@@ -279,14 +279,68 @@ class RateLimitResult:
 # --- Auth ---
 
 
+class AuthMethod(Enum):
+    """How the request was authenticated."""
+
+    OIDC_JWT = "oidc_jwt"
+    API_KEY = "api_key"
+    ANONYMOUS = "anonymous"
+
+
 @dataclass
 class RequestContext:
-    """Extracted JWT claims for request authorization."""
+    """Extracted identity claims for request authorization."""
 
     user_id: str
     project_id: str
     roles: list[str]
     scopes: list[str]
+    auth_method: AuthMethod = AuthMethod.ANONYMOUS
+    tenant_id: str | None = None
+    business_unit: str | None = None
+    environment: str | None = None
+    api_key_id: str | None = None
+    email: str | None = None
+
+
+@dataclass
+class APIKey:
+    """A project-scoped API key."""
+
+    key_id: str
+    key_hash: str
+    project_id: str
+    name: str
+    scopes: list[str]
+    created_by: str
+    created_at: datetime = field(default_factory=datetime.utcnow)
+    expires_at: datetime | None = None
+    revoked: bool = False
+    revoked_at: datetime | None = None
+    last_used_at: datetime | None = None
+
+
+@dataclass
+class PolicyNode:
+    """A single node in the hierarchical policy tree."""
+
+    node_id: str
+    node_type: str  # "org" | "business_unit" | "project" | "environment"
+    parent_id: str | None
+    display_name: str
+    limits: dict = field(default_factory=dict)
+    created_at: datetime = field(default_factory=datetime.utcnow)
+
+
+@dataclass
+class ResolvedPolicy:
+    """Flattened effective policy after hierarchy walk."""
+
+    rate_limit_rpm: int | None = None
+    budget_limit: float | None = None
+    allowed_models: list[str] | None = None
+    max_tokens_per_request: int | None = None
+    allowed_providers: list[str] | None = None
 
 
 # --- Validation ---

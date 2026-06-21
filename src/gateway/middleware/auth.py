@@ -1,129 +1,166 @@
-"""Authentication and authorization middleware for the LLM-Router.
+"""Multi-strategy authentication middleware for AxonLLM.
 
-Validates JWT tokens via AgentCore Identity and evaluates Cedar policies
-via AgentCore Policy. Extracts JWT claims into RequestContext on request.state.
+Priority chain:
+1. X-Amzn-Oidc-Data header (ALB OIDC JWT)
+2. Authorization: Bearer <token> (OIDC JWT or API key if prefixed axon_)
+3. X-Api-Key header
+4. Anonymous -> 401
 """
 
+from __future__ import annotations
+
 import logging
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
-from src.gateway.models import RequestContext
+from src.gateway.models import AuthMethod, RequestContext
+
+if TYPE_CHECKING:
+    from src.gateway.auth.api_key_service import APIKeyService
+    from src.gateway.auth.oidc_service import OIDCService
 
 logger = logging.getLogger(__name__)
 
-
-class IdentityService(Protocol):
-    """Interface for JWT token validation (AgentCore Identity)."""
-
-    async def validate_token(self, token: str) -> dict | None:
-        """Validate a JWT token and return claims dict, or None if invalid."""
-        ...
+PUBLIC_PATHS = frozenset({
+    "/health",
+    "/admin/dashboard",
+    "/chat",
+    "/playground",
+    "/routing",
+})
 
 
 class PolicyService(Protocol):
-    """Interface for Cedar policy evaluation (AgentCore Policy)."""
+    """Interface for policy evaluation."""
 
     async def evaluate(self, context: RequestContext, action: str, resource: str) -> str:
-        """Evaluate a Cedar policy. Returns 'ALLOW' or 'DENY'."""
         ...
 
 
 class AuthMiddleware(BaseHTTPMiddleware):
-    """Starlette middleware that validates JWT via AgentCore Identity
-    and extracts claims into RequestContext.
-
-    Supports ENFORCE and LOG_ONLY modes for Cedar policy evaluation.
-    """
+    """Authenticates requests via OIDC JWT, API key, or rejects as anonymous."""
 
     def __init__(
         self,
         app,
-        identity_service: IdentityService,
-        policy_service: PolicyService,
-        mode: str = "ENFORCE",
+        oidc_service: OIDCService | None = None,
+        api_key_service: APIKeyService | None = None,
+        policy_service: PolicyService | None = None,
+        mode: str = "LOG_ONLY",
+        public_paths: frozenset[str] | None = None,
     ):
         super().__init__(app)
-        self.identity_service = identity_service
+        self.oidc_service = oidc_service
+        self.api_key_service = api_key_service
         self.policy_service = policy_service
         self.mode = mode
+        self.public_paths = public_paths or PUBLIC_PATHS
 
     async def dispatch(self, request: Request, call_next) -> Response:
-        """
-        1. Extract Bearer token from Authorization header
-        2. Validate token via AgentCore Identity
-        3. Extract JWT_Claims (sub, project_id, roles, scopes)
-        4. Attach RequestContext to request.state
-        5. Evaluate Cedar policy via AgentCore Policy
-        6. Return 401 if token invalid, 403 if policy denies
-        """
-        # 1. Extract Bearer token
-        auth_header = request.headers.get("authorization")
-        if not auth_header or not auth_header.startswith("Bearer "):
-            return JSONResponse(
-                status_code=401,
-                content={
-                    "error": {
-                        "type": "authentication_error",
-                        "message": "Missing or malformed Authorization header. Expected 'Bearer <token>'.",
-                    }
-                },
+        # Skip auth for public paths and static assets
+        path = request.url.path
+        if path in self.public_paths or path.startswith("/admin/static") or path.startswith("/chat/static"):
+            request.state.context = RequestContext(
+                user_id="anonymous",
+                project_id="",
+                roles=[],
+                scopes=[],
+                auth_method=AuthMethod.ANONYMOUS,
             )
+            return await call_next(request)
 
-        token = auth_header[len("Bearer "):]
+        context = None
 
-        # 2. Validate token via identity service
-        claims = await self.identity_service.validate_token(token)
-        if claims is None:
-            return JSONResponse(
-                status_code=401,
-                content={
-                    "error": {
-                        "type": "authentication_error",
-                        "message": "Invalid or expired token.",
-                    }
-                },
-            )
+        # 1. ALB OIDC header
+        if self.oidc_service:
+            alb_token = request.headers.get("x-amzn-oidc-data")
+            if alb_token:
+                context = await self.oidc_service.validate_alb_jwt(alb_token)
 
-        # 3. Extract JWT claims into RequestContext
-        context = RequestContext(
-            user_id=claims.get("sub", ""),
-            project_id=claims.get("project_id", ""),
-            roles=claims.get("roles", []),
-            scopes=claims.get("scopes", []),
-        )
+        # 2. Authorization: Bearer <token>
+        if context is None:
+            auth_header = request.headers.get("authorization")
+            if auth_header and auth_header.startswith("Bearer "):
+                token = auth_header[7:]
+                if token.startswith("axon_"):
+                    context = await self._authenticate_api_key(token)
+                elif self.oidc_service:
+                    context = await self.oidc_service.validate_oidc_jwt(token)
 
-        # 4. Attach to request.state
-        request.state.context = context
+        # 3. X-Api-Key header
+        if context is None:
+            api_key_header = request.headers.get("x-api-key")
+            if api_key_header:
+                context = await self._authenticate_api_key(api_key_header)
 
-        # 5. Evaluate Cedar policy
-        action = request.method.lower()
-        resource = request.url.path
-        decision = await self.policy_service.evaluate(context, action, resource)
-
-        if decision == "DENY":
+        # 4. No credentials — reject (or allow in LOG_ONLY mode)
+        if context is None:
             if self.mode == "ENFORCE":
                 return JSONResponse(
-                    status_code=403,
+                    status_code=401,
                     content={
                         "error": {
-                            "type": "authorization_error",
-                            "message": "Access denied by policy.",
+                            "type": "authentication_error",
+                            "message": "Missing or invalid credentials. Provide a Bearer token or X-Api-Key header.",
                         }
                     },
                 )
             else:
-                # LOG_ONLY mode — log the denial but allow through
-                logger.warning(
-                    "Policy DENY (LOG_ONLY mode) for user=%s project=%s action=%s resource=%s",
-                    context.user_id,
-                    context.project_id,
-                    action,
-                    resource,
+                context = RequestContext(
+                    user_id="anonymous",
+                    project_id="",
+                    roles=[],
+                    scopes=[],
+                    auth_method=AuthMethod.ANONYMOUS,
                 )
 
-        # 6. Continue to the next middleware / route handler
+        request.state.context = context
+
+        # Policy evaluation
+        if self.policy_service:
+            action = request.method.lower()
+            resource = path
+            decision = await self.policy_service.evaluate(context, action, resource)
+
+            if decision == "DENY":
+                if self.mode == "ENFORCE":
+                    return JSONResponse(
+                        status_code=403,
+                        content={
+                            "error": {
+                                "type": "authorization_error",
+                                "message": "Access denied by policy.",
+                            }
+                        },
+                    )
+                else:
+                    logger.warning(
+                        "Policy DENY (LOG_ONLY) user=%s project=%s action=%s resource=%s",
+                        context.user_id,
+                        context.project_id,
+                        action,
+                        resource,
+                    )
+
         return await call_next(request)
+
+    async def _authenticate_api_key(self, raw_key: str) -> RequestContext | None:
+        """Validate API key and return context."""
+        if not self.api_key_service:
+            return None
+
+        key_record = await self.api_key_service.validate_key(raw_key)
+        if key_record is None:
+            return None
+
+        return RequestContext(
+            user_id=f"apikey:{key_record.key_id}",
+            project_id=key_record.project_id,
+            roles=["service"],
+            scopes=key_record.scopes,
+            auth_method=AuthMethod.API_KEY,
+            api_key_id=key_record.key_id,
+        )

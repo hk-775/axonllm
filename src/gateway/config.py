@@ -136,3 +136,6 @@ class AppConfig:
     catalog_config_path: str = "config/catalog.yaml"
     ensemble_config_path: str = "config/ensemble.yaml"
     load_demo_data: bool = False
+    oidc_issuer: str = ""
+    oidc_audience: str = ""
+    auth_mode: str = "LOG_ONLY"

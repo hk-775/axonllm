@@ -11,7 +11,7 @@ import os
 from datetime import datetime
 from decimal import Decimal
 
-from src.gateway.models import FeedbackRecord, GuardrailRule, Project, UsageRecord
+from src.gateway.models import APIKey, FeedbackRecord, GuardrailRule, PolicyNode, Project, UsageRecord
 
 logger = logging.getLogger(__name__)
 
@@ -506,4 +506,232 @@ class DynamoPersistence:
             return records
         except Exception:
             logger.warning("Failed to load feedback records from DynamoDB", exc_info=True)
+            return []
+
+    # --- APIKey persistence ---
+
+    @staticmethod
+    def serialize_api_key(key: APIKey) -> dict:
+        return {
+            "PK": f"APIKEY#{key.key_id}",
+            "SK": "APIKEY",
+            "entity_type": "api_key",
+            "key_id": key.key_id,
+            "key_hash": key.key_hash,
+            "project_id": key.project_id,
+            "name": key.name,
+            "scopes": json.dumps(key.scopes),
+            "created_by": key.created_by,
+            "created_at": key.created_at.isoformat(),
+            "expires_at": key.expires_at.isoformat() if key.expires_at else None,
+            "revoked": key.revoked,
+            "revoked_at": key.revoked_at.isoformat() if key.revoked_at else None,
+            "last_used_at": key.last_used_at.isoformat() if key.last_used_at else None,
+        }
+
+    @staticmethod
+    def deserialize_api_key(item: dict) -> APIKey:
+        scopes_raw = item.get("scopes", "[]")
+        scopes = json.loads(scopes_raw) if isinstance(scopes_raw, str) else scopes_raw
+        return APIKey(
+            key_id=item["key_id"],
+            key_hash=item["key_hash"],
+            project_id=item["project_id"],
+            name=item["name"],
+            scopes=scopes,
+            created_by=item["created_by"],
+            created_at=datetime.fromisoformat(item["created_at"]),
+            expires_at=datetime.fromisoformat(item["expires_at"]) if item.get("expires_at") else None,
+            revoked=bool(item.get("revoked", False)),
+            revoked_at=datetime.fromisoformat(item["revoked_at"]) if item.get("revoked_at") else None,
+            last_used_at=datetime.fromisoformat(item["last_used_at"]) if item.get("last_used_at") else None,
+        )
+
+    async def save_api_key(self, key: APIKey) -> None:
+        if not self._enabled:
+            return
+
+        def _put():
+            table = self._get_table()
+            item = self.serialize_api_key(key)
+            table.put_item(Item=item)
+            # Hash lookup index
+            table.put_item(Item={
+                "PK": f"APIKEY_HASH#{key.key_hash}",
+                "SK": "LOOKUP",
+                "key_id": key.key_id,
+            })
+            # Project membership
+            table.put_item(Item={
+                "PK": f"PROJECT#{key.project_id}",
+                "SK": f"APIKEY#{key.key_id}",
+                "key_id": key.key_id,
+            })
+
+        try:
+            await asyncio.to_thread(_put)
+        except Exception:
+            logger.warning("Failed to save API key %s", key.key_id, exc_info=True)
+
+    async def get_api_key_by_hash(self, key_hash: str) -> APIKey | None:
+        if not self._enabled:
+            return None
+
+        def _get():
+            table = self._get_table()
+            resp = table.get_item(Key={"PK": f"APIKEY_HASH#{key_hash}", "SK": "LOOKUP"})
+            item = resp.get("Item")
+            if not item:
+                return None
+            key_id = item["key_id"]
+            key_resp = table.get_item(Key={"PK": f"APIKEY#{key_id}", "SK": "APIKEY"})
+            return key_resp.get("Item")
+
+        try:
+            item = await asyncio.to_thread(_get)
+            if item:
+                return self.deserialize_api_key(item)
+        except Exception:
+            logger.warning("Failed to lookup API key by hash", exc_info=True)
+        return None
+
+    async def get_api_key(self, key_id: str) -> APIKey | None:
+        if not self._enabled:
+            return None
+
+        def _get():
+            table = self._get_table()
+            resp = table.get_item(Key={"PK": f"APIKEY#{key_id}", "SK": "APIKEY"})
+            return resp.get("Item")
+
+        try:
+            item = await asyncio.to_thread(_get)
+            if item:
+                return self.deserialize_api_key(item)
+        except Exception:
+            logger.warning("Failed to get API key %s", key_id, exc_info=True)
+        return None
+
+    async def list_api_keys_for_project(self, project_id: str) -> list[APIKey]:
+        if not self._enabled:
+            return []
+
+        def _query():
+            from boto3.dynamodb.conditions import Key
+
+            table = self._get_table()
+            resp = table.query(
+                KeyConditionExpression=Key("PK").eq(f"PROJECT#{project_id}") & Key("SK").begins_with("APIKEY#")
+            )
+            key_ids = [item["key_id"] for item in resp.get("Items", [])]
+            keys = []
+            for kid in key_ids:
+                key_resp = table.get_item(Key={"PK": f"APIKEY#{kid}", "SK": "APIKEY"})
+                item = key_resp.get("Item")
+                if item:
+                    keys.append(item)
+            return keys
+
+        try:
+            items = await asyncio.to_thread(_query)
+            return [self.deserialize_api_key(item) for item in items]
+        except Exception:
+            logger.warning("Failed to list API keys for project %s", project_id, exc_info=True)
+            return []
+
+    async def update_api_key(self, key: APIKey) -> None:
+        await self.save_api_key(key)
+
+    # --- PolicyNode persistence ---
+
+    @staticmethod
+    def serialize_policy_node(node: PolicyNode) -> dict:
+        return {
+            "PK": f"POLICY_NODE#{node.node_id}",
+            "SK": "CONFIG",
+            "entity_type": "policy_node",
+            "node_id": node.node_id,
+            "node_type": node.node_type,
+            "parent_id": node.parent_id,
+            "display_name": node.display_name,
+            "limits": json.dumps(node.limits),
+            "created_at": node.created_at.isoformat(),
+        }
+
+    @staticmethod
+    def deserialize_policy_node(item: dict) -> PolicyNode:
+        limits_raw = item.get("limits", "{}")
+        limits = json.loads(limits_raw) if isinstance(limits_raw, str) else limits_raw
+        return PolicyNode(
+            node_id=item["node_id"],
+            node_type=item["node_type"],
+            parent_id=item.get("parent_id"),
+            display_name=item.get("display_name", item["node_id"]),
+            limits=limits,
+            created_at=datetime.fromisoformat(item["created_at"]) if "created_at" in item else datetime.utcnow(),
+        )
+
+    async def save_policy_node(self, node: PolicyNode) -> None:
+        if not self._enabled:
+            return
+
+        def _put():
+            table = self._get_table()
+            item = self.serialize_policy_node(node)
+            table.put_item(Item=item)
+            if node.parent_id:
+                table.put_item(Item={
+                    "PK": f"POLICY_NODE#{node.parent_id}",
+                    "SK": f"CHILD#{node.node_id}",
+                    "node_id": node.node_id,
+                })
+
+        try:
+            await asyncio.to_thread(_put)
+        except Exception:
+            logger.warning("Failed to save policy node %s", node.node_id, exc_info=True)
+
+    async def get_policy_node(self, node_id: str) -> PolicyNode | None:
+        if not self._enabled:
+            return None
+
+        def _get():
+            table = self._get_table()
+            resp = table.get_item(Key={"PK": f"POLICY_NODE#{node_id}", "SK": "CONFIG"})
+            return resp.get("Item")
+
+        try:
+            item = await asyncio.to_thread(_get)
+            if item:
+                return self.deserialize_policy_node(item)
+        except Exception:
+            logger.warning("Failed to get policy node %s", node_id, exc_info=True)
+        return None
+
+    async def load_all_policy_nodes(self) -> list[PolicyNode]:
+        if not self._enabled:
+            return []
+
+        def _scan():
+            from boto3.dynamodb.conditions import Attr
+
+            table = self._get_table()
+            items = []
+            response = table.scan(
+                FilterExpression=Attr("entity_type").eq("policy_node")
+            )
+            items.extend(response.get("Items", []))
+            while "LastEvaluatedKey" in response:
+                response = table.scan(
+                    FilterExpression=Attr("entity_type").eq("policy_node"),
+                    ExclusiveStartKey=response["LastEvaluatedKey"],
+                )
+                items.extend(response.get("Items", []))
+            return items
+
+        try:
+            raw_items = await asyncio.to_thread(_scan)
+            return [self.deserialize_policy_node(item) for item in raw_items]
+        except Exception:
+            logger.warning("Failed to load policy nodes from DynamoDB", exc_info=True)
             return []
