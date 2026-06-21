@@ -1,0 +1,138 @@
+# Demo seed data for local development.
+# Loaded when AXON_LOAD_DEMO_DATA=true.
+
+projects:
+  - project_id: proj-alpha
+    name: Alpha Team
+    budget_limit: 500.0
+    alert_threshold: 400.0
+    cache_enabled: true
+    prompt_caching_enabled: true
+    members:
+      - chat-user
+      - test-user
+      - user-alice
+      - user-bob
+    allowed_models:
+      - claude-opus
+      - claude-sonnet
+      - gpt-4o
+      - nova-pro
+      - deepseek-r1
+      - llama-3.3-70b
+      - llama-4-scout
+      - mistral-large
+      - gpt-oss-120b
+      - qwen3-235b
+
+  - project_id: proj-beta
+    name: Beta Team
+    budget_limit: 200.0
+    alert_threshold: 150.0
+    members:
+      - user-carol
+    allowed_models:
+      - claude-haiku
+      - gpt-4o-mini
+      - nova-lite
+      - nova-micro
+
+user_budgets:
+  - user_id: user-alice
+    budget_limit: 50.0
+    alert_threshold: 40.0
+  - user_id: user-bob
+    budget_limit: 100.0
+    alert_threshold: 80.0
+  - user_id: user-carol
+    budget_limit: 75.0
+    alert_threshold: 60.0
+  - user_id: chat-user
+    budget_limit: 200.0
+    alert_threshold: 150.0
+  - user_id: test-user
+    budget_limit: 100.0
+    alert_threshold: 80.0
+
+usage_seeds:
+  - project_id: proj-alpha
+    user_id: user-alice
+    provider: openai
+    model: gpt-4
+    prompt_tokens: 500
+    completion_tokens: 200
+    cost: 0.033
+  - project_id: proj-alpha
+    user_id: user-alice
+    provider: anthropic
+    model: claude-3
+    prompt_tokens: 300
+    completion_tokens: 150
+    cost: 0.0032
+    cached_tokens: 200
+    cache_creation_tokens: 50
+  - project_id: proj-alpha
+    user_id: user-alice
+    provider: vertex_ai
+    model: gemini-pro
+    prompt_tokens: 400
+    completion_tokens: 250
+    cost: 0.000225
+  - project_id: proj-alpha
+    user_id: user-bob
+    provider: openai
+    model: gpt-4
+    prompt_tokens: 800
+    completion_tokens: 400
+    cost: 0.054
+  - project_id: proj-alpha
+    user_id: user-bob
+    provider: vertex_ai
+    model: gemini-pro
+    prompt_tokens: 600
+    completion_tokens: 350
+    cost: 0.000325
+  - project_id: proj-beta
+    user_id: user-carol
+    provider: openai
+    model: gpt-4
+    prompt_tokens: 1000
+    completion_tokens: 500
+    cost: 0.06
+  - project_id: proj-beta
+    user_id: user-carol
+    provider: anthropic
+    model: claude-3
+    prompt_tokens: 200
+    completion_tokens: 100
+    cost: 0.002
+  - project_id: proj-beta
+    user_id: user-carol
+    provider: vertex_ai
+    model: gemini-pro
+    prompt_tokens: 900
+    completion_tokens: 450
+    cost: 0.00045
+  - project_id: proj-alpha
+    user_id: user-bob
+    provider: bedrock
+    model: claude-3
+    prompt_tokens: 600
+    completion_tokens: 300
+    cost: 0.0063
+    cached_tokens: 400
+    cache_creation_tokens: 100
+
+policies:
+  - name: allow-all-read
+    description: Allow all users read access
+    policy_text: 'permit(principal, action == Action::"read", resource);'
+    mode: ENFORCE
+  - name: restrict-gpt4
+    description: Restrict GPT-4 to senior devs
+    policy_text: 'forbid(principal, action, resource) unless { principal.role == "senior" };'
+    mode: LOG_ONLY
+
+unhealthy_providers:
+  - provider: azure_openai
+    cooldown_seconds: 600

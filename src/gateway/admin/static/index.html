@@ -1,0 +1,1931 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AxonLLM</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Open+Sans:wght@400;600;700&display=swap" rel="stylesheet">
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/@babel/standalone@7.24.7/babel.min.js"></script>
+  <style>
+    :root {
+      --awsui-color-background: #f2f3f3;
+      --awsui-color-background-container: #ffffff;
+      --awsui-color-background-input: #ffffff;
+      --awsui-color-background-nav: #232f3e;
+      --awsui-color-background-nav-hover: #354150;
+      --awsui-color-background-sidebar: #232f3e;
+      --awsui-color-background-status-info: #f2f8fd;
+      --awsui-color-background-status-success: #f2fcf3;
+      --awsui-color-background-status-error: #fff7f7;
+      --awsui-color-background-status-warning: #fffce9;
+      --awsui-color-text-body: #000716;
+      --awsui-color-text-heading: #000716;
+      --awsui-color-text-secondary: #5f6b7a;
+      --awsui-color-text-label: #000716;
+      --awsui-color-text-nav: #d1d5db;
+      --awsui-color-text-nav-active: #ffffff;
+      --awsui-color-text-link: #0972d3;
+      --awsui-color-text-interactive-active: #0972d3;
+      --awsui-color-border: #e9ebed;
+      --awsui-color-border-divider: #e9ebed;
+      --awsui-color-border-input: #7d8998;
+      --awsui-color-border-input-focus: #0972d3;
+      --awsui-color-primary: #0972d3;
+      --awsui-color-primary-hover: #033160;
+      --awsui-color-status-success: #037f0c;
+      --awsui-color-status-error: #d91515;
+      --awsui-color-status-warning: #8d6605;
+      --awsui-color-status-info: #0972d3;
+      --sidebar-w: 220px;
+      --topbar-h: 40px;
+    }
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Open Sans', 'Amazon Ember', -apple-system, BlinkMacSystemFont, sans-serif;
+      background: var(--awsui-color-background);
+      color: var(--awsui-color-text-body);
+      line-height: 1.5;
+      font-size: 14px;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* ── Top Navigation Bar (AWS-style dark bar) ── */
+    .topbar {
+      position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+      height: var(--topbar-h);
+      background: var(--awsui-color-background-nav);
+      display: flex; align-items: center;
+      padding: 0 1rem;
+      border-bottom: none;
+    }
+    .topbar-brand {
+      display: flex; align-items: center; gap: 0.5rem;
+      color: #fff; font-size: 14px; font-weight: 700;
+      margin-right: 1.5rem;
+      letter-spacing: -0.2px;
+    }
+    .topbar-brand .logo-icon {
+      width: 22px; height: 22px;
+      background: linear-gradient(135deg, #ff9900, #ffb84d);
+      border-radius: 4px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 12px; font-weight: 700; color: #232f3e;
+    }
+    .topbar-service {
+      color: var(--awsui-color-text-nav);
+      font-size: 14px; font-weight: 400;
+      padding: 0 0.75rem;
+      height: var(--topbar-h);
+      display: flex; align-items: center;
+      border-left: 1px solid rgba(255,255,255,0.15);
+    }
+    .topbar-right {
+      margin-left: auto;
+      display: flex; align-items: center; gap: 0.75rem;
+    }
+    .topbar-status {
+      display: flex; align-items: center; gap: 0.35rem;
+      font-size: 12px; color: var(--awsui-color-text-nav);
+    }
+    .topbar-status .dot {
+      width: 6px; height: 6px; border-radius: 50%;
+      background: #1aab2a;
+    }
+
+    /* ── Sidebar ── */
+    .sidebar {
+      position: fixed; top: var(--topbar-h); left: 0; bottom: 0;
+      width: var(--sidebar-w);
+      background: var(--awsui-color-background-sidebar);
+      overflow-y: auto;
+      z-index: 50;
+    }
+    .sidebar-section { padding: 0.75rem 0 0.25rem; }
+    .sidebar-section-label {
+      font-size: 11px; font-weight: 700; text-transform: uppercase;
+      letter-spacing: 0.8px;
+      color: #9ba7b6;
+      padding: 0 1rem 0.35rem;
+    }
+    .nav-item {
+      display: flex; align-items: center; gap: 0.5rem;
+      width: 100%; text-align: left;
+      background: none; border: none;
+      color: var(--awsui-color-text-nav);
+      padding: 0.45rem 1rem;
+      cursor: pointer;
+      font-size: 13px; font-weight: 400;
+      font-family: inherit;
+      transition: background 100ms, color 100ms;
+      border-left: 3px solid transparent;
+    }
+    .nav-item:hover {
+      background: var(--awsui-color-background-nav-hover);
+      color: #fff;
+    }
+    .nav-item.active {
+      background: rgba(9,114,211,0.18);
+      color: #fff;
+      border-left-color: #539fe5;
+      font-weight: 600;
+    }
+    .nav-item .nav-icon { font-size: 14px; width: 18px; text-align: center; flex-shrink: 0; opacity: 0.7; }
+    .nav-item.active .nav-icon { opacity: 1; }
+
+    /* ── Main Content ── */
+    .main {
+      margin-left: var(--sidebar-w);
+      margin-top: var(--topbar-h);
+      padding: 1.5rem 2rem 2rem;
+      min-height: calc(100vh - var(--topbar-h));
+    }
+
+    /* ── Page Header (Cloudscape-style) ── */
+    .page-header {
+      margin-bottom: 1.25rem;
+    }
+    .page-header h1 {
+      font-size: 24px; font-weight: 700;
+      color: var(--awsui-color-text-heading);
+      letter-spacing: -0.3px;
+    }
+    .page-header p {
+      color: var(--awsui-color-text-secondary);
+      font-size: 14px; margin-top: 0.15rem;
+    }
+    .page-header-actions {
+      display: flex; justify-content: space-between; align-items: flex-start;
+    }
+
+    /* ── Container (Cloudscape container pattern) ── */
+    .container {
+      background: var(--awsui-color-background-container);
+      border: 1px solid var(--awsui-color-border);
+      border-radius: 12px;
+      margin-bottom: 1.25rem;
+      overflow: hidden;
+      box-shadow: 0 1px 2px rgba(0,7,22,0.05);
+    }
+    .container-header {
+      padding: 0.85rem 1.25rem;
+      border-bottom: 1px solid var(--awsui-color-border);
+      display: flex; align-items: center; justify-content: space-between;
+      background: var(--awsui-color-background-container);
+    }
+    .container-header h2 {
+      font-size: 16px; font-weight: 700;
+      color: var(--awsui-color-text-heading);
+    }
+    .container-header .counter {
+      font-size: 16px; font-weight: 400;
+      color: var(--awsui-color-text-secondary);
+      margin-left: 0.35rem;
+    }
+    .container-body { padding: 1.25rem; }
+    .container-body.no-pad { padding: 0; }
+
+    /* ── Key-Value Pairs ── */
+    .column-layout {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 1rem;
+    }
+    .kv-pair {}
+    .kv-pair .kv-label {
+      font-size: 12px; font-weight: 600;
+      color: var(--awsui-color-text-secondary);
+      margin-bottom: 0.15rem;
+    }
+    .kv-pair .kv-value {
+      font-size: 14px; font-weight: 400;
+      color: var(--awsui-color-text-body);
+    }
+
+    /* ── Stat Cards (Cloudscape value-with-trend) ── */
+    .stat-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 1rem; margin-bottom: 1.25rem;
+    }
+    .stat-card {
+      background: var(--awsui-color-background-container);
+      border: 1px solid var(--awsui-color-border);
+      border-radius: 12px;
+      padding: 1rem 1.25rem;
+      box-shadow: 0 1px 2px rgba(0,7,22,0.05);
+    }
+    .stat-card .stat-label {
+      font-size: 12px; font-weight: 600;
+      color: var(--awsui-color-text-secondary);
+      text-transform: uppercase; letter-spacing: 0.3px;
+    }
+    .stat-card .stat-value {
+      font-size: 28px; font-weight: 700;
+      color: var(--awsui-color-text-heading);
+      margin-top: 0.2rem; letter-spacing: -0.5px;
+    }
+
+    /* ── Tables ── */
+    table { width: 100%; border-collapse: collapse; }
+    th {
+      text-align: left;
+      padding: 0.6rem 1.25rem;
+      font-size: 12px; font-weight: 700;
+      color: var(--awsui-color-text-secondary);
+      background: #fafafa;
+      border-bottom: 1px solid var(--awsui-color-border);
+      letter-spacing: 0.2px;
+    }
+    td {
+      padding: 0.65rem 1.25rem;
+      font-size: 14px;
+      border-bottom: 1px solid var(--awsui-color-border);
+      color: var(--awsui-color-text-body);
+      vertical-align: middle;
+    }
+    tr:last-child td { border-bottom: none; }
+    tbody tr { transition: background 80ms; }
+    tbody tr:hover td { background: #f4f6f8; }
+    tbody tr.clickable { cursor: pointer; }
+    td strong { color: var(--awsui-color-text-heading); font-weight: 600; }
+    td code {
+      background: #f4f6f8; padding: 0.15rem 0.45rem;
+      border-radius: 4px; font-size: 13px;
+      color: var(--awsui-color-text-body);
+      font-family: 'SF Mono', 'Fira Code', monospace;
+    }
+    td .sub-text {
+      font-size: 12px; color: var(--awsui-color-text-secondary); margin-top: 1px;
+    }
+
+    /* ── Status Indicators / Badges ── */
+    .badge {
+      display: inline-flex; align-items: center; gap: 0.3rem;
+      padding: 0.15rem 0.55rem;
+      border-radius: 4px;
+      font-size: 12px; font-weight: 600;
+    }
+    .badge-green { background: var(--awsui-color-background-status-success); color: var(--awsui-color-status-success); }
+    .badge-red { background: var(--awsui-color-background-status-error); color: var(--awsui-color-status-error); }
+    .badge-yellow { background: var(--awsui-color-background-status-warning); color: var(--awsui-color-status-warning); }
+    .badge-blue { background: var(--awsui-color-background-status-info); color: var(--awsui-color-status-info); }
+    .badge-purple { background: #f5f0ff; color: #6941c6; }
+    .badge-neutral { background: #f2f3f3; color: var(--awsui-color-text-secondary); }
+    .badge .badge-dot {
+      width: 6px; height: 6px; border-radius: 50%;
+    }
+    .badge-green .badge-dot { background: var(--awsui-color-status-success); }
+    .badge-red .badge-dot { background: var(--awsui-color-status-error); }
+
+    .tag {
+      display: inline-block;
+      background: #f2f3f3;
+      border: 1px solid var(--awsui-color-border);
+      padding: 0.1rem 0.5rem;
+      border-radius: 4px;
+      font-size: 12px;
+      margin: 0.1rem 0.15rem;
+      color: var(--awsui-color-text-body);
+    }
+</style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useState, useEffect, useCallback } = React;
+
+    const api = {
+      get: (url) => fetch(url).then(r => r.ok ? r.json() : r.json().then(e => Promise.reject(e))),
+      post: (url, body) => fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(r => r.json().then(d => r.ok ? d : Promise.reject(d))),
+      put: (url, body) => fetch(url, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(r => r.json().then(d => r.ok ? d : Promise.reject(d))),
+      del: (url) => fetch(url, { method: 'DELETE' }).then(r => r.ok ? r.json() : r.json().then(e => Promise.reject(e))),
+    };
+
+    const fmt = {
+      cost: (v) => `$${(v || 0).toFixed(4)}`,
+      num: (v) => (v || 0).toLocaleString(),
+      pct: (v) => `${(v || 0).toFixed(1)}%`,
+    };
+
+    /* ── Buttons (Cloudscape-style) ── */
+    const btnStyles = {
+      base: { display: 'inline-flex', alignItems: 'center', gap: '0.35rem', padding: '0.4rem 1rem', border: 'none', borderRadius: '8px', cursor: 'pointer', fontSize: '14px', fontWeight: 600, fontFamily: 'inherit', transition: 'all 100ms' },
+      primary: { background: '#0972d3', color: '#fff', border: '2px solid #0972d3' },
+      normal: { background: '#fff', color: '#000716', border: '2px solid #7d8998' },
+      link: { background: 'none', color: '#0972d3', border: 'none', padding: '0.2rem 0', fontWeight: 600 },
+      danger: { background: '#fff', color: '#d91515', border: '2px solid #d91515' },
+    };
+
+    function Btn({ variant = 'normal', children, style, ...props }) {
+      const s = { ...btnStyles.base, ...btnStyles[variant], ...style };
+      return <button style={s} {...props}>{children}</button>;
+    }
+
+    /* ── Breadcrumb ── */
+    function Breadcrumb({ items }) {
+      return (
+        <nav style={{ fontSize: '14px', marginBottom: '0.5rem', color: '#5f6b7a' }}>
+          {items.map((item, i) => (
+            <span key={i}>
+              {i > 0 && <span style={{ margin: '0 0.35rem' }}>/</span>}
+              {item.onClick
+                ? <span onClick={item.onClick} style={{ color: '#0972d3', cursor: 'pointer', fontWeight: 400 }}>{item.label}</span>
+                : <span style={{ color: '#000716', fontWeight: 400 }}>{item.label}</span>}
+            </span>
+          ))}
+        </nav>
+      );
+    }
+
+    /* ── Flash Message ── */
+    function Flash({ type, children, onDismiss }) {
+      const colors = {
+        success: { bg: '#f2fcf3', border: '#037f0c', color: '#037f0c', icon: '✓' },
+        error: { bg: '#fff7f7', border: '#d91515', color: '#d91515', icon: '✕' },
+        info: { bg: '#f2f8fd', border: '#0972d3', color: '#0972d3', icon: 'ℹ' },
+      };
+      const c = colors[type] || colors.info;
+      return (
+        <div style={{ background: c.bg, borderLeft: `4px solid ${c.border}`, color: c.color, padding: '0.65rem 1rem', borderRadius: '4px', marginBottom: '1rem', fontSize: '14px', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+          <span style={{ fontWeight: 700 }}>{c.icon}</span>
+          <span style={{ flex: 1 }}>{children}</span>
+          {onDismiss && <span onClick={onDismiss} style={{ cursor: 'pointer', opacity: 0.6 }}>✕</span>}
+        </div>
+      );
+    }
+
+    /* ── Loading Spinner ── */
+    function Loading({ text = 'Loading...' }) {
+      return (
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '3rem', color: '#5f6b7a' }}>
+          <svg width="20" height="20" viewBox="0 0 20 20" style={{ animation: 'spin 0.8s linear infinite', marginRight: '0.6rem' }}>
+            <circle cx="10" cy="10" r="8" fill="none" stroke="#e9ebed" strokeWidth="2.5" />
+            <circle cx="10" cy="10" r="8" fill="none" stroke="#0972d3" strokeWidth="2.5" strokeDasharray="20 32" strokeLinecap="round" />
+          </svg>
+          {text}
+        </div>
+      );
+    }
+
+    /* ── Empty State ── */
+    function EmptyState({ title, subtitle, action }) {
+      return (
+        <div style={{ textAlign: 'center', padding: '3rem 2rem', color: '#5f6b7a' }}>
+          <div style={{ fontSize: '2rem', marginBottom: '0.5rem', opacity: 0.4 }}>📋</div>
+          <div style={{ fontSize: '16px', fontWeight: 700, color: '#000716', marginBottom: '0.25rem' }}>{title}</div>
+          {subtitle && <div style={{ fontSize: '14px', marginBottom: '1rem' }}>{subtitle}</div>}
+          {action}
+        </div>
+      );
+    }
+
+    /* ── Progress Bar ── */
+    function ProgressBar({ value, color }) {
+      return (
+        <div style={{ height: '6px', background: '#e9ebed', borderRadius: '3px', overflow: 'hidden', marginTop: '0.3rem' }}>
+          <div style={{ height: '100%', borderRadius: '3px', width: `${Math.min(value, 100)}%`, background: color || '#0972d3', transition: 'width 0.3s ease' }} />
+        </div>
+      );
+    }
+
+    /* ================================================================== */
+    /*  Overview Page                                                      */
+    /* ================================================================== */
+    function OverviewPage() {
+      const [data, setData] = useState(null);
+      const [health, setHealth] = useState(null);
+      const [error, setError] = useState(null);
+
+      useEffect(() => {
+        Promise.all([api.get('/admin/overview'), api.get('/admin/health')])
+          .then(([o, h]) => { setData(o); setHealth(h); })
+          .catch(() => setError('Failed to load overview data.'));
+      }, []);
+
+      if (error) return <Flash type="error">{error}</Flash>;
+      if (!data) return <Loading text="Loading overview..." />;
+
+      const providers = health ? Object.entries(health.providers || {}) : [];
+      const healthyCount = providers.filter(([,s]) => s === 'healthy').length;
+
+      return (
+        <div>
+          <div className="page-header"><h1>Overview</h1><p>Real-time gateway metrics and system health</p></div>
+          <div className="stat-grid">
+            <div className="stat-card"><div className="stat-label">Total Requests</div><div className="stat-value">{fmt.num(data.total_requests)}</div></div>
+            <div className="stat-card"><div className="stat-label">Total Cost</div><div className="stat-value">{fmt.cost(data.total_cost)}</div></div>
+            <div className="stat-card"><div className="stat-label">Active Projects</div><div className="stat-value">{data.active_projects}</div></div>
+            <div className="stat-card"><div className="stat-label">Cache Hit Rate</div><div className="stat-value">{data.cache_hit_rate != null ? (data.cache_hit_rate * 100).toFixed(1) + '%' : '—'}</div></div>
+            <div className="stat-card"><div className="stat-label">Active Users</div><div className="stat-value">{data.active_users}</div></div>
+          </div>
+
+          {health && (
+            <div className="container">
+              <div className="container-header">
+                <h2>Provider Health <span className="counter">({providers.length})</span></h2>
+                <span className="badge badge-green"><span className="badge-dot"></span>{healthyCount}/{providers.length} healthy</span>
+              </div>
+              <div className="container-body no-pad">
+                <table>
+                  <thead><tr><th>Provider</th><th>Status</th></tr></thead>
+                  <tbody>
+                    {providers.map(([name, status]) => (
+                      <tr key={name}>
+                        <td><strong>{name}</strong></td>
+                        <td><span className={`badge ${status === 'healthy' ? 'badge-green' : 'badge-red'}`}><span className="badge-dot"></span>{status}</span></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    /* ================================================================== */
+    /*  Projects List                                                      */
+    /* ================================================================== */
+    function ProjectsPage({ onSelect, onCreateNew }) {
+      const [projects, setProjects] = useState(null);
+      const [error, setError] = useState(null);
+
+      useEffect(() => { api.get('/admin/projects').then(setProjects).catch(() => setError('Failed to load projects')); }, []);
+
+      if (error) return <Flash type="error">{error}</Flash>;
+      if (!projects) return <Loading text="Loading projects..." />;
+
+      return (
+        <div>
+          <div className="page-header page-header-actions">
+            <div><h1>Projects</h1><p>Manage project configurations and budgets</p></div>
+            <Btn variant="primary" onClick={onCreateNew}>Create project</Btn>
+          </div>
+          {projects.length === 0 ? (
+            <div className="container"><EmptyState title="No projects" subtitle="Create a project to get started." action={<Btn variant="primary" onClick={onCreateNew}>Create project</Btn>} /></div>
+          ) : (
+            <div className="container">
+              <div className="container-header"><h2>Projects <span className="counter">({projects.length})</span></h2></div>
+              <div className="container-body no-pad">
+                <table>
+                  <thead><tr><th>Project</th><th>Spend</th><th>Budget</th><th>Utilization</th><th>Requests</th></tr></thead>
+                  <tbody>
+                    {projects.map(p => (
+                      <tr key={p.project_id} className="clickable" onClick={() => onSelect(p.project_id)}>
+                        <td>
+                          <strong style={{ color: '#0972d3' }}>{p.name}</strong>
+                          <div className="sub-text">{p.project_id}</div>
+                        </td>
+                        <td>{fmt.cost(p.current_spend)}</td>
+                        <td>{p.budget_limit != null ? `$${p.budget_limit.toFixed(2)}` : <span style={{ color: '#5f6b7a' }}>—</span>}</td>
+                        <td style={{ minWidth: '130px' }}>
+                          {p.budget_utilization_pct != null ? (
+                            <div>
+                              <span style={{ fontSize: '13px', fontWeight: 600 }}>{fmt.pct(p.budget_utilization_pct)}</span>
+                              <ProgressBar value={p.budget_utilization_pct} color={p.budget_utilization_pct > 90 ? '#d91515' : p.budget_utilization_pct > 70 ? '#8d6605' : '#037f0c'} />
+                            </div>
+                          ) : <span style={{ color: '#5f6b7a' }}>—</span>}
+                        </td>
+                        <td>{p.request_count}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    /* ================================================================== */
+    /*  Project Detail                                                     */
+    /* ================================================================== */
+    function ProjectDetailPage({ projectId, onBack, onEdit }) {
+      const [project, setProject] = useState(null);
+      const [error, setError] = useState(null);
+      const [newMember, setNewMember] = useState('');
+      const [memberMsg, setMemberMsg] = useState(null);
+      const [allModels, setAllModels] = useState([]);
+      const [projectModels, setProjectModels] = useState([]);
+      const [modelMsg, setModelMsg] = useState(null);
+      const [modelError, setModelError] = useState(null);
+      const [addingModel, setAddingModel] = useState('');
+
+      const loadProject = useCallback(() => {
+        api.get(`/admin/projects/${projectId}`).then(setProject).catch(() => setError('Failed to load project'));
+      }, [projectId]);
+
+      const loadProjectModels = useCallback(() => {
+        api.get(`/admin/projects/${projectId}/models`)
+          .then(data => setProjectModels(data.allowed_models || []))
+          .catch(() => setModelError('Failed to load project models'));
+      }, [projectId]);
+
+      const loadAllModels = useCallback(() => {
+        api.get('/admin/models')
+          .then(models => setAllModels(models.map(m => m.name)))
+          .catch(() => {});
+      }, []);
+
+      useEffect(() => { loadProject(); loadProjectModels(); loadAllModels(); }, [loadProject, loadProjectModels, loadAllModels]);
+
+      const handleAddModel = (modelName) => {
+        if (!modelName) return;
+        setModelMsg(null); setModelError(null);
+        api.post(`/admin/projects/${projectId}/models`, { model: modelName })
+          .then(data => {
+            setProjectModels(data.allowed_models || []);
+            setModelMsg(`Added "${modelName}"`);
+            setAddingModel('');
+            setProject(prev => prev ? { ...prev, allowed_models: data.allowed_models || [] } : prev);
+          })
+          .catch(() => setModelError(`Failed to add model "${modelName}"`));
+      };
+
+      const handleRemoveModel = (modelName) => {
+        setModelMsg(null); setModelError(null);
+        api.del(`/admin/projects/${projectId}/models/${encodeURIComponent(modelName)}`)
+          .then(data => {
+            setProjectModels(data.allowed_models || []);
+            setModelMsg(`Removed "${modelName}"`);
+            setProject(prev => prev ? { ...prev, allowed_models: data.allowed_models || [] } : prev);
+          })
+          .catch(() => setModelError(`Failed to remove model "${modelName}"`));
+      };
+
+      if (error) return <div><Breadcrumb items={[{ label: 'Projects', onClick: onBack }, { label: projectId }]} /><Flash type="error">{error}</Flash></div>;
+      if (!project) return <Loading text="Loading project..." />;
+
+      const modelEntries = Object.entries(project.usage_by_model || {});
+      const providerEntries = Object.entries(project.usage_by_provider || {});
+      const userEntries = Object.entries(project.usage_by_user || {});
+
+      return (
+        <div>
+          <Breadcrumb items={[{ label: 'Projects', onClick: onBack }, { label: project.name }]} />
+          <div className="page-header page-header-actions">
+            <div><h1>{project.name}</h1><p>{project.project_id}</p></div>
+            <div style={{ display: 'flex', gap: '0.5rem' }}>
+              <Btn variant="normal" onClick={() => onEdit(projectId)}>Edit</Btn>
+            </div>
+          </div>
+
+          <div className="container">
+            <div className="container-header"><h2>Configuration</h2></div>
+            <div className="container-body">
+              <div className="column-layout">
+                <div className="kv-pair"><div className="kv-label">Budget limit</div><div className="kv-value">{project.budget_limit != null ? `$${project.budget_limit}` : '—'}</div></div>
+                <div className="kv-pair"><div className="kv-label">Alert threshold</div><div className="kv-value">{project.alert_threshold != null ? `$${project.alert_threshold}` : '—'}</div></div>
+                <div className="kv-pair"><div className="kv-label">Cache</div><div className="kv-value">{project.cache_enabled ? `Enabled (${project.cache_ttl_seconds}s TTL)` : 'Disabled'}</div></div>
+                <div className="kv-pair"><div className="kv-label">Prompt caching</div><div className="kv-value">{project.prompt_caching_enabled ? 'Enabled' : 'Disabled'}</div></div>
+                <div className="kv-pair"><div className="kv-label">Cache hit rate</div><div className="kv-value">{project.cache_hit_rate != null ? (project.cache_hit_rate * 100).toFixed(1) + '%' : '—'}</div></div>
+                <div className="kv-pair"><div className="kv-label">Log level</div><div className="kv-value"><span className="badge badge-neutral">{project.log_level}</span></div></div>
+              </div>
+              <div style={{ marginTop: '1rem' }}>
+                <div className="kv-label" style={{ fontSize: '12px', fontWeight: 600, color: '#5f6b7a', marginBottom: '0.3rem' }}>Allowed models</div>
+                {project.allowed_models && project.allowed_models.length > 0
+                  ? project.allowed_models.map(m => <span key={m} className="tag">{m}</span>)
+                  : <span style={{ color: '#5f6b7a', fontSize: '14px' }}>All models</span>}
+              </div>
+            </div>
+          </div>
+
+          <div className="container">
+            <div className="container-header">
+              <h2>Members <span className="counter">({(project.members || []).length})</span></h2>
+            </div>
+            <div className="container-body">
+              {memberMsg && <Flash type="success" onDismiss={() => setMemberMsg(null)}>{memberMsg}</Flash>}
+              <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.75rem', alignItems: 'center' }}>
+                <input
+                  style={{ flex: 1, padding: '0.4rem 0.75rem', background: '#fff', border: '2px solid #7d8998', borderRadius: '8px', fontSize: '14px', fontFamily: 'inherit' }}
+                  placeholder="Enter user ID to add..."
+                  value={newMember}
+                  onChange={e => setNewMember(e.target.value)}
+                  onKeyDown={e => { if (e.key === 'Enter' && newMember.trim()) { e.preventDefault(); const uid = newMember.trim(); api.post(`/admin/projects/${projectId}/members`, { user_id: uid }).then(() => { setMemberMsg(`Added ${uid}`); setNewMember(''); setProject(prev => ({ ...prev, members: [...(prev.members || []).filter(m => m !== uid), uid] })); }).catch(() => setMemberMsg('Failed to add member')); }}}
+                />
+                <Btn variant="primary" style={{ fontSize: '13px', padding: '0.4rem 0.75rem' }} onClick={() => { if (newMember.trim()) { const uid = newMember.trim(); api.post(`/admin/projects/${projectId}/members`, { user_id: uid }).then(() => { setMemberMsg(`Added ${uid}`); setNewMember(''); setProject(prev => ({ ...prev, members: [...(prev.members || []).filter(m => m !== uid), uid] })); }).catch(() => setMemberMsg('Failed to add member')); }}}>Add</Btn>
+              </div>
+              {project.members && project.members.length > 0
+                ? project.members.map(u => (
+                  <span key={u} className="tag" style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem' }}>
+                    {u}
+                    <span style={{ cursor: 'pointer', color: '#d91515', fontWeight: 700, fontSize: '11px' }} onClick={() => { api.del(`/admin/projects/${projectId}/members/${u}`).then(() => { setMemberMsg(`Removed ${u}`); setProject(prev => ({ ...prev, members: (prev.members || []).filter(m => m !== u) })); }).catch(() => setMemberMsg('Failed to remove member')); }}>✕</span>
+                  </span>
+                ))
+                : <span style={{ color: '#5f6b7a', fontSize: '14px' }}>No members added yet</span>}
+            </div>
+          </div>
+
+          <div className="container">
+            <div className="container-header">
+              <h2>Model Access <span className="counter">({projectModels.length})</span></h2>
+            </div>
+            <div className="container-body">
+              {modelMsg && <Flash type="success" onDismiss={() => setModelMsg(null)}>{modelMsg}</Flash>}
+              {modelError && <Flash type="error" onDismiss={() => setModelError(null)}>{modelError}</Flash>}
+              <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.75rem', alignItems: 'center' }}>
+                <select
+                  style={{ flex: 1, padding: '0.4rem 0.75rem', background: '#fff', border: '2px solid #7d8998', borderRadius: '8px', fontSize: '14px', fontFamily: 'inherit', appearance: 'none', backgroundImage: "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' fill='%235f6b7a' viewBox='0 0 16 16'%3E%3Cpath d='M8 11L3 6h10z'/%3E%3C/svg%3E\")", backgroundRepeat: 'no-repeat', backgroundPosition: 'right 0.75rem center', paddingRight: '2rem' }}
+                  value={addingModel}
+                  onChange={e => setAddingModel(e.target.value)}
+                >
+                  <option value="">Select a model to add...</option>
+                  {allModels.filter(m => !projectModels.includes(m)).map(m => (
+                    <option key={m} value={m}>{m}</option>
+                  ))}
+                </select>
+                <Btn variant="primary" style={{ fontSize: '13px', padding: '0.4rem 0.75rem' }} onClick={() => handleAddModel(addingModel)} disabled={!addingModel}>Add</Btn>
+              </div>
+              {projectModels.length > 0
+                ? projectModels.map(m => (
+                  <span key={m} className="tag" style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem' }}>
+                    {m}
+                    <span style={{ cursor: 'pointer', color: '#d91515', fontWeight: 700, fontSize: '11px' }} onClick={() => handleRemoveModel(m)}>✕</span>
+                  </span>
+                ))
+                : <span style={{ color: '#5f6b7a', fontSize: '14px' }}>All models allowed</span>}
+            </div>
+          </div>
+
+          <div className="container">
+            <div className="container-header"><h2>Active Users <span className="counter">({(project.users || []).length})</span></h2></div>
+            <div className="container-body">
+              {project.users && project.users.length > 0
+                ? project.users.map(u => <span key={u} className="tag">{u}</span>)
+                : <span style={{ color: '#5f6b7a', fontSize: '14px' }}>No usage recorded</span>}
+            </div>
+          </div>
+
+          {userEntries.length > 0 && <BreakdownTable title="Usage by user" entries={userEntries} keyLabel="User" />}
+          {modelEntries.length > 0 && <BreakdownTable title="Usage by model" entries={modelEntries} keyLabel="Model" />}
+          {providerEntries.length > 0 && <BreakdownTable title="Usage by provider" entries={providerEntries} keyLabel="Provider" />}
+
+          {project.guardrail_rules && project.guardrail_rules.length > 0 && (
+            <div className="container">
+              <div className="container-header"><h2>Guardrail rules</h2></div>
+              <div className="container-body no-pad">
+                <table>
+                  <thead><tr><th>Name</th><th>Type</th><th>Pattern</th><th>Action</th><th>Applies to</th></tr></thead>
+                  <tbody>
+                    {project.guardrail_rules.map((g, i) => (
+                      <tr key={i}>
+                        <td><strong>{g.name}</strong></td>
+                        <td><span className="badge badge-neutral">{g.rule_type}</span></td>
+                        <td><code>{g.pattern || '—'}</code></td>
+                        <td><span className={`badge ${g.action === 'block' ? 'badge-red' : 'badge-yellow'}`}>{g.action}</span></td>
+                        <td>{g.applies_to}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    function BreakdownTable({ title, entries, keyLabel }) {
+      return (
+        <div className="container">
+          <div className="container-header"><h2>{title} <span className="counter">({entries.length})</span></h2></div>
+          <div className="container-body no-pad">
+            <table>
+              <thead><tr><th>{keyLabel}</th><th>Requests</th><th>Tokens</th><th>Cost</th></tr></thead>
+              <tbody>
+                {entries.map(([key, d]) => (
+                  <tr key={key}><td><strong>{key}</strong></td><td>{d.requests}</td><td>{fmt.num(d.tokens)}</td><td>{fmt.cost(d.cost)}</td></tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      );
+    }
+
+    /* ================================================================== */
+    /*  Project Form                                                       */
+    /* ================================================================== */
+    function ProjectFormPage({ projectId, onBack, onSaved }) {
+      const isEdit = !!projectId;
+      const [form, setForm] = useState({ name: '', budget_limit: '', alert_threshold: '', allowed_models: '', cache_enabled: false, cache_ttl_seconds: '300', log_level: 'INFO', rate_limit_rpm: '', guardrail_rules: [] });
+      const [loading, setLoading] = useState(isEdit);
+      const [saving, setSaving] = useState(false);
+      const [msg, setMsg] = useState(null);
+      const [error, setError] = useState(null);
+
+      useEffect(() => {
+        if (isEdit) {
+          api.get(`/admin/projects/${projectId}`).then(p => {
+            setForm({ name: p.name || '', budget_limit: p.budget_limit != null ? String(p.budget_limit) : '', alert_threshold: p.alert_threshold != null ? String(p.alert_threshold) : '', allowed_models: (p.allowed_models || []).join(', '), cache_enabled: p.cache_enabled || false, cache_ttl_seconds: String(p.cache_ttl_seconds || 300), log_level: p.log_level || 'INFO', rate_limit_rpm: '', guardrail_rules: p.guardrail_rules || [] });
+            setLoading(false);
+          }).catch(() => { setError('Failed to load project'); setLoading(false); });
+        }
+      }, [projectId, isEdit]);
+
+      const handleChange = (field, value) => setForm(prev => ({ ...prev, [field]: value }));
+
+      const handleSubmit = async (e) => {
+        e.preventDefault(); setSaving(true); setMsg(null); setError(null);
+        const body = { name: form.name, budget_limit: form.budget_limit ? parseFloat(form.budget_limit) : null, alert_threshold: form.alert_threshold ? parseFloat(form.alert_threshold) : null, allowed_models: form.allowed_models ? form.allowed_models.split(',').map(s => s.trim()).filter(Boolean) : null, cache_enabled: form.cache_enabled, cache_ttl_seconds: parseInt(form.cache_ttl_seconds) || 300, log_level: form.log_level, rate_limit_rpm: form.rate_limit_rpm ? parseInt(form.rate_limit_rpm) : null, guardrail_rules: form.guardrail_rules };
+        try {
+          if (isEdit) { await api.put(`/admin/projects/${projectId}`, body); setMsg('Project updated successfully.'); }
+          else { await api.post('/admin/projects', body); setMsg('Project created successfully.'); }
+          if (onSaved) setTimeout(onSaved, 800);
+        } catch { setError('Failed to save project.'); }
+        setSaving(false);
+      };
+
+      if (loading) return <Loading />;
+
+      const formLabelStyle = { display: 'block', fontSize: '14px', fontWeight: 600, marginBottom: '0.3rem', color: '#000716' };
+      const formInputStyle = { width: '100%', padding: '0.5rem 0.75rem', background: '#fff', border: '2px solid #7d8998', borderRadius: '8px', fontSize: '14px', color: '#000716', fontFamily: 'inherit', outline: 'none' };
+      const formSelectStyle = { ...formInputStyle, appearance: 'none', backgroundImage: "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' fill='%235f6b7a' viewBox='0 0 16 16'%3E%3Cpath d='M8 11L3 6h10z'/%3E%3C/svg%3E\")", backgroundRepeat: 'no-repeat', backgroundPosition: 'right 0.75rem center', paddingRight: '2rem' };
+
+      return (
+        <div>
+          <Breadcrumb items={[{ label: 'Projects', onClick: onBack }, { label: isEdit ? 'Edit' : 'Create' }]} />
+          <div className="page-header"><h1>{isEdit ? 'Edit project' : 'Create project'}</h1></div>
+          {msg && <Flash type="success">{msg}</Flash>}
+          {error && <Flash type="error">{error}</Flash>}
+          <div className="container">
+            <div className="container-header"><h2>Project settings</h2></div>
+            <div className="container-body">
+              <form onSubmit={handleSubmit}>
+                <div style={{ marginBottom: '1rem' }}><label style={formLabelStyle}>Project name</label><input style={formInputStyle} value={form.name} onChange={e => handleChange('name', e.target.value)} required placeholder="My Project" /></div>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginBottom: '1rem' }}>
+                  <div><label style={formLabelStyle}>Budget limit ($)</label><input style={formInputStyle} type="number" step="0.01" value={form.budget_limit} onChange={e => handleChange('budget_limit', e.target.value)} placeholder="No limit" /></div>
+                  <div><label style={formLabelStyle}>Alert threshold ($)</label><input style={formInputStyle} type="number" step="0.01" value={form.alert_threshold} onChange={e => handleChange('alert_threshold', e.target.value)} placeholder="No alert" /></div>
+                </div>
+                <div style={{ marginBottom: '1rem' }}><label style={formLabelStyle}>Allowed models</label><input style={formInputStyle} value={form.allowed_models} onChange={e => handleChange('allowed_models', e.target.value)} placeholder="gpt-4, claude-3 (leave empty for all)" /><div style={{ fontSize: '12px', color: '#5f6b7a', marginTop: '0.2rem' }}>Comma-separated list of model names</div></div>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginBottom: '1rem' }}>
+                  <div><label style={{ ...formLabelStyle, display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}><input type="checkbox" checked={form.cache_enabled} onChange={e => handleChange('cache_enabled', e.target.checked)} style={{ width: '16px', height: '16px', accentColor: '#0972d3' }} /> Enable caching</label></div>
+                  <div><label style={formLabelStyle}>Cache TTL (seconds)</label><input style={formInputStyle} type="number" value={form.cache_ttl_seconds} onChange={e => handleChange('cache_ttl_seconds', e.target.value)} /></div>
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginBottom: '1rem' }}>
+                  <div><label style={formLabelStyle}>Log level</label><select style={formSelectStyle} value={form.log_level} onChange={e => handleChange('log_level', e.target.value)}><option>DEBUG</option><option>INFO</option><option>WARNING</option><option>ERROR</option></select></div>
+                  <div><label style={formLabelStyle}>Rate limit (RPM)</label><input style={formInputStyle} type="number" value={form.rate_limit_rpm} onChange={e => handleChange('rate_limit_rpm', e.target.value)} placeholder="Default" /></div>
+                </div>
+                <div style={{ marginTop: '1.25rem', marginBottom: '1rem' }}>
+                  <h3 style={{ fontSize: '16px', fontWeight: 700, color: '#000716', marginBottom: '0.75rem' }}>Guardrail rules</h3>
+                  <GuardrailEditor rules={form.guardrail_rules} onChange={rules => handleChange('guardrail_rules', rules)} />
+                </div>
+                <div style={{ marginTop: '1.5rem', display: 'flex', gap: '0.5rem', borderTop: '1px solid #e9ebed', paddingTop: '1.25rem' }}>
+                  <Btn variant="primary" type="submit" disabled={saving}>{saving ? 'Saving...' : isEdit ? 'Save changes' : 'Create project'}</Btn>
+                  <Btn variant="normal" type="button" onClick={onBack}>Cancel</Btn>
+                </div>
+              </form>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    function GuardrailEditor({ rules, onChange }) {
+      const addRule = () => onChange([...rules, { name: '', rule_type: 'keyword_block', pattern: '', action: 'block', applies_to: 'both' }]);
+      const removeRule = (i) => onChange(rules.filter((_, idx) => idx !== i));
+      const updateRule = (i, field, value) => { const u = [...rules]; u[i] = { ...u[i], [field]: value }; onChange(u); };
+      const inputStyle = { width: '100%', padding: '0.4rem 0.6rem', background: '#fff', border: '2px solid #7d8998', borderRadius: '8px', fontSize: '13px', color: '#000716', fontFamily: 'inherit' };
+      const selectStyle = { ...inputStyle, appearance: 'none' };
+      const labelStyle = { display: 'block', fontSize: '12px', fontWeight: 600, marginBottom: '0.2rem', color: '#5f6b7a' };
+
+      return (
+        <div>
+          {rules.map((rule, i) => (
+            <div key={i} style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 0.8fr 0.8fr auto', gap: '0.5rem', marginBottom: '0.5rem', alignItems: 'end' }}>
+              <div><label style={labelStyle}>Name</label><input style={inputStyle} value={rule.name} onChange={e => updateRule(i, 'name', e.target.value)} /></div>
+              <div><label style={labelStyle}>Type</label><select style={selectStyle} value={rule.rule_type} onChange={e => updateRule(i, 'rule_type', e.target.value)}><option value="keyword_block">Keyword</option><option value="regex_match">Regex</option><option value="content_category">Category</option></select></div>
+              <div><label style={labelStyle}>Pattern</label><input style={inputStyle} value={rule.pattern || ''} onChange={e => updateRule(i, 'pattern', e.target.value)} /></div>
+              <div><label style={labelStyle}>Action</label><select style={selectStyle} value={rule.action} onChange={e => updateRule(i, 'action', e.target.value)}><option value="block">Block</option><option value="warn">Warn</option><option value="redact">Redact</option></select></div>
+              <div><label style={labelStyle}>Scope</label><select style={selectStyle} value={rule.applies_to} onChange={e => updateRule(i, 'applies_to', e.target.value)}><option value="both">Both</option><option value="request">Request</option><option value="response">Response</option></select></div>
+              <Btn variant="danger" style={{ marginBottom: '0.1rem', padding: '0.35rem 0.5rem', fontSize: '12px' }} onClick={() => removeRule(i)}>✕</Btn>
+            </div>
+          ))}
+          <Btn variant="normal" style={{ fontSize: '13px', padding: '0.3rem 0.75rem' }} onClick={addRule}>+ Add rule</Btn>
+        </div>
+      );
+    }
+
+    /* ================================================================== */
+    /*  Users Page                                                         */
+    /* ================================================================== */
+    function UsersPage({ onSelect }) {
+      const [users, setUsers] = useState(null);
+      const [error, setError] = useState(null);
+
+      useEffect(() => { api.get('/admin/users').then(setUsers).catch(() => setError('Failed to load users')); }, []);
+
+      if (error) return <Flash type="error">{error}</Flash>;
+      if (!users) return <Loading text="Loading users..." />;
+
+      return (
+        <div>
+          <div className="page-header"><h1>Users</h1><p>All users with aggregated usage metrics and budgets</p></div>
+          {users.length === 0 ? (
+            <div className="container"><EmptyState title="No users" subtitle="No user activity recorded yet." /></div>
+          ) : (
+            <div className="container">
+              <div className="container-header"><h2>Users <span className="counter">({users.length})</span></h2></div>
+              <div className="container-body no-pad">
+                <table>
+                  <thead><tr><th>User</th><th>Projects</th><th>Spend</th><th>Budget</th><th>Utilization</th><th>Requests</th></tr></thead>
+                  <tbody>
+                    {users.map(u => (
+                      <tr key={u.user_id} className="clickable" onClick={() => onSelect(u.user_id)}>
+                        <td><strong style={{ color: '#0972d3' }}>{u.user_id}</strong></td>
+                        <td>{u.projects.map(p => <span key={p} className="tag">{p}</span>)}</td>
+                        <td>{fmt.cost(u.cost)}</td>
+                        <td>{u.budget_limit != null ? `$${u.budget_limit.toFixed(2)}` : <span style={{ color: '#5f6b7a' }}>—</span>}</td>
+                        <td style={{ minWidth: '130px' }}>
+                          {u.budget_utilization_pct != null ? (
+                            <div>
+                              <span style={{ fontSize: '13px', fontWeight: 600 }}>{fmt.pct(u.budget_utilization_pct)}</span>
+                              <ProgressBar value={u.budget_utilization_pct} color={u.budget_utilization_pct > 90 ? '#d91515' : u.budget_utilization_pct > 70 ? '#8d6605' : '#037f0c'} />
+                            </div>
+                          ) : <span style={{ color: '#5f6b7a' }}>—</span>}
+                        </td>
+                        <td>{u.requests}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    /* ================================================================== */
+    /*  User Detail                                                        */
+    /* ================================================================== */
+    function UserDetailPage({ userId, onBack }) {
+      const [user, setUser] = useState(null);
+      const [error, setError] = useState(null);
+      const [editBudget, setEditBudget] = useState(false);
+      const [budgetForm, setBudgetForm] = useState({ budget_limit: '', alert_threshold: '' });
+      const [budgetMsg, setBudgetMsg] = useState(null);
+      const [editAccess, setEditAccess] = useState(false);
+      const [accessModels, setAccessModels] = useState([]);
+      const [allModels, setAllModels] = useState([]);
+      const [accessMsg, setAccessMsg] = useState(null);
+
+      const loadUser = useCallback(() => {
+        api.get(`/admin/users/${userId}`).then(u => {
+          setUser(u);
+          setBudgetForm({
+            budget_limit: u.budget_limit != null ? String(u.budget_limit) : '',
+            alert_threshold: u.alert_threshold != null ? String(u.alert_threshold) : '',
+          });
+          setAccessModels(u.allowed_models || []);
+        }).catch(() => setError('Failed to load user'));
+        api.get('/admin/models').then(models => {
+          setAllModels(models.map(m => m.name));
+        }).catch(() => {});
+      }, [userId]);
+
+      useEffect(() => { loadUser(); }, [loadUser]);
+
+      const saveBudget = async () => {
+        setBudgetMsg(null);
+        const body = {
+          budget_limit: budgetForm.budget_limit ? parseFloat(budgetForm.budget_limit) : null,
+          alert_threshold: budgetForm.alert_threshold ? parseFloat(budgetForm.alert_threshold) : null,
+        };
+        try {
+          await api.put(`/admin/users/${userId}/budget`, body);
+          setBudgetMsg('Budget updated successfully.');
+          setEditBudget(false);
+          loadUser();
+        } catch { setBudgetMsg('Failed to update budget.'); }
+      };
+
+      const saveAccess = async () => {
+        setAccessMsg(null);
+        const allowed = accessModels.length > 0 ? accessModels : null;
+        try {
+          await api.put(`/admin/users/${userId}/allowed-models`, { allowed_models: allowed });
+          setAccessMsg('Model access updated successfully.');
+          setEditAccess(false);
+          loadUser();
+        } catch { setAccessMsg('Failed to update model access.'); }
+      };
+
+      const toggleModel = (modelName) => {
+        setAccessModels(prev =>
+          prev.includes(modelName)
+            ? prev.filter(m => m !== modelName)
+            : [...prev, modelName]
+        );
+      };
+
+      if (error) return <div><Breadcrumb items={[{ label: 'Users', onClick: onBack }, { label: userId }]} /><Flash type="error">{error}</Flash></div>;
+      if (!user) return <Loading text="Loading user..." />;
+
+      const projectEntries = Object.entries(user.usage_by_project || {});
+      const modelEntries = Object.entries(user.usage_by_model || {});
+      const providerEntries = Object.entries(user.usage_by_provider || {});
+      const budgetLimit = user.budget_limit;
+      const utilization = budgetLimit ? (user.total_cost / budgetLimit * 100) : null;
+
+      const formInputStyle = { width: '100%', padding: '0.5rem 0.75rem', background: '#fff', border: '2px solid #7d8998', borderRadius: '8px', fontSize: '14px', color: '#000716', fontFamily: 'inherit' };
+      const formLabelStyle = { display: 'block', fontSize: '14px', fontWeight: 600, marginBottom: '0.3rem', color: '#000716' };
+
+      return (
+        <div>
+          <Breadcrumb items={[{ label: 'Users', onClick: onBack }, { label: user.user_id }]} />
+          <div className="page-header"><h1>{user.user_id}</h1><p>Member of {user.projects.length} project{user.projects.length !== 1 ? 's' : ''}</p></div>
+
+          {budgetMsg && <Flash type="success">{budgetMsg}</Flash>}
+
+          <div className="stat-grid">
+            <div className="stat-card"><div className="stat-label">Requests</div><div className="stat-value">{user.total_requests}</div></div>
+            <div className="stat-card"><div className="stat-label">Tokens</div><div className="stat-value">{fmt.num(user.total_tokens)}</div></div>
+            <div className="stat-card"><div className="stat-label">Total Spend</div><div className="stat-value">{fmt.cost(user.total_cost)}</div></div>
+            <div className="stat-card">
+              <div className="stat-label">Budget</div>
+              <div className="stat-value">{budgetLimit != null ? `$${budgetLimit}` : '—'}</div>
+              {utilization != null && <ProgressBar value={utilization} color={utilization > 90 ? '#d91515' : utilization > 70 ? '#8d6605' : '#037f0c'} />}
+            </div>
+          </div>
+
+          <div className="container">
+            <div className="container-header">
+              <h2>Budget configuration</h2>
+              {!editBudget && <Btn variant="normal" style={{ fontSize: '13px', padding: '0.3rem 0.75rem' }} onClick={() => setEditBudget(true)}>Edit budget</Btn>}
+            </div>
+            <div className="container-body">
+              {editBudget ? (
+                <div>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginBottom: '1rem' }}>
+                    <div><label style={formLabelStyle}>Budget limit ($)</label><input style={formInputStyle} type="number" step="0.01" value={budgetForm.budget_limit} onChange={e => setBudgetForm(f => ({ ...f, budget_limit: e.target.value }))} placeholder="No limit" /></div>
+                    <div><label style={formLabelStyle}>Alert threshold ($)</label><input style={formInputStyle} type="number" step="0.01" value={budgetForm.alert_threshold} onChange={e => setBudgetForm(f => ({ ...f, alert_threshold: e.target.value }))} placeholder="No alert" /></div>
+                  </div>
+                  <div style={{ display: 'flex', gap: '0.5rem' }}>
+                    <Btn variant="primary" onClick={saveBudget}>Save budget</Btn>
+                    <Btn variant="normal" onClick={() => setEditBudget(false)}>Cancel</Btn>
+                  </div>
+                </div>
+              ) : (
+                <div className="column-layout">
+                  <div className="kv-pair"><div className="kv-label">Budget limit</div><div className="kv-value">{budgetLimit != null ? `$${budgetLimit}` : '—'}</div></div>
+                  <div className="kv-pair"><div className="kv-label">Alert threshold</div><div className="kv-value">{user.alert_threshold != null ? `$${user.alert_threshold}` : '—'}</div></div>
+                  <div className="kv-pair"><div className="kv-label">Current spend</div><div className="kv-value">{fmt.cost(user.total_cost)}</div></div>
+                  <div className="kv-pair"><div className="kv-label">Utilization</div><div className="kv-value">{utilization != null ? fmt.pct(utilization) : '—'}</div></div>
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="container">
+            <div className="container-header"><h2>Projects <span className="counter">({user.projects.length})</span></h2></div>
+            <div className="container-body">{user.projects.map(p => <span key={p} className="tag">{p}</span>)}</div>
+          </div>
+
+          <div className="container">
+            <div className="container-header">
+              <h2>Model access</h2>
+              {!editAccess && <Btn variant="normal" style={{ fontSize: '13px', padding: '0.3rem 0.75rem' }} onClick={() => { setEditAccess(true); setAccessModels(user.allowed_models || []); }}>Edit access</Btn>}
+            </div>
+            <div className="container-body">
+              {accessMsg && <Flash type="success" onDismiss={() => setAccessMsg(null)}>{accessMsg}</Flash>}
+              {editAccess ? (
+                <div>
+                  <p style={{ fontSize: '13px', color: '#5f6b7a', marginBottom: '0.75rem' }}>
+                    Select which models this user can access. Leave all unchecked to allow access to all models.
+                  </p>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem', marginBottom: '1rem' }}>
+                    {allModels.map(m => (
+                      <label key={m} style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem', padding: '0.35rem 0.75rem', background: accessModels.includes(m) ? '#f2f8fd' : '#f4f6f8', border: accessModels.includes(m) ? '2px solid #0972d3' : '2px solid #e9ebed', borderRadius: '8px', cursor: 'pointer', fontSize: '13px', fontWeight: accessModels.includes(m) ? 600 : 400, color: accessModels.includes(m) ? '#0972d3' : '#5f6b7a', transition: 'all 100ms' }}>
+                        <input type="checkbox" checked={accessModels.includes(m)} onChange={() => toggleModel(m)} style={{ display: 'none' }} />
+                        {accessModels.includes(m) ? '✓' : ''} {m}
+                      </label>
+                    ))}
+                  </div>
+                  <div style={{ display: 'flex', gap: '0.5rem' }}>
+                    <Btn variant="primary" onClick={saveAccess}>Save access</Btn>
+                    <Btn variant="normal" onClick={() => setEditAccess(false)}>Cancel</Btn>
+                    {accessModels.length > 0 && <Btn variant="link" style={{ color: '#d91515' }} onClick={() => setAccessModels([])}>Clear all (allow all)</Btn>}
+                  </div>
+                </div>
+              ) : (
+                <div>
+                  {user.allowed_models && user.allowed_models.length > 0 ? (
+                    <div>
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.25rem' }}>
+                        {user.allowed_models.map(m => <span key={m} className="tag">{m}</span>)}
+                      </div>
+                    </div>
+                  ) : (
+                    <span style={{ color: '#5f6b7a', fontSize: '14px' }}>All models (no restrictions)</span>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+
+          {projectEntries.length > 0 && <BreakdownTable title="Usage by project" entries={projectEntries} keyLabel="Project" />}
+          {modelEntries.length > 0 && <BreakdownTable title="Usage by model" entries={modelEntries} keyLabel="Model" />}
+          {providerEntries.length > 0 && <BreakdownTable title="Usage by provider" entries={providerEntries} keyLabel="Provider" />}
+        </div>
+      );
+    }
+
+    /* ================================================================== */
+    /*  Models Page                                                        */
+    /* ================================================================== */
+    function ModelsPage() {
+      const [models, setModels] = useState(null);
+      const [error, setError] = useState(null);
+      const [expanded, setExpanded] = useState(null);
+      const [msg, setMsg] = useState(null);
+
+      const loadModels = useCallback(() => { api.get('/admin/models').then(setModels).catch(() => setError('Failed to load models')); }, []);
+      useEffect(() => { loadModels(); }, [loadModels]);
+
+      const strategies = ['round-robin', 'weighted', 'least-latency', 'cost-optimized'];
+
+      const handleStrategyChange = async (modelName, newStrategy) => {
+        setMsg(null);
+        try {
+          await api.put('/admin/models/' + modelName, { routing_strategy: newStrategy });
+          setMsg('Routing strategy for "' + modelName + '" updated to ' + newStrategy + '.');
+          loadModels();
+        } catch { setMsg(null); }
+      };
+
+      useEffect(() => { loadModels(); }, [loadModels]);
+
+      if (error) return <Flash type="error">{error}</Flash>;
+      if (!models) return <Loading text="Loading models..." />;
+
+      return (
+        <div>
+          <div className="page-header"><h1>Models</h1><p>Model routing configuration and provider mappings</p></div>
+          {msg && <Flash type="success">{msg}</Flash>}
+          {models.length === 0 ? (
+            <div className="container"><EmptyState title="No models" subtitle="No models configured yet." /></div>
+          ) : (
+            <div className="container">
+              <div className="container-header"><h2>Models <span className="counter">({models.length})</span></h2></div>
+              <div className="container-body no-pad">
+                <table>
+                  <thead><tr><th>Model</th><th>Strategy</th><th>Providers</th><th>Requests</th><th>Tokens</th><th>Cost</th></tr></thead>
+                  <tbody>
+                    {models.map(m => (
+                      <React.Fragment key={m.name}>
+                        <tr className="clickable" onClick={() => setExpanded(expanded === m.name ? null : m.name)}>
+                          <td>
+                            <strong style={{ color: '#0972d3' }}>{m.name}</strong>
+                            <div className="sub-text">{m.description}</div>
+                          </td>
+                          <td><select value={m.routing_strategy} onChange={(e) => { e.stopPropagation(); handleStrategyChange(m.name, e.target.value); }} onClick={(e) => e.stopPropagation()} style={{ padding: '4px 8px', borderRadius: '6px', border: '2px solid #7d8998', fontSize: '13px', fontFamily: 'inherit', background: '#fff', color: '#000716', cursor: 'pointer' }}>
+                            {strategies.map(s => <option key={s} value={s}>{s}</option>)}
+                          </select></td>
+                          <td>{m.providers.map(p => p.provider).join(', ')}</td>
+                          <td>{m.total_requests}</td>
+                          <td>{fmt.num(m.total_tokens)}</td>
+                          <td>{fmt.cost(m.total_cost)}</td>
+                        </tr>
+                        {expanded === m.name && (
+                          <tr><td colSpan="6" style={{ background: '#fafafa', padding: '1.25rem' }}>
+                            <div style={{ marginBottom: '0.75rem' }}>
+                              <div style={{ fontSize: '12px', fontWeight: 700, color: '#5f6b7a', marginBottom: '0.3rem' }}>CAPABILITIES</div>
+                              <div>{m.capabilities.length > 0 ? m.capabilities.map(c => <span key={c} className="tag">{c}</span>) : <span style={{ color: '#5f6b7a', fontSize: '13px' }}>None</span>}</div>
+                            </div>
+                            <div style={{ fontSize: '12px', fontWeight: 700, color: '#5f6b7a', marginBottom: '0.3rem' }}>PROVIDER MAPPINGS</div>
+                            <table style={{ marginTop: '0.25rem' }}>
+                              <thead><tr><th>Provider</th><th>Model ID</th><th>Weight</th><th>Fallback order</th></tr></thead>
+                              <tbody>
+                                {m.providers.map((p, i) => (
+                                  <tr key={i}><td><strong>{p.provider}</strong></td><td><code>{p.model_id}</code></td><td>{p.weight}</td><td>{p.fallback_order}</td></tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </td></tr>
+                        )}
+                      </React.Fragment>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    /* ================================================================== */
+    /*  Policies Page                                                      */
+    /* ================================================================== */
+    function PoliciesPage() {
+      const [policies, setPolicies] = useState(null);
+      const [error, setError] = useState(null);
+      const [showForm, setShowForm] = useState(false);
+      const [editPolicy, setEditPolicy] = useState(null);
+      const [msg, setMsg] = useState(null);
+
+      const loadPolicies = useCallback(() => { api.get('/admin/policies').then(setPolicies).catch(() => setError('Failed to load policies')); }, []);
+      useEffect(() => { loadPolicies(); }, [loadPolicies]);
+
+      const handleSave = async (policy) => {
+        setMsg(null);
+        try { const r = await api.post('/admin/policies', policy); setMsg(`Policy "${policy.name}" ${r.status}.`); setShowForm(false); setEditPolicy(null); loadPolicies(); }
+        catch { setMsg(null); }
+      };
+
+      if (error) return <Flash type="error">{error}</Flash>;
+      if (!policies) return <Loading text="Loading policies..." />;
+
+      const formLabelStyle = { display: 'block', fontSize: '14px', fontWeight: 600, marginBottom: '0.3rem', color: '#000716' };
+      const formInputStyle = { width: '100%', padding: '0.5rem 0.75rem', background: '#fff', border: '2px solid #7d8998', borderRadius: '8px', fontSize: '14px', color: '#000716', fontFamily: 'inherit' };
+
+      return (
+        <div>
+          <div className="page-header page-header-actions">
+            <div><h1>Cedar policies</h1><p>Authorization policies for access control</p></div>
+            <Btn variant="primary" onClick={() => { setEditPolicy(null); setShowForm(true); }}>Create policy</Btn>
+          </div>
+          {msg && <Flash type="success">{msg}</Flash>}
+          {showForm && (
+            <div className="container" style={{ marginBottom: '1.25rem' }}>
+              <div className="container-header"><h2>{editPolicy ? 'Edit policy' : 'Create policy'}</h2></div>
+              <div className="container-body">
+                <PolicyFormInline initial={editPolicy} onSave={handleSave} onCancel={() => { setShowForm(false); setEditPolicy(null); }} />
+              </div>
+            </div>
+          )}
+          {policies.length === 0 ? (
+            <div className="container"><EmptyState title="No policies" subtitle="Create a policy to get started." action={<Btn variant="primary" onClick={() => setShowForm(true)}>Create policy</Btn>} /></div>
+          ) : (
+            <div className="container">
+              <div className="container-header"><h2>Policies <span className="counter">({policies.length})</span></h2></div>
+              <div className="container-body no-pad">
+                <table>
+                  <thead><tr><th>Name</th><th>Description</th><th>Mode</th><th>Actions</th></tr></thead>
+                  <tbody>
+                    {policies.map((p, i) => (
+                      <tr key={i}>
+                        <td><strong>{p.name}</strong></td>
+                        <td>{p.description || <span style={{ color: '#5f6b7a' }}>—</span>}</td>
+                        <td><span className={`badge ${p.mode === 'ENFORCE' ? 'badge-blue' : 'badge-yellow'}`}>{p.mode}</span></td>
+                        <td><Btn variant="link" onClick={() => { setEditPolicy(p); setShowForm(true); }}>Edit</Btn></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    function PolicyFormInline({ initial, onSave, onCancel }) {
+      const [form, setForm] = useState({ name: initial?.name || '', description: initial?.description || '', policy_text: initial?.policy_text || '', mode: initial?.mode || 'LOG_ONLY' });
+      const handleChange = (field, value) => setForm(prev => ({ ...prev, [field]: value }));
+      const formLabelStyle = { display: 'block', fontSize: '14px', fontWeight: 600, marginBottom: '0.3rem', color: '#000716' };
+      const formInputStyle = { width: '100%', padding: '0.5rem 0.75rem', background: '#fff', border: '2px solid #7d8998', borderRadius: '8px', fontSize: '14px', color: '#000716', fontFamily: 'inherit' };
+      const formSelectStyle = { ...formInputStyle, appearance: 'none' };
+
+      return (
+        <div>
+          <div style={{ marginBottom: '1rem' }}><label style={formLabelStyle}>Policy name</label><input style={formInputStyle} value={form.name} onChange={e => handleChange('name', e.target.value)} disabled={!!initial} /></div>
+          <div style={{ marginBottom: '1rem' }}><label style={formLabelStyle}>Description</label><input style={formInputStyle} value={form.description} onChange={e => handleChange('description', e.target.value)} /></div>
+          <div style={{ marginBottom: '1rem' }}><label style={formLabelStyle}>Cedar policy text</label><textarea style={{ ...formInputStyle, minHeight: '80px', resize: 'vertical', fontFamily: "'SF Mono', 'Fira Code', monospace", fontSize: '13px' }} value={form.policy_text} onChange={e => handleChange('policy_text', e.target.value)} placeholder="permit(principal, action, resource) when { ... };" /></div>
+          <div style={{ marginBottom: '1rem' }}><label style={formLabelStyle}>Mode</label><select style={formSelectStyle} value={form.mode} onChange={e => handleChange('mode', e.target.value)}><option value="LOG_ONLY">LOG_ONLY (Test)</option><option value="ENFORCE">ENFORCE (Production)</option></select></div>
+          <div style={{ display: 'flex', gap: '0.5rem' }}>
+            <Btn variant="primary" onClick={() => onSave(form)} disabled={!form.name}>Save policy</Btn>
+            <Btn variant="normal" onClick={onCancel}>Cancel</Btn>
+          </div>
+        </div>
+      );
+    }
+
+    /* ================================================================== */
+    /*  Health Page                                                        */
+    /* ================================================================== */
+    function HealthPage() {
+      const [health, setHealth] = useState(null);
+      const [error, setError] = useState(null);
+
+      useEffect(() => { api.get('/admin/health').then(setHealth).catch(() => setError('Failed to load health')); }, []);
+
+      if (error) return <Flash type="error">{error}</Flash>;
+      if (!health) return <Loading text="Loading health..." />;
+
+      const providers = Object.entries(health.providers || {});
+
+      return (
+        <div>
+          <div className="page-header"><h1>System health</h1><p>Provider connectivity and runtime status</p></div>
+          <div className="stat-grid">
+            <div className="stat-card">
+              <div className="stat-label">Runtime</div>
+              <div className="stat-value" style={{ fontSize: '18px', marginTop: '0.4rem' }}><span className="badge badge-green" style={{ fontSize: '14px', padding: '0.25rem 0.65rem' }}><span className="badge-dot"></span>{health.runtime || 'unknown'}</span></div>
+            </div>
+            <div className="stat-card">
+              <div className="stat-label">Overall Status</div>
+              <div className="stat-value" style={{ fontSize: '18px', marginTop: '0.4rem' }}><span className={`badge ${health.status === 'ok' ? 'badge-green' : 'badge-red'}`} style={{ fontSize: '14px', padding: '0.25rem 0.65rem' }}><span className="badge-dot"></span>{health.status}</span></div>
+            </div>
+          </div>
+          <div className="container">
+            <div className="container-header"><h2>Provider status <span className="counter">({providers.length})</span></h2></div>
+            <div className="container-body no-pad">
+              {providers.length === 0 ? (
+                <EmptyState title="No providers" subtitle="No providers configured." />
+              ) : (
+                <table>
+                  <thead><tr><th>Provider</th><th>Status</th></tr></thead>
+                  <tbody>
+                    {providers.map(([name, status]) => (
+                      <tr key={name}>
+                        <td><strong>{name}</strong></td>
+                        <td><span className={`badge ${status === 'healthy' ? 'badge-green' : 'badge-red'}`}><span className="badge-dot"></span>{status}</span></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    /* ================================================================== */
+    /*  Configuration Page                                                 */
+    /* ================================================================== */
+    function ConfigurationPage() {
+      const [models, setModels] = useState(null);
+      const [catalog, setCatalog] = useState(null);
+      const [error, setError] = useState(null);
+      const [msg, setMsg] = useState(null);
+      const [expanded, setExpanded] = useState(null);
+      const [showForm, setShowForm] = useState(false);
+      const [editModel, setEditModel] = useState(null);
+      const [deleteTarget, setDeleteTarget] = useState(null);
+
+      const loadModels = useCallback(() => {
+        api.get('/admin/models').then(setModels).catch(() => setError('Failed to load models'));
+      }, []);
+
+      const loadCatalog = useCallback(() => {
+        api.get('/admin/catalog').then(setCatalog).catch(() => {});
+      }, []);
+
+      useEffect(() => { loadModels(); loadCatalog(); }, [loadModels, loadCatalog]);
+
+      const handleDelete = async (name) => {
+        setMsg(null);
+        try {
+          await api.del('/admin/models/' + encodeURIComponent(name));
+          setMsg('Model "' + name + '" deleted successfully.');
+          setDeleteTarget(null);
+          loadModels();
+        } catch { setMsg(null); setError('Failed to delete model.'); setDeleteTarget(null); }
+      };
+
+      const handleFormSave = async (formData, isEdit) => {
+        setMsg(null); setError(null);
+        const body = {
+          name: formData.name,
+          description: formData.description,
+          routing_strategy: formData.routing_strategy,
+          providers: formData.providers,
+        };
+        try {
+          if (isEdit) {
+            const res = await api.put('/admin/models/' + encodeURIComponent(formData.name), body);
+            if (res.errors) { return { errors: res.errors }; }
+            setMsg('Model "' + formData.name + '" updated successfully.');
+          } else {
+            const res = await api.post('/admin/models', body);
+            if (res.errors) { return { errors: res.errors }; }
+            setMsg('Model "' + formData.name + '" created successfully.');
+          }
+          setShowForm(false);
+          setEditModel(null);
+          loadModels();
+          return null;
+        } catch (e) {
+          if (e && e.errors) return { errors: e.errors };
+          return { errors: [{ message: 'Failed to save model.' }] };
+        }
+      };
+
+      if (error && !models) return <Flash type="error">{error}</Flash>;
+      if (!models) return <Loading text="Loading configuration..." />;
+
+      return (
+        <div>
+          <div className="page-header page-header-actions">
+            <div><h1>Configuration</h1><p>Manage virtual model configurations and provider mappings</p></div>
+            {!showForm && <Btn variant="primary" onClick={() => { setEditModel(null); setShowForm(true); setMsg(null); setError(null); }}>Add model</Btn>}
+          </div>
+          {msg && <Flash type="success" onDismiss={() => setMsg(null)}>{msg}</Flash>}
+          {error && models && <Flash type="error" onDismiss={() => setError(null)}>{error}</Flash>}
+
+          {showForm && (
+            <ModelForm
+              model={editModel}
+              catalog={catalog}
+              onSave={handleFormSave}
+              onCancel={() => { setShowForm(false); setEditModel(null); }}
+            />
+          )}
+
+          {deleteTarget && (
+            <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,7,22,0.5)', zIndex: 200, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <div style={{ background: '#fff', borderRadius: '12px', padding: '1.5rem', maxWidth: '420px', width: '100%', boxShadow: '0 4px 20px rgba(0,0,0,0.15)' }}>
+                <h3 style={{ fontSize: '18px', fontWeight: 700, marginBottom: '0.5rem' }}>Delete model</h3>
+                <p style={{ fontSize: '14px', color: '#5f6b7a', marginBottom: '1.25rem' }}>
+                  Are you sure you want to delete <strong>"{deleteTarget}"</strong>? This action cannot be undone.
+                </p>
+                <div style={{ display: 'flex', gap: '0.5rem', justifyContent: 'flex-end' }}>
+                  <Btn variant="normal" onClick={() => setDeleteTarget(null)}>Cancel</Btn>
+                  <Btn variant="danger" onClick={() => handleDelete(deleteTarget)}>Delete</Btn>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {models.length === 0 && !showForm ? (
+            <div className="container"><EmptyState title="No models" subtitle="Add a model to get started." action={<Btn variant="primary" onClick={() => { setEditModel(null); setShowForm(true); }}>Add model</Btn>} /></div>
+          ) : (
+            <div className="container">
+              <div className="container-header"><h2>Models <span className="counter">({models.length})</span></h2></div>
+              <div className="container-body no-pad">
+                <table>
+                  <thead><tr><th>Name</th><th>Description</th><th>Routing Strategy</th><th>Providers</th><th>Requests</th><th>Tokens</th><th>Cost</th><th>Actions</th></tr></thead>
+                  <tbody>
+                    {models.map(m => (
+                      <React.Fragment key={m.name}>
+                        <tr className="clickable" onClick={() => setExpanded(expanded === m.name ? null : m.name)}>
+                          <td><strong style={{ color: '#0972d3' }}>{m.name}</strong></td>
+                          <td>{m.description || <span style={{ color: '#5f6b7a' }}>—</span>}</td>
+                          <td><span className="badge badge-blue">{m.routing_strategy}</span></td>
+                          <td>{m.providers.map(p => p.provider).join(', ')}</td>
+                          <td>{m.total_requests || 0}</td>
+                          <td>{(m.total_tokens || 0).toLocaleString()}</td>
+                          <td>${(m.total_cost || 0).toFixed(4)}</td>
+                          <td onClick={e => e.stopPropagation()} style={{ whiteSpace: 'nowrap' }}>
+                            <Btn variant="link" onClick={() => { setEditModel(m); setShowForm(true); setMsg(null); setError(null); }}>Edit</Btn>
+                            <Btn variant="link" style={{ color: '#d91515', marginLeft: '0.5rem' }} onClick={() => setDeleteTarget(m.name)}>Delete</Btn>
+                          </td>
+                        </tr>
+                        {expanded === m.name && (
+                          <tr><td colSpan="8" style={{ background: '#fafafa', padding: '1.25rem' }}>
+                            <div style={{ fontSize: '12px', fontWeight: 700, color: '#5f6b7a', marginBottom: '0.3rem' }}>PROVIDER DETAILS</div>
+                            <table style={{ marginTop: '0.25rem' }}>
+                              <thead><tr><th>Provider</th><th>Model ID</th><th>Weight</th><th>Fallback Order</th></tr></thead>
+                              <tbody>
+                                {m.providers.map((p, i) => (
+                                  <tr key={i}>
+                                    <td><strong>{p.provider}</strong></td>
+                                    <td><code>{p.model_id}</code></td>
+                                    <td>{p.weight}</td>
+                                    <td>{p.fallback_order}</td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </td></tr>
+                        )}
+                      </React.Fragment>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    function ModelForm({ model, catalog, onSave, onCancel }) {
+      const isEdit = !!model;
+      const [form, setForm] = useState({
+        name: model ? model.name : '',
+        description: model ? (model.description || '') : '',
+        routing_strategy: model ? model.routing_strategy : 'round-robin',
+        providers: model && model.providers.length > 0
+          ? model.providers.map(p => ({ provider: p.provider, model_id: p.model_id, weight: String(p.weight), fallback_order: String(p.fallback_order) }))
+          : [{ provider: '', model_id: '', weight: '1.0', fallback_order: '0' }],
+      });
+      const [saving, setSaving] = useState(false);
+      const [errors, setErrors] = useState(null);
+
+      const strategies = ['round-robin', 'weighted', 'least-latency', 'cost-optimized'];
+      const catalogProviders = catalog ? Object.keys(catalog) : [];
+
+      const handleChange = (field, value) => setForm(prev => ({ ...prev, [field]: value }));
+
+      const updateProvider = (i, field, value) => {
+        const updated = [...form.providers];
+        updated[i] = { ...updated[i], [field]: value };
+        if (field === 'provider') {
+          updated[i].model_id = '';
+        }
+        setForm(prev => ({ ...prev, providers: updated }));
+      };
+
+      const addProvider = () => {
+        setForm(prev => ({ ...prev, providers: [...prev.providers, { provider: '', model_id: '', weight: '1.0', fallback_order: String(prev.providers.length) }] }));
+      };
+
+      const removeProvider = (i) => {
+        setForm(prev => ({ ...prev, providers: prev.providers.filter((_, idx) => idx !== i) }));
+      };
+
+      const selectCatalogModel = (i, modelId) => {
+        const updated = [...form.providers];
+        updated[i] = { ...updated[i], model_id: modelId };
+        setForm(prev => ({ ...prev, providers: updated }));
+      };
+
+      const handleSubmit = async (e) => {
+        e.preventDefault();
+        setSaving(true); setErrors(null);
+        const body = {
+          ...form,
+          providers: form.providers.map(p => ({
+            provider: p.provider,
+            model_id: p.model_id,
+            weight: parseFloat(p.weight) || 1.0,
+            fallback_order: parseInt(p.fallback_order) || 0,
+          })),
+        };
+        const result = await onSave(body, isEdit);
+        if (result && result.errors) {
+          setErrors(result.errors);
+        }
+        setSaving(false);
+      };
+
+      const formLabelStyle = { display: 'block', fontSize: '14px', fontWeight: 600, marginBottom: '0.3rem', color: '#000716' };
+      const formInputStyle = { width: '100%', padding: '0.5rem 0.75rem', background: '#fff', border: '2px solid #7d8998', borderRadius: '8px', fontSize: '14px', color: '#000716', fontFamily: 'inherit', outline: 'none' };
+      const formSelectStyle = { ...formInputStyle, appearance: 'none', backgroundImage: "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' fill='%235f6b7a' viewBox='0 0 16 16'%3E%3Cpath d='M8 11L3 6h10z'/%3E%3C/svg%3E\")", backgroundRepeat: 'no-repeat', backgroundPosition: 'right 0.75rem center', paddingRight: '2rem' };
+      const provLabelStyle = { display: 'block', fontSize: '12px', fontWeight: 600, marginBottom: '0.2rem', color: '#5f6b7a' };
+      const provInputStyle = { width: '100%', padding: '0.4rem 0.6rem', background: '#fff', border: '2px solid #7d8998', borderRadius: '8px', fontSize: '13px', color: '#000716', fontFamily: 'inherit' };
+      const provSelectStyle = { ...provInputStyle, appearance: 'none', backgroundImage: "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' fill='%235f6b7a' viewBox='0 0 16 16'%3E%3Cpath d='M8 11L3 6h10z'/%3E%3C/svg%3E\")", backgroundRepeat: 'no-repeat', backgroundPosition: 'right 0.6rem center', paddingRight: '1.8rem' };
+
+      const getCatalogModels = (providerKey) => {
+        if (!catalog || !catalog[providerKey]) return [];
+        return catalog[providerKey].models || [];
+      };
+
+      return (
+        <div className="container" style={{ marginBottom: '1.25rem' }}>
+          <div className="container-header"><h2>{isEdit ? 'Edit model' : 'Add model'}</h2></div>
+          <div className="container-body">
+            {errors && (
+              <Flash type="error" onDismiss={() => setErrors(null)}>
+                {errors.map((err, i) => <div key={i}>{err.message || err.msg || JSON.stringify(err)}</div>)}
+              </Flash>
+            )}
+            <form onSubmit={handleSubmit}>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginBottom: '1rem' }}>
+                <div>
+                  <label style={formLabelStyle}>Model name</label>
+                  <input style={formInputStyle} value={form.name} onChange={e => handleChange('name', e.target.value)} required placeholder="e.g. gpt-4" disabled={isEdit} />
+                </div>
+                <div>
+                  <label style={formLabelStyle}>Routing strategy</label>
+                  <select style={formSelectStyle} value={form.routing_strategy} onChange={e => handleChange('routing_strategy', e.target.value)}>
+                    {strategies.map(s => <option key={s} value={s}>{s}</option>)}
+                  </select>
+                </div>
+              </div>
+              <div style={{ marginBottom: '1rem' }}>
+                <label style={formLabelStyle}>Description</label>
+                <input style={formInputStyle} value={form.description} onChange={e => handleChange('description', e.target.value)} placeholder="Model description" />
+              </div>
+
+              <div style={{ marginTop: '1.25rem', marginBottom: '1rem' }}>
+                <h3 style={{ fontSize: '16px', fontWeight: 700, color: '#000716', marginBottom: '0.75rem' }}>Providers</h3>
+                {form.providers.map((prov, i) => {
+                  const catalogModels = getCatalogModels(prov.provider);
+                  return (
+                    <div key={i} style={{ display: 'grid', gridTemplateColumns: '1.2fr 1.2fr 1.2fr 0.6fr 0.6fr auto', gap: '0.5rem', marginBottom: '0.5rem', alignItems: 'end' }}>
+                      <div>
+                        <label style={provLabelStyle}>Provider</label>
+                        <select style={provSelectStyle} value={prov.provider} onChange={e => updateProvider(i, 'provider', e.target.value)}>
+                          <option value="">Select provider...</option>
+                          {catalogProviders.map(k => (
+                            <option key={k} value={k}>{catalog[k].display_name || k}</option>
+                          ))}
+                        </select>
+                      </div>
+                      <div>
+                        <label style={provLabelStyle}>Catalog model</label>
+                        <select style={provSelectStyle} value={catalogModels.some(cm => cm.model_id === prov.model_id) ? prov.model_id : ''} onChange={e => selectCatalogModel(i, e.target.value)} disabled={!prov.provider || catalogModels.length === 0}>
+                          <option value="">Select or type below...</option>
+                          {catalogModels.map(cm => (
+                            <option key={cm.model_id} value={cm.model_id}>
+                              {cm.name} {cm.capabilities ? '[' + cm.capabilities.join(', ') + ']' : ''}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                      <div>
+                        <label style={provLabelStyle}>Model ID</label>
+                        <input style={provInputStyle} value={prov.model_id} onChange={e => updateProvider(i, 'model_id', e.target.value)} placeholder="model-id" />
+                      </div>
+                      <div>
+                        <label style={provLabelStyle}>Weight</label>
+                        <input style={provInputStyle} type="number" step="0.1" min="0" value={prov.weight} onChange={e => updateProvider(i, 'weight', e.target.value)} />
+                      </div>
+                      <div>
+                        <label style={provLabelStyle}>Fallback</label>
+                        <input style={provInputStyle} type="number" min="0" value={prov.fallback_order} onChange={e => updateProvider(i, 'fallback_order', e.target.value)} />
+                      </div>
+                      <Btn variant="danger" style={{ marginBottom: '0.1rem', padding: '0.35rem 0.5rem', fontSize: '12px' }} onClick={() => removeProvider(i)} disabled={form.providers.length <= 1}>✕</Btn>
+                    </div>
+                  );
+                })}
+                <Btn variant="normal" style={{ fontSize: '13px', padding: '0.3rem 0.75rem' }} onClick={addProvider}>+ Add provider</Btn>
+              </div>
+
+              <div style={{ marginTop: '1.5rem', display: 'flex', gap: '0.5rem', borderTop: '1px solid #e9ebed', paddingTop: '1.25rem' }}>
+                <Btn variant="primary" type="submit" disabled={saving}>{saving ? 'Saving...' : isEdit ? 'Save changes' : 'Add model'}</Btn>
+                <Btn variant="normal" type="button" onClick={onCancel}>Cancel</Btn>
+              </div>
+            </form>
+          </div>
+        </div>
+      );
+    }
+
+    /* ================================================================== */
+    /*  Efficiency Page                                                     */
+    /* ================================================================== */
+    function EfficiencyPage({ onSelectUser }) {
+      const [overview, setOverview] = useState(null);
+      const [selectedUser, setSelectedUser] = useState(null);
+      const [userReport, setUserReport] = useState(null);
+      const [error, setError] = useState(null);
+      const [loading, setLoading] = useState(true);
+
+      useEffect(() => {
+        api.get('/admin/efficiency')
+          .then(d => { setOverview(d); setLoading(false); })
+          .catch(() => { setError('Failed to load efficiency data.'); setLoading(false); });
+      }, []);
+
+      const loadUserReport = (userId) => {
+        setSelectedUser(userId);
+        setUserReport(null);
+        api.get(`/admin/users/${encodeURIComponent(userId)}/efficiency`)
+          .then(setUserReport)
+          .catch(() => setUserReport({ error: 'Failed to load user efficiency report.' }));
+      };
+
+      if (error) return <Flash type="error">{error}</Flash>;
+      if (loading) return <Loading text="Analyzing token efficiency..." />;
+
+      const gradeColor = (grade) => {
+        const colors = { excellent: '#037f0c', good: '#0972d3', fair: '#8d6605', poor: '#d91515', wasteful: '#d91515' };
+        return colors[grade] || '#5f6b7a';
+      };
+      const gradeBg = (grade) => {
+        const colors = { excellent: '#f2fcf3', good: '#f2f8fd', fair: '#fffce9', poor: '#fff7f7', wasteful: '#fff7f7' };
+        return colors[grade] || '#f2f3f3';
+      };
+      const scoreBar = (score) => {
+        const color = score >= 85 ? '#037f0c' : score >= 70 ? '#0972d3' : score >= 50 ? '#8d6605' : '#d91515';
+        return (
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+            <div style={{ flex: 1, height: '6px', background: '#e9ebed', borderRadius: '3px', overflow: 'hidden' }}>
+              <div style={{ height: '100%', borderRadius: '3px', width: `${score}%`, background: color, transition: 'width 0.3s ease' }} />
+            </div>
+            <span style={{ fontSize: '13px', fontWeight: 600, color }}>{score}</span>
+          </div>
+        );
+      };
+      const severityBadge = (severity) => {
+        const cls = severity === 'critical' ? 'badge-red' : severity === 'warning' ? 'badge-orange' : 'badge-blue';
+        const bg = severity === 'critical' ? '#d91515' : severity === 'warning' ? '#8d6605' : '#0972d3';
+        return <span className="badge" style={{ background: `${bg}15`, color: bg, border: `1px solid ${bg}40`, fontSize: '11px' }}>{severity}</span>;
+      };
+
+      if (selectedUser && userReport) {
+        if (userReport.error) return <div><Breadcrumb items={[{ label: 'Efficiency', onClick: () => setSelectedUser(null) }, { label: selectedUser }]} /><Flash type="error">{userReport.error}</Flash></div>;
+        const m = userReport.metrics;
+        const hasSemanticProfile = userReport.semantic && userReport.semantic.profile;
+        return (
+          <div>
+            <Breadcrumb items={[{ label: 'Efficiency', onClick: () => setSelectedUser(null) }, { label: selectedUser }]} />
+            <div className="page-header">
+              <h1>Efficiency Report: {selectedUser}</h1>
+              <p>Token utilization analysis and optimization recommendations</p>
+            </div>
+
+            <div style={{ display: 'flex', gap: '0.75rem', marginBottom: '1.25rem', flexWrap: 'wrap' }}>
+              <div style={{ flex: '1 1 200px', background: gradeBg(m.grade), border: `1px solid ${gradeColor(m.grade)}40`, borderRadius: '12px', padding: '1rem 1.25rem', textAlign: 'center' }}>
+                <div style={{ fontSize: '11px', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.5px', color: '#5f6b7a', marginBottom: '0.25rem' }}>Grade</div>
+                <div style={{ fontSize: '28px', fontWeight: 700, color: gradeColor(m.grade), textTransform: 'uppercase' }}>{m.grade}</div>
+                <div style={{ fontSize: '12px', color: '#5f6b7a', marginTop: '0.15rem' }}>Score: {m.score}/100</div>
+              </div>
+              <div className="stat-card" style={{ flex: '1 1 140px' }}><div className="stat-label">Avg Cost/Request</div><div className="stat-value">{fmt.cost(m.avg_cost_per_request)}</div></div>
+              <div className="stat-card" style={{ flex: '1 1 140px' }}><div className="stat-label">Total Cost</div><div className="stat-value">{fmt.cost(m.total_cost)}</div></div>
+              <div className="stat-card" style={{ flex: '1 1 140px' }}><div className="stat-label">Requests</div><div className="stat-value">{fmt.num(m.total_requests)}</div></div>
+            </div>
+
+            <div className="container" style={{ marginBottom: '1.25rem' }}>
+              <div className="container-header"><h2>Efficiency Metrics</h2></div>
+              <div className="container-body no-pad">
+                <table>
+                  <thead><tr><th>Metric</th><th>Value</th><th>Status</th></tr></thead>
+                  <tbody>
+                    <tr><td>Completion/Prompt Ratio</td><td>{(m.completion_prompt_ratio * 100).toFixed(1)}%</td><td>{m.completion_prompt_ratio < 0.05 ? <span style={{color:'#d91515'}}>Low</span> : <span style={{color:'#037f0c'}}>OK</span>}</td></tr>
+                    <tr><td>Cache Utilization</td><td>{(m.cache_utilization_rate * 100).toFixed(1)}%</td><td>{m.cache_utilization_rate < 0.1 ? <span style={{color:'#8d6605'}}>Low</span> : <span style={{color:'#037f0c'}}>OK</span>}</td></tr>
+                    <tr><td>Expensive Model Usage</td><td>{(m.expensive_model_ratio * 100).toFixed(0)}%</td><td>{m.expensive_model_ratio > 0.8 ? <span style={{color:'#d91515'}}>High</span> : <span style={{color:'#037f0c'}}>OK</span>}</td></tr>
+                    <tr><td>Duplicate Request Rate</td><td>{(m.duplicate_request_rate * 100).toFixed(1)}%</td><td>{m.duplicate_request_rate > 0.15 ? <span style={{color:'#d91515'}}>High</span> : <span style={{color:'#037f0c'}}>OK</span>}</td></tr>
+                    <tr><td>Token Velocity</td><td>{fmt.num(Math.round(m.token_velocity_per_hour))} tok/hr</td><td>{m.token_velocity_per_hour > 50000 ? <span style={{color:'#d91515'}}>High</span> : <span style={{color:'#037f0c'}}>OK</span>}</td></tr>
+                    <tr><td>Avg Prompt Tokens</td><td>{fmt.num(Math.round(m.avg_prompt_tokens))}</td><td>{m.avg_prompt_tokens > 4000 ? <span style={{color:'#8d6605'}}>Large</span> : <span style={{color:'#037f0c'}}>OK</span>}</td></tr>
+                    <tr><td>Avg Completion Tokens</td><td>{fmt.num(Math.round(m.avg_completion_tokens))}</td><td>—</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            {userReport.alerts && userReport.alerts.length > 0 && (
+              <div className="container" style={{ marginBottom: '1.25rem' }}>
+                <div className="container-header"><h2>Alerts <span className="counter">({userReport.alerts.length})</span></h2></div>
+                <div className="container-body" style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                  {userReport.alerts.map((a, i) => (
+                    <div key={i} style={{ padding: '0.75rem 1rem', borderRadius: '8px', background: a.severity === 'critical' ? '#fff7f7' : a.severity === 'warning' ? '#fffce9' : '#f2f8fd', border: `1px solid ${a.severity === 'critical' ? '#d9151530' : a.severity === 'warning' ? '#8d660530' : '#0972d330'}` }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.25rem' }}>
+                        {severityBadge(a.severity)}
+                        <strong style={{ fontSize: '13px' }}>{a.alert_type.replace(/_/g, ' ')}</strong>
+                      </div>
+                      <div style={{ fontSize: '13px', color: '#5f6b7a' }}>{a.message}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {userReport.recommendations && userReport.recommendations.length > 0 && (
+              <div className="container" style={{ marginBottom: '1.25rem' }}>
+                <div className="container-header"><h2>Model Recommendations</h2></div>
+                <div className="container-body no-pad">
+                  <table>
+                    <thead><tr><th>Current Model</th><th>Recommended</th><th>Est. Savings</th><th>Quality Impact</th><th>Reason</th></tr></thead>
+                    <tbody>
+                      {userReport.recommendations.map((r, i) => (
+                        <tr key={i}>
+                          <td><strong>{r.current_model}</strong></td>
+                          <td><span style={{ color: '#037f0c', fontWeight: 600 }}>{r.recommended_model}</span></td>
+                          <td><span style={{ color: '#037f0c', fontWeight: 600 }}>{r.estimated_savings_pct}%</span></td>
+                          <td>{r.quality_impact}</td>
+                          <td style={{ fontSize: '12px', color: '#5f6b7a', maxWidth: '300px' }}>{r.reason}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+
+            {userReport.peer_comparison && userReport.peer_comparison.peers_found > 0 && (
+              <div className="container" style={{ marginBottom: '1.25rem' }}>
+                <div className="container-header"><h2>Peer Comparison</h2></div>
+                <div className="container-body">
+                  <div style={{ display: 'flex', gap: '1.5rem', flexWrap: 'wrap' }}>
+                    <div><span style={{ fontSize: '12px', color: '#5f6b7a' }}>Your Avg Cost/Req</span><div style={{ fontSize: '18px', fontWeight: 700 }}>{fmt.cost(userReport.peer_comparison.user_avg_cost_per_request)}</div></div>
+                    <div><span style={{ fontSize: '12px', color: '#5f6b7a' }}>Peer Avg Cost/Req</span><div style={{ fontSize: '18px', fontWeight: 700 }}>{fmt.cost(userReport.peer_comparison.peer_avg_cost_per_request)}</div></div>
+                    <div><span style={{ fontSize: '12px', color: '#5f6b7a' }}>vs Peers</span><div style={{ fontSize: '18px', fontWeight: 700, color: userReport.peer_comparison.vs_avg_pct > 0 ? '#d91515' : '#037f0c' }}>{userReport.peer_comparison.vs_avg_pct > 0 ? '+' : ''}{userReport.peer_comparison.vs_avg_pct}%</div></div>
+                    <div><span style={{ fontSize: '12px', color: '#5f6b7a' }}>Efficiency Percentile</span><div style={{ fontSize: '18px', fontWeight: 700 }}>{userReport.peer_comparison.percentile}th</div></div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {hasSemanticProfile && (
+              <div className="container" style={{ marginBottom: '1.25rem' }}>
+                <div className="container-header"><h2>Usage Profile (Semantic Analysis)</h2></div>
+                <div className="container-body">
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))', gap: '1rem' }}>
+                    <div><span style={{ fontSize: '12px', color: '#5f6b7a' }}>Avg Complexity</span><div style={{ fontSize: '16px', fontWeight: 700, textTransform: 'capitalize' }}>{userReport.semantic.profile.avg_complexity}</div></div>
+                    <div><span style={{ fontSize: '12px', color: '#5f6b7a' }}>Typical Model</span><div style={{ fontSize: '16px', fontWeight: 700 }}>{userReport.semantic.profile.typical_model}</div></div>
+                    <div><span style={{ fontSize: '12px', color: '#5f6b7a' }}>Optimal Model</span><div style={{ fontSize: '16px', fontWeight: 700, color: '#037f0c' }}>{userReport.semantic.profile.optimal_model}</div></div>
+                    <div><span style={{ fontSize: '12px', color: '#5f6b7a' }}>Est. Monthly Savings</span><div style={{ fontSize: '16px', fontWeight: 700, color: '#037f0c' }}>${userReport.semantic.profile.estimated_monthly_savings.toFixed(2)}</div></div>
+                  </div>
+                  {userReport.semantic.profile.patterns && userReport.semantic.profile.patterns.length > 0 && (
+                    <div style={{ marginTop: '1rem' }}>
+                      <div style={{ fontSize: '12px', color: '#5f6b7a', marginBottom: '0.35rem' }}>Detected Patterns</div>
+                      <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap' }}>
+                        {userReport.semantic.profile.patterns.map((p, i) => (
+                          <span key={i} className="badge" style={{ background: '#fff7f7', color: '#d91515', border: '1px solid #d9151530', fontSize: '11px' }}>{p.replace(/_/g, ' ')}</span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {userReport.semantic && userReport.semantic.waste_summary && userReport.semantic.waste_summary.estimated_wasted_cost > 0 && (
+              <div className="container">
+                <div className="container-header"><h2>Waste Breakdown</h2></div>
+                <div className="container-body">
+                  <div style={{ display: 'flex', gap: '1.5rem', flexWrap: 'wrap' }}>
+                    <div><span style={{ fontSize: '12px', color: '#5f6b7a' }}>Total Cost</span><div style={{ fontSize: '18px', fontWeight: 700 }}>{fmt.cost(userReport.semantic.waste_summary.total_cost)}</div></div>
+                    <div><span style={{ fontSize: '12px', color: '#5f6b7a' }}>Estimated Waste</span><div style={{ fontSize: '18px', fontWeight: 700, color: '#d91515' }}>{fmt.cost(userReport.semantic.waste_summary.estimated_wasted_cost)}</div></div>
+                    <div><span style={{ fontSize: '12px', color: '#5f6b7a' }}>Waste %</span><div style={{ fontSize: '18px', fontWeight: 700, color: '#d91515' }}>{userReport.semantic.waste_summary.waste_pct}%</div></div>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        );
+      }
+
+      if (selectedUser) return <Loading text={`Loading report for ${selectedUser}...`} />;
+
+      return (
+        <div>
+          <div className="page-header"><h1>Token Efficiency</h1><p>Analyze token utilization, detect waste patterns, and optimize costs</p></div>
+
+          <div className="stat-grid">
+            <div className="stat-card"><div className="stat-label">Users Analyzed</div><div className="stat-value">{overview.total_users_analyzed}</div></div>
+            <div className="stat-card"><div className="stat-label">Avg Efficiency Score</div><div className="stat-value">{overview.avg_efficiency_score}/100</div></div>
+            <div className="stat-card"><div className="stat-label">Total Cost</div><div className="stat-value">{fmt.cost(overview.total_cost)}</div></div>
+          </div>
+
+          {overview.grade_distribution && (
+            <div className="container" style={{ marginBottom: '1.25rem' }}>
+              <div className="container-header"><h2>Grade Distribution</h2></div>
+              <div className="container-body">
+                <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap' }}>
+                  {['excellent', 'good', 'fair', 'poor', 'wasteful'].map(grade => {
+                    const count = overview.grade_distribution[grade] || 0;
+                    if (count === 0) return null;
+                    return (
+                      <div key={grade} style={{ flex: '1 1 100px', textAlign: 'center', padding: '0.75rem', borderRadius: '8px', background: gradeBg(grade), border: `1px solid ${gradeColor(grade)}30` }}>
+                        <div style={{ fontSize: '24px', fontWeight: 700, color: gradeColor(grade) }}>{count}</div>
+                        <div style={{ fontSize: '12px', fontWeight: 600, textTransform: 'uppercase', color: gradeColor(grade) }}>{grade}</div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {overview.wasteful_users && overview.wasteful_users.length > 0 && (
+            <div className="container" style={{ marginBottom: '1.25rem' }}>
+              <div className="container-header"><h2>Users Needing Attention <span className="counter">({overview.wasteful_users.length})</span></h2></div>
+              <div className="container-body no-pad">
+                <table>
+                  <thead><tr><th>User</th><th>Score</th><th>Grade</th><th>Cost</th><th></th></tr></thead>
+                  <tbody>
+                    {overview.wasteful_users.map(u => (
+                      <tr key={u.user_id}>
+                        <td><strong>{u.user_id}</strong></td>
+                        <td>{scoreBar(u.score)}</td>
+                        <td><span style={{ color: gradeColor(u.grade), fontWeight: 600, textTransform: 'uppercase', fontSize: '12px' }}>{u.grade}</span></td>
+                        <td>{fmt.cost(u.cost)}</td>
+                        <td><Btn variant="link" onClick={() => loadUserReport(u.user_id)}>View report</Btn></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          <div className="container">
+            <div className="container-header"><h2>All Users <span className="counter">({overview.users.length})</span></h2></div>
+            <div className="container-body no-pad">
+              <table>
+                <thead><tr><th>User</th><th>Score</th><th>Grade</th><th>C/P Ratio</th><th>Cache Util</th><th>Expensive %</th><th>Dup Rate</th><th>Requests</th><th>Cost</th><th></th></tr></thead>
+                <tbody>
+                  {overview.users.map(u => (
+                    <tr key={u.user_id}>
+                      <td><strong>{u.user_id}</strong></td>
+                      <td style={{ minWidth: '100px' }}>{scoreBar(u.score)}</td>
+                      <td><span style={{ color: gradeColor(u.grade), fontWeight: 600, textTransform: 'uppercase', fontSize: '12px' }}>{u.grade}</span></td>
+                      <td>{(u.completion_prompt_ratio * 100).toFixed(1)}%</td>
+                      <td>{(u.cache_utilization_rate * 100).toFixed(1)}%</td>
+                      <td>{(u.expensive_model_ratio * 100).toFixed(0)}%</td>
+                      <td>{(u.duplicate_request_rate * 100).toFixed(1)}%</td>
+                      <td>{fmt.num(u.total_requests)}</td>
+                      <td>{fmt.cost(u.total_cost)}</td>
+                      <td><Btn variant="link" onClick={() => loadUserReport(u.user_id)}>Details</Btn></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    /* ================================================================== */
+    /*  App Shell                                                          */
+    /* ================================================================== */
+    function App() {
+      const [view, setView] = useState('overview');
+      const [selectedProject, setSelectedProject] = useState(null);
+      const [editProjectId, setEditProjectId] = useState(null);
+      const [selectedUser, setSelectedUser] = useState(null);
+
+      const navigate = (v, opts = {}) => {
+        setView(v);
+        setSelectedProject(opts.projectId || null);
+        setEditProjectId(opts.editProjectId || null);
+        setSelectedUser(opts.userId || null);
+      };
+
+      let content;
+      switch (view) {
+        case 'overview': content = <OverviewPage />; break;
+        case 'efficiency': content = <EfficiencyPage />; break;
+        case 'projects': content = <ProjectsPage onSelect={(id) => navigate('project-detail', { projectId: id })} onCreateNew={() => navigate('project-form')} />; break;
+        case 'project-detail': content = <ProjectDetailPage projectId={selectedProject} onBack={() => navigate('projects')} onEdit={(id) => navigate('project-form', { editProjectId: id })} />; break;
+        case 'project-form': content = <ProjectFormPage projectId={editProjectId} onBack={() => editProjectId ? navigate('project-detail', { projectId: editProjectId }) : navigate('projects')} onSaved={() => navigate('projects')} />; break;
+        case 'users': content = <UsersPage onSelect={(id) => navigate('user-detail', { userId: id })} />; break;
+        case 'user-detail': content = <UserDetailPage userId={selectedUser} onBack={() => navigate('users')} />; break;
+        case 'models': content = <ModelsPage />; break;
+        case 'policies': content = <PoliciesPage />; break;
+        case 'configuration': content = <ConfigurationPage />; break;
+        case 'health': content = <HealthPage />; break;
+        default: content = <OverviewPage />;
+      }
+
+      const navSections = [
+        { label: 'Analytics', items: [
+          { key: 'overview', icon: '📊', label: 'Overview' },
+          { key: 'efficiency', icon: '⚡', label: 'Efficiency' },
+        ]},
+        { label: 'Management', items: [
+          { key: 'projects', icon: '📁', label: 'Projects', activeViews: ['projects', 'project-detail', 'project-form'] },
+          { key: 'users', icon: '👤', label: 'Users', activeViews: ['users', 'user-detail'] },
+          { key: 'models', icon: '🤖', label: 'Models' },
+        ]},
+        { label: 'Security', items: [
+          { key: 'policies', icon: '🔒', label: 'Policies' },
+        ]},
+        { label: 'System', items: [
+          { key: 'configuration', icon: '⚙', label: 'Configuration' },
+          { key: 'health', icon: '💚', label: 'Health' },
+        ]},
+      ];
+
+      const isActive = (item) => {
+        if (item.activeViews) return item.activeViews.includes(view);
+        return view === item.key;
+      };
+
+      return (
+        <div>
+          <header className="topbar" role="banner">
+            <div className="topbar-brand">
+              <div className="logo-icon">R</div>
+              AxonLLM
+            </div>
+            <div style={{color: '#ff9900', fontSize: '13px', fontWeight: 600, fontStyle: 'italic', letterSpacing: '0.3px', marginRight: '1rem', whiteSpace: 'nowrap'}}>The neural control plane for enterprise LLMs</div>
+            <a href="/chat" style={{color: 'var(--awsui-color-text-nav)', textDecoration: 'none', fontSize: '14px', padding: '0 0.75rem', height: 'var(--topbar-h)', display: 'flex', alignItems: 'center', borderLeft: '1px solid rgba(255,255,255,0.15)', transition: 'background 100ms, color 100ms'}} onMouseOver={e => {e.currentTarget.style.background='var(--awsui-color-background-nav-hover)';e.currentTarget.style.color='#fff'}} onMouseOut={e => {e.currentTarget.style.background='';e.currentTarget.style.color='var(--awsui-color-text-nav)'}}>💬 Chat</a>
+            <a href="/playground" style={{color: 'var(--awsui-color-text-nav)', textDecoration: 'none', fontSize: '14px', padding: '0 0.75rem', height: 'var(--topbar-h)', display: 'flex', alignItems: 'center', borderLeft: '1px solid rgba(255,255,255,0.15)', transition: 'background 100ms, color 100ms'}} onMouseOver={e => {e.currentTarget.style.background='var(--awsui-color-background-nav-hover)';e.currentTarget.style.color='#fff'}} onMouseOut={e => {e.currentTarget.style.background='';e.currentTarget.style.color='var(--awsui-color-text-nav)'}}>🧪 Playground</a>
+            <a href="/routing" style={{color: 'var(--awsui-color-text-nav)', textDecoration: 'none', fontSize: '14px', padding: '0 0.75rem', height: 'var(--topbar-h)', display: 'flex', alignItems: 'center', borderLeft: '1px solid rgba(255,255,255,0.15)', transition: 'background 100ms, color 100ms'}} onMouseOver={e => {e.currentTarget.style.background='var(--awsui-color-background-nav-hover)';e.currentTarget.style.color='#fff'}} onMouseOut={e => {e.currentTarget.style.background='';e.currentTarget.style.color='var(--awsui-color-text-nav)'}}>🔀 Routing</a>
+            <a href="/admin/architecture" target="_blank" style={{color: 'var(--awsui-color-text-nav)', textDecoration: 'none', fontSize: '14px', padding: '0 0.75rem', height: 'var(--topbar-h)', display: 'flex', alignItems: 'center', borderLeft: '1px solid rgba(255,255,255,0.15)', transition: 'background 100ms, color 100ms'}} onMouseOver={e => {e.currentTarget.style.background='var(--awsui-color-background-nav-hover)';e.currentTarget.style.color='#fff'}} onMouseOut={e => {e.currentTarget.style.background='';e.currentTarget.style.color='var(--awsui-color-text-nav)'}}>🏗️ Architecture</a>
+            <div className="topbar-right">
+              <div className="topbar-status"><div className="dot"></div>System Online</div>
+            </div>
+          </header>
+          <aside className="sidebar" role="navigation" aria-label="Main navigation">
+            <nav>
+              {navSections.map(section => (
+                <div key={section.label} className="sidebar-section">
+                  <div className="sidebar-section-label">{section.label}</div>
+                  {section.items.map(item => (
+                    <button key={item.key} className={`nav-item ${isActive(item) ? 'active' : ''}`} onClick={() => navigate(item.key)}>
+                      <span className="nav-icon">{item.icon}</span>
+                      {item.label}
+                    </button>
+                  ))}
+                </div>
+              ))}
+            </nav>
+          </aside>
+          <main className="main" role="main">
+            {content}
+          </main>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>

@@ -1,0 +1,8 @@
+.git
+.hypothesis
+.pytest_cache
+.vscode
+.kiro
+tests
+__pycache__
+*.pyc

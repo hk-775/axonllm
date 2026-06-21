@@ -1,0 +1,6 @@
+bedrock-agentcore
+pyyaml>=6.0
+tiktoken>=0.7.0
+starlette>=0.37.0
+aiohttp>=3.9.0
+boto3>=1.34.0

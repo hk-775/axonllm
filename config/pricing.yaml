@@ -1,0 +1,111 @@
+# Token pricing per provider and model.
+# Costs are per 1,000 tokens.
+
+providers:
+  openai:
+    gpt-4:
+      prompt_token_cost: 0.03
+      completion_token_cost: 0.06
+    gpt-3.5-turbo:
+      prompt_token_cost: 0.001
+      completion_token_cost: 0.002
+    gpt-4o:
+      prompt_token_cost: 0.0025
+      completion_token_cost: 0.01
+    gpt-4o-mini:
+      prompt_token_cost: 0.00015
+      completion_token_cost: 0.0006
+    o4-mini:
+      prompt_token_cost: 0.0011
+      completion_token_cost: 0.0044
+
+  anthropic:
+    claude-3:
+      prompt_token_cost: 0.003
+      completion_token_cost: 0.015
+      cached_token_cost: 0.0003
+      cache_creation_token_cost: 0.00375
+    claude-sonnet-4-20250514:
+      prompt_token_cost: 0.003
+      completion_token_cost: 0.015
+      cached_token_cost: 0.0003
+      cache_creation_token_cost: 0.00375
+    claude-sonnet-4-6:
+      prompt_token_cost: 0.003
+      completion_token_cost: 0.015
+      cached_token_cost: 0.0003
+      cache_creation_token_cost: 0.00375
+    claude-3-5-haiku-latest:
+      prompt_token_cost: 0.0008
+      completion_token_cost: 0.004
+      cached_token_cost: 0.00008
+      cache_creation_token_cost: 0.001
+    claude-opus-4-20250514:
+      prompt_token_cost: 0.015
+      completion_token_cost: 0.075
+      cached_token_cost: 0.0015
+      cache_creation_token_cost: 0.01875
+    claude-opus-4-8:
+      prompt_token_cost: 0.015
+      completion_token_cost: 0.075
+      cached_token_cost: 0.0015
+      cache_creation_token_cost: 0.01875
+
+  bedrock:
+    claude-3:
+      prompt_token_cost: 0.003
+      completion_token_cost: 0.015
+      cached_token_cost: 0.0003
+      cache_creation_token_cost: 0.00375
+    us.anthropic.claude-opus-4-6-v1:
+      prompt_token_cost: 0.015
+      completion_token_cost: 0.075
+      cached_token_cost: 0.0015
+      cache_creation_token_cost: 0.01875
+    us.amazon.nova-pro-v1:0:
+      prompt_token_cost: 0.0008
+      completion_token_cost: 0.0032
+    us.amazon.nova-lite-v1:0:
+      prompt_token_cost: 0.00006
+      completion_token_cost: 0.00024
+    us.amazon.nova-micro-v1:0:
+      prompt_token_cost: 0.000035
+      completion_token_cost: 0.00014
+    us.deepseek.r1-v1:0:
+      prompt_token_cost: 0.00135
+      completion_token_cost: 0.00540
+    us.meta.llama3-3-70b-instruct-v1:0:
+      prompt_token_cost: 0.00072
+      completion_token_cost: 0.00072
+    us.meta.llama4-maverick-17b-instruct-v1:0:
+      prompt_token_cost: 0.00024
+      completion_token_cost: 0.00097
+    us.meta.llama4-scout-17b-instruct-v1:0:
+      prompt_token_cost: 0.00017
+      completion_token_cost: 0.00066
+    mistral.mistral-large-2407-v1:0:
+      prompt_token_cost: 0.002
+      completion_token_cost: 0.006
+    us.mistral.pixtral-large-2502-v1:0:
+      prompt_token_cost: 0.002
+      completion_token_cost: 0.006
+    openai.gpt-oss-120b-1:0:
+      prompt_token_cost: 0.00015
+      completion_token_cost: 0.0006
+    qwen.qwen3-235b-a22b-2507-v1:0:
+      prompt_token_cost: 0.00022
+      completion_token_cost: 0.00088
+
+  vertex_ai:
+    gemini-pro:
+      prompt_token_cost: 0.00025
+      completion_token_cost: 0.0005
+    gemini-2.5-pro:
+      prompt_token_cost: 0.00125
+      completion_token_cost: 0.01
+    gemini-2.5-flash:
+      prompt_token_cost: 0.00015
+      completion_token_cost: 0.0006
+    gemini-2.0-flash:
+      prompt_token_cost: 0.0001
+      completion_token_cost: 0.0004

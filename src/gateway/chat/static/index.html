@@ -1,0 +1,863 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+  <meta http-equiv="Pragma" content="no-cache" />
+  <title>AxonLLM — Chat</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Open+Sans:wght@400;600;700&display=swap" rel="stylesheet">
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/@babel/standalone@7.24.7/babel.min.js"></script>
+  <style>
+    :root {
+      /* Colors - Cloudscape Palette */
+      --color-bg: #f2f3f3;
+      --color-bg-container: #ffffff;
+      --color-bg-input: #ffffff;
+      --color-bg-nav: #232f3e;
+      --color-bg-nav-hover: #354150;
+      --color-bg-status-info: #f2f8fd;
+      --color-bg-status-success: #f2fcf3;
+      --color-bg-status-error: #fff7f7;
+      --color-bg-status-warning: #fffce9;
+      --color-text-body: #000716;
+      --color-text-heading: #000716;
+      --color-text-secondary: #5f6b7a;
+      --color-text-label: #000716;
+      --color-text-nav: #d1d5db;
+
+      /* Cloudscape AWSUI variables (used by chat components) */
+      --awsui-color-primary: #0972d3;
+      --awsui-color-primary-hover: #065299;
+      --awsui-color-text-body: #000716;
+      --awsui-color-text-heading: #000716;
+      --awsui-color-text-secondary: #5f6b7a;
+      --awsui-color-background-container: #ffffff;
+      --awsui-color-background-input: #ffffff;
+      --awsui-color-border: #e9ebed;
+      --awsui-color-border-input: #7d8998;
+      --awsui-color-border-input-focus: #0972d3;
+      --awsui-color-status-error: #d91515;
+      --color-text-nav-active: #ffffff;
+      --color-text-link: #0972d3;
+      --color-border: #e9ebed;
+      --color-border-input: #7d8998;
+      --color-border-input-focus: #0972d3;
+      --color-accent: #0972d3;
+      --color-accent-hover: #033160;
+      --color-status-success: #037f0c;
+      --color-status-error: #d91515;
+      --color-status-warning: #8d6605;
+      --color-status-info: #0972d3;
+      --color-brand-gradient-start: #ff9900;
+      --color-brand-gradient-end: #ffb84d;
+
+      /* Typography */
+      --font-family: 'Open Sans', 'Amazon Ember', -apple-system, BlinkMacSystemFont, sans-serif;
+      --font-size-base: 14px;
+      --font-size-heading-lg: 24px;
+      --font-size-heading-md: 18px;
+      --font-size-heading-sm: 16px;
+      --font-size-label: 12px;
+      --font-size-small: 13px;
+      --line-height: 1.5;
+
+      /* Spacing */
+      --space-xs: 0.25rem;
+      --space-sm: 0.5rem;
+      --space-md: 0.75rem;
+      --space-lg: 1rem;
+      --space-xl: 1.25rem;
+      --space-2xl: 1.5rem;
+      --space-3xl: 2rem;
+
+      /* Border Radius */
+      --radius-sm: 4px;
+      --radius-md: 8px;
+      --radius-lg: 12px;
+
+      /* Layout */
+      --sidebar-w: 220px;
+      --topbar-h: 40px;
+    }
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: var(--font-family);
+      background: var(--color-bg);
+      color: var(--color-text-body);
+      line-height: var(--line-height);
+      font-size: var(--font-size-base);
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* ── Top Navigation Bar (matches admin dashboard) ── */
+    .topbar {
+      position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+      height: var(--topbar-h);
+      background: var(--color-bg-nav);
+      display: flex; align-items: center;
+      padding: 0 var(--space-lg);
+    }
+    .topbar-brand {
+      display: flex; align-items: center; gap: var(--space-sm);
+      color: #fff; font-size: var(--font-size-base); font-weight: 700;
+      margin-right: var(--space-2xl);
+      letter-spacing: -0.2px;
+    }
+    .topbar-brand .logo-icon {
+      width: 22px; height: 22px;
+      background: linear-gradient(135deg, var(--color-brand-gradient-start), var(--color-brand-gradient-end));
+      border-radius: var(--radius-sm);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 12px; font-weight: 700; color: var(--color-bg-nav);
+    }
+    .topbar-tagline {
+      color: var(--color-brand-gradient-start);
+      font-size: 13px;
+      font-weight: 500;
+      font-style: italic;
+      letter-spacing: 0.3px;
+      margin-right: var(--space-lg);
+      white-space: nowrap;
+      opacity: 1;
+    }
+    .topbar-nav {
+      display: flex; align-items: center;
+      height: 100%;
+    }
+    .topbar-nav a {
+      color: var(--color-text-nav);
+      text-decoration: none;
+      font-size: var(--font-size-base); font-weight: 400;
+      padding: 0 var(--space-md);
+      height: var(--topbar-h);
+      display: flex; align-items: center;
+      border-left: 1px solid rgba(255,255,255,0.15);
+      transition: background 100ms, color 100ms;
+    }
+    .topbar-nav a:hover {
+      background: var(--color-bg-nav-hover);
+      color: #fff;
+    }
+    .topbar-nav a.active {
+      color: var(--color-text-nav-active);
+      font-weight: 600;
+      background: rgba(9,114,211,0.18);
+    }
+    .topbar-right {
+      margin-left: auto;
+      display: flex; align-items: center; gap: var(--space-md);
+    }
+    .topbar-status {
+      display: flex; align-items: center; gap: 0.35rem;
+      font-size: var(--font-size-label); color: var(--color-text-nav);
+    }
+    .topbar-status .dot {
+      width: 6px; height: 6px; border-radius: 50%;
+      background: #1aab2a;
+    }
+
+    /* ── Chat Layout ── */
+    .chat-wrapper {
+      margin-top: var(--topbar-h);
+      height: calc(100vh - var(--topbar-h));
+      display: flex;
+      flex-direction: column;
+      max-width: 900px;
+      margin-left: auto;
+      margin-right: auto;
+      padding: 0 1rem;
+    }
+
+    /* ── Chat Header ── */
+    .chat-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: var(--space-md) 0;
+      border-bottom: 1px solid var(--color-border);
+      flex-shrink: 0;
+    }
+    .chat-header-left {
+      display: flex;
+      align-items: center;
+      gap: var(--space-md);
+    }
+    .chat-header h1 {
+      font-size: var(--font-size-heading-md);
+      font-weight: 700;
+      color: var(--color-text-heading);
+    }
+
+    /* ── Model Selector ── */
+    .model-select {
+      padding: 0.35rem 2rem 0.35rem 0.6rem;
+      background: var(--color-bg-input);
+      border: 2px solid var(--color-border-input);
+      border-radius: var(--radius-md);
+      font-size: var(--font-size-small);
+      font-family: var(--font-family);
+      color: var(--color-text-body);
+      cursor: pointer;
+      outline: none;
+      appearance: none;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' fill='%235f6b7a' viewBox='0 0 16 16'%3E%3Cpath d='M8 11L3 6h10z'/%3E%3C/svg%3E");
+      background-repeat: no-repeat;
+      background-position: right 0.6rem center;
+    }
+    .model-select:focus {
+      border-color: var(--color-border-input-focus);
+    }
+
+    /* ── New Chat Button ── */
+    .btn-new-chat {
+      display: inline-flex; align-items: center; gap: 0.35rem;
+      padding: 0.35rem 0.85rem;
+      background: #fff;
+      color: var(--awsui-color-text-body);
+      border: 2px solid var(--awsui-color-border-input);
+      border-radius: 8px;
+      font-size: 13px; font-weight: 600;
+      font-family: inherit;
+      cursor: pointer;
+      transition: all 100ms;
+    }
+    .btn-new-chat:hover {
+      background: #f4f6f8;
+      border-color: var(--awsui-color-primary);
+      color: var(--awsui-color-primary);
+    }
+
+    /* ── Message List ── */
+    .message-list {
+      flex: 1;
+      overflow-y: auto;
+      padding: 1rem 0;
+      scroll-behavior: smooth;
+    }
+
+    /* ── Message Bubble ── */
+    .message-bubble {
+      display: flex;
+      gap: 0.75rem;
+      margin-bottom: 1.25rem;
+      max-width: 100%;
+    }
+    .message-bubble.user {
+      flex-direction: row-reverse;
+    }
+    .message-avatar {
+      width: 32px; height: 32px;
+      border-radius: 50%;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 14px; font-weight: 700;
+      flex-shrink: 0;
+    }
+    .message-bubble.user .message-avatar {
+      background: var(--awsui-color-primary);
+      color: #fff;
+    }
+    .message-bubble.assistant .message-avatar {
+      background: linear-gradient(135deg, #ff9900, #ffb84d);
+      color: #232f3e;
+    }
+    .message-bubble.error .message-avatar {
+      background: #fff7f7;
+      color: var(--awsui-color-status-error);
+    }
+    .message-content-wrap {
+      max-width: 75%;
+      min-width: 0;
+    }
+    .message-bubble.user .message-content-wrap {
+      text-align: right;
+    }
+    .message-content {
+      display: inline-block;
+      padding: 0.65rem 1rem;
+      border-radius: 12px;
+      font-size: 14px;
+      line-height: 1.6;
+      white-space: pre-wrap;
+      word-break: break-word;
+      text-align: left;
+    }
+    .message-bubble.user .message-content {
+      background: var(--awsui-color-primary);
+      color: #fff;
+      border-bottom-right-radius: 4px;
+    }
+    .message-bubble.assistant .message-content {
+      background: var(--awsui-color-background-container);
+      color: var(--awsui-color-text-body);
+      border: 1px solid var(--awsui-color-border);
+      border-bottom-left-radius: 4px;
+    }
+    .message-bubble.error .message-content {
+      background: #fff7f7;
+      color: var(--awsui-color-status-error);
+      border: 1px solid #fecaca;
+      border-bottom-left-radius: 4px;
+    }
+    .message-meta {
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+      margin-top: 0.3rem;
+      font-size: 11px;
+      color: var(--awsui-color-text-secondary);
+    }
+    .message-bubble.user .message-meta {
+      justify-content: flex-end;
+    }
+    .model-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.25rem;
+      background: #f2f3f3;
+      border: 1px solid var(--awsui-color-border);
+      padding: 0.1rem 0.45rem;
+      border-radius: 4px;
+      font-size: 11px;
+      color: var(--awsui-color-text-secondary);
+    }
+
+    /* ── Input Area ── */
+    .input-area {
+      flex-shrink: 0;
+      padding: 0.75rem 0 1rem;
+      border-top: 1px solid var(--awsui-color-border);
+    }
+    .input-row {
+      display: flex;
+      gap: 0.5rem;
+      align-items: flex-end;
+    }
+    .input-row textarea {
+      flex: 1;
+      min-width: 0;
+      padding: 0.6rem 0.85rem;
+      background: var(--awsui-color-background-input);
+      border: 2px solid var(--awsui-color-border-input);
+      border-radius: 10px;
+      font-size: 14px;
+      font-family: inherit;
+      color: var(--awsui-color-text-body);
+      resize: none;
+      outline: none;
+      line-height: 1.5;
+      min-height: 42px;
+      max-height: 150px;
+      overflow: hidden;
+    }
+    .input-row textarea:focus {
+      border-color: var(--awsui-color-border-input-focus);
+    }
+    .input-row textarea:disabled {
+      background: #f4f6f8;
+      color: #9ba7b6;
+      cursor: not-allowed;
+    }
+    .btn-send {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 42px; height: 42px;
+      background: var(--awsui-color-primary);
+      color: #fff;
+      border: none;
+      border-radius: 10px;
+      cursor: pointer;
+      font-size: 18px;
+      transition: background 100ms;
+      flex-shrink: 0;
+    }
+    .btn-send:hover:not(:disabled) {
+      background: var(--awsui-color-primary-hover);
+    }
+    .btn-send:disabled {
+      background: #9ba7b6;
+      cursor: not-allowed;
+    }
+
+    /* ── Welcome State ── */
+    .welcome {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      flex: 1;
+      text-align: center;
+      color: var(--awsui-color-text-secondary);
+      padding: 2rem;
+    }
+    .welcome-icon {
+      width: 56px; height: 56px;
+      background: linear-gradient(135deg, #ff9900, #ffb84d);
+      border-radius: 14px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 28px; color: #232f3e;
+      margin-bottom: 1rem;
+    }
+    .welcome h2 {
+      font-size: 20px; font-weight: 700;
+      color: var(--awsui-color-text-heading);
+      margin-bottom: 0.35rem;
+    }
+    .welcome p {
+      font-size: 14px;
+      max-width: 400px;
+    }
+
+    /* ── Loading dots animation ── */
+    .loading-dots span {
+      display: inline-block;
+      width: 6px; height: 6px;
+      border-radius: 50%;
+      background: var(--awsui-color-text-secondary);
+      margin: 0 2px;
+      animation: dotPulse 1.2s ease-in-out infinite;
+    }
+    .loading-dots span:nth-child(2) { animation-delay: 0.2s; }
+    .loading-dots span:nth-child(3) { animation-delay: 0.4s; }
+    @keyframes dotPulse {
+      0%, 80%, 100% { opacity: 0.3; transform: scale(0.8); }
+      40% { opacity: 1; transform: scale(1); }
+    }
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useState, useEffect, useRef, useCallback } = React;
+
+    /* ── ModelSelector Component ── */
+    function ModelSelector({ models, selectedModel, onSelect, loading, error }) {
+      if (error) {
+        return <select className="model-select" disabled><option>No models available</option></select>;
+      }
+      if (loading) {
+        return <select className="model-select" disabled><option>Loading models...</option></select>;
+      }
+      if (!models || models.length === 0) {
+        return <select className="model-select" disabled><option>No models available</option></select>;
+      }
+      return (
+        <select
+          className="model-select"
+          value={selectedModel || ''}
+          onChange={(e) => onSelect(e.target.value)}
+          aria-label="Select model"
+        >
+          {models.map((m) => (
+            <option key={m.name} value={m.name}>
+              {m.name} [{m.providers ? m.providers.join(', ') : ''}]
+            </option>
+          ))}
+        </select>
+      );
+    }
+
+    /* ── MessageBubble Component ── */
+    function MessageBubble({ message }) {
+      const roleLabel = message.role === 'user' ? 'U' : message.role === 'assistant' ? 'AI' : '!';
+      const timeStr = message.timestamp
+        ? new Date(message.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+        : '';
+
+      return (
+        <div className={`message-bubble ${message.role}`}>
+          <div className="message-avatar">{roleLabel}</div>
+          <div className="message-content-wrap">
+            <div className="message-content">{message.content || '\u00A0'}</div>
+            <div className="message-meta">
+              {timeStr && <span>{timeStr}</span>}
+              {message.role === 'assistant' && message.provider && (
+                <span className="model-badge">
+                  {message.provider}{message.model ? ` / ${message.model}` : ''}
+                </span>
+              )}
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    /* ── MessageList Component ── */
+    function MessageList({ messages, loading }) {
+      const listRef = useRef(null);
+      const bottomRef = useRef(null);
+
+      useEffect(() => {
+        if (bottomRef.current) {
+          bottomRef.current.scrollIntoView({ behavior: 'smooth' });
+        }
+      }, [messages, loading]);
+
+      if (messages.length === 0) {
+        return (
+          <div className="welcome">
+            <div className="welcome-icon">R</div>
+            <h2>AxonLLM Chat</h2>
+            <p>Select a model and start a conversation. Your messages will be routed through the gateway to the best available provider.</p>
+          </div>
+        );
+      }
+
+      return (
+        <div className="message-list" ref={listRef}>
+          {messages.map((msg, i) => (
+            <MessageBubble key={i} message={msg} />
+          ))}
+          {loading && (
+            <div className="message-bubble assistant">
+              <div className="message-avatar">AI</div>
+              <div className="message-content-wrap">
+                <div className="message-content">
+                  <div className="loading-dots"><span></span><span></span><span></span></div>
+                </div>
+              </div>
+            </div>
+          )}
+          <div ref={bottomRef} />
+        </div>
+      );
+    }
+
+    /* ── MessageInput Component ── */
+    function MessageInput({ onSend, disabled }) {
+      const [text, setText] = useState('');
+      const textareaRef = useRef(null);
+
+      const handleSend = useCallback(() => {
+        const trimmed = text.trim();
+        if (!trimmed || disabled) return;
+        onSend(trimmed);
+        setText('');
+        if (textareaRef.current) {
+          textareaRef.current.style.height = 'auto';
+        }
+      }, [text, disabled, onSend]);
+
+      const handleKeyDown = useCallback((e) => {
+        if (e.key === 'Enter' && !e.shiftKey) {
+          e.preventDefault();
+          handleSend();
+        }
+      }, [handleSend]);
+
+      const handleInput = useCallback((e) => {
+        const el = e.target;
+        el.style.height = 'auto';
+        el.style.height = Math.min(el.scrollHeight, 150) + 'px';
+      }, []);
+
+      return (
+        <div className="input-area">
+          <div className="input-row">
+            <textarea
+              ref={textareaRef}
+              rows="1"
+              placeholder={disabled ? 'Waiting for response...' : 'Type a message...'}
+              value={text}
+              onChange={(e) => setText(e.target.value)}
+              onKeyDown={handleKeyDown}
+              onInput={handleInput}
+              disabled={disabled}
+              aria-label="Message input"
+            />
+            <button
+              className="btn-send"
+              onClick={handleSend}
+              disabled={disabled || !text.trim()}
+              aria-label="Send message"
+              title="Send message"
+            >
+              &#10148;
+            </button>
+          </div>
+        </div>
+      );
+    }
+
+    /* ── ChatApp Root Component ── */
+    function ChatApp() {
+      const [messages, setMessages] = useState([]);
+      const [selectedModel, setSelectedModel] = useState(null);
+      const [selectedProvider, setSelectedProvider] = useState(null);
+      const [models, setModels] = useState([]);
+      const [modelsLoading, setModelsLoading] = useState(true);
+      const [modelsError, setModelsError] = useState(null);
+      const [loading, setLoading] = useState(false);
+      const [users, setUsers] = useState([]);
+      const [selectedUser, setSelectedUser] = useState(null);
+
+      // Fetch models and users on mount
+      useEffect(() => {
+        fetch('/api/models')
+          .then((res) => {
+            if (!res.ok) throw new Error('Failed to fetch models');
+            return res.json();
+          })
+          .then((data) => {
+            setModels(data);
+            if (data.length > 0) {
+              setSelectedModel(data[0].name);
+            }
+            setModelsLoading(false);
+          })
+          .catch(() => {
+            setModelsError('Failed to load models');
+            setModelsLoading(false);
+          });
+        fetch('/api/users')
+          .then((res) => res.ok ? res.json() : [])
+          .then((data) => {
+            setUsers(data);
+            if (data.length > 0) setSelectedUser(data[0]);
+          })
+          .catch(() => {});
+      }, []);
+
+      const handleNewChat = useCallback(() => {
+        setMessages([]);
+      }, []);
+
+      const handleSend = useCallback(async (text) => {
+        if (!selectedModel) return;
+
+        const userMessage = {
+          role: 'user',
+          content: text,
+          timestamp: Date.now(),
+        };
+
+        // Build conversation history for the API (only role + content)
+        const conversationHistory = [...messages, userMessage].map((m) => ({
+          role: m.role === 'error' ? 'assistant' : m.role,
+          content: m.content,
+        })).filter((m) => m.role === 'user' || m.role === 'assistant');
+
+        setMessages((prev) => [...prev, userMessage]);
+        setLoading(true);
+
+        // Create placeholder assistant message
+        const assistantMessage = {
+          role: 'assistant',
+          content: '',
+          model: '',
+          provider: '',
+          timestamp: Date.now(),
+        };
+
+        setMessages((prev) => [...prev, assistantMessage]);
+
+        try {
+          const response = await fetch('/api/chat/stream', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              model: selectedModel,
+              messages: conversationHistory,
+              user_id: selectedUser,
+              provider: selectedProvider,
+            }),
+          });
+
+          // Handle non-stream error responses
+          if (!response.ok) {
+            let errorMsg = 'An unexpected error occurred.';
+            try {
+              const errData = await response.json();
+              if (response.status === 429) {
+                errorMsg = 'Rate limit exceeded. Please wait before retrying.';
+              } else if (response.status === 502) {
+                errorMsg = 'The model provider is currently unavailable.';
+              } else if (errData.error && errData.error.message) {
+                errorMsg = errData.error.message;
+              }
+            } catch (e) {
+              if (response.status === 429) {
+                errorMsg = 'Rate limit exceeded. Please wait before retrying.';
+              } else if (response.status === 502) {
+                errorMsg = 'The model provider is currently unavailable.';
+              }
+            }
+
+            // Replace the placeholder assistant message with error
+            setMessages((prev) => {
+              const updated = [...prev];
+              updated[updated.length - 1] = {
+                role: 'error',
+                content: errorMsg,
+                timestamp: Date.now(),
+              };
+              return updated;
+            });
+            setLoading(false);
+            return;
+          }
+
+          // Stream the response
+          const reader = response.body.getReader();
+          const decoder = new TextDecoder();
+          let buffer = '';
+
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split('\n');
+            buffer = lines.pop() || '';
+
+            for (const line of lines) {
+              const trimmed = line.trim();
+              if (!trimmed || !trimmed.startsWith('data:')) continue;
+
+              const payload = trimmed.slice(5).trim();
+
+              // [DONE] sentinel
+              if (payload === '[DONE]') {
+                setLoading(false);
+                return;
+              }
+
+              try {
+                const chunk = JSON.parse(payload);
+
+                // Stream error event
+                if (chunk.error) {
+                  const errMsg = chunk.error.message || 'A streaming error occurred.';
+                  setMessages((prev) => {
+                    const updated = [...prev];
+                    const last = updated[updated.length - 1];
+                    updated[updated.length - 1] = {
+                      ...last,
+                      role: 'error',
+                      content: last.content ? last.content + '\n' + errMsg : errMsg,
+                    };
+                    return updated;
+                  });
+                  continue;
+                }
+
+                // Normal content chunk — append token
+                setMessages((prev) => {
+                  const updated = [...prev];
+                  const last = updated[updated.length - 1];
+                  updated[updated.length - 1] = {
+                    ...last,
+                    content: (last.content || '') + (chunk.content || ''),
+                    model: chunk.model || last.model,
+                    provider: chunk.provider || last.provider,
+                  };
+                  return updated;
+                });
+              } catch (e) {
+                // Ignore malformed JSON lines
+              }
+            }
+          }
+
+          // If we exit the loop without [DONE], mark as complete
+          setLoading(false);
+
+        } catch (err) {
+          // Network error
+          setMessages((prev) => {
+            const updated = [...prev];
+            updated[updated.length - 1] = {
+              role: 'error',
+              content: 'Connection error. Please check your network.',
+              timestamp: Date.now(),
+            };
+            return updated;
+          });
+          setLoading(false);
+        }
+      }, [selectedModel, selectedUser, selectedProvider, messages]);
+
+      return (
+        <div>
+          <header className="topbar" role="banner">
+            <div className="topbar-brand">
+              <div className="logo-icon">R</div>
+              AxonLLM
+            </div>
+            <div className="topbar-tagline">The neural control plane for enterprise LLMs</div>
+            <nav className="topbar-nav">
+              <a href="/admin/dashboard">Dashboard</a>
+              <a href="/chat" className="active">Chat</a>
+              <a href="/playground">Playground</a>
+              <a href="/routing">Routing</a>
+            </nav>
+            <div className="topbar-right">
+              <div className="topbar-status"><div className="dot"></div>System Online</div>
+            </div>
+          </header>
+
+          <div className="chat-wrapper">
+            <div className="chat-header">
+              <div className="chat-header-left">
+                <h1>Chat</h1>
+                <ModelSelector
+                  models={models}
+                  selectedModel={selectedModel}
+                  onSelect={setSelectedModel}
+                  loading={modelsLoading}
+                  error={modelsError}
+                />
+                {users.length > 0 && (
+                  <select
+                    className="model-select"
+                    value={selectedUser || ''}
+                    onChange={(e) => setSelectedUser(e.target.value)}
+                    aria-label="Select user"
+                    style={{marginLeft: '0.25rem'}}
+                  >
+                    {users.map((u) => (
+                      <option key={u} value={u}>👤 {u}</option>
+                    ))}
+                  </select>
+                )}
+                {(() => {
+                  const mc = models.find(m => m.name === selectedModel);
+                  const provs = mc ? mc.providers : [];
+                  return provs.length > 0 ? (
+                    <select
+                      className="model-select"
+                      value={selectedProvider || ''}
+                      onChange={(e) => setSelectedProvider(e.target.value || null)}
+                      aria-label="Select provider"
+                      style={{marginLeft: '0.25rem'}}
+                    >
+                      <option value="">🔀 Auto (router picks)</option>
+                      {provs.map((p) => (
+                        <option key={p} value={p}>🏢 {p}</option>
+                      ))}
+                    </select>
+                  ) : null;
+                })()}
+              </div>
+              <button className="btn-new-chat" onClick={handleNewChat} aria-label="New chat">
+                ✦ New Chat
+              </button>
+            </div>
+
+            <MessageList messages={messages} loading={loading && messages.length > 0 && messages[messages.length - 1].role !== 'assistant'} />
+
+            <MessageInput onSend={handleSend} disabled={loading} />
+          </div>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<ChatApp />);
+  </script>
+</body>
+</html>

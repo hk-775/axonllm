@@ -1,0 +1,54 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+*.egg
+dist/
+build/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Testing
+.hypothesis/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Secrets — never commit API keys or credentials
+config/providers.yaml
+*.env
+.env.*
+APIKeys.docx
+
+# Binary documents (keep .md versions only)
+*.docx
+*.pdf
+
+# AgentCore build artifacts
+.bedrock_agentcore/
+.bedrock_agentcore.yaml
+
+# Kiro specs (internal development tooling)
+.kiro/
+
+# OS
+.DS_Store
+Thumbs.db
+~$*
+
+# Docker
+.docker/
+
+# Local data
+*.db
+*.sqlite3

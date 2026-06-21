@@ -1,0 +1,252 @@
+"""Configuration loading utilities for AxonLLM.
+
+Reads YAML config files and environment variables, producing typed objects.
+All functions return sensible defaults when files are missing.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+from dataclasses import dataclass, field
+from pathlib import Path
+
+import yaml
+
+from src.gateway.config import AppConfig
+from src.gateway.models import TokenPricing
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Data structures
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class DemoSeedData:
+    """Demo/seed data loaded from YAML for local development."""
+
+    projects: list[dict] = field(default_factory=list)
+    user_budgets: list[dict] = field(default_factory=list)
+    usage_seeds: list[dict] = field(default_factory=list)
+    policies: list[dict] = field(default_factory=list)
+    unhealthy_providers: list[dict] = field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# load_app_config
+# ---------------------------------------------------------------------------
+
+
+def load_app_config() -> AppConfig:
+    """Build an AppConfig from environment variables, falling back to defaults."""
+    return AppConfig(
+        aws_region=os.environ.get("AWS_DEFAULT_REGION", "us-east-1"),
+        bedrock_region=os.environ.get("AXON_BEDROCK_REGION", "us-east-1"),
+        server_host=os.environ.get("AXON_SERVER_HOST", "0.0.0.0"),
+        server_port=int(os.environ.get("AXON_SERVER_PORT", "8000")),
+        models_config_path=os.environ.get("AXON_MODELS_CONFIG", "config/models.yaml"),
+        providers_config_path=os.environ.get("AXON_PROVIDERS_CONFIG", "config/providers.yaml"),
+        pricing_config_path=os.environ.get("AXON_PRICING_CONFIG", "config/pricing.yaml"),
+        demo_seed_config_path=os.environ.get("AXON_DEMO_SEED_CONFIG", "config/demo_seed.yaml"),
+        catalog_config_path=os.environ.get("AXON_CATALOG_CONFIG", "config/catalog.yaml"),
+        ensemble_config_path=os.environ.get("AXON_ENSEMBLE_CONFIG", "config/ensemble.yaml"),
+        load_demo_data=os.environ.get("AXON_LOAD_DEMO_DATA", "false").lower() == "true",
+    )
+
+
+# ---------------------------------------------------------------------------
+# load_pricing_config
+# ---------------------------------------------------------------------------
+
+
+def load_pricing_config(path: str) -> dict[str, dict[str, TokenPricing]]:
+    """Load token pricing from a YAML file.
+
+    Expected format::
+
+        providers:
+          openai:
+            gpt-4:
+              prompt_token_cost: 0.03
+              completion_token_cost: 0.06
+              cached_token_cost: null      # optional
+              image_token_cost: null        # optional
+              reasoning_token_cost: null    # optional
+              per_request_cost: 0.0         # optional
+
+    Returns an empty dict if the file does not exist.
+    Skips malformed entries (missing required fields) with a warning.
+    """
+    if not Path(path).exists():
+        logger.warning("Pricing config not found at %s — using empty pricing", path)
+        return {}
+
+    with open(path, encoding="utf-8") as f:
+        raw = yaml.safe_load(f) or {}
+
+    providers_raw = raw.get("providers", {})
+    if not isinstance(providers_raw, dict):
+        logger.warning("Pricing config at %s has invalid 'providers' key", path)
+        return {}
+
+    result: dict[str, dict[str, TokenPricing]] = {}
+    for provider, models in providers_raw.items():
+        if not isinstance(models, dict):
+            logger.warning("Pricing config: skipping provider '%s' (not a dict)", provider)
+            continue
+        provider_pricing: dict[str, TokenPricing] = {}
+        for model, entry in models.items():
+            if not isinstance(entry, dict):
+                logger.warning("Pricing config: skipping %s/%s (not a dict)", provider, model)
+                continue
+            if "prompt_token_cost" not in entry or "completion_token_cost" not in entry:
+                logger.warning(
+                    "Pricing config: skipping %s/%s (missing required fields)", provider, model
+                )
+                continue
+            provider_pricing[model] = TokenPricing(
+                prompt_token_cost=float(entry["prompt_token_cost"]),
+                completion_token_cost=float(entry["completion_token_cost"]),
+                cached_token_cost=_opt_float(entry.get("cached_token_cost")),
+                cache_creation_token_cost=_opt_float(entry.get("cache_creation_token_cost")),
+                image_token_cost=_opt_float(entry.get("image_token_cost")),
+                reasoning_token_cost=_opt_float(entry.get("reasoning_token_cost")),
+                per_request_cost=float(entry.get("per_request_cost", 0.0)),
+            )
+        if provider_pricing:
+            result[provider] = provider_pricing
+    return result
+
+
+# ---------------------------------------------------------------------------
+# load_demo_seed_config
+# ---------------------------------------------------------------------------
+
+
+def load_demo_seed_config(path: str) -> DemoSeedData:
+    """Load demo seed data from a YAML file.
+
+    Returns empty DemoSeedData if the file does not exist.
+    """
+    if not Path(path).exists():
+        logger.warning("Demo seed config not found at %s — using empty seed data", path)
+        return DemoSeedData()
+
+    with open(path, encoding="utf-8") as f:
+        raw = yaml.safe_load(f) or {}
+
+    return DemoSeedData(
+        projects=raw.get("projects", []),
+        user_budgets=raw.get("user_budgets", []),
+        usage_seeds=raw.get("usage_seeds", []),
+        policies=raw.get("policies", []),
+        unhealthy_providers=raw.get("unhealthy_providers", []),
+    )
+
+
+# ---------------------------------------------------------------------------
+# load_catalog_config
+# ---------------------------------------------------------------------------
+
+
+def load_catalog_config(path: str, fallback: dict | None = None) -> dict:
+    """Load provider model catalog from a YAML file.
+
+    Returns *fallback* (or empty dict) if the file does not exist.
+    """
+    if not Path(path).exists():
+        logger.warning("Catalog config not found at %s — using fallback", path)
+        return fallback if fallback is not None else {}
+
+    with open(path, encoding="utf-8") as f:
+        raw = yaml.safe_load(f) or {}
+
+    return raw.get("providers", fallback or {})
+
+
+# ---------------------------------------------------------------------------
+# load_ensemble_config
+# ---------------------------------------------------------------------------
+
+
+def load_ensemble_config(path: str):
+    """Load ensemble routing presets from a YAML file.
+
+    Returns an empty (unconfigured) ``EnsembleConfig`` if the file does not
+    exist, mirroring the missing-file-with-warning behaviour of the other
+    loaders in this module.
+    """
+    # Function-level import: ``EnsembleConfig`` lives in a sibling module that
+    # may be created in a separate task. Importing here avoids import-order
+    # coupling at module load time.
+    from src.gateway.ensemble_config import EnsembleConfig
+
+    if not Path(path).exists():
+        logger.warning("Ensemble config not found at %s — using empty ensemble config", path)
+        return EnsembleConfig()
+
+    config = EnsembleConfig()
+    config.load(path)
+    return config
+
+
+
+# ---------------------------------------------------------------------------
+# Serialization helpers (for round-trip testing)
+# ---------------------------------------------------------------------------
+
+
+def serialize_pricing_config(pricing: dict[str, dict[str, TokenPricing]]) -> dict:
+    """Convert a pricing dict back to a plain dict suitable for YAML dump."""
+    result: dict[str, dict[str, dict]] = {}
+    for provider, models in pricing.items():
+        provider_dict: dict[str, dict] = {}
+        for model, tp in models.items():
+            entry: dict[str, float | None] = {
+                "prompt_token_cost": tp.prompt_token_cost,
+                "completion_token_cost": tp.completion_token_cost,
+            }
+            if tp.cached_token_cost is not None:
+                entry["cached_token_cost"] = tp.cached_token_cost
+            if tp.cache_creation_token_cost is not None:
+                entry["cache_creation_token_cost"] = tp.cache_creation_token_cost
+            if tp.image_token_cost is not None:
+                entry["image_token_cost"] = tp.image_token_cost
+            if tp.reasoning_token_cost is not None:
+                entry["reasoning_token_cost"] = tp.reasoning_token_cost
+            if tp.per_request_cost != 0.0:
+                entry["per_request_cost"] = tp.per_request_cost
+            provider_dict[model] = entry
+        result[provider] = provider_dict
+    return {"providers": result}
+
+
+def serialize_demo_seed_config(seed_data: DemoSeedData) -> dict:
+    """Convert DemoSeedData back to a plain dict suitable for YAML dump."""
+    result: dict[str, list] = {}
+    if seed_data.projects:
+        result["projects"] = seed_data.projects
+    if seed_data.user_budgets:
+        result["user_budgets"] = seed_data.user_budgets
+    if seed_data.usage_seeds:
+        result["usage_seeds"] = seed_data.usage_seeds
+    if seed_data.policies:
+        result["policies"] = seed_data.policies
+    if seed_data.unhealthy_providers:
+        result["unhealthy_providers"] = seed_data.unhealthy_providers
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+
+def _opt_float(value) -> float | None:
+    """Convert a value to float or return None."""
+    if value is None:
+        return None
+    return float(value)

@@ -1,0 +1,44 @@
+# Provider configurations for AxonLLM Router.
+# API keys can be set here or via environment variables.
+# Environment variables take precedence over values in this file.
+#
+# Bedrock doesn't need configuration here — it uses AWS credentials automatically.
+
+providers:
+  # Anthropic (direct API)
+  # Set ANTHROPIC_API_KEY env var or add api_key below
+  anthropic:
+    base_url: https://api.anthropic.com
+    auth_type: api_key
+    # api_key: sk-ant-your-key-here
+
+  # OpenAI
+  # Set OPENAI_API_KEY env var or add api_key below
+  openai:
+    base_url: https://api.openai.com
+    auth_type: api_key
+    # api_key: sk-your-key-here
+
+  # Azure OpenAI
+  # Set AZURE_OPENAI_API_KEY env var or uncomment below
+  # azure_openai:
+  #   base_url: https://your-resource.openai.azure.com
+  #   auth_type: azure_key
+  #   api_key: your-azure-key
+
+  # Google Vertex AI
+  # Set GCP_ACCESS_TOKEN env var or uncomment below
+  # vertex_ai:
+  #   base_url: https://us-central1-aiplatform.googleapis.com
+  #   auth_type: gcp_service_account
+  #   access_token: your-gcp-token
+  #   extra_params:
+  #     project: your-gcp-project
+  #     location: us-central1
+
+  # Cohere
+  # Set COHERE_API_KEY env var or uncomment below
+  # cohere:
+  #   base_url: https://api.cohere.ai
+  #   auth_type: api_key
+  #   api_key: your-cohere-key

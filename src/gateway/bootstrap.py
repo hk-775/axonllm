@@ -1,0 +1,358 @@
+"""Centralized bootstrap for AxonLLM gateway components.
+
+Both ``serve_dashboard.py`` and ``agentcore_agent.py`` delegate to this
+module instead of duplicating inline wiring.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import TYPE_CHECKING
+
+from starlette.applications import Starlette
+
+from src.gateway.admin.routes import AdminAPI, PROVIDER_MODEL_CATALOG, create_admin_routes
+from src.gateway.agent import GatewayAgent
+from src.gateway.efficiency_analyzer import EfficiencyAnalyzer
+from src.gateway.cache_manager import CacheManager
+from src.gateway.chat.client_agent import ClientAgent
+from src.gateway.chat.routes import ChatAPI, create_chat_routes
+from src.gateway.config import AppConfig
+from src.gateway.config_loader import (
+    DemoSeedData,
+    load_app_config,
+    load_catalog_config,
+    load_demo_seed_config,
+    load_ensemble_config,
+    load_pricing_config,
+)
+from src.gateway.cost_tracker import CostTracker
+from src.gateway.feedback_tracker import FeedbackTracker
+from src.gateway.guardrail_engine import GuardrailEngine
+from src.gateway.health_tracker import ProviderHealthTracker
+from src.gateway.model_leaderboard import ModelLeaderboard
+from src.gateway.model_registry import ModelRegistry
+from src.gateway.models import Project, RateLimitConfig, UsageRecord
+from src.gateway.multi_provider_factory import MultiProviderFactory
+from src.gateway.persistence import DynamoPersistence
+from src.gateway.provider_loader import load_provider_configs
+from src.gateway.rate_limiter import SlidingWindowRateLimiter
+from src.gateway.request_validator import RequestValidator
+from src.gateway.router import Router
+from src.gateway.semantic_efficiency import SemanticEfficiencyEngine
+from src.gateway.smart_routing import SmartRoutingStrategy
+from src.gateway.task_classifier import TaskClassifier
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# GatewayComponents container
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class GatewayComponents:
+    """All constructed gateway components returned by the bootstrap."""
+
+    cost_tracker: CostTracker
+    health_tracker: ProviderHealthTracker
+    registry: ModelRegistry
+    router: Router
+    rate_limiter: SlidingWindowRateLimiter
+    guardrail_engine: GuardrailEngine
+    cache_manager: CacheManager
+    multi_factory: MultiProviderFactory
+    request_validator: RequestValidator
+    gateway_agent: GatewayAgent
+    projects: dict[str, Project]
+    user_configs: dict[str, dict]
+    policies: list[dict]
+    persistence: DynamoPersistence
+    catalog: dict
+    efficiency_analyzer: EfficiencyAnalyzer | None = None
+    semantic_engine: SemanticEfficiencyEngine | None = None
+
+
+# ---------------------------------------------------------------------------
+# Core builder
+# ---------------------------------------------------------------------------
+
+
+def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComponents:
+    """Construct all gateway components from configuration.
+
+    If *app_config* is ``None``, one is loaded from environment variables.
+    """
+    if app_config is None:
+        app_config = load_app_config()
+
+    # --- Pricing ---
+    pricing = load_pricing_config(app_config.pricing_config_path)
+
+    # --- Persistence ---
+    persistence = DynamoPersistence(region=app_config.aws_region)
+    if persistence.enabled:
+        asyncio.get_event_loop().run_until_complete(
+            persistence.create_table_if_not_exists()
+        )
+
+    # --- Core components ---
+    cost_tracker = CostTracker(pricing_config=pricing, persistence=persistence)
+    health_tracker = ProviderHealthTracker()
+
+    registry = ModelRegistry()
+    registry.load(app_config.models_config_path)
+    all_model_names = list(registry.models.keys())
+
+    # --- Demo seed data ---
+    projects: dict[str, Project] = {}
+    user_configs: dict[str, dict] = {}
+    policies: list[dict] = []
+
+    if app_config.load_demo_data:
+        seed = load_demo_seed_config(app_config.demo_seed_config_path)
+        projects, user_configs, policies = _apply_seed_data(
+            seed, cost_tracker, health_tracker, all_model_names,
+        )
+
+    # --- DynamoDB persisted state (merges on top of seed data) ---
+    loaded_feedback: list = []
+    if persistence.enabled:
+        loaded_projects, loaded_user_configs, loaded_records, loaded_feedback = (
+            asyncio.get_event_loop().run_until_complete(_load_persisted_state(persistence))
+        )
+        projects.update(loaded_projects)
+        user_configs.update(loaded_user_configs)
+        existing_ids = {r.request_id for r in cost_tracker._records}
+        for rec in loaded_records:
+            if rec.request_id not in existing_ids:
+                cost_tracker._records.append(rec)
+                existing_ids.add(rec.request_id)
+
+    # --- Smart routing components ---
+    leaderboard = ModelLeaderboard()
+    leaderboard.load("config/leaderboard.yaml", valid_models=set(all_model_names))
+
+    task_classifier = TaskClassifier()
+    feedback_tracker = FeedbackTracker(persistence=persistence)
+    if loaded_feedback:
+        feedback_tracker._records.extend(loaded_feedback)
+
+    smart_strategy = SmartRoutingStrategy(
+        classifier=task_classifier,
+        leaderboard=leaderboard,
+        model_registry=registry,
+        health_tracker=health_tracker,
+        cost_tracker=cost_tracker,
+        feedback_tracker=feedback_tracker,
+        confidence_threshold=leaderboard.config.get("confidence_threshold", 0.3),
+        cost_quality_tradeoff=leaderboard.config.get("cost_quality_tradeoff", 0.3),
+        default_model=leaderboard.config.get("default_model", "claude-sonnet"),
+    )
+
+    # --- Routing / rate limiting / guardrails / cache ---
+    ensemble_config = load_ensemble_config(app_config.ensemble_config_path)
+    router = Router(
+        model_registry=registry,
+        health_tracker=health_tracker,
+        smart_strategy=smart_strategy,
+        ensemble_config=ensemble_config,
+        cost_tracker=cost_tracker,
+    )
+    rate_limiter = SlidingWindowRateLimiter(config=RateLimitConfig())
+    guardrail_engine = GuardrailEngine()
+    cache_manager = CacheManager()
+
+    # --- Multi-provider factory ---
+    provider_configs = load_provider_configs(app_config.providers_config_path)
+    multi_factory = MultiProviderFactory(
+        provider_configs=provider_configs,
+        bedrock_region=app_config.bedrock_region,
+    )
+
+    # --- Request validator ---
+    request_validator = RequestValidator(model_registry=registry)
+
+    # --- Gateway agent ---
+    gateway_agent = GatewayAgent(
+        router=router,
+        rate_limiter=rate_limiter,
+        guardrail_engine=guardrail_engine,
+        cache_manager=cache_manager,
+        cost_tracker=cost_tracker,
+        projects=projects,
+        provider_fn_factory=multi_factory,
+        user_configs=user_configs,
+        request_validator=request_validator,
+        smart_routing_enabled=True,
+    )
+
+    # --- Efficiency analysis ---
+    efficiency_analyzer = EfficiencyAnalyzer(cost_tracker=cost_tracker)
+    semantic_engine = SemanticEfficiencyEngine(
+        task_classifier=task_classifier,
+        cost_tracker=cost_tracker,
+        model_registry=registry,
+        leaderboard=leaderboard,
+    )
+
+    # --- Catalog ---
+    catalog = load_catalog_config(
+        app_config.catalog_config_path, fallback=PROVIDER_MODEL_CATALOG,
+    )
+
+    return GatewayComponents(
+        cost_tracker=cost_tracker,
+        health_tracker=health_tracker,
+        registry=registry,
+        router=router,
+        rate_limiter=rate_limiter,
+        guardrail_engine=guardrail_engine,
+        cache_manager=cache_manager,
+        multi_factory=multi_factory,
+        request_validator=request_validator,
+        gateway_agent=gateway_agent,
+        projects=projects,
+        user_configs=user_configs,
+        policies=policies,
+        persistence=persistence,
+        catalog=catalog,
+        efficiency_analyzer=efficiency_analyzer,
+        semantic_engine=semantic_engine,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Starlette app builder (used by serve_dashboard.py)
+# ---------------------------------------------------------------------------
+
+
+def build_starlette_app(app_config: AppConfig | None = None) -> Starlette:
+    """Build a fully-wired Starlette application."""
+    if app_config is None:
+        app_config = load_app_config()
+
+    comp = build_gateway_components(app_config)
+
+    admin_api = AdminAPI(
+        cost_tracker=comp.cost_tracker,
+        health_tracker=comp.health_tracker,
+        model_registry=comp.registry,
+        projects=comp.projects,
+        policies=comp.policies,
+        user_configs=comp.user_configs,
+        config_path=app_config.models_config_path,
+        persistence=comp.persistence,
+        catalog=comp.catalog,
+        efficiency_analyzer=comp.efficiency_analyzer,
+        semantic_engine=comp.semantic_engine,
+    )
+
+    # Default chat project is the first demo project or "default"
+    default_project = next(iter(comp.projects), "default")
+    client_agent = ClientAgent(
+        comp.gateway_agent,
+        default_project_id=default_project,
+        default_user_id="chat-user",
+    )
+    chat_api = ChatAPI(client_agent)
+
+    routes = create_admin_routes(admin_api) + create_chat_routes(chat_api)
+    return Starlette(routes=routes)
+
+
+# ---------------------------------------------------------------------------
+# Agent-only builder (used by agentcore_agent.py)
+# ---------------------------------------------------------------------------
+
+
+def build_gateway_agent(app_config: AppConfig | None = None) -> GatewayAgent:
+    """Build and return just the GatewayAgent (no HTTP routes)."""
+    comp = build_gateway_components(app_config)
+    return comp.gateway_agent
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+
+def _apply_seed_data(
+    seed: DemoSeedData,
+    cost_tracker: CostTracker,
+    health_tracker: ProviderHealthTracker,
+    all_model_names: list[str],
+) -> tuple[dict[str, Project], dict[str, dict], list[dict]]:
+    """Apply demo seed data to components. Returns (projects, user_configs, policies)."""
+    projects: dict[str, Project] = {}
+    for p in seed.projects:
+        proj = Project(
+            project_id=p["project_id"],
+            name=p["name"],
+            budget_limit=p.get("budget_limit"),
+            alert_threshold=p.get("alert_threshold"),
+            cache_enabled=p.get("cache_enabled", False),
+            prompt_caching_enabled=p.get("prompt_caching_enabled", False),
+            members=p.get("members", []),
+            allowed_models=p.get("allowed_models"),
+        )
+        projects[proj.project_id] = proj
+        if proj.budget_limit is not None or proj.alert_threshold is not None:
+            cost_tracker.register_project(
+                proj.project_id,
+                budget_limit=proj.budget_limit,
+                alert_threshold=proj.alert_threshold,
+            )
+
+    # User budgets
+    user_configs: dict[str, dict] = {}
+    for ub in seed.user_budgets:
+        cost_tracker.register_user(
+            ub["user_id"],
+            budget_limit=ub.get("budget_limit"),
+            alert_threshold=ub.get("alert_threshold"),
+        )
+
+    # Usage seeds
+    async def _seed_usage():
+        for s in seed.usage_seeds:
+            pt = s.get("prompt_tokens", 0)
+            ct = s.get("completion_tokens", 0)
+            await cost_tracker.record_usage(UsageRecord(
+                request_id=f"req-{s['project_id']}-{s['user_id']}-{s['provider']}",
+                project_id=s["project_id"],
+                user_id=s["user_id"],
+                provider=s["provider"],
+                model=s["model"],
+                prompt_tokens=pt,
+                completion_tokens=ct,
+                total_tokens=pt + ct,
+                cost=s.get("cost", 0.0),
+                timestamp=datetime.utcnow(),
+                cached_tokens=s.get("cached_tokens", 0),
+                cache_creation_tokens=s.get("cache_creation_tokens", 0),
+            ))
+
+    asyncio.get_event_loop().run_until_complete(_seed_usage())
+
+    # Unhealthy providers
+    for up in seed.unhealthy_providers:
+        health_tracker.mark_unhealthy(
+            up["provider"],
+            cooldown_seconds=up.get("cooldown_seconds", 600),
+        )
+
+    return projects, user_configs, seed.policies
+
+
+async def _load_persisted_state(persistence: DynamoPersistence):
+    """Load projects, user configs, usage records, and feedback from DynamoDB."""
+    loaded_projects = await persistence.load_projects()
+    loaded_user_configs = await persistence.load_user_configs()
+    loaded_records = await persistence.load_usage_records()
+    loaded_feedback = await persistence.load_feedback_records()
+    return loaded_projects, loaded_user_configs, loaded_records, loaded_feedback

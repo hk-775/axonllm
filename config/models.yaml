@@ -1,0 +1,173 @@
+virtual_models:
+- name: claude-opus
+  description: Claude Opus 4
+  routing_strategy: least-latency
+  providers:
+  - provider: bedrock
+    model_id: us.anthropic.claude-opus-4-6-v1
+    weight: 0.5
+    fallback_order: 0
+  - provider: anthropic
+    model_id: claude-opus-4-8
+    weight: 0.5
+    fallback_order: 1
+- name: claude-sonnet
+  description: Claude Sonnet 4
+  routing_strategy: cost-optimized
+  providers:
+  - provider: anthropic
+    model_id: claude-sonnet-4-6
+    weight: 0.5
+    fallback_order: 1
+  - provider: bedrock
+    model_id: us.anthropic.claude-sonnet-4-6
+    weight: 0.5
+    fallback_order: 0
+- name: claude-haiku
+  description: Claude Haiku 4.5
+  routing_strategy: round-robin
+  providers:
+  - provider: anthropic
+    model_id: claude-haiku-4-5-20251001
+    weight: 0.5
+    fallback_order: 1
+  - provider: bedrock
+    model_id: us.anthropic.claude-haiku-4-5-20251001-v1:0
+    weight: 0.5
+    fallback_order: 0
+- name: gpt-4o
+  description: GPT-4o
+  routing_strategy: round-robin
+  providers:
+  - provider: openai
+    model_id: gpt-4o
+    weight: 1.0
+    fallback_order: 0
+- name: gpt-4o-mini
+  description: GPT-4o Mini
+  routing_strategy: round-robin
+  providers:
+  - provider: openai
+    model_id: gpt-4o-mini
+    weight: 1.0
+    fallback_order: 0
+- name: o4-mini
+  description: o4 Mini (Reasoning)
+  routing_strategy: weighted
+  providers:
+  - provider: openai
+    model_id: o4-mini
+    weight: 1.0
+    fallback_order: 0
+- name: nova-pro
+  description: Amazon Nova Pro
+  routing_strategy: round-robin
+  providers:
+  - provider: bedrock
+    model_id: us.amazon.nova-pro-v1:0
+    weight: 1.0
+    fallback_order: 0
+- name: nova-lite
+  description: Amazon Nova Lite
+  routing_strategy: round-robin
+  providers:
+  - provider: bedrock
+    model_id: us.amazon.nova-lite-v1:0
+    weight: 1.0
+    fallback_order: 0
+- name: nova-micro
+  description: Amazon Nova Micro
+  routing_strategy: round-robin
+  providers:
+  - provider: bedrock
+    model_id: us.amazon.nova-micro-v1:0
+    weight: 1.0
+    fallback_order: 0
+- name: deepseek-r1
+  description: DeepSeek R1
+  routing_strategy: round-robin
+  providers:
+  - provider: bedrock
+    model_id: us.deepseek.r1-v1:0
+    weight: 1.0
+    fallback_order: 0
+- name: llama-3.3-70b
+  description: Meta Llama 3.3 70B Instruct
+  routing_strategy: round-robin
+  providers:
+  - provider: bedrock
+    model_id: us.meta.llama3-3-70b-instruct-v1:0
+    weight: 1.0
+    fallback_order: 0
+- name: llama-4-maverick
+  description: Meta Llama 4 Maverick 17B Instruct
+  routing_strategy: round-robin
+  providers:
+  - provider: bedrock
+    model_id: us.meta.llama4-maverick-17b-instruct-v1:0
+    weight: 1.0
+    fallback_order: 0
+- name: llama-4-scout
+  description: Meta Llama 4 Scout 17B Instruct
+  routing_strategy: round-robin
+  providers:
+  - provider: bedrock
+    model_id: us.meta.llama4-scout-17b-instruct-v1:0
+    weight: 1.0
+    fallback_order: 0
+- name: mistral-large
+  description: Mistral Large 2 (24.07)
+  routing_strategy: round-robin
+  providers:
+  - provider: bedrock
+    model_id: mistral.mistral-large-2407-v1:0
+    weight: 1.0
+    fallback_order: 0
+- name: pixtral-large
+  description: Mistral Pixtral Large 25.02 (multimodal)
+  routing_strategy: round-robin
+  providers:
+  - provider: bedrock
+    model_id: us.mistral.pixtral-large-2502-v1:0
+    weight: 1.0
+    fallback_order: 0
+- name: gpt-oss-120b
+  description: OpenAI GPT-OSS 120B (open weight)
+  routing_strategy: round-robin
+  providers:
+  - provider: bedrock
+    model_id: openai.gpt-oss-120b-1:0
+    weight: 1.0
+    fallback_order: 0
+- name: qwen3-235b
+  description: Qwen3 235B A22B (open weight)
+  routing_strategy: round-robin
+  providers:
+  - provider: bedrock
+    model_id: qwen.qwen3-235b-a22b-2507-v1:0
+    weight: 1.0
+    fallback_order: 0
+- name: gemini-2.5-pro
+  description: Gemini 2.5 Pro
+  routing_strategy: round-robin
+  providers:
+  - provider: vertex_ai
+    model_id: gemini-2.5-pro
+    weight: 1.0
+    fallback_order: 0
+- name: gemini-2.5-flash
+  description: Gemini 2.5 Flash
+  routing_strategy: round-robin
+  providers:
+  - provider: vertex_ai
+    model_id: gemini-2.5-flash
+    weight: 1.0
+    fallback_order: 0
+- name: gemini-2.0-flash
+  description: Gemini 2.0 Flash
+  routing_strategy: round-robin
+  providers:
+  - provider: vertex_ai
+    model_id: gemini-2.0-flash
+    weight: 1.0
+    fallback_order: 0
