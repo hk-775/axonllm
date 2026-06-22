@@ -8,10 +8,15 @@ keywords = ["llm", "gateway", "ai", "routing", "enterprise", "bedrock", "openai"
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "pyyaml>=6.0",
+    "tiktoken>=0.7.0",
+    "starlette>=0.37.0",
+    "aiohttp>=3.9.0",
 ]
 
 [project.urls]
@@ -19,13 +24,6 @@ Homepage = "https://github.com/axonllm/axonllm"
 Repository = "https://github.com/axonllm/axonllm"
 Issues = "https://github.com/axonllm/axonllm/issues"
 Documentation = "https://github.com/axonllm/axonllm#readme"
-
-dependencies = [
-    "pyyaml>=6.0",
-    "tiktoken>=0.7.0",
-    "starlette>=0.37.0",
-    "aiohttp>=3.9.0",
-]
 
 [project.optional-dependencies]
 dev = [
