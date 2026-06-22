@@ -78,6 +78,7 @@ VALID_PROVIDERS: frozenset[str] = frozenset({
     "openai",
     "anthropic",
     "bedrock",
+    "bedrock-mantle",
     "azure_openai",
     "vertex_ai",
     "cohere",
