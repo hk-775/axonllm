@@ -49,6 +49,11 @@ Thumbs.db
 # Docker
 .docker/
 
+# CDK
+infra/cdk.out/
+infra/.venv/
+infra/outputs.json
+
 # Local data
 *.db
 *.sqlite3

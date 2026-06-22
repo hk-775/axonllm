@@ -253,20 +253,33 @@ pytest tests/ -x -q
 
 ## Deployment
 
-### AWS App Runner (recommended)
+### ECS Fargate (recommended)
+
+```bash
+./deploy-fargate.sh us-east-1
+```
+
+This deploys AxonLLM as a Fargate service (via CDK) with:
+- ALB with sticky sessions and 5-minute idle timeout (for SSE streaming)
+- Auto-scaling (2-10 tasks) on CPU and request count
+- DynamoDB tables for persistence (audit trail, API keys, policies)
+- Secrets Manager for provider API keys
+- IAM role with Bedrock invoke permissions
+- CloudWatch Container Insights
+
+Prerequisites:
+- AWS CLI configured with appropriate permissions
+- Docker running
+- Node.js installed (for CDK CLI)
+- First-time: `cd infra && pip install -r requirements.txt && cdk bootstrap`
+
+### AWS App Runner (simpler, less control)
 
 ```bash
 ./deploy.sh us-east-1
 ```
 
-This deploys AxonLLM as an App Runner service with:
-- Auto-scaling based on request concurrency
-- IAM role with Bedrock invoke permissions
-- DynamoDB tables for persistence (audit trail, API keys, policies)
-
-Prerequisites:
-- AWS CLI configured with appropriate permissions
-- Docker (for building the container image)
+Simpler setup but no ALB, no sticky sessions, limited scaling control.
 
 ### Docker (self-hosted)
 

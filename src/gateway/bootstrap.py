@@ -12,6 +12,9 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from starlette.applications import Starlette
+from starlette.requests import Request
+from starlette.responses import JSONResponse
+from starlette.routing import Route
 
 from src.gateway.admin.audit_routes import AuditAPI, create_audit_routes
 from src.gateway.admin.key_routes import KeyManagementAPI, create_key_routes
@@ -369,8 +372,12 @@ def build_starlette_app(app_config: AppConfig | None = None) -> Starlette:
     )
     chat_api = ChatAPI(client_agent)
 
+    async def health_check(request: Request) -> JSONResponse:
+        return JSONResponse({"status": "healthy"})
+
     routes = (
-        create_admin_routes(admin_api)
+        [Route("/health", health_check)]
+        + create_admin_routes(admin_api)
         + create_key_routes(key_api)
         + create_policy_hierarchy_routes(policy_api)
         + create_audit_routes(audit_api)

@@ -145,6 +145,10 @@ def _bedrock_url(config: ProviderConfig, mapping: ProviderModelMapping) -> str:
     return f"{config.base_url}/model/{mapping.model_id}/invoke"
 
 
+def _mantle_url(config: ProviderConfig, mapping: ProviderModelMapping) -> str:
+    return f"{config.base_url}/v1/chat/completions"
+
+
 def _vertex_ai_url(config: ProviderConfig, mapping: ProviderModelMapping) -> str:
     project = config.extra_params.get("project", "")
     location = config.extra_params.get("location", "")
@@ -163,6 +167,7 @@ _URL_DISPATCH: dict[str, callable] = {
     "anthropic": _anthropic_url,
     "azure_openai": _azure_openai_url,
     "bedrock": _bedrock_url,
+    "bedrock-mantle": _mantle_url,
     "vertex_ai": _vertex_ai_url,
     "cohere": _cohere_url,
 }
