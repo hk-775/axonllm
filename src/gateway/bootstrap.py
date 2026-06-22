@@ -17,6 +17,7 @@ from starlette.applications import Starlette
 from src.gateway.admin.audit_routes import AuditAPI, create_audit_routes
 from src.gateway.admin.key_routes import KeyManagementAPI, create_key_routes
 from src.gateway.admin.policy_routes import PolicyHierarchyAPI, create_policy_hierarchy_routes
+from src.gateway.admin.region_routes import RegionAPI, create_region_routes
 from src.gateway.admin.routes import AdminAPI, PROVIDER_MODEL_CATALOG, create_admin_routes
 from src.gateway.admin.webhook_routes import WebhookAPI, create_webhook_routes
 from src.gateway.agent import GatewayAgent
@@ -25,6 +26,9 @@ from src.gateway.auth.oidc_service import OIDCConfig, OIDCService
 from src.gateway.auth.policy_hierarchy import PolicyHierarchyResolver
 from src.gateway.efficiency_analyzer import EfficiencyAnalyzer
 from src.gateway.middleware.auth import AuthMiddleware
+from src.gateway.multi_region.health_monitor import SpokeHealthMonitor
+from src.gateway.multi_region.region_config import default_single_region, HubConfig
+from src.gateway.multi_region.region_router import RegionRouter
 from src.gateway.middleware.security import SecurityMiddleware
 from src.gateway.security.audit_trail import AuditTrail
 from src.gateway.security.event_dispatcher import EventDispatcher
@@ -93,6 +97,8 @@ class GatewayComponents:
     injection_detector: PromptInjectionDetector | None = None
     audit_trail: AuditTrail | None = None
     event_dispatcher: EventDispatcher | None = None
+    region_router: RegionRouter | None = None
+    health_monitor: SpokeHealthMonitor | None = None
     efficiency_analyzer: EfficiencyAnalyzer | None = None
     semantic_engine: SemanticEfficiencyEngine | None = None
 
@@ -131,6 +137,11 @@ def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComp
     policy_resolver = PolicyHierarchyResolver(persistence=persistence)
     if persistence.enabled:
         asyncio.get_event_loop().run_until_complete(policy_resolver.load_nodes())
+
+    # --- Multi-region ---
+    hub_config = default_single_region(region=app_config.aws_region)
+    region_router = RegionRouter(hub_config=hub_config)
+    health_monitor = SpokeHealthMonitor(hub_config=hub_config)
 
     # --- Security services ---
     pii_redactor = PIIRedactor()
@@ -266,6 +277,8 @@ def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComp
         injection_detector=injection_detector,
         audit_trail=audit_trail,
         event_dispatcher=event_dispatcher,
+        region_router=region_router,
+        health_monitor=health_monitor,
         efficiency_analyzer=efficiency_analyzer,
         semantic_engine=semantic_engine,
     )
@@ -297,11 +310,12 @@ def build_starlette_app(app_config: AppConfig | None = None) -> Starlette:
         semantic_engine=comp.semantic_engine,
     )
 
-    # Key, policy, audit, and webhook admin APIs
+    # Key, policy, audit, webhook, and region admin APIs
     key_api = KeyManagementAPI(api_key_service=comp.api_key_service)
     policy_api = PolicyHierarchyAPI(resolver=comp.policy_resolver)
     audit_api = AuditAPI(audit_trail=comp.audit_trail)
     webhook_api = WebhookAPI(dispatcher=comp.event_dispatcher)
+    region_api = RegionAPI(router=comp.region_router, monitor=comp.health_monitor)
 
     # Default chat project is the first demo project or "default"
     default_project = next(iter(comp.projects), "default")
@@ -318,6 +332,7 @@ def build_starlette_app(app_config: AppConfig | None = None) -> Starlette:
         + create_policy_hierarchy_routes(policy_api)
         + create_audit_routes(audit_api)
         + create_webhook_routes(webhook_api)
+        + create_region_routes(region_api)
         + create_chat_routes(chat_api)
     )
 
