@@ -141,6 +141,19 @@ class PolicyHierarchyResolver:
                     p for p in current.allowed_providers if p in node_providers
                 ]
 
+        # PII redaction: once enabled by a parent, children cannot disable
+        if limits.get("pii_redaction_enabled"):
+            current.pii_redaction_enabled = True
+
+        # PII types: union (child can add types but never remove parent's)
+        node_pii_types = limits.get("pii_redact_types")
+        if node_pii_types is not None:
+            if current.pii_redact_types is None:
+                current.pii_redact_types = list(node_pii_types)
+            else:
+                merged = set(current.pii_redact_types) | set(node_pii_types)
+                current.pii_redact_types = sorted(merged)
+
         return current
 
     async def set_node(self, node: PolicyNode) -> None:

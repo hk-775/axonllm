@@ -735,3 +735,16 @@ class DynamoPersistence:
         except Exception:
             logger.warning("Failed to load policy nodes from DynamoDB", exc_info=True)
             return []
+
+    # --- Generic item write (used by audit trail) ---
+
+    async def put_item(self, item: dict) -> None:
+        """Write a raw item to DynamoDB. Used by subsystems that manage their own schema."""
+        if not self._enabled:
+            return
+
+        def _put():
+            table = self._get_table()
+            table.put_item(Item=item)
+
+        await asyncio.to_thread(_put)

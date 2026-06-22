@@ -341,6 +341,8 @@ class ResolvedPolicy:
     allowed_models: list[str] | None = None
     max_tokens_per_request: int | None = None
     allowed_providers: list[str] | None = None
+    pii_redaction_enabled: bool = False
+    pii_redact_types: list[str] | None = None
 
 
 # --- Validation ---

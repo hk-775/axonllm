@@ -14,9 +14,19 @@ from typing import TYPE_CHECKING
 
 from starlette.applications import Starlette
 
+from src.gateway.admin.key_routes import KeyManagementAPI, create_key_routes
+from src.gateway.admin.policy_routes import PolicyHierarchyAPI, create_policy_hierarchy_routes
 from src.gateway.admin.routes import AdminAPI, PROVIDER_MODEL_CATALOG, create_admin_routes
 from src.gateway.agent import GatewayAgent
+from src.gateway.auth.api_key_service import APIKeyService
+from src.gateway.auth.oidc_service import OIDCConfig, OIDCService
+from src.gateway.auth.policy_hierarchy import PolicyHierarchyResolver
 from src.gateway.efficiency_analyzer import EfficiencyAnalyzer
+from src.gateway.middleware.auth import AuthMiddleware
+from src.gateway.middleware.security import SecurityMiddleware
+from src.gateway.security.audit_trail import AuditTrail
+from src.gateway.security.injection_detector import PromptInjectionDetector
+from src.gateway.security.pii_redactor import PIIRedactor
 from src.gateway.cache_manager import CacheManager
 from src.gateway.chat.client_agent import ClientAgent
 from src.gateway.chat.routes import ChatAPI, create_chat_routes
@@ -73,6 +83,12 @@ class GatewayComponents:
     policies: list[dict]
     persistence: DynamoPersistence
     catalog: dict
+    api_key_service: APIKeyService | None = None
+    oidc_service: OIDCService | None = None
+    policy_resolver: PolicyHierarchyResolver | None = None
+    pii_redactor: PIIRedactor | None = None
+    injection_detector: PromptInjectionDetector | None = None
+    audit_trail: AuditTrail | None = None
     efficiency_analyzer: EfficiencyAnalyzer | None = None
     semantic_engine: SemanticEfficiencyEngine | None = None
 
@@ -99,6 +115,23 @@ def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComp
         asyncio.get_event_loop().run_until_complete(
             persistence.create_table_if_not_exists()
         )
+
+    # --- Auth services ---
+    api_key_service = APIKeyService(persistence=persistence)
+    oidc_config = OIDCConfig(
+        issuer=app_config.oidc_issuer,
+        audience=app_config.oidc_audience,
+        alb_region=app_config.aws_region,
+    )
+    oidc_service = OIDCService(config=oidc_config)
+    policy_resolver = PolicyHierarchyResolver(persistence=persistence)
+    if persistence.enabled:
+        asyncio.get_event_loop().run_until_complete(policy_resolver.load_nodes())
+
+    # --- Security services ---
+    pii_redactor = PIIRedactor()
+    injection_detector = PromptInjectionDetector()
+    audit_trail = AuditTrail(persistence=persistence)
 
     # --- Core components ---
     cost_tracker = CostTracker(pricing_config=pricing, persistence=persistence)
@@ -221,6 +254,12 @@ def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComp
         policies=policies,
         persistence=persistence,
         catalog=catalog,
+        api_key_service=api_key_service,
+        oidc_service=oidc_service,
+        policy_resolver=policy_resolver,
+        pii_redactor=pii_redactor,
+        injection_detector=injection_detector,
+        audit_trail=audit_trail,
         efficiency_analyzer=efficiency_analyzer,
         semantic_engine=semantic_engine,
     )
@@ -252,6 +291,10 @@ def build_starlette_app(app_config: AppConfig | None = None) -> Starlette:
         semantic_engine=comp.semantic_engine,
     )
 
+    # Key and policy admin APIs
+    key_api = KeyManagementAPI(api_key_service=comp.api_key_service)
+    policy_api = PolicyHierarchyAPI(resolver=comp.policy_resolver)
+
     # Default chat project is the first demo project or "default"
     default_project = next(iter(comp.projects), "default")
     client_agent = ClientAgent(
@@ -261,8 +304,34 @@ def build_starlette_app(app_config: AppConfig | None = None) -> Starlette:
     )
     chat_api = ChatAPI(client_agent)
 
-    routes = create_admin_routes(admin_api) + create_chat_routes(chat_api)
-    return Starlette(routes=routes)
+    routes = (
+        create_admin_routes(admin_api)
+        + create_key_routes(key_api)
+        + create_policy_hierarchy_routes(policy_api)
+        + create_chat_routes(chat_api)
+    )
+
+    app = Starlette(routes=routes)
+
+    # Security middleware (runs after auth, before LLM routing)
+    app.add_middleware(
+        SecurityMiddleware,
+        pii_redactor=comp.pii_redactor,
+        injection_detector=comp.injection_detector,
+        policy_resolver=comp.policy_resolver,
+        audit_trail=comp.audit_trail,
+    )
+
+    # Auth middleware (outermost — runs first on every request)
+    app.add_middleware(
+        AuthMiddleware,
+        oidc_service=comp.oidc_service,
+        api_key_service=comp.api_key_service,
+        policy_service=None,
+        mode=app_config.auth_mode,
+    )
+
+    return app
 
 
 # ---------------------------------------------------------------------------
