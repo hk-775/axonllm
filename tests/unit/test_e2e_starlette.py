@@ -171,13 +171,7 @@ def app_setup():
     app = Starlette(routes=routes)
 
     # Middleware stack (order matters: auth first, then security)
-    app.add_middleware(
-        SecurityMiddleware,
-        pii_redactor=pii_redactor,
-        injection_detector=injection_detector,
-        policy_resolver=resolver,
-        audit_trail=audit_trail,
-    )
+    app.add_middleware(SecurityMiddleware)
     app.add_middleware(
         AuthMiddleware,
         api_key_service=api_key_service,

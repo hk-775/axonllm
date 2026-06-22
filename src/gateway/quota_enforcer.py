@@ -29,6 +29,9 @@ class QuotaDecision:
     current_value: float | int | None = None
 
 
+BUDGET_ALERT_THRESHOLDS = [0.8, 0.9, 1.0]
+
+
 class QuotaEnforcer:
     """Enforces resolved policy limits on incoming requests.
 
@@ -40,6 +43,15 @@ class QuotaEnforcer:
     def __init__(self) -> None:
         self._request_windows: dict[str, list[datetime]] = {}
         self._spend_tracker: dict[str, float] = {}
+        self._alerted_thresholds: dict[str, set[float]] = {}
+        self._alert_callbacks: list = []
+
+    def on_budget_alert(self, callback) -> None:
+        """Register a callback for budget threshold alerts.
+
+        Callback signature: callback(project_id, threshold_pct, current_spend, budget_limit)
+        """
+        self._alert_callbacks.append(callback)
 
     def check_rate_limit(
         self, project_id: str, policy: ResolvedPolicy
@@ -167,9 +179,23 @@ class QuotaEnforcer:
 
         return QuotaDecision(allowed=True)
 
-    def record_spend(self, project_id: str, cost: float) -> None:
-        """Record spend for budget tracking."""
-        self._spend_tracker[project_id] = self._spend_tracker.get(project_id, 0.0) + cost
+    def record_spend(self, project_id: str, cost: float, budget_limit: float | None = None) -> None:
+        """Record spend for budget tracking. Fires alerts at threshold crossings."""
+        prev = self._spend_tracker.get(project_id, 0.0)
+        new_spend = prev + cost
+        self._spend_tracker[project_id] = new_spend
+
+        if budget_limit and budget_limit > 0 and self._alert_callbacks:
+            alerted = self._alerted_thresholds.get(project_id, set())
+            for threshold in BUDGET_ALERT_THRESHOLDS:
+                if threshold in alerted:
+                    continue
+                trigger_at = budget_limit * threshold
+                if prev < trigger_at <= new_spend:
+                    alerted.add(threshold)
+                    for cb in self._alert_callbacks:
+                        cb(project_id, threshold, new_spend, budget_limit)
+            self._alerted_thresholds[project_id] = alerted
 
     def get_spend(self, project_id: str) -> float:
         """Get current tracked spend for a project."""
@@ -178,6 +204,7 @@ class QuotaEnforcer:
     def reset_spend(self, project_id: str) -> None:
         """Reset spend tracking for a project (e.g., at billing cycle reset)."""
         self._spend_tracker.pop(project_id, None)
+        self._alerted_thresholds.pop(project_id, None)
 
     def cap_max_tokens(self, requested: int | None, policy: ResolvedPolicy) -> int | None:
         """Return the effective max_tokens — capped by policy if needed."""

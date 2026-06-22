@@ -26,6 +26,7 @@ from src.gateway.auth.api_key_service import APIKeyService
 from src.gateway.auth.oidc_service import OIDCConfig, OIDCService
 from src.gateway.auth.policy_hierarchy import PolicyHierarchyResolver
 from src.gateway.efficiency_analyzer import EfficiencyAnalyzer
+from src.gateway.middleware.admin_rbac import AdminRBACMiddleware
 from src.gateway.middleware.auth import AuthMiddleware
 from src.gateway.multi_region.health_monitor import SpokeHealthMonitor
 from src.gateway.multi_region.region_config import default_single_region, HubConfig
@@ -155,6 +156,34 @@ def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComp
     audit_trail = AuditTrail(persistence=persistence)
     event_dispatcher = EventDispatcher()
 
+    # --- Budget threshold alerting ---
+    def _budget_alert(project_id, threshold_pct, current_spend, budget_limit):
+        import asyncio
+        from src.gateway.security.event_dispatcher import SecurityEvent
+        from datetime import timezone
+        event = SecurityEvent(
+            event_id=f"budget_{project_id}_{int(threshold_pct * 100)}",
+            event_type="budget_threshold",
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            severity="warning" if threshold_pct < 1.0 else "critical",
+            project_id=project_id,
+            data={
+                "threshold_pct": threshold_pct * 100,
+                "current_spend": current_spend,
+                "budget_limit": budget_limit,
+            },
+        )
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                loop.create_task(event_dispatcher.dispatch(event))
+            else:
+                loop.run_until_complete(event_dispatcher.dispatch(event))
+        except Exception:
+            logger.warning("Budget alert dispatch failed for %s at %d%%", project_id, int(threshold_pct * 100))
+
+    quota_enforcer.on_budget_alert(_budget_alert)
+
     # --- Core components ---
     cost_tracker = CostTracker(pricing_config=pricing, persistence=persistence)
     health_tracker = ProviderHealthTracker()
@@ -250,6 +279,7 @@ def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComp
         injection_detector=injection_detector,
         audit_trail=audit_trail,
         event_dispatcher=event_dispatcher,
+        region_router=region_router,
     )
 
     # --- Efficiency analysis ---
@@ -353,14 +383,11 @@ def build_starlette_app(app_config: AppConfig | None = None) -> Starlette:
 
     app = Starlette(routes=routes)
 
-    # Security middleware (runs after auth, before LLM routing)
-    app.add_middleware(
-        SecurityMiddleware,
-        pii_redactor=comp.pii_redactor,
-        injection_detector=comp.injection_detector,
-        policy_resolver=comp.policy_resolver,
-        audit_trail=comp.audit_trail,
-    )
+    # Security middleware (lightweight marker for LLM endpoints)
+    app.add_middleware(SecurityMiddleware)
+
+    # Admin RBAC (runs after auth, checks role/scope on /admin/* paths)
+    app.add_middleware(AdminRBACMiddleware, mode=app_config.auth_mode)
 
     # Auth middleware (outermost — runs first on every request)
     app.add_middleware(

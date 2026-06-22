@@ -37,6 +37,7 @@ from src.gateway.streaming import simulate_streaming
 
 if TYPE_CHECKING:
     from src.gateway.auth.policy_hierarchy import PolicyHierarchyResolver
+    from src.gateway.multi_region.region_router import RegionRouter
     from src.gateway.provider_fn_factory import ProviderFnFactory
     from src.gateway.quota_enforcer import QuotaEnforcer
     from src.gateway.security.audit_trail import AuditTrail
@@ -137,6 +138,7 @@ class GatewayAgent:
         injection_detector: PromptInjectionDetector | None = None,
         audit_trail: AuditTrail | None = None,
         event_dispatcher: EventDispatcher | None = None,
+        region_router: RegionRouter | None = None,
     ) -> None:
         self.router = router
         self.rate_limiter = rate_limiter
@@ -155,6 +157,7 @@ class GatewayAgent:
         self._injection_detector = injection_detector
         self._audit_trail = audit_trail
         self._event_dispatcher = event_dispatcher
+        self._region_router = region_router
 
     # ------------------------------------------------------------------
     # Public API
@@ -396,6 +399,26 @@ class GatewayAgent:
                 result = self._response_to_dict(cached, is_cached=True)
                 result["_rate_limit_headers"] = _rate_limit_headers
                 return result
+
+        # 9.5. Region routing — check spoke availability and data residency
+        region_decision = None
+        if self._region_router is not None:
+            data_zone = context.get("data_residency_zone")
+            region_decision = self._region_router.route(
+                model=request.model or None,
+                data_residency_zone=data_zone,
+                preferred_region=context.get("preferred_region"),
+            )
+            if region_decision is None:
+                resp = _error_response(
+                    503,
+                    "service_unavailable",
+                    "No available region for this request"
+                    + (f" (data_residency_zone={data_zone})" if data_zone else ""),
+                    code="no_available_region",
+                )
+                resp["_rate_limit_headers"] = _rate_limit_headers
+                return resp
 
         # 10. Route and execute
         try:
@@ -666,7 +689,8 @@ class GatewayAgent:
 
             # Record spend in quota enforcer for hierarchy budget tracking
             if self._quota_enforcer is not None:
-                self._quota_enforcer.record_spend(req_ctx.project_id, cost)
+                budget_limit = resolved_policy.budget_limit if resolved_policy else None
+                self._quota_enforcer.record_spend(req_ctx.project_id, cost, budget_limit=budget_limit)
 
         # 13. Budget status for streaming (already enforced pre-request)
         budget_status: BudgetStatus | None = None
@@ -682,8 +706,9 @@ class GatewayAgent:
                 return self._stream_response_real(
                     request, response, budget_status, _rate_limit_headers,
                     prompt_caching_enabled=prompt_caching_enabled,
+                    pii_mapping=pii_mapping,
                 )
-            return self._stream_response(response, budget_status, _rate_limit_headers)
+            return self._stream_response(response, budget_status, _rate_limit_headers, pii_mapping=pii_mapping)
 
         # 16. Non-streaming return
         result = self._response_to_dict(response)
@@ -701,6 +726,11 @@ class GatewayAgent:
             result["ensemble"] = self._ensemble_metadata(ensemble_decision)
         if ensemble_unavailable:
             result["ensemble_unavailable"] = True
+        if region_decision is not None:
+            result["region"] = {
+                "spoke": region_decision.target_spoke.region,
+                "reason": region_decision.reason,
+            }
         result["_rate_limit_headers"] = _rate_limit_headers
         return result
 
@@ -713,6 +743,7 @@ class GatewayAgent:
         response: ChatCompletionResponse,
         budget_status: BudgetStatus | None = None,
         rate_limit_headers: dict[str, str] | None = None,
+        pii_mapping: RedactionMapping | None = None,
     ) -> AsyncIterator[dict]:
         """Async generator that yields SSE-formatted chunks.
 
@@ -725,7 +756,10 @@ class GatewayAgent:
         try:
             chunks = simulate_streaming(response)
             for chunk in chunks:
-                yield {"data": self._chunk_to_dict(chunk)}
+                chunk_dict = self._chunk_to_dict(chunk)
+                if pii_mapping and pii_mapping.redacted_count > 0:
+                    chunk_dict = self._reinject_chunk_pii(chunk_dict, pii_mapping)
+                yield {"data": chunk_dict}
         except Exception as exc:
             # On error during streaming, yield error event then DONE
             yield {"data": {"error": {"type": "stream_error", "message": str(exc)}}}
@@ -805,6 +839,7 @@ class GatewayAgent:
         budget_status: BudgetStatus | None = None,
         rate_limit_headers: dict[str, str] | None = None,
         prompt_caching_enabled: bool = False,
+        pii_mapping: RedactionMapping | None = None,
     ) -> AsyncIterator[dict]:
         """Async generator that yields real SSE chunks from the provider.
 
@@ -822,7 +857,7 @@ class GatewayAgent:
 
         if adapter is None or config is None:
             # Fall back to simulated streaming if we can't resolve provider info
-            async for chunk_dict in self._stream_response(response, budget_status, rate_limit_headers):
+            async for chunk_dict in self._stream_response(response, budget_status, rate_limit_headers, pii_mapping=pii_mapping):
                 yield chunk_dict
             return
 
@@ -835,7 +870,7 @@ class GatewayAgent:
                 break
 
         if mapping is None:
-            async for chunk_dict in self._stream_response(response, budget_status, rate_limit_headers):
+            async for chunk_dict in self._stream_response(response, budget_status, rate_limit_headers, pii_mapping=pii_mapping):
                 yield chunk_dict
             return
 
@@ -849,7 +884,10 @@ class GatewayAgent:
                 prompt_caching_enabled=prompt_caching_enabled,
             )
             async for chunk in stream:
-                yield {"data": self._chunk_to_dict(chunk)}
+                chunk_dict = self._chunk_to_dict(chunk)
+                if pii_mapping and pii_mapping.redacted_count > 0:
+                    chunk_dict = self._reinject_chunk_pii(chunk_dict, pii_mapping)
+                yield {"data": chunk_dict}
                 if chunk.is_final:
                     break
         except Exception as exc:
@@ -1101,6 +1139,20 @@ class GatewayAgent:
             "model": chunk.model,
             "is_final": chunk.is_final,
         }
+
+    def _reinject_chunk_pii(self, chunk_dict: dict, mapping: RedactionMapping) -> dict:
+        """Re-inject PII tokens in a streaming chunk's delta content."""
+        choices = chunk_dict.get("choices", [])
+        new_choices = []
+        for choice in choices:
+            delta = choice.get("delta", {})
+            content = delta.get("content", "")
+            if isinstance(content, str) and content:
+                reinjected = mapping.reinject(content)
+                new_choices.append({**choice, "delta": {**delta, "content": reinjected}})
+            else:
+                new_choices.append(choice)
+        return {**chunk_dict, "choices": new_choices}
 
     def _replace_response_content(
         self, response: ChatCompletionResponse, message: str
