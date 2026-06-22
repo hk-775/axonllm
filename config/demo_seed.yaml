@@ -17,6 +17,12 @@ projects:
       - claude-opus
       - claude-sonnet
       - gpt-4o
+      - gpt-5.5
+      - gpt-5.5-pro
+      - gpt-5.4
+      - gpt-4.1
+      - o3
+      - o4-mini
       - nova-pro
       - deepseek-r1
       - llama-3.3-70b
