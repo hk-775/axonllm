@@ -37,16 +37,12 @@ virtual_models:
     fallback_order: 0
 - name: gpt-5.5
   description: GPT-5.5
-  routing_strategy: least-latency
+  routing_strategy: round-robin
   providers:
   - provider: bedrock-mantle
     model_id: openai.gpt-5.5
-    weight: 0.5
+    weight: 1.0
     fallback_order: 0
-  - provider: openai
-    model_id: gpt-5.5
-    weight: 0.5
-    fallback_order: 1
 - name: gpt-5.5-pro
   description: GPT-5.5 Pro
   routing_strategy: round-robin

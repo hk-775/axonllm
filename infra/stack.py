@@ -157,10 +157,17 @@ class AxonLLMStack(Stack):
         # --- IAM permissions ---
         task_role = fargate_service.task_definition.task_role
 
-        # Bedrock invoke
+        # Bedrock (runtime + mantle)
         task_role.add_to_policy(
             iam.PolicyStatement(
-                actions=["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
+                actions=[
+                    "bedrock:InvokeModel",
+                    "bedrock:InvokeModelWithResponseStream",
+                    "bedrock:InvokeEndpoint",
+                    "bedrock:Converse",
+                    "bedrock:ConverseStream",
+                    "bedrock-mantle:*",
+                ],
                 resources=["*"],
             )
         )
