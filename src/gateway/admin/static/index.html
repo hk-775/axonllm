@@ -2286,6 +2286,156 @@
     }
 
     /* ================================================================== */
+    /*  Quotas Page                                                         */
+    /* ================================================================== */
+    function QuotasPage() {
+      const [projectId, setProjectId] = useState('');
+      const [quota, setQuota] = useState(null);
+      const [simResult, setSimResult] = useState(null);
+      const [error, setError] = useState(null);
+      const [msg, setMsg] = useState(null);
+      const [simForm, setSimForm] = useState({ project_id: '', model: '', provider: '', max_tokens: '', estimated_cost: '' });
+
+      const loadQuota = async () => {
+        if (!projectId.trim()) return;
+        setError(null); setQuota(null);
+        try {
+          const data = await api.get(`/admin/quotas/${encodeURIComponent(projectId)}`);
+          setQuota(data);
+        } catch (e) { setError(e.detail || 'Failed to load quota'); }
+      };
+
+      const resetSpend = async () => {
+        if (!projectId.trim()) return;
+        setMsg(null);
+        try {
+          const res = await api.post(`/admin/quotas/${encodeURIComponent(projectId)}/reset`);
+          setMsg(`Reset successful. Previous spend: ${fmt.cost(res.previous_spend)}`);
+          loadQuota();
+        } catch (e) { setError('Reset failed'); }
+      };
+
+      const simulate = async () => {
+        setSimResult(null); setError(null);
+        try {
+          const body = {
+            project_id: simForm.project_id,
+            model: simForm.model,
+            provider: simForm.provider || undefined,
+            max_tokens: simForm.max_tokens ? parseInt(simForm.max_tokens) : undefined,
+            estimated_cost: simForm.estimated_cost ? parseFloat(simForm.estimated_cost) : 0,
+          };
+          const res = await api.post('/admin/quotas/simulate', body);
+          setSimResult(res);
+        } catch (e) { setError('Simulation failed'); }
+      };
+
+      const inputStyle = { padding: '0.4rem 0.75rem', border: '2px solid var(--awsui-color-border-input)', borderRadius: '8px', fontSize: '14px', fontFamily: 'inherit', width: '100%' };
+
+      return (
+        <div>
+          <div className="page-header"><h1>Quota & Usage Controls</h1><p>Policy-hierarchy-driven budget, rate, and model enforcement</p></div>
+          {error && <Flash type="error" onDismiss={() => setError(null)}>{error}</Flash>}
+          {msg && <Flash type="success" onDismiss={() => setMsg(null)}>{msg}</Flash>}
+
+          {/* Lookup Section */}
+          <div className="container" style={{ marginBottom: '1.5rem' }}>
+            <div className="container-header"><h2>Project Quota Lookup</h2></div>
+            <div className="container-body">
+              <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'flex-end' }}>
+                <div style={{ flex: 1 }}>
+                  <label style={{ display: 'block', fontSize: '12px', fontWeight: 600, marginBottom: '0.25rem' }}>Project ID</label>
+                  <input style={inputStyle} placeholder="e.g. proj:ml-team" value={projectId} onChange={e => setProjectId(e.target.value)} onKeyDown={e => e.key === 'Enter' && loadQuota()} />
+                </div>
+                <Btn variant="primary" onClick={loadQuota}>Lookup</Btn>
+              </div>
+
+              {quota && (
+                <div style={{ marginTop: '1.5rem' }}>
+                  <div className="stat-grid">
+                    <div className="stat-card"><div className="stat-label">Rate Limit</div><div className="stat-value">{quota.policy_limits.rate_limit_rpm ?? 'unlimited'} <span style={{fontSize:'12px',color:'var(--awsui-color-text-secondary)'}}>RPM</span></div></div>
+                    <div className="stat-card"><div className="stat-label">Budget Limit</div><div className="stat-value">{quota.policy_limits.budget_limit ? fmt.cost(quota.policy_limits.budget_limit) : 'unlimited'}</div></div>
+                    <div className="stat-card"><div className="stat-label">Current Spend</div><div className="stat-value">{fmt.cost(quota.usage.current_spend)}</div></div>
+                    <div className="stat-card"><div className="stat-label">Budget Used</div><div className="stat-value">{quota.usage.budget_utilization_pct != null ? fmt.pct(quota.usage.budget_utilization_pct) : 'N/A'}</div></div>
+                  </div>
+
+                  <div style={{ marginTop: '1rem' }}>
+                    <h3 style={{ fontSize: '14px', fontWeight: 600, marginBottom: '0.5rem' }}>Policy Limits</h3>
+                    <table>
+                      <tbody>
+                        <tr><td style={{fontWeight:600}}>Max Tokens/Request</td><td>{quota.policy_limits.max_tokens_per_request ?? 'unlimited'}</td></tr>
+                        <tr><td style={{fontWeight:600}}>Allowed Models</td><td>{quota.policy_limits.allowed_models ? quota.policy_limits.allowed_models.join(', ') : 'all'}</td></tr>
+                        <tr><td style={{fontWeight:600}}>Allowed Providers</td><td>{quota.policy_limits.allowed_providers ? quota.policy_limits.allowed_providers.join(', ') : 'all'}</td></tr>
+                        <tr><td style={{fontWeight:600}}>PII Redaction</td><td><span className={`badge ${quota.policy_limits.pii_redaction_enabled ? 'badge-green' : 'badge-grey'}`}>{quota.policy_limits.pii_redaction_enabled ? 'enabled' : 'disabled'}</span></td></tr>
+                        {quota.policy_limits.pii_redact_types && quota.policy_limits.pii_redact_types.length > 0 && (
+                          <tr><td style={{fontWeight:600}}>PII Types</td><td>{quota.policy_limits.pii_redact_types.join(', ')}</td></tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  <div style={{ marginTop: '1rem', display: 'flex', gap: '0.5rem' }}>
+                    <Btn variant="danger" onClick={resetSpend}>Reset Spend</Btn>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Simulate Section */}
+          <div className="container">
+            <div className="container-header"><h2>Request Simulator</h2></div>
+            <div className="container-body">
+              <p style={{ fontSize: '13px', color: 'var(--awsui-color-text-secondary)', marginBottom: '1rem' }}>Test whether a request would pass quota enforcement without sending it.</p>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem', marginBottom: '1rem' }}>
+                <div>
+                  <label style={{ display: 'block', fontSize: '12px', fontWeight: 600, marginBottom: '0.25rem' }}>Project ID *</label>
+                  <input style={inputStyle} placeholder="proj:ml-team" value={simForm.project_id} onChange={e => setSimForm({...simForm, project_id: e.target.value})} />
+                </div>
+                <div>
+                  <label style={{ display: 'block', fontSize: '12px', fontWeight: 600, marginBottom: '0.25rem' }}>Model *</label>
+                  <input style={inputStyle} placeholder="claude-opus" value={simForm.model} onChange={e => setSimForm({...simForm, model: e.target.value})} />
+                </div>
+                <div>
+                  <label style={{ display: 'block', fontSize: '12px', fontWeight: 600, marginBottom: '0.25rem' }}>Provider</label>
+                  <input style={inputStyle} placeholder="anthropic (optional)" value={simForm.provider} onChange={e => setSimForm({...simForm, provider: e.target.value})} />
+                </div>
+                <div>
+                  <label style={{ display: 'block', fontSize: '12px', fontWeight: 600, marginBottom: '0.25rem' }}>Max Tokens</label>
+                  <input style={inputStyle} type="number" placeholder="4096 (optional)" value={simForm.max_tokens} onChange={e => setSimForm({...simForm, max_tokens: e.target.value})} />
+                </div>
+                <div>
+                  <label style={{ display: 'block', fontSize: '12px', fontWeight: 600, marginBottom: '0.25rem' }}>Estimated Cost ($)</label>
+                  <input style={inputStyle} type="number" step="0.001" placeholder="0.05" value={simForm.estimated_cost} onChange={e => setSimForm({...simForm, estimated_cost: e.target.value})} />
+                </div>
+              </div>
+              <Btn variant="primary" onClick={simulate}>Simulate Request</Btn>
+
+              {simResult && (
+                <div style={{ marginTop: '1rem', padding: '1rem', borderRadius: '8px', background: simResult.allowed ? 'var(--awsui-color-background-status-success)' : 'var(--awsui-color-background-status-error)', border: `1px solid ${simResult.allowed ? 'var(--awsui-color-status-success)' : 'var(--awsui-color-status-error)'}` }}>
+                  <div style={{ fontSize: '16px', fontWeight: 700, marginBottom: '0.5rem', color: simResult.allowed ? 'var(--awsui-color-status-success)' : 'var(--awsui-color-status-error)' }}>
+                    {simResult.allowed ? '✓ Request Allowed' : '✗ Request Blocked'}
+                  </div>
+                  {!simResult.allowed && (
+                    <div>
+                      <div style={{ fontSize: '13px' }}><strong>Reason:</strong> {simResult.reason}</div>
+                      <div style={{ fontSize: '13px' }}><strong>Limit Type:</strong> {simResult.limit_type}</div>
+                      {simResult.limit_value != null && <div style={{ fontSize: '13px' }}><strong>Limit Value:</strong> {simResult.limit_value}</div>}
+                      {simResult.current_value != null && <div style={{ fontSize: '13px' }}><strong>Current Value:</strong> {simResult.current_value}</div>}
+                    </div>
+                  )}
+                  <div style={{ marginTop: '0.75rem', fontSize: '12px', color: 'var(--awsui-color-text-secondary)' }}>
+                    <strong>Resolved Policy:</strong> RPM={simResult.resolved_policy.rate_limit_rpm ?? '∞'}, Budget={simResult.resolved_policy.budget_limit ? fmt.cost(simResult.resolved_policy.budget_limit) : '∞'}, MaxTokens={simResult.resolved_policy.max_tokens_per_request ?? '∞'}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    /* ================================================================== */
     /*  App Shell                                                          */
     /* ================================================================== */
     function App() {
@@ -2316,6 +2466,7 @@
         case 'api-keys': content = <ApiKeysPage />; break;
         case 'security': content = <SecurityPage />; break;
         case 'webhooks': content = <WebhooksPage />; break;
+        case 'quotas': content = <QuotasPage />; break;
         case 'regions': content = <RegionsPage />; break;
         case 'configuration': content = <ConfigurationPage />; break;
         case 'health': content = <HealthPage />; break;
@@ -2336,6 +2487,7 @@
         { label: 'Governance', items: [
           { key: 'policies', icon: '🔒', label: 'Policies' },
           { key: 'policy-hierarchy', icon: '🏛', label: 'Hierarchy' },
+          { key: 'quotas', icon: '📏', label: 'Quotas' },
           { key: 'regions', icon: '🌐', label: 'Regions' },
         ]},
         { label: 'Security', items: [
