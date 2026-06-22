@@ -128,7 +128,7 @@ def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComp
     # --- Persistence ---
     persistence = DynamoPersistence(region=app_config.aws_region)
     if persistence.enabled:
-        asyncio.get_event_loop().run_until_complete(
+        asyncio.run(
             persistence.create_table_if_not_exists()
         )
 
@@ -142,7 +142,7 @@ def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComp
     oidc_service = OIDCService(config=oidc_config)
     policy_resolver = PolicyHierarchyResolver(persistence=persistence)
     if persistence.enabled:
-        asyncio.get_event_loop().run_until_complete(policy_resolver.load_nodes())
+        asyncio.run(policy_resolver.load_nodes())
 
     # --- Quota enforcement ---
     quota_enforcer = QuotaEnforcer()
@@ -209,7 +209,7 @@ def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComp
     loaded_feedback: list = []
     if persistence.enabled:
         loaded_projects, loaded_user_configs, loaded_records, loaded_feedback = (
-            asyncio.get_event_loop().run_until_complete(_load_persisted_state(persistence))
+            asyncio.run(_load_persisted_state(persistence))
         )
         projects.update(loaded_projects)
         user_configs.update(loaded_user_configs)
@@ -479,7 +479,7 @@ def _apply_seed_data(
                 cache_creation_tokens=s.get("cache_creation_tokens", 0),
             ))
 
-    asyncio.get_event_loop().run_until_complete(_seed_usage())
+    asyncio.run(_seed_usage())
 
     # Unhealthy providers
     for up in seed.unhealthy_providers:

@@ -23,7 +23,7 @@ from src.gateway.models import RateLimitConfig
 
 def _run(coro):
     """Run an async coroutine synchronously."""
-    return asyncio.get_event_loop().run_until_complete(coro)
+    return asyncio.run(coro)
 
 
 # RPM values kept small so we can exceed them within a single test run

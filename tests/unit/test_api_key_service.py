@@ -48,7 +48,7 @@ def service():
 
 class TestIssueKey:
     def test_returns_key_and_raw(self, service):
-        key, raw = asyncio.get_event_loop().run_until_complete(
+        key, raw = asyncio.run(
             service.issue_key("proj-1", "Test Key", ["chat:invoke"], "admin")
         )
         assert key.project_id == "proj-1"
@@ -58,13 +58,13 @@ class TestIssueKey:
         assert len(raw) == len(PREFIX) + 64  # 32 bytes hex = 64 chars
 
     def test_key_id_has_prefix(self, service):
-        key, _ = asyncio.get_event_loop().run_until_complete(
+        key, _ = asyncio.run(
             service.issue_key("proj-1", "K", ["chat:invoke"], "admin")
         )
         assert key.key_id.startswith("axk_")
 
     def test_hash_stored_not_raw(self, service):
-        key, raw = asyncio.get_event_loop().run_until_complete(
+        key, raw = asyncio.run(
             service.issue_key("proj-1", "K", ["chat:invoke"], "admin")
         )
         assert key.key_hash == APIKeyService.hash_key(raw)
@@ -73,64 +73,64 @@ class TestIssueKey:
 
 class TestValidateKey:
     def test_valid_key_returns_record(self, service):
-        key, raw = asyncio.get_event_loop().run_until_complete(
+        key, raw = asyncio.run(
             service.issue_key("proj-1", "K", ["chat:invoke"], "admin")
         )
-        result = asyncio.get_event_loop().run_until_complete(service.validate_key(raw))
+        result = asyncio.run(service.validate_key(raw))
         assert result is not None
         assert result.key_id == key.key_id
 
     def test_wrong_key_returns_none(self, service):
-        asyncio.get_event_loop().run_until_complete(
+        asyncio.run(
             service.issue_key("proj-1", "K", ["chat:invoke"], "admin")
         )
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             service.validate_key("axon_" + "a" * 64)
         )
         assert result is None
 
     def test_non_prefixed_key_returns_none(self, service):
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             service.validate_key("not-a-valid-key")
         )
         assert result is None
 
     def test_revoked_key_returns_none(self, service):
-        key, raw = asyncio.get_event_loop().run_until_complete(
+        key, raw = asyncio.run(
             service.issue_key("proj-1", "K", ["chat:invoke"], "admin")
         )
-        asyncio.get_event_loop().run_until_complete(service.revoke_key(key.key_id))
-        result = asyncio.get_event_loop().run_until_complete(service.validate_key(raw))
+        asyncio.run(service.revoke_key(key.key_id))
+        result = asyncio.run(service.validate_key(raw))
         assert result is None
 
     def test_expired_key_returns_none(self, service):
         expires_at = datetime.now(timezone.utc) - timedelta(hours=1)
-        key, raw = asyncio.get_event_loop().run_until_complete(
+        key, raw = asyncio.run(
             service.issue_key("proj-1", "K", ["chat:invoke"], "admin", expires_at=expires_at)
         )
-        result = asyncio.get_event_loop().run_until_complete(service.validate_key(raw))
+        result = asyncio.run(service.validate_key(raw))
         assert result is None
 
 
 class TestRevokeKey:
     def test_revoke_existing_key(self, service):
-        key, _ = asyncio.get_event_loop().run_until_complete(
+        key, _ = asyncio.run(
             service.issue_key("proj-1", "K", ["chat:invoke"], "admin")
         )
-        success = asyncio.get_event_loop().run_until_complete(service.revoke_key(key.key_id))
+        success = asyncio.run(service.revoke_key(key.key_id))
         assert success is True
 
     def test_revoke_nonexistent_returns_false(self, service):
-        success = asyncio.get_event_loop().run_until_complete(service.revoke_key("nonexistent"))
+        success = asyncio.run(service.revoke_key("nonexistent"))
         assert success is False
 
 
 class TestRotateKey:
     def test_rotate_returns_new_key(self, service):
-        key, _ = asyncio.get_event_loop().run_until_complete(
+        key, _ = asyncio.run(
             service.issue_key("proj-1", "K", ["chat:invoke"], "admin")
         )
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             service.rotate_key(key.key_id, "admin")
         )
         assert result is not None
@@ -141,22 +141,22 @@ class TestRotateKey:
         assert new_raw.startswith(PREFIX)
 
     def test_old_key_revoked_after_rotation(self, service):
-        key, old_raw = asyncio.get_event_loop().run_until_complete(
+        key, old_raw = asyncio.run(
             service.issue_key("proj-1", "K", ["chat:invoke"], "admin")
         )
-        asyncio.get_event_loop().run_until_complete(service.rotate_key(key.key_id, "admin"))
-        result = asyncio.get_event_loop().run_until_complete(service.validate_key(old_raw))
+        asyncio.run(service.rotate_key(key.key_id, "admin"))
+        result = asyncio.run(service.validate_key(old_raw))
         assert result is None
 
 
 class TestListKeys:
     def test_list_returns_only_project_keys(self, service):
-        asyncio.get_event_loop().run_until_complete(
+        asyncio.run(
             service.issue_key("proj-1", "K1", ["chat:invoke"], "admin")
         )
-        asyncio.get_event_loop().run_until_complete(
+        asyncio.run(
             service.issue_key("proj-2", "K2", ["chat:invoke"], "admin")
         )
-        keys = asyncio.get_event_loop().run_until_complete(service.list_keys("proj-1"))
+        keys = asyncio.run(service.list_keys("proj-1"))
         assert len(keys) == 1
         assert keys[0].project_id == "proj-1"

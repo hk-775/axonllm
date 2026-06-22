@@ -15,7 +15,7 @@ from src.gateway.multi_region.region_config import (
 
 
 def _run(coro):
-    return asyncio.get_event_loop().run_until_complete(coro)
+    return asyncio.run(coro)
 
 
 class TestHealthCheckNoURL:

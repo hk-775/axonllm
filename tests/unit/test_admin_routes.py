@@ -200,7 +200,7 @@ class TestOverview:
             _make_usage_record(project_id="p2", user_id="u1", cost=0.03),
         ]
         for r in records:
-            asyncio.get_event_loop().run_until_complete(
+            asyncio.run(
                 admin_api.cost_tracker.record_usage(r)
             )
 
@@ -276,7 +276,7 @@ class TestProjectCRUD:
             "budget_limit": 100.0,
         })
         # Record some usage for p1
-        asyncio.get_event_loop().run_until_complete(
+        asyncio.run(
             admin_api.cost_tracker.record_usage(
                 _make_usage_record(project_id="p1", cost=25.0)
             )
@@ -293,7 +293,7 @@ class TestProjectCRUD:
 
     def test_get_project_detail(self, admin_api, client):
         client.post("/admin/projects", json={"project_id": "p1", "name": "Alpha"})
-        asyncio.get_event_loop().run_until_complete(
+        asyncio.run(
             admin_api.cost_tracker.record_usage(
                 _make_usage_record(project_id="p1", user_id="u1", provider="openai", model="gpt-4", cost=0.01)
             )
@@ -369,7 +369,7 @@ class TestUsageQuery:
             _make_usage_record(provider="anthropic", model="claude-3", cost=0.02),
         ]
         for r in records:
-            asyncio.get_event_loop().run_until_complete(
+            asyncio.run(
                 admin_api.cost_tracker.record_usage(r)
             )
 
@@ -386,7 +386,7 @@ class TestUsageQuery:
             _make_usage_record(provider="openai", cost=0.03),
         ]
         for r in records:
-            asyncio.get_event_loop().run_until_complete(
+            asyncio.run(
                 admin_api.cost_tracker.record_usage(r)
             )
 
@@ -401,7 +401,7 @@ class TestUsageQuery:
             _make_usage_record(model="claude-3", cost=0.02),
         ]
         for r in records:
-            asyncio.get_event_loop().run_until_complete(
+            asyncio.run(
                 admin_api.cost_tracker.record_usage(r)
             )
 
@@ -416,7 +416,7 @@ class TestUsageQuery:
             _make_usage_record(project_id="p2", cost=0.02),
         ]
         for r in records:
-            asyncio.get_event_loop().run_until_complete(
+            asyncio.run(
                 admin_api.cost_tracker.record_usage(r)
             )
 
@@ -432,7 +432,7 @@ class TestUsageQuery:
             _make_usage_record(project_id="p2", provider="openai", cost=0.03),
         ]
         for r in records:
-            asyncio.get_event_loop().run_until_complete(
+            asyncio.run(
                 admin_api.cost_tracker.record_usage(r)
             )
 

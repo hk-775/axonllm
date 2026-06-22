@@ -98,7 +98,7 @@ class TestValidateOIDCJWT:
         token = _make_jwt(header, payload)
 
         # Without python-jose, falls back to manual decode but checks exp
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             service.validate_oidc_jwt(token)
         )
         assert result is None
@@ -117,7 +117,7 @@ class TestValidateOIDCJWT:
         service._jwks_cache = {"keys": [{"kid": "k1", "kty": "RSA"}]}
         service._jwks_fetched_at = time.time()
 
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             service.validate_oidc_jwt(token)
         )
         assert result is None
@@ -135,7 +135,7 @@ class TestValidateOIDCJWT:
         service._jwks_cache = {"keys": [{"kid": "k1", "kty": "RSA"}]}
         service._jwks_fetched_at = time.time()
 
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             service.validate_oidc_jwt(token)
         )
         assert result is None
@@ -147,7 +147,7 @@ class TestJWKSCache:
         service._jwks_fetched_at = time.time()
 
         # _get_jwks should return cache without fetching
-        result = asyncio.get_event_loop().run_until_complete(service._get_jwks())
+        result = asyncio.run(service._get_jwks())
         assert result == {"keys": [{"kid": "k1"}]}
 
     def test_find_key_by_kid(self, service):

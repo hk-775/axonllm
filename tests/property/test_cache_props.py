@@ -24,7 +24,7 @@ from src.gateway.models import (
 
 def _run(coro):
     """Run an async coroutine synchronously."""
-    return asyncio.get_event_loop().run_until_complete(coro)
+    return asyncio.run(coro)
 
 
 model_strategy = st.sampled_from(["gpt-4", "claude-3", "gemini-pro", "command-r"])
