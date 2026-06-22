@@ -14,7 +14,6 @@ from typing import Awaitable, Callable
 import boto3
 
 from src.gateway.adapters.bedrock_adapter import BedrockAdapter
-from src.gateway.adapters.openai_style import OpenAIStyleAdapter
 from src.gateway.models import (
     ChatCompletionRequest,
     ChatCompletionResponse,

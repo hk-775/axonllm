@@ -6,11 +6,9 @@ raises alerts, and compares users against their project peers.
 
 from __future__ import annotations
 
-import hashlib
-import json
 import logging
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import TYPE_CHECKING
 
 from src.gateway.models import (

@@ -207,7 +207,10 @@ class PolicyHierarchyResolver:
         return violations
 
     def _invalidate_cache_for(self, node_id: str) -> None:
-        """Invalidate cache entries that include this node."""
-        keys_to_remove = [k for k in self._cache if node_id in k]
-        for k in keys_to_remove:
-            del self._cache[k]
+        """Invalidate all cache entries.
+
+        A change to any node (especially org/BU level) can affect many
+        downstream resolved policies. Clearing the entire cache is safe
+        since entries rebuild on next resolve() call.
+        """
+        self._cache.clear()

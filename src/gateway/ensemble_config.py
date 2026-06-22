@@ -17,7 +17,6 @@ import yaml
 from src.gateway.ensemble import (
     DEFAULT_FALLBACK_POLICY,
     DEFAULT_QUORUM,
-    EnsembleConfigError,
     EnsembleStrategy,
 )
 from src.gateway.models import EnsemblePreset

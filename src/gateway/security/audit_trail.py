@@ -11,15 +11,16 @@ Records are append-only and include a hash chain for tamper detection.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
-import time
 import uuid
-from dataclasses import asdict, dataclass, field
+from collections import deque
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from src.gateway.persistence import DynamoPersistence
@@ -83,9 +84,10 @@ class AuditTrail:
         buffer_size: int = 10000,
     ) -> None:
         self._persistence = persistence
-        self._buffer: list[AuditRecord] = []
+        self._buffer: deque[AuditRecord] = deque(maxlen=buffer_size)
         self._buffer_size = buffer_size
         self._last_hash = "genesis"
+        self._lock = asyncio.Lock()
 
     async def record(
         self,
@@ -96,22 +98,21 @@ class AuditTrail:
         data: dict | None = None,
     ) -> AuditRecord:
         """Append a new audit record."""
-        record = AuditRecord(
-            record_id=f"aud_{uuid.uuid4().hex[:16]}",
-            event_type=event_type,
-            timestamp=datetime.now(timezone.utc),
-            user_id=user_id,
-            project_id=project_id,
-            request_id=request_id,
-            data=data or {},
-            prev_hash=self._last_hash,
-        )
-        record.record_hash = record.compute_hash()
-        self._last_hash = record.record_hash
+        async with self._lock:
+            record = AuditRecord(
+                record_id=f"aud_{uuid.uuid4().hex[:16]}",
+                event_type=event_type,
+                timestamp=datetime.now(timezone.utc),
+                user_id=user_id,
+                project_id=project_id,
+                request_id=request_id,
+                data=data or {},
+                prev_hash=self._last_hash,
+            )
+            record.record_hash = record.compute_hash()
+            self._last_hash = record.record_hash
 
-        self._buffer.append(record)
-        if len(self._buffer) > self._buffer_size:
-            self._buffer = self._buffer[-self._buffer_size:]
+            self._buffer.append(record)
 
         if self._persistence and self._persistence.enabled:
             await self._persist(record)
@@ -192,7 +193,7 @@ class AuditTrail:
         limit: int = 100,
     ) -> list[AuditRecord]:
         """Query recent records from the in-memory buffer."""
-        results = self._buffer
+        results: list[AuditRecord] = list(self._buffer)
         if project_id:
             results = [r for r in results if r.project_id == project_id]
         if event_type:
@@ -201,7 +202,7 @@ class AuditTrail:
 
     def verify_chain(self, records: list[AuditRecord] | None = None) -> bool:
         """Verify hash chain integrity. Returns False if tampered."""
-        records = records or self._buffer
+        records = records if records is not None else list(self._buffer)
         if not records:
             return True
 

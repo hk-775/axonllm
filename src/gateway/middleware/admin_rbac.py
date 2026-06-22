@@ -42,7 +42,7 @@ class AdminRBACMiddleware(BaseHTTPMiddleware):
                 return self._deny("No authentication context")
             return await call_next(request)
 
-        if self._is_authorized(ctx):
+        if self._is_authorized(ctx, path):
             return await call_next(request)
 
         if self.mode == "ENFORCE":
@@ -57,13 +57,28 @@ class AdminRBACMiddleware(BaseHTTPMiddleware):
         )
         return await call_next(request)
 
-    def _is_authorized(self, ctx) -> bool:
+    def _is_authorized(self, ctx, path: str = "") -> bool:
         if "admin" in ctx.roles:
             return True
+        resource = self._extract_resource(path)
         for scope in ctx.scopes:
-            if scope == "admin:*" or scope.startswith("admin:"):
+            if scope == "admin:*":
+                return True
+            if scope.startswith("admin:") and self._scope_matches_resource(scope, resource):
                 return True
         return False
+
+    def _extract_resource(self, path: str) -> str:
+        """Extract the admin resource from path, e.g. /admin/quotas/proj:x -> quotas."""
+        parts = path.strip("/").split("/")
+        if len(parts) >= 2:
+            return parts[1]
+        return ""
+
+    def _scope_matches_resource(self, scope: str, resource: str) -> bool:
+        """Check if a scope like 'admin:quotas' grants access to the resource."""
+        scope_resource = scope[len("admin:"):]
+        return scope_resource == resource
 
     def _deny(self, message: str) -> JSONResponse:
         return JSONResponse(

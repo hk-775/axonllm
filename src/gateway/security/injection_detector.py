@@ -10,6 +10,7 @@ Detects common prompt injection techniques:
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -91,13 +92,20 @@ class PromptInjectionDetector:
     def __init__(self, block_threshold: float = 0.7) -> None:
         self._block_threshold = block_threshold
 
+    def _normalize(self, text: str) -> str:
+        """Normalize Unicode to defeat homoglyph and zero-width char bypass."""
+        text = unicodedata.normalize("NFKD", text)
+        text = re.sub(r"[​-‏ - ⁠﻿]", "", text)
+        return text
+
     def analyze(self, text: str) -> DetectionResult:
         """Analyze text for prompt injection patterns."""
+        normalized = self._normalize(text)
         detected: list[str] = []
         max_score = 0.0
 
         for pattern_name, regex, weight in INJECTION_PATTERNS:
-            if regex.search(text):
+            if regex.search(normalized):
                 detected.append(pattern_name)
                 max_score = max(max_score, weight)
 

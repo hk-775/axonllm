@@ -13,9 +13,8 @@ Integrates with TaskClassifier, SmartRoutingStrategy, and CostTracker.
 from __future__ import annotations
 
 import logging
-import math
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING
 
@@ -512,7 +511,6 @@ class SemanticEfficiencyEngine:
     def _string_overlap(self, a: str, b: str) -> float:
         if not a or not b:
             return 0.0
-        shorter = min(len(a), len(b))
         longer = max(len(a), len(b))
         if longer == 0:
             return 0.0
@@ -586,7 +584,6 @@ class SemanticEfficiencyEngine:
                 continue
 
             avg_prompt = sum(r.prompt_tokens for r in recs) / len(recs)
-            avg_completion = sum(r.completion_tokens for r in recs) / len(recs)
             complexity = self._tokens_to_complexity(avg_prompt)
             needed_tier = COMPLEXITY_MODEL_MAP.get(complexity, 5)
 

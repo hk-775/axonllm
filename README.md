@@ -1,5 +1,9 @@
 # AxonLLM
 
+[![CI](https://github.com/axonllm/axonllm/actions/workflows/ci.yml/badge.svg)](https://github.com/axonllm/axonllm/actions/workflows/ci.yml)
+[![License: MIT-0](https://img.shields.io/badge/License-MIT--0-blue.svg)](LICENSE)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
+
 **The neural control plane for enterprise LLMs.**
 
 One API, any provider. Smart routing picks the best model for each prompt. Ensemble mode dispatches to multiple models and synthesizes a better answer. Policy-driven security, PII redaction, quota enforcement, and multi-region failover — all in one place.
@@ -245,17 +249,26 @@ pip install -e ".[dev]"
 pytest tests/ -x -q
 ```
 
-860+ tests including unit, integration, end-to-end, and Hypothesis property-based tests.
+980 tests including unit, integration, end-to-end, and Hypothesis property-based tests.
 
 ## Deployment
 
-### AWS App Runner
+### AWS App Runner (recommended)
 
 ```bash
 ./deploy.sh us-east-1
 ```
 
-### Docker
+This deploys AxonLLM as an App Runner service with:
+- Auto-scaling based on request concurrency
+- IAM role with Bedrock invoke permissions
+- DynamoDB tables for persistence (audit trail, API keys, policies)
+
+Prerequisites:
+- AWS CLI configured with appropriate permissions
+- Docker (for building the container image)
+
+### Docker (self-hosted)
 
 ```bash
 docker build -t axonllm .
@@ -265,6 +278,17 @@ docker run -p 8000:8000 \
   -e AXON_AUTH_MODE=ENFORCE \
   axonllm
 ```
+
+### Production Checklist
+
+| Setting | Recommendation |
+|---------|---------------|
+| `AXON_AUTH_MODE` | Set to `ENFORCE` (default is `LOG_ONLY` for easy local dev) |
+| API keys | Use env vars, never commit to `providers.yaml` |
+| DynamoDB | Enable with `LLM_ROUTER_DYNAMODB_ENABLED=true` for persistent audit trail |
+| OIDC | Configure `AXON_OIDC_ISSUER` and `AXON_OIDC_AUDIENCE` for SSO |
+| TLS | Terminate TLS at ALB/CloudFront, not at the gateway |
+| Budgets | Set org-level budget limits before granting project access |
 
 ## Contributing
 

@@ -115,7 +115,7 @@ class TestQuotaEnforcementInFlow:
         agent, enforcer = setup
         # Spend at budget limit — any estimated_cost > 0 triggers denial,
         # but even with 0.0 estimated cost, spend >= budget blocks.
-        enforcer.record_spend("proj:ml", 5.01)
+        _run(enforcer.record_spend("proj:ml", 5.01))
         result = _run(agent.handle_chat_completion(
             {"model": "claude-sonnet", "messages": [{"role": "user", "content": "hi"}]},
             {"project_id": "proj:ml", "user_id": "u1"},

@@ -71,14 +71,21 @@ class PIIRedactor:
         if not active_types:
             return text, mapping
 
+        # Collect all matches first, then replace from right to left
+        # to avoid index shifting and token-on-token false matches
+        matches: list[tuple[int, int, str, str]] = []
         for pii_type in active_types:
             pattern = PII_PATTERNS.get(pii_type)
             if pattern is None:
                 continue
             for match in pattern.finditer(text):
-                original = match.group()
-                token = mapping.add(pii_type, original)
-                text = text.replace(original, token, 1)
+                matches.append((match.start(), match.end(), pii_type, match.group()))
+
+        # Sort by start position descending so replacements don't shift earlier indices
+        matches.sort(key=lambda m: m[0], reverse=True)
+        for start, end, pii_type, original in matches:
+            token = mapping.add(pii_type, original)
+            text = text[:start] + token + text[end:]
 
         return text, mapping
 
@@ -99,15 +106,19 @@ class PIIRedactor:
         for msg in messages:
             content = msg.get("content", "")
             if isinstance(content, str):
-                redacted_content = content
+                # Collect all matches first, replace right-to-left
+                matches: list[tuple[int, int, str, str]] = []
                 for pii_type in active_types:
                     pattern = PII_PATTERNS.get(pii_type)
                     if pattern is None:
                         continue
-                    for match in pattern.finditer(redacted_content):
-                        original = match.group()
-                        token = mapping.add(pii_type, original)
-                        redacted_content = redacted_content.replace(original, token, 1)
+                    for match in pattern.finditer(content):
+                        matches.append((match.start(), match.end(), pii_type, match.group()))
+                matches.sort(key=lambda m: m[0], reverse=True)
+                redacted_content = content
+                for start, end, pii_type, original in matches:
+                    token = mapping.add(pii_type, original)
+                    redacted_content = redacted_content[:start] + token + redacted_content[end:]
                 redacted.append({**msg, "content": redacted_content})
             else:
                 redacted.append(msg)

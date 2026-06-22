@@ -4,11 +4,7 @@ Thank you for your interest in contributing to AxonLLM.
 
 ## Security
 
-See [CONTRIBUTING](CONTRIBUTING.md#security-issue-notifications) for more information.
-
-## Security Issue Notifications
-
-If you discover a potential security issue, please notify us privately. Do not create a public GitHub issue.
+If you discover a potential security issue, please report it responsibly via the process described in [SECURITY.md](SECURITY.md). Do not create a public GitHub issue.
 
 ## Development Setup
 

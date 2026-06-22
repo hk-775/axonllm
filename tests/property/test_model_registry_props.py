@@ -13,8 +13,8 @@ import yaml
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from gateway.model_registry import ModelRegistry, VALID_PROVIDERS
-from gateway.models import RoutingStrategy
+from src.gateway.model_registry import ModelRegistry, VALID_PROVIDERS
+from src.gateway.models import RoutingStrategy
 
 # ---------------------------------------------------------------------------
 # Hypothesis strategies for generating valid YAML model registry configs

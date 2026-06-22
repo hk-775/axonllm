@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import secrets
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from src.gateway.models import APIKey
@@ -14,6 +14,9 @@ if TYPE_CHECKING:
     from src.gateway.persistence import DynamoPersistence
 
 PREFIX = "axon_"
+
+
+CACHE_TTL_SECONDS = 300
 
 
 class APIKeyService:
@@ -25,7 +28,7 @@ class APIKeyService:
 
     def __init__(self, persistence: DynamoPersistence) -> None:
         self._persistence = persistence
-        self._cache: dict[str, APIKey] = {}
+        self._cache: dict[str, tuple[APIKey, float]] = {}
 
     @staticmethod
     def generate_raw_key() -> str:
@@ -55,12 +58,12 @@ class APIKeyService:
             name=name,
             scopes=scopes,
             created_by=created_by,
-            created_at=datetime.utcnow(),
+            created_at=datetime.now(timezone.utc),
             expires_at=expires_at,
         )
 
         await self._persistence.save_api_key(key)
-        self._cache[key_hash] = key
+        self._cache[key_hash] = (key, time.time())
         return key, raw_key
 
     async def validate_key(self, raw_key: str) -> APIKey | None:
@@ -70,12 +73,16 @@ class APIKeyService:
 
         key_hash = self.hash_key(raw_key)
 
-        cached = self._cache.get(key_hash)
-        if cached and not cached.revoked:
-            if cached.expires_at and cached.expires_at < datetime.utcnow():
-                return None
-            cached.last_used_at = datetime.utcnow()
-            return cached
+        entry = self._cache.get(key_hash)
+        if entry is not None:
+            cached, cached_at = entry
+            if (time.time() - cached_at) < CACHE_TTL_SECONDS and not cached.revoked:
+                if cached.expires_at and cached.expires_at < datetime.now(timezone.utc):
+                    return None
+                cached.last_used_at = datetime.now(timezone.utc)
+                return cached
+            else:
+                del self._cache[key_hash]
 
         key = await self._persistence.get_api_key_by_hash(key_hash)
         if key is None:
@@ -84,11 +91,11 @@ class APIKeyService:
         if key.revoked:
             return None
 
-        if key.expires_at and key.expires_at < datetime.utcnow():
+        if key.expires_at and key.expires_at < datetime.now(timezone.utc):
             return None
 
-        key.last_used_at = datetime.utcnow()
-        self._cache[key_hash] = key
+        key.last_used_at = datetime.now(timezone.utc)
+        self._cache[key_hash] = (key, time.time())
         return key
 
     async def revoke_key(self, key_id: str) -> bool:
@@ -98,11 +105,15 @@ class APIKeyService:
             return False
 
         key.revoked = True
-        key.revoked_at = datetime.utcnow()
+        key.revoked_at = datetime.now(timezone.utc)
         await self._persistence.update_api_key(key)
 
         self._cache.pop(key.key_hash, None)
         return True
+
+    def invalidate_cache(self) -> None:
+        """Clear the key cache (e.g., after receiving a revocation from another instance)."""
+        self._cache.clear()
 
     async def rotate_key(
         self, key_id: str, rotated_by: str

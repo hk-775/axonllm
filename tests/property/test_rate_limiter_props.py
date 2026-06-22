@@ -8,7 +8,7 @@ Properties covered:
 """
 
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from hypothesis import given, settings, assume
 from hypothesis import strategies as st
@@ -212,7 +212,7 @@ def test_sliding_window_boundary_behavior(rpm, window_seconds, first_batch_fract
     assume(second_batch >= 1)
     assume(first_batch + second_batch > rpm)
 
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
 
     # Place first_batch requests near the end of "window 1"
     # These are within [now - window_seconds, now], placed at now - small_offset

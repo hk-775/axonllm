@@ -245,7 +245,7 @@ def test_usage_aggregation_filtering(
         f"Request count mismatch: expected {len(expected)}, got {report.total_requests}"
     )
     assert report.total_tokens == sum(r.total_tokens for r in expected), (
-        f"Token sum mismatch"
+        "Token sum mismatch"
     )
     assert abs(report.total_cost - sum(r.cost for r in expected)) < 1e-6, (
         f"Cost sum mismatch: expected {sum(r.cost for r in expected)}, got {report.total_cost}"

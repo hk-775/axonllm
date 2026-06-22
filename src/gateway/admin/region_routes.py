@@ -8,7 +8,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
-from src.gateway.multi_region.region_config import SpokeRole, SpokeStatus
+from src.gateway.multi_region.region_config import SpokeRole
 
 if TYPE_CHECKING:
     from src.gateway.multi_region.health_monitor import SpokeHealthMonitor
@@ -111,7 +111,7 @@ class RegionAPI:
         else:
             return JSONResponse(
                 status_code=400,
-                content={"error": f"Invalid status. Valid: healthy, unhealthy, draining"},
+                content={"error": "Invalid status. Valid: healthy, unhealthy, draining"},
             )
 
         return JSONResponse(content={

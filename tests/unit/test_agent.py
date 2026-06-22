@@ -384,7 +384,7 @@ async def test_create_gateway_agent_factory():
 # Task 14.2 — list_models and health_check
 # ---------------------------------------------------------------------------
 
-from src.gateway.models import VirtualModelConfig, ProviderModelMapping, RoutingStrategy
+from src.gateway.models import VirtualModelConfig, RoutingStrategy
 from src.gateway.health_tracker import ProviderHealthTracker
 from src.gateway.model_registry import ModelRegistry
 

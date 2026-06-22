@@ -8,6 +8,7 @@ import asyncio
 import json
 import logging
 import os
+import threading
 from datetime import datetime
 from decimal import Decimal
 
@@ -31,6 +32,7 @@ class DynamoPersistence:
         ).lower() == "true"
         self._table = None
         self._dynamodb = None
+        self._init_lock = threading.Lock()
 
     @property
     def enabled(self) -> bool:
@@ -38,12 +40,14 @@ class DynamoPersistence:
         return self._enabled
 
     def _get_table(self):
-        """Lazily create the boto3 DynamoDB Table resource."""
+        """Lazily create the boto3 DynamoDB Table resource (thread-safe)."""
         if self._table is None:
-            import boto3
+            with self._init_lock:
+                if self._table is None:
+                    import boto3
 
-            self._dynamodb = boto3.resource("dynamodb", region_name=self._region)
-            self._table = self._dynamodb.Table(self._table_name)
+                    self._dynamodb = boto3.resource("dynamodb", region_name=self._region)
+                    self._table = self._dynamodb.Table(self._table_name)
         return self._table
 
     # --- Table management ---

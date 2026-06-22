@@ -77,6 +77,11 @@ class TestAdminRBACEnforce:
         resp = client.get("/admin/quotas/proj:test", headers={"x-test-scope": "admin:quotas"})
         assert resp.status_code == 200
 
+    def test_denies_mismatched_admin_scope(self):
+        client = _make_app("ENFORCE")
+        resp = client.get("/admin/quotas/proj:test", headers={"x-test-scope": "admin:keys"})
+        assert resp.status_code == 403
+
     def test_dashboard_is_public(self):
         client = _make_app("ENFORCE")
         resp = client.get("/admin/dashboard")

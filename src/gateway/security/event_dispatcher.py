@@ -18,7 +18,6 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +76,7 @@ class EventDispatcher:
         self._destinations: list[EventDestination] = []
         self._dispatch_count: int = 0
         self._error_count: int = 0
+        self._http_client = None
 
     def add_destination(self, destination: EventDestination) -> None:
         self._destinations.append(destination)
@@ -178,6 +178,12 @@ class EventDispatcher:
         elif dest.destination_type == DestinationType.CLOUDWATCH:
             await self._send_cloudwatch(event, dest)
 
+    def _get_http_client(self):
+        if self._http_client is None:
+            import httpx
+            self._http_client = httpx.AsyncClient(timeout=10.0)
+        return self._http_client
+
     async def _send_webhook(self, event: SecurityEvent, dest: EventDestination) -> None:
         url = dest.config.get("url", "")
         headers = dest.config.get("headers", {})
@@ -187,19 +193,17 @@ class EventDispatcher:
             return
 
         try:
-            import httpx
-
-            async with httpx.AsyncClient() as client:
-                resp = await client.post(
-                    url,
-                    json=event.to_dict(),
-                    headers={"Content-Type": "application/json", **headers},
-                    timeout=timeout,
+            client = self._get_http_client()
+            resp = await client.post(
+                url,
+                json=event.to_dict(),
+                headers={"Content-Type": "application/json", **headers},
+                timeout=timeout,
+            )
+            if resp.status_code >= 400:
+                logger.warning(
+                    "Webhook %s returned %d", dest.name, resp.status_code
                 )
-                if resp.status_code >= 400:
-                    logger.warning(
-                        "Webhook %s returned %d", dest.name, resp.status_code
-                    )
         except ImportError:
             logger.warning("httpx not installed — webhook dispatch unavailable")
         except Exception as e:

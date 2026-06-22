@@ -2,25 +2,29 @@
 
 import hashlib
 import json
-from datetime import datetime, timedelta
+from collections import OrderedDict
+from datetime import datetime, timedelta, timezone
 
 from src.gateway.models import ChatCompletionRequest, ChatCompletionResponse
 
 
 class CacheManager:
-    """In-memory response cache with TTL-based expiration."""
+    """In-memory response cache with TTL-based expiration and LRU eviction."""
+
+    MAX_ENTRIES = 10_000
 
     def __init__(self) -> None:
-        self._cache: dict[str, dict] = {}
+        self._cache: OrderedDict[str, dict] = OrderedDict()
 
     async def get(self, cache_key: str) -> ChatCompletionResponse | None:
         """Look up cached response. Returns None on miss or if expired."""
         entry = self._cache.get(cache_key)
         if entry is None:
             return None
-        if datetime.utcnow() >= entry["expires_at"]:
+        if datetime.now(timezone.utc) >= entry["expires_at"]:
             del self._cache[cache_key]
             return None
+        self._cache.move_to_end(cache_key)
         return entry["response"]
 
     async def put(
@@ -29,8 +33,11 @@ class CacheManager:
         """Store response in cache with TTL."""
         self._cache[cache_key] = {
             "response": response,
-            "expires_at": datetime.utcnow() + timedelta(seconds=ttl_seconds),
+            "expires_at": datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds),
         }
+        self._cache.move_to_end(cache_key)
+        while len(self._cache) > self.MAX_ENTRIES:
+            self._cache.popitem(last=False)
 
     def compute_cache_key(
         self, request: ChatCompletionRequest, project_id: str

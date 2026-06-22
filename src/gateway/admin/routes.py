@@ -28,7 +28,7 @@ from src.gateway.cost_tracker import CostTracker
 from src.gateway.efficiency_analyzer import EfficiencyAnalyzer
 from src.gateway.health_tracker import ProviderHealthTracker
 from src.gateway.model_registry import ModelRegistry
-from src.gateway.models import GuardrailRule, Project, RoutingStrategy, UsageFilters
+from src.gateway.models import GuardrailRule, Project, UsageFilters
 from src.gateway.semantic_efficiency import SemanticEfficiencyEngine
 
 if TYPE_CHECKING:

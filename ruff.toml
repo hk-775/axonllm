@@ -1,0 +1,13 @@
+target-version = "py311"
+line-length = 120
+
+[lint]
+select = ["E", "F", "W"]
+ignore = [
+    "E501",  # line too long — handled by formatter
+    "E402",  # module-level import not at top — needed for conditional imports
+]
+
+[lint.per-file-ignores]
+"tests/**" = ["F401", "F841"]  # unused imports/vars common in test fixtures
+"src/gateway/__init__.py" = ["F401"]

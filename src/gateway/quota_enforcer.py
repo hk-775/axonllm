@@ -10,8 +10,9 @@ Takes a ResolvedPolicy (from the hierarchy walk) and enforces:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+import asyncio
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -45,6 +46,7 @@ class QuotaEnforcer:
         self._spend_tracker: dict[str, float] = {}
         self._alerted_thresholds: dict[str, set[float]] = {}
         self._alert_callbacks: list = []
+        self._lock = asyncio.Lock()
 
     def on_budget_alert(self, callback) -> None:
         """Register a callback for budget threshold alerts.
@@ -53,32 +55,33 @@ class QuotaEnforcer:
         """
         self._alert_callbacks.append(callback)
 
-    def check_rate_limit(
+    async def check_rate_limit(
         self, project_id: str, policy: ResolvedPolicy
     ) -> QuotaDecision:
         """Check if request is within the policy's rate_limit_rpm."""
         if policy.rate_limit_rpm is None:
             return QuotaDecision(allowed=True)
 
-        now = datetime.utcnow()
-        window = timedelta(seconds=60)
-        cutoff = now - window
+        async with self._lock:
+            now = datetime.now(timezone.utc)
+            window = timedelta(seconds=60)
+            cutoff = now - window
 
-        timestamps = self._request_windows.get(project_id, [])
-        timestamps = [ts for ts in timestamps if ts > cutoff]
+            timestamps = self._request_windows.get(project_id, [])
+            timestamps = [ts for ts in timestamps if ts > cutoff]
 
-        if len(timestamps) >= policy.rate_limit_rpm:
-            return QuotaDecision(
-                allowed=False,
-                reason=f"Policy rate limit exceeded: {policy.rate_limit_rpm} RPM",
-                limit_type="rate_limit_rpm",
-                limit_value=policy.rate_limit_rpm,
-                current_value=len(timestamps),
-            )
+            if len(timestamps) >= policy.rate_limit_rpm:
+                return QuotaDecision(
+                    allowed=False,
+                    reason=f"Policy rate limit exceeded: {policy.rate_limit_rpm} RPM",
+                    limit_type="rate_limit_rpm",
+                    limit_value=policy.rate_limit_rpm,
+                    current_value=len(timestamps),
+                )
 
-        timestamps.append(now)
-        self._request_windows[project_id] = timestamps
-        return QuotaDecision(allowed=True)
+            timestamps.append(now)
+            self._request_windows[project_id] = timestamps
+            return QuotaDecision(allowed=True)
 
     def check_budget(
         self, project_id: str, estimated_cost: float, policy: ResolvedPolicy
@@ -154,7 +157,7 @@ class QuotaEnforcer:
 
         return QuotaDecision(allowed=True)
 
-    def enforce_all(
+    async def enforce_all(
         self,
         project_id: str,
         model: str,
@@ -164,8 +167,11 @@ class QuotaEnforcer:
         policy: ResolvedPolicy,
     ) -> QuotaDecision:
         """Run all quota checks. Returns first failure or allowed."""
+        rate_decision = await self.check_rate_limit(project_id, policy)
+        if not rate_decision.allowed:
+            return rate_decision
+
         checks = [
-            self.check_rate_limit(project_id, policy),
             self.check_budget(project_id, estimated_cost, policy),
             self.check_max_tokens(max_tokens, policy),
             self.check_model_allowed(model, policy),
@@ -179,23 +185,24 @@ class QuotaEnforcer:
 
         return QuotaDecision(allowed=True)
 
-    def record_spend(self, project_id: str, cost: float, budget_limit: float | None = None) -> None:
+    async def record_spend(self, project_id: str, cost: float, budget_limit: float | None = None) -> None:
         """Record spend for budget tracking. Fires alerts at threshold crossings."""
-        prev = self._spend_tracker.get(project_id, 0.0)
-        new_spend = prev + cost
-        self._spend_tracker[project_id] = new_spend
+        async with self._lock:
+            prev = self._spend_tracker.get(project_id, 0.0)
+            new_spend = prev + cost
+            self._spend_tracker[project_id] = new_spend
 
-        if budget_limit and budget_limit > 0 and self._alert_callbacks:
-            alerted = self._alerted_thresholds.get(project_id, set())
-            for threshold in BUDGET_ALERT_THRESHOLDS:
-                if threshold in alerted:
-                    continue
-                trigger_at = budget_limit * threshold
-                if prev < trigger_at <= new_spend:
-                    alerted.add(threshold)
-                    for cb in self._alert_callbacks:
-                        cb(project_id, threshold, new_spend, budget_limit)
-            self._alerted_thresholds[project_id] = alerted
+            if budget_limit and budget_limit > 0 and self._alert_callbacks:
+                alerted = self._alerted_thresholds.get(project_id, set())
+                for threshold in BUDGET_ALERT_THRESHOLDS:
+                    if threshold in alerted:
+                        continue
+                    trigger_at = budget_limit * threshold
+                    if prev < trigger_at <= new_spend:
+                        alerted.add(threshold)
+                        for cb in self._alert_callbacks:
+                            cb(project_id, threshold, new_spend, budget_limit)
+                self._alerted_thresholds[project_id] = alerted
 
     def get_spend(self, project_id: str) -> float:
         """Get current tracked spend for a project."""

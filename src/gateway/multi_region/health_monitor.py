@@ -15,7 +15,6 @@ from dataclasses import dataclass, field
 from src.gateway.multi_region.region_config import (
     HubConfig,
     SpokeConfig,
-    SpokeRole,
     SpokeStatus,
 )
 

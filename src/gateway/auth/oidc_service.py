@@ -129,28 +129,25 @@ class OIDCService:
     ) -> dict | None:
         """Verify JWT signature and decode claims.
 
-        Uses python-jose if available, falls back to manual decode for testing.
+        Requires python-jose for signature verification. Refuses to decode
+        without verification to prevent authentication bypass.
         """
         try:
             from jose import jwt as jose_jwt
+        except ImportError:
+            logger.error(
+                "python-jose is not installed — JWT signature verification unavailable. "
+                "Install it with: pip install python-jose[cryptography]"
+            )
+            return None
 
+        try:
             return jose_jwt.decode(
                 token,
                 key,
                 algorithms=algorithms,
                 options={"verify_aud": False, "verify_exp": True},
             )
-        except ImportError:
-            # Fallback: decode payload without signature verification (testing only)
-            try:
-                payload_segment = token.split(".")[1]
-                padding = 4 - len(payload_segment) % 4
-                if padding != 4:
-                    payload_segment += "=" * padding
-                payload_bytes = base64.urlsafe_b64decode(payload_segment)
-                return json.loads(payload_bytes)
-            except Exception:
-                return None
         except Exception:
             return None
 

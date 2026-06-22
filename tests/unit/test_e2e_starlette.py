@@ -213,7 +213,7 @@ class TestQuotaEnforcementE2E:
 
     def test_blocks_over_budget(self, app_setup):
         client, raw_key, _, _, quota_enforcer = app_setup
-        quota_enforcer.record_spend("proj:ml", 500.01)
+        asyncio.get_event_loop().run_until_complete(quota_enforcer.record_spend("proj:ml", 500.01))
         resp = client.post("/api/chat", json={
             "model": "test-model",
             "messages": [{"role": "user", "content": "hello"}],

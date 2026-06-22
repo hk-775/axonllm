@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
-from datetime import datetime
 from typing import TYPE_CHECKING
 
 import tiktoken
@@ -32,6 +31,8 @@ class CostTracker:
         pricing_config: Nested dict mapping provider -> model -> TokenPricing.
         budgets: Dict mapping project_id -> {"budget_limit": float, "alert_threshold": float}.
     """
+
+    MAX_RECORDS = 100_000
 
     def __init__(
         self,
@@ -142,7 +143,7 @@ class CostTracker:
         creation_rate = pricing.cache_creation_token_cost if pricing.cache_creation_token_cost is not None else pricing.prompt_token_cost
 
         # Subtract cached + creation from prompt to avoid double-billing
-        billable_prompt = prompt_tokens - cached_tokens - cache_creation_tokens
+        billable_prompt = max(0, prompt_tokens - cached_tokens - cache_creation_tokens)
 
         cost = (billable_prompt / 1000 * pricing.prompt_token_cost) + (
             completion_tokens / 1000 * pricing.completion_token_cost
@@ -171,6 +172,8 @@ class CostTracker:
     async def record_usage(self, usage: UsageRecord) -> None:
         """Persist a usage record to the in-memory store."""
         self._records.append(usage)
+        if len(self._records) > self.MAX_RECORDS:
+            self._records = self._records[-(self.MAX_RECORDS // 2):]
 
         # Fire-and-forget DynamoDB write
         if self._persistence is not None and self._persistence.enabled:

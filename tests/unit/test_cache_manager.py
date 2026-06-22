@@ -59,10 +59,11 @@ async def test_expired_entry_returns_none():
     expired = now + timedelta(seconds=61)
 
     with patch("src.gateway.cache_manager.datetime") as mock_dt:
-        mock_dt.utcnow.return_value = now
+        mock_dt.now.return_value = now
+        mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
         await cm.put("key-exp", response, ttl_seconds=60)
 
-        mock_dt.utcnow.return_value = expired
+        mock_dt.now.return_value = expired
         result = await cm.get("key-exp")
 
     assert result is None
@@ -77,11 +78,11 @@ async def test_expired_entry_is_cleaned_up():
     expired = now + timedelta(seconds=61)
 
     with patch("src.gateway.cache_manager.datetime") as mock_dt:
-        mock_dt.utcnow.return_value = now
+        mock_dt.now.return_value = now
         mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
         await cm.put("key-exp", response, ttl_seconds=60)
 
-        mock_dt.utcnow.return_value = expired
+        mock_dt.now.return_value = expired
         await cm.get("key-exp")
 
     # Entry should have been removed from internal cache

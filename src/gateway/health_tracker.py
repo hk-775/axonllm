@@ -31,11 +31,16 @@ class ProviderHealthTracker:
             return True
         return False
 
+    MAX_LATENCY_RECORDS = 1000
+
     def record_latency(self, provider: str, latency_ms: float) -> None:
         """Record a latency observation for least-latency routing."""
         if provider not in self._latencies:
             self._latencies[provider] = []
-        self._latencies[provider].append((time.time(), latency_ms))
+        records = self._latencies[provider]
+        records.append((time.time(), latency_ms))
+        if len(records) > self.MAX_LATENCY_RECORDS:
+            self._latencies[provider] = records[-(self.MAX_LATENCY_RECORDS // 2):]
 
     def get_average_latency(self, provider: str, window_seconds: int) -> float:
         """Get average latency over the sliding window.

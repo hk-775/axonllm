@@ -74,7 +74,7 @@ class QuotaAPI:
         environment = body.get("environment")
 
         policy = await self.resolver.resolve(project_id, environment)
-        decision = self.enforcer.enforce_all(
+        decision = await self.enforcer.enforce_all(
             project_id=project_id,
             model=model,
             provider=provider,

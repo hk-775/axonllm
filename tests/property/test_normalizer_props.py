@@ -20,7 +20,7 @@ from src.gateway.adapters.bedrock_adapter import BedrockAdapter
 from src.gateway.adapters.azure_adapter import AzureOpenAIAdapter
 from src.gateway.adapters.vertex_adapter import VertexAIAdapter
 from src.gateway.adapters.cohere_adapter import CohereAdapter
-from src.gateway.models import ChatCompletionRequest
+from src.gateway.models import ChatCompletionRequest, ChatCompletionResponse
 
 
 # ---------------------------------------------------------------------------

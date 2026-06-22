@@ -1,0 +1,7 @@
+# Default owners for everything in the repo
+* @axonllm/maintainers
+
+# Security-critical paths require security review
+/src/gateway/security/ @axonllm/maintainers
+/src/gateway/auth/ @axonllm/maintainers
+/src/gateway/middleware/auth.py @axonllm/maintainers

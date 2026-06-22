@@ -8,9 +8,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
-from typing import TYPE_CHECKING
 
 from starlette.applications import Starlette
 
@@ -29,7 +28,7 @@ from src.gateway.efficiency_analyzer import EfficiencyAnalyzer
 from src.gateway.middleware.admin_rbac import AdminRBACMiddleware
 from src.gateway.middleware.auth import AuthMiddleware
 from src.gateway.multi_region.health_monitor import SpokeHealthMonitor
-from src.gateway.multi_region.region_config import default_single_region, HubConfig
+from src.gateway.multi_region.region_config import default_single_region
 from src.gateway.multi_region.region_router import RegionRouter
 from src.gateway.quota_enforcer import QuotaEnforcer
 from src.gateway.middleware.security import SecurityMiddleware
@@ -174,13 +173,13 @@ def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComp
             },
         )
         try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                loop.create_task(event_dispatcher.dispatch(event))
-            else:
-                loop.run_until_complete(event_dispatcher.dispatch(event))
-        except Exception:
-            logger.warning("Budget alert dispatch failed for %s at %d%%", project_id, int(threshold_pct * 100))
+            loop = asyncio.get_running_loop()
+            loop.create_task(event_dispatcher.dispatch(event))
+        except RuntimeError:
+            logger.warning(
+                "Budget alert dispatch skipped (no running loop) for %s at %d%%",
+                project_id, int(threshold_pct * 100),
+            )
 
     quota_enforcer.on_budget_alert(_budget_alert)
 

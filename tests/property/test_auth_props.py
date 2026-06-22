@@ -20,7 +20,7 @@ from starlette.routing import Route
 from starlette.testclient import TestClient
 
 from src.gateway.middleware.auth import AuthMiddleware
-from src.gateway.models import RequestContext
+from src.gateway.models import AuthMethod, RequestContext
 
 
 # ---------------------------------------------------------------------------
@@ -28,16 +28,27 @@ from src.gateway.models import RequestContext
 # ---------------------------------------------------------------------------
 
 
-class FakeIdentityService:
-    """Returns pre-configured claims for any token except 'invalid'."""
+class FakeOIDCService:
+    """Returns a pre-configured RequestContext for any token except 'invalid'."""
 
     def __init__(self, claims: dict | None = None):
         self._claims = claims
 
-    async def validate_token(self, token: str) -> dict | None:
+    async def validate_alb_jwt(self, token: str) -> RequestContext | None:
+        return None
+
+    async def validate_oidc_jwt(self, token: str) -> RequestContext | None:
         if token == "invalid":
             return None
-        return self._claims
+        if self._claims is None:
+            return None
+        return RequestContext(
+            user_id=self._claims.get("sub", ""),
+            project_id=self._claims.get("project_id", ""),
+            roles=self._claims.get("roles", []),
+            scopes=self._claims.get("scopes", []),
+            auth_method=AuthMethod.OIDC_JWT,
+        )
 
 
 class FakePolicyService:
@@ -73,12 +84,12 @@ def _build_client(
     decision: str = "ALLOW",
     mode: str = "ENFORCE",
 ) -> TestClient:
-    identity = FakeIdentityService(claims=claims)
+    oidc = FakeOIDCService(claims=claims)
     policy = FakePolicyService(decision=decision)
     app = Starlette(routes=[Route("/test", _echo_context)])
     app.add_middleware(
         AuthMiddleware,
-        identity_service=identity,
+        oidc_service=oidc,
         policy_service=policy,
         mode=mode,
     )

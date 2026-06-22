@@ -448,7 +448,7 @@ class Router:
         allowed_models: set[str] | None = None,
     ) -> ChatCompletionResponse:
         """Execute request with strategy-based initial selection, retry, and fallback.
-        
+
         If preferred_provider is set, skip strategy and use that provider directly.
         If allowed_models is set, filter out providers for models not in the set.
         """
@@ -475,7 +475,7 @@ class Router:
                 remaining = [m for m in mappings if m.provider != preferred_provider]
             else:
                 remaining = list(mappings)
-            
+
             for mapping in sorted(remaining, key=lambda m: m.fallback_order):
                 if not self.health_tracker.is_healthy(mapping.provider):
                     attempts.append({"provider": mapping.provider, "status_code": 0, "message": "skipped (unhealthy)"})

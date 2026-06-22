@@ -1,7 +1,7 @@
 """Tests for API key management service."""
 
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -104,7 +104,7 @@ class TestValidateKey:
         assert result is None
 
     def test_expired_key_returns_none(self, service):
-        expires_at = datetime.utcnow() - timedelta(hours=1)
+        expires_at = datetime.now(timezone.utc) - timedelta(hours=1)
         key, raw = asyncio.get_event_loop().run_until_complete(
             service.issue_key("proj-1", "K", ["chat:invoke"], "admin", expires_at=expires_at)
         )

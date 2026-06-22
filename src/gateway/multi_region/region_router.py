@@ -9,8 +9,8 @@ Decision logic:
 
 from __future__ import annotations
 
-import random
-from dataclasses import dataclass, field
+import secrets
+from dataclasses import dataclass
 
 from src.gateway.multi_region.region_config import (
     HubConfig,
@@ -123,14 +123,14 @@ class RegionRouter:
         """Select spoke using weighted random distribution."""
         total_weight = sum(s.weight for s in spokes)
         if total_weight == 0:
-            selected = random.choice(spokes)
+            selected = secrets.choice(spokes)
             return RoutingDecision(
                 target_spoke=selected,
                 reason="random_equal_weight",
                 candidates_considered=len(spokes),
             )
 
-        r = random.randint(1, total_weight)
+        r = secrets.randbelow(total_weight) + 1
         cumulative = 0
         for spoke in spokes:
             cumulative += spoke.weight

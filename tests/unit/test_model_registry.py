@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from gateway.model_registry import VALID_PROVIDERS, ModelRegistry
+from src.gateway.model_registry import VALID_PROVIDERS, ModelRegistry
 
 
 # --- Fixtures ---

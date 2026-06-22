@@ -1,7 +1,7 @@
 """Unit tests for SlidingWindowRateLimiter."""
 
 import pytest
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from src.gateway.models import RateLimitConfig
 from src.gateway.rate_limiter import SlidingWindowRateLimiter
@@ -190,14 +190,14 @@ class TestResetTime:
     @pytest.mark.asyncio
     async def test_reset_at_is_in_the_future(self):
         limiter = _make_limiter()
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         result = await limiter.check_rate_limit("user-1", "proj-1")
         assert result.reset_at >= now
 
     @pytest.mark.asyncio
     async def test_reset_at_within_window(self):
         limiter = _make_limiter(window_seconds=60)
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         result = await limiter.check_rate_limit("user-1", "proj-1")
         # reset_at should be at most window_seconds from now
         assert result.reset_at <= now + timedelta(seconds=61)
@@ -229,7 +229,7 @@ class TestRetryAfter:
         """Requests outside the window should not count."""
         limiter = _make_limiter(user_rpm=2, project_rpm=100, window_seconds=60)
         # Manually inject old timestamps
-        old_time = datetime.utcnow() - timedelta(seconds=120)
+        old_time = datetime.now(timezone.utc) - timedelta(seconds=120)
         limiter._user_requests["user-1"] = [old_time, old_time]
         limiter._project_requests["proj-1"] = [old_time, old_time]
         # These old requests should be cleaned up, so new request is allowed

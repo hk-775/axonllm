@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import uuid
 import warnings
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, AsyncIterator
 
 from src.gateway.cache_manager import CacheManager
@@ -16,8 +16,8 @@ from src.gateway.models import (
     EnsemblePreset,
     Project,
     RequestContext,
+    ResolvedPolicy,
     StreamChunk,
-    TokenUsage,
     UsageRecord,
 )
 from src.gateway.rate_limiter import SlidingWindowRateLimiter
@@ -218,7 +218,7 @@ class GatewayAgent:
         if self._quota_enforcer is not None and self._policy_resolver is not None:
             resolved_policy = await self._policy_resolver.resolve(req_ctx.project_id)
             estimated_cost = self._estimate_request_cost(request)
-            quota_decision = self._quota_enforcer.enforce_all(
+            quota_decision = await self._quota_enforcer.enforce_all(
                 project_id=req_ctx.project_id,
                 model=request.model or "",
                 provider=context.get("provider"),
@@ -238,7 +238,7 @@ class GatewayAgent:
         request_id = f"req_{__import__('uuid').uuid4().hex[:12]}"
         pii_mapping = None
 
-        if self._injection_detector is not None and resolved_policy is not None:
+        if self._injection_detector is not None:
             injection_result = self._injection_detector.analyze_messages(request.messages or [])
             if injection_result.score > 0:
                 if self._audit_trail is not None:
@@ -270,9 +270,10 @@ class GatewayAgent:
                     )
 
         # 2.9. PII redaction
-        if self._pii_redactor is not None and resolved_policy is not None:
+        if self._pii_redactor is not None:
+            effective_policy = resolved_policy or ResolvedPolicy()
             redacted_messages, pii_mapping = self._pii_redactor.redact_messages(
-                request.messages or [], resolved_policy
+                request.messages or [], effective_policy
             )
             if pii_mapping.redacted_count > 0:
                 request = ChatCompletionRequest(
@@ -681,7 +682,7 @@ class GatewayAgent:
                 completion_tokens=response.usage.completion_tokens,
                 total_tokens=response.usage.total_tokens,
                 cost=cost,
-                timestamp=__import__("datetime").datetime.utcnow(),
+                timestamp=datetime.now(timezone.utc),
                 cached_tokens=response.usage.cached_tokens,
                 cache_creation_tokens=response.usage.cache_creation_tokens,
             )
@@ -690,7 +691,7 @@ class GatewayAgent:
             # Record spend in quota enforcer for hierarchy budget tracking
             if self._quota_enforcer is not None:
                 budget_limit = resolved_policy.budget_limit if resolved_policy else None
-                self._quota_enforcer.record_spend(req_ctx.project_id, cost, budget_limit=budget_limit)
+                await self._quota_enforcer.record_spend(req_ctx.project_id, cost, budget_limit=budget_limit)
 
         # 13. Budget status for streaming (already enforced pre-request)
         budget_status: BudgetStatus | None = None
@@ -754,11 +755,12 @@ class GatewayAgent:
         if rate_limit_headers:
             yield {"_rate_limit_headers": rate_limit_headers}
         try:
+            pii_buffer: dict = {"pending": ""}
             chunks = simulate_streaming(response)
             for chunk in chunks:
                 chunk_dict = self._chunk_to_dict(chunk)
                 if pii_mapping and pii_mapping.redacted_count > 0:
-                    chunk_dict = self._reinject_chunk_pii(chunk_dict, pii_mapping)
+                    chunk_dict = self._reinject_chunk_pii(chunk_dict, pii_mapping, pii_buffer)
                 yield {"data": chunk_dict}
         except Exception as exc:
             # On error during streaming, yield error event then DONE
@@ -879,6 +881,7 @@ class GatewayAgent:
             yield {"_rate_limit_headers": rate_limit_headers}
 
         try:
+            pii_buffer: dict = {"pending": ""}
             stream = factory._http_client.execute_streaming(
                 request, mapping, adapter, config,
                 prompt_caching_enabled=prompt_caching_enabled,
@@ -886,7 +889,7 @@ class GatewayAgent:
             async for chunk in stream:
                 chunk_dict = self._chunk_to_dict(chunk)
                 if pii_mapping and pii_mapping.redacted_count > 0:
-                    chunk_dict = self._reinject_chunk_pii(chunk_dict, pii_mapping)
+                    chunk_dict = self._reinject_chunk_pii(chunk_dict, pii_mapping, pii_buffer)
                 yield {"data": chunk_dict}
                 if chunk.is_final:
                     break
@@ -1140,15 +1143,29 @@ class GatewayAgent:
             "is_final": chunk.is_final,
         }
 
-    def _reinject_chunk_pii(self, chunk_dict: dict, mapping: RedactionMapping) -> dict:
-        """Re-inject PII tokens in a streaming chunk's delta content."""
+    def _reinject_chunk_pii(
+        self, chunk_dict: dict, mapping: RedactionMapping, buffer: dict
+    ) -> dict:
+        """Re-inject PII tokens in a streaming chunk's delta content.
+
+        Uses a buffer to handle tokens split across chunk boundaries.
+        Buffer holds {"pending": str} — text that might be a partial token.
+        """
         choices = chunk_dict.get("choices", [])
         new_choices = []
         for choice in choices:
             delta = choice.get("delta", {})
             content = delta.get("content", "")
             if isinstance(content, str) and content:
-                reinjected = mapping.reinject(content)
+                text = buffer.get("pending", "") + content
+                # Check if text ends with a potential partial token (starts with [ but no closing ])
+                last_open = text.rfind("[")
+                if last_open != -1 and "]" not in text[last_open:]:
+                    buffer["pending"] = text[last_open:]
+                    text = text[:last_open]
+                else:
+                    buffer["pending"] = ""
+                reinjected = mapping.reinject(text)
                 new_choices.append({**choice, "delta": {**delta, "content": reinjected}})
             else:
                 new_choices.append(choice)
@@ -1277,6 +1294,13 @@ def create_gateway_agent(
     provider_fn_factory: ProviderFnFactory | None = None,
     user_configs: dict[str, dict] | None = None,
     request_validator: RequestValidator | None = None,
+    quota_enforcer: QuotaEnforcer | None = None,
+    policy_resolver: PolicyHierarchyResolver | None = None,
+    pii_redactor: PIIRedactor | None = None,
+    injection_detector: PromptInjectionDetector | None = None,
+    audit_trail: AuditTrail | None = None,
+    event_dispatcher: EventDispatcher | None = None,
+    region_router: RegionRouter | None = None,
 ) -> GatewayAgent:
     """Create and wire a GatewayAgent, also setting the module-level singleton."""
     global _agent
@@ -1291,6 +1315,13 @@ def create_gateway_agent(
         provider_fn_factory=provider_fn_factory,
         user_configs=user_configs,
         request_validator=request_validator,
+        quota_enforcer=quota_enforcer,
+        policy_resolver=policy_resolver,
+        pii_redactor=pii_redactor,
+        injection_detector=injection_detector,
+        audit_trail=audit_trail,
+        event_dispatcher=event_dispatcher,
+        region_router=region_router,
     )
     _agent = agent
     return agent

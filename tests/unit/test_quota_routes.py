@@ -69,7 +69,7 @@ class TestGetProjectQuota:
 
     def test_shows_current_spend(self, setup):
         client, enforcer, _ = setup
-        enforcer.record_spend("proj:ml", 1234.56)
+        asyncio.get_event_loop().run_until_complete(enforcer.record_spend("proj:ml", 1234.56))
         resp = client.get("/admin/quotas/proj:ml")
         data = resp.json()
         assert data["usage"]["current_spend"] == 1234.56
@@ -77,7 +77,7 @@ class TestGetProjectQuota:
 
     def test_budget_utilization_pct(self, setup):
         client, enforcer, _ = setup
-        enforcer.record_spend("proj:ml", 2500.0)
+        asyncio.get_event_loop().run_until_complete(enforcer.record_spend("proj:ml", 2500.0))
         resp = client.get("/admin/quotas/proj:ml")
         assert resp.json()["usage"]["budget_utilization_pct"] == 50.0
 
@@ -85,7 +85,7 @@ class TestGetProjectQuota:
 class TestResetSpend:
     def test_resets_spend(self, setup):
         client, enforcer, _ = setup
-        enforcer.record_spend("proj:ml", 1000.0)
+        asyncio.get_event_loop().run_until_complete(enforcer.record_spend("proj:ml", 1000.0))
         resp = client.post("/admin/quotas/proj:ml/reset")
         assert resp.status_code == 200
         assert resp.json()["previous_spend"] == 1000.0
@@ -119,7 +119,7 @@ class TestSimulateRequest:
 
     def test_blocked_budget(self, setup):
         client, enforcer, _ = setup
-        enforcer.record_spend("proj:ml", 4999.0)
+        asyncio.get_event_loop().run_until_complete(enforcer.record_spend("proj:ml", 4999.0))
         resp = client.post("/admin/quotas/simulate", json={
             "project_id": "proj:ml",
             "model": "claude-opus",
