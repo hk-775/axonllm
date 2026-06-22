@@ -5,6 +5,7 @@ WORKDIR /app
 COPY pyproject.toml requirements.txt ./
 COPY src/ src/
 COPY config/ config/
+COPY docs/ docs/
 COPY serve_dashboard.py .
 COPY agentcore_agent.py .
 COPY scripts/ scripts/
