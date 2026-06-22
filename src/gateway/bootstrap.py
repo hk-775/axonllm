@@ -246,6 +246,10 @@ def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComp
         smart_routing_enabled=True,
         quota_enforcer=quota_enforcer,
         policy_resolver=policy_resolver,
+        pii_redactor=pii_redactor,
+        injection_detector=injection_detector,
+        audit_trail=audit_trail,
+        event_dispatcher=event_dispatcher,
     )
 
     # --- Efficiency analysis ---

@@ -39,6 +39,10 @@ if TYPE_CHECKING:
     from src.gateway.auth.policy_hierarchy import PolicyHierarchyResolver
     from src.gateway.provider_fn_factory import ProviderFnFactory
     from src.gateway.quota_enforcer import QuotaEnforcer
+    from src.gateway.security.audit_trail import AuditTrail
+    from src.gateway.security.event_dispatcher import EventDispatcher
+    from src.gateway.security.injection_detector import PromptInjectionDetector
+    from src.gateway.security.pii_redactor import PIIRedactor, RedactionMapping
 
 
 # ---------------------------------------------------------------------------
@@ -129,6 +133,10 @@ class GatewayAgent:
         smart_routing_enabled: bool = False,
         quota_enforcer: QuotaEnforcer | None = None,
         policy_resolver: PolicyHierarchyResolver | None = None,
+        pii_redactor: PIIRedactor | None = None,
+        injection_detector: PromptInjectionDetector | None = None,
+        audit_trail: AuditTrail | None = None,
+        event_dispatcher: EventDispatcher | None = None,
     ) -> None:
         self.router = router
         self.rate_limiter = rate_limiter
@@ -143,6 +151,10 @@ class GatewayAgent:
         self._smart_routing_enabled = smart_routing_enabled
         self._quota_enforcer = quota_enforcer
         self._policy_resolver = policy_resolver
+        self._pii_redactor = pii_redactor
+        self._injection_detector = injection_detector
+        self._audit_trail = audit_trail
+        self._event_dispatcher = event_dispatcher
 
     # ------------------------------------------------------------------
     # Public API
@@ -218,6 +230,75 @@ class GatewayAgent:
                     quota_decision.reason,
                     code=f"quota_{quota_decision.limit_type}",
                 )
+
+        # 2.8. Prompt injection detection
+        request_id = f"req_{__import__('uuid').uuid4().hex[:12]}"
+        pii_mapping = None
+
+        if self._injection_detector is not None and resolved_policy is not None:
+            injection_result = self._injection_detector.analyze_messages(request.messages or [])
+            if injection_result.score > 0:
+                if self._audit_trail is not None:
+                    await self._audit_trail.record_injection_event(
+                        user_id=req_ctx.user_id,
+                        project_id=req_ctx.project_id,
+                        request_id=request_id,
+                        threat_level=injection_result.threat_level.value,
+                        patterns=injection_result.detected_patterns,
+                        blocked=injection_result.should_block,
+                    )
+                if self._event_dispatcher is not None:
+                    await self._event_dispatcher.dispatch_injection_event(
+                        event_id=request_id,
+                        user_id=req_ctx.user_id,
+                        project_id=req_ctx.project_id,
+                        threat_level=injection_result.threat_level.value,
+                        patterns=injection_result.detected_patterns,
+                        blocked=injection_result.should_block,
+                    )
+                if injection_result.should_block:
+                    return _error_response(
+                        400,
+                        "content_policy_violation",
+                        f"Request blocked: prompt injection detected "
+                        f"(threat_level={injection_result.threat_level.value}, "
+                        f"score={injection_result.score:.2f})",
+                        code="injection_blocked",
+                    )
+
+        # 2.9. PII redaction
+        if self._pii_redactor is not None and resolved_policy is not None:
+            redacted_messages, pii_mapping = self._pii_redactor.redact_messages(
+                request.messages or [], resolved_policy
+            )
+            if pii_mapping.redacted_count > 0:
+                request = ChatCompletionRequest(
+                    messages=redacted_messages,
+                    model=request.model,
+                    temperature=request.temperature,
+                    max_tokens=request.max_tokens,
+                    top_p=request.top_p,
+                    stop=request.stop,
+                    stream=request.stream,
+                    system=request.system,
+                )
+                if self._audit_trail is not None:
+                    redacted_types = list(pii_mapping._counters.keys())
+                    await self._audit_trail.record_pii_redaction(
+                        user_id=req_ctx.user_id,
+                        project_id=req_ctx.project_id,
+                        request_id=request_id,
+                        redacted_types=redacted_types,
+                        count=pii_mapping.redacted_count,
+                    )
+                if self._event_dispatcher is not None:
+                    await self._event_dispatcher.dispatch_pii_event(
+                        event_id=request_id,
+                        user_id=req_ctx.user_id,
+                        project_id=req_ctx.project_id,
+                        redacted_types=list(pii_mapping._counters.keys()),
+                        count=pii_mapping.redacted_count,
+                    )
 
         # 3. Rate limit check
         rate_result = await self.rate_limiter.check_rate_limit(
@@ -527,6 +608,31 @@ class GatewayAgent:
                     response,
                     resp_guard.message or "Response blocked by guardrail.",
                 )
+
+        # 11.5. PII re-injection into response
+        if pii_mapping is not None and pii_mapping.redacted_count > 0 and self._pii_redactor is not None:
+            for i, choice in enumerate(response.choices):
+                msg = choice.get("message", {})
+                content = msg.get("content", "")
+                if isinstance(content, str) and content:
+                    reinjected = self._pii_redactor.reinject_response(content, pii_mapping)
+                    response.choices[i] = {
+                        **choice,
+                        "message": {**msg, "content": reinjected},
+                    }
+
+        # 11.6. Audit trail — record LLM request
+        if self._audit_trail is not None:
+            await self._audit_trail.record_llm_request(
+                user_id=req_ctx.user_id,
+                project_id=req_ctx.project_id,
+                request_id=request_id,
+                model=response.model,
+                provider=response.provider,
+                message_count=len(request.messages or []),
+                pii_redacted_count=pii_mapping.redacted_count if pii_mapping else 0,
+                injection_score=0.0,
+            )
 
         # 12. Cost tracking
         # Ensemble routing records per-call usage internally via the router's
