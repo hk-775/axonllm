@@ -1832,6 +1832,460 @@
     }
 
     /* ================================================================== */
+    /*  Regions Page                                                        */
+    /* ================================================================== */
+    function RegionsPage() {
+      const [topology, setTopology] = useState(null);
+      const [health, setHealth] = useState(null);
+      const [error, setError] = useState(null);
+      const [msg, setMsg] = useState(null);
+
+      const load = useCallback(() => {
+        api.get('/admin/regions').then(setTopology).catch(() => setError('Failed to load topology'));
+        api.get('/admin/regions/health').then(setHealth).catch(() => {});
+      }, []);
+
+      useEffect(() => { load(); }, [load]);
+
+      const triggerHealthCheck = async () => {
+        setMsg(null);
+        try {
+          const res = await api.post('/admin/regions/health/check');
+          setMsg(`Checked ${res.checked} spoke(s)`);
+          load();
+        } catch { setError('Health check failed'); }
+      };
+
+      const triggerFailover = async () => {
+        try {
+          const res = await api.post('/admin/regions/failover');
+          setMsg(`Failover to ${res.failover_to}`);
+          load();
+        } catch (e) { setError(e.error || 'Failover failed'); }
+      };
+
+      const setStatus = async (region, status) => {
+        try {
+          await api.put(`/admin/regions/${region}/status`, { status });
+          setMsg(`${region} marked ${status}`);
+          load();
+        } catch { setError('Status update failed'); }
+      };
+
+      if (error) return <Flash type="error">{error}</Flash>;
+      if (!topology) return <Loading text="Loading regions..." />;
+
+      const modeColors = { single_region: 'badge-blue', active_passive: 'badge-green', active_active: 'badge-blue' };
+
+      return (
+        <div>
+          <div className="page-header"><h1>Multi-Region Topology</h1><p>Hub-and-spoke routing, failover, and data residency</p></div>
+          {msg && <Flash type="success">{msg}</Flash>}
+          <div className="stat-grid">
+            <div className="stat-card"><div className="stat-label">Mode</div><div className="stat-value"><span className={`badge ${modeColors[topology.mode] || 'badge-blue'}`}>{topology.mode.replace(/_/g, '-')}</span></div></div>
+            <div className="stat-card"><div className="stat-label">Hub Region</div><div className="stat-value">{topology.hub_region}</div></div>
+            <div className="stat-card"><div className="stat-label">Spokes</div><div className="stat-value">{topology.healthy_spokes}/{topology.total_spokes} healthy</div></div>
+          </div>
+          <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '1rem' }}>
+            <Btn variant="normal" onClick={triggerHealthCheck}>Run Health Check</Btn>
+            <Btn variant="danger" onClick={triggerFailover}>Trigger Failover</Btn>
+          </div>
+          <div className="container">
+            <div className="container-header"><h2>Spokes <span className="counter">({topology.spokes.length})</span></h2></div>
+            <div className="container-body no-pad">
+              <table>
+                <thead><tr><th>Region</th><th>Role</th><th>Status</th><th>Weight</th><th>Data Zones</th><th>Actions</th></tr></thead>
+                <tbody>
+                  {topology.spokes.map(s => (
+                    <tr key={s.region}>
+                      <td><strong>{s.region}</strong></td>
+                      <td><span className={`badge ${s.role === 'primary' ? 'badge-blue' : s.role === 'failover' ? 'badge-grey' : 'badge-green'}`}>{s.role}</span></td>
+                      <td><span className={`badge ${s.status === 'healthy' ? 'badge-green' : s.status === 'draining' ? 'badge-grey' : 'badge-red'}`}><span className="badge-dot"></span>{s.status}</span></td>
+                      <td>{s.weight}%</td>
+                      <td>{s.data_residency_zones.length > 0 ? s.data_residency_zones.join(', ') : '-'}</td>
+                      <td style={{ display: 'flex', gap: '0.3rem' }}>
+                        {s.status !== 'draining' && <Btn variant="link" onClick={() => setStatus(s.region, 'draining')}>Drain</Btn>}
+                        {s.status === 'unhealthy' && <Btn variant="link" onClick={() => setStatus(s.region, 'healthy')}>Recover</Btn>}
+                        {s.status === 'healthy' && <Btn variant="link" onClick={() => setStatus(s.region, 'unhealthy')}>Force Down</Btn>}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    /* ================================================================== */
+    /*  API Keys Page                                                       */
+    /* ================================================================== */
+    function ApiKeysPage() {
+      const [keys, setKeys] = useState([]);
+      const [projectId, setProjectId] = useState('');
+      const [showForm, setShowForm] = useState(false);
+      const [newKey, setNewKey] = useState(null);
+      const [error, setError] = useState(null);
+      const [form, setForm] = useState({ name: '', scopes: 'chat:invoke', project_id: '' });
+
+      const loadKeys = useCallback(() => {
+        if (!projectId) return;
+        api.get(`/admin/projects/${encodeURIComponent(projectId)}/keys`).then(setKeys).catch(() => setError('Failed to load keys'));
+      }, [projectId]);
+
+      useEffect(() => { loadKeys(); }, [loadKeys]);
+
+      const issueKey = async () => {
+        setError(null); setNewKey(null);
+        try {
+          const res = await api.post(`/admin/projects/${encodeURIComponent(form.project_id || projectId)}/keys`, {
+            name: form.name,
+            scopes: form.scopes.split(',').map(s => s.trim()),
+          });
+          setNewKey(res);
+          setShowForm(false);
+          loadKeys();
+        } catch (e) { setError(e.error || 'Failed to issue key'); }
+      };
+
+      const revokeKey = async (keyId) => {
+        await api.del(`/admin/keys/${keyId}`);
+        loadKeys();
+      };
+
+      const rotateKey = async (keyId) => {
+        const res = await api.post(`/admin/keys/${keyId}/rotate`);
+        setNewKey(res);
+        loadKeys();
+      };
+
+      return (
+        <div>
+          <div className="page-header"><h1>API Keys</h1><p>Issue, revoke, and rotate project-scoped API keys</p></div>
+          {error && <Flash type="error">{error}</Flash>}
+          {newKey && (
+            <Flash type="success">
+              <strong>New key issued:</strong> <code style={{ fontSize: '12px', wordBreak: 'break-all' }}>{newKey.key}</code>
+              <br /><small>Copy this now — it will not be shown again.</small>
+            </Flash>
+          )}
+          <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '1rem', alignItems: 'center' }}>
+            <input style={{ padding: '0.4rem 0.75rem', border: '2px solid var(--awsui-color-border-input)', borderRadius: '8px', fontSize: '14px', width: '250px' }} placeholder="Project ID to view keys..." value={projectId} onChange={e => setProjectId(e.target.value)} />
+            <Btn variant="primary" onClick={() => setShowForm(true)}>Issue New Key</Btn>
+          </div>
+          {showForm && (
+            <div className="container" style={{ marginBottom: '1rem' }}>
+              <div className="container-header"><h2>Issue API Key</h2></div>
+              <div className="container-body">
+                <div style={{ marginBottom: '0.5rem' }}><label style={{ fontWeight: 600, fontSize: '13px' }}>Project ID</label><input style={{ display: 'block', width: '100%', padding: '0.4rem', border: '2px solid var(--awsui-color-border-input)', borderRadius: '6px', marginTop: '0.25rem' }} value={form.project_id || projectId} onChange={e => setForm({ ...form, project_id: e.target.value })} /></div>
+                <div style={{ marginBottom: '0.5rem' }}><label style={{ fontWeight: 600, fontSize: '13px' }}>Key Name</label><input style={{ display: 'block', width: '100%', padding: '0.4rem', border: '2px solid var(--awsui-color-border-input)', borderRadius: '6px', marginTop: '0.25rem' }} value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} placeholder="e.g. CI/CD Pipeline" /></div>
+                <div style={{ marginBottom: '0.5rem' }}><label style={{ fontWeight: 600, fontSize: '13px' }}>Scopes (comma-separated)</label><input style={{ display: 'block', width: '100%', padding: '0.4rem', border: '2px solid var(--awsui-color-border-input)', borderRadius: '6px', marginTop: '0.25rem' }} value={form.scopes} onChange={e => setForm({ ...form, scopes: e.target.value })} /></div>
+                <div style={{ display: 'flex', gap: '0.5rem' }}><Btn variant="primary" onClick={issueKey} disabled={!form.name}>Issue</Btn><Btn variant="normal" onClick={() => setShowForm(false)}>Cancel</Btn></div>
+              </div>
+            </div>
+          )}
+          {keys.length > 0 && (
+            <div className="container">
+              <div className="container-header"><h2>Keys for {projectId} <span className="counter">({keys.length})</span></h2></div>
+              <div className="container-body no-pad">
+                <table>
+                  <thead><tr><th>Key ID</th><th>Name</th><th>Scopes</th><th>Created</th><th>Status</th><th>Last Used</th><th>Actions</th></tr></thead>
+                  <tbody>
+                    {keys.map(k => (
+                      <tr key={k.key_id}>
+                        <td><code style={{ fontSize: '12px' }}>{k.key_id}</code></td>
+                        <td><strong>{k.name}</strong></td>
+                        <td>{k.scopes.join(', ')}</td>
+                        <td>{new Date(k.created_at).toLocaleDateString()}</td>
+                        <td><span className={`badge ${k.revoked ? 'badge-red' : 'badge-green'}`}><span className="badge-dot"></span>{k.revoked ? 'Revoked' : 'Active'}</span></td>
+                        <td>{k.last_used_at ? new Date(k.last_used_at).toLocaleString() : '-'}</td>
+                        <td style={{ display: 'flex', gap: '0.3rem' }}>
+                          {!k.revoked && <Btn variant="link" onClick={() => rotateKey(k.key_id)}>Rotate</Btn>}
+                          {!k.revoked && <Btn variant="link" onClick={() => revokeKey(k.key_id)}>Revoke</Btn>}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    /* ================================================================== */
+    /*  Security / Audit Page                                              */
+    /* ================================================================== */
+    function SecurityPage() {
+      const [tab, setTab] = useState('events');
+      const [records, setRecords] = useState([]);
+      const [stats, setStats] = useState(null);
+      const [integrity, setIntegrity] = useState(null);
+      const [error, setError] = useState(null);
+
+      const loadEvents = useCallback(() => {
+        api.get('/admin/audit/security?limit=50').then(r => setRecords(r.records)).catch(() => setError('Failed to load events'));
+      }, []);
+      const loadStats = useCallback(() => {
+        api.get('/admin/audit/stats').then(setStats).catch(() => {});
+      }, []);
+      const loadIntegrity = useCallback(() => {
+        api.get('/admin/audit/verify').then(setIntegrity).catch(() => {});
+      }, []);
+
+      useEffect(() => { loadEvents(); loadStats(); loadIntegrity(); }, [loadEvents, loadStats, loadIntegrity]);
+
+      const severityColor = (type) => {
+        if (type.includes('blocked')) return 'badge-red';
+        if (type.includes('detected') || type.includes('failure')) return 'badge-grey';
+        return 'badge-blue';
+      };
+
+      return (
+        <div>
+          <div className="page-header"><h1>Security & Audit</h1><p>Injection attempts, PII redaction events, audit trail integrity</p></div>
+          {error && <Flash type="error">{error}</Flash>}
+          <div className="stat-grid">
+            <div className="stat-card"><div className="stat-label">Total Events</div><div className="stat-value">{stats ? fmt.num(stats.total) : '-'}</div></div>
+            <div className="stat-card"><div className="stat-label">Chain Integrity</div><div className="stat-value">{integrity ? <span className={`badge ${integrity.chain_valid ? 'badge-green' : 'badge-red'}`}><span className="badge-dot"></span>{integrity.status}</span> : '-'}</div></div>
+            <div className="stat-card"><div className="stat-label">Security Events</div><div className="stat-value">{records.length}</div></div>
+          </div>
+          {stats && stats.by_type && Object.keys(stats.by_type).length > 0 && (
+            <div className="container" style={{ marginBottom: '1rem' }}>
+              <div className="container-header"><h2>Event Breakdown</h2></div>
+              <div className="container-body">
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem' }}>
+                  {Object.entries(stats.by_type).map(([type, count]) => (
+                    <span key={type} className="badge badge-blue" style={{ padding: '0.3rem 0.6rem' }}>{type}: {count}</span>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+          <div className="container">
+            <div className="container-header"><h2>Recent Security Events <span className="counter">({records.length})</span></h2></div>
+            <div className="container-body no-pad">
+              {records.length === 0 ? (
+                <EmptyState title="No security events" subtitle="No injection attempts or PII redactions recorded yet." />
+              ) : (
+                <table>
+                  <thead><tr><th>Time</th><th>Type</th><th>User</th><th>Project</th><th>Details</th></tr></thead>
+                  <tbody>
+                    {records.map(r => (
+                      <tr key={r.record_id}>
+                        <td style={{ fontSize: '12px', whiteSpace: 'nowrap' }}>{new Date(r.timestamp).toLocaleString()}</td>
+                        <td><span className={`badge ${severityColor(r.event_type)}`}>{r.event_type}</span></td>
+                        <td>{r.user_id}</td>
+                        <td>{r.project_id}</td>
+                        <td style={{ fontSize: '12px', maxWidth: '300px', overflow: 'hidden', textOverflow: 'ellipsis' }}>{JSON.stringify(r.data)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    /* ================================================================== */
+    /*  Webhooks Page                                                       */
+    /* ================================================================== */
+    function WebhooksPage() {
+      const [destinations, setDestinations] = useState([]);
+      const [stats, setStats] = useState(null);
+      const [showForm, setShowForm] = useState(false);
+      const [error, setError] = useState(null);
+      const [msg, setMsg] = useState(null);
+      const [form, setForm] = useState({ name: '', type: 'webhook', url: '', event_filter: '' });
+
+      const load = useCallback(() => {
+        api.get('/admin/webhooks').then(d => { setDestinations(d.destinations); setStats(d.stats); }).catch(() => setError('Failed to load'));
+      }, []);
+
+      useEffect(() => { load(); }, [load]);
+
+      const addDestination = async () => {
+        setError(null); setMsg(null);
+        const config = { url: form.url };
+        const eventFilter = form.event_filter ? form.event_filter.split(',').map(s => s.trim()) : null;
+        try {
+          await api.post('/admin/webhooks', { name: form.name, type: form.type, config, event_filter: eventFilter });
+          setMsg(`Destination "${form.name}" added`);
+          setShowForm(false);
+          setForm({ name: '', type: 'webhook', url: '', event_filter: '' });
+          load();
+        } catch (e) { setError(e.error || 'Failed to add'); }
+      };
+
+      const removeDestination = async (name) => {
+        await api.del(`/admin/webhooks/${encodeURIComponent(name)}`);
+        load();
+      };
+
+      const testDestination = async (name) => {
+        try {
+          const res = await api.post(`/admin/webhooks/${encodeURIComponent(name)}/test`);
+          setMsg(`Test event sent to "${name}": ${res.status}`);
+        } catch (e) { setError(e.error || `Test failed for "${name}"`); }
+      };
+
+      return (
+        <div>
+          <div className="page-header"><h1>Webhooks & Events</h1><p>Push security events to external systems (Slack, SNS, CloudWatch, SIEM)</p></div>
+          {error && <Flash type="error">{error}</Flash>}
+          {msg && <Flash type="success">{msg}</Flash>}
+          <div className="stat-grid">
+            <div className="stat-card"><div className="stat-label">Destinations</div><div className="stat-value">{stats ? stats.destinations : 0}</div></div>
+            <div className="stat-card"><div className="stat-label">Events Dispatched</div><div className="stat-value">{stats ? fmt.num(stats.dispatched) : 0}</div></div>
+            <div className="stat-card"><div className="stat-label">Errors</div><div className="stat-value" style={{ color: stats && stats.errors > 0 ? 'var(--awsui-color-status-error)' : undefined }}>{stats ? stats.errors : 0}</div></div>
+          </div>
+          <div style={{ marginBottom: '1rem' }}><Btn variant="primary" onClick={() => setShowForm(true)}>Add Destination</Btn></div>
+          {showForm && (
+            <div className="container" style={{ marginBottom: '1rem' }}>
+              <div className="container-header"><h2>New Destination</h2></div>
+              <div className="container-body">
+                <div style={{ marginBottom: '0.5rem' }}><label style={{ fontWeight: 600, fontSize: '13px' }}>Name</label><input style={{ display: 'block', width: '100%', padding: '0.4rem', border: '2px solid var(--awsui-color-border-input)', borderRadius: '6px', marginTop: '0.25rem' }} value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} placeholder="e.g. slack-security" /></div>
+                <div style={{ marginBottom: '0.5rem' }}><label style={{ fontWeight: 600, fontSize: '13px' }}>Type</label><select style={{ display: 'block', width: '100%', padding: '0.4rem', border: '2px solid var(--awsui-color-border-input)', borderRadius: '6px', marginTop: '0.25rem' }} value={form.type} onChange={e => setForm({ ...form, type: e.target.value })}><option value="webhook">Webhook</option><option value="sns">SNS</option><option value="cloudwatch">CloudWatch</option></select></div>
+                <div style={{ marginBottom: '0.5rem' }}><label style={{ fontWeight: 600, fontSize: '13px' }}>URL / Topic ARN</label><input style={{ display: 'block', width: '100%', padding: '0.4rem', border: '2px solid var(--awsui-color-border-input)', borderRadius: '6px', marginTop: '0.25rem' }} value={form.url} onChange={e => setForm({ ...form, url: e.target.value })} placeholder="https://hooks.slack.com/..." /></div>
+                <div style={{ marginBottom: '0.5rem' }}><label style={{ fontWeight: 600, fontSize: '13px' }}>Event Filter (comma-separated, empty = all)</label><input style={{ display: 'block', width: '100%', padding: '0.4rem', border: '2px solid var(--awsui-color-border-input)', borderRadius: '6px', marginTop: '0.25rem' }} value={form.event_filter} onChange={e => setForm({ ...form, event_filter: e.target.value })} placeholder="injection_blocked, auth_failure" /></div>
+                <div style={{ display: 'flex', gap: '0.5rem' }}><Btn variant="primary" onClick={addDestination} disabled={!form.name}>Add</Btn><Btn variant="normal" onClick={() => setShowForm(false)}>Cancel</Btn></div>
+              </div>
+            </div>
+          )}
+          <div className="container">
+            <div className="container-header"><h2>Destinations <span className="counter">({destinations.length})</span></h2></div>
+            <div className="container-body no-pad">
+              {destinations.length === 0 ? (
+                <EmptyState title="No destinations" subtitle="Add a webhook or SNS topic to receive security events." />
+              ) : (
+                <table>
+                  <thead><tr><th>Name</th><th>Type</th><th>Status</th><th>Event Filter</th><th>Actions</th></tr></thead>
+                  <tbody>
+                    {destinations.map(d => (
+                      <tr key={d.name}>
+                        <td><strong>{d.name}</strong></td>
+                        <td><span className="badge badge-blue">{d.type}</span></td>
+                        <td><span className={`badge ${d.enabled ? 'badge-green' : 'badge-grey'}`}><span className="badge-dot"></span>{d.enabled ? 'Active' : 'Disabled'}</span></td>
+                        <td>{d.event_filter ? d.event_filter.join(', ') : 'All events'}</td>
+                        <td style={{ display: 'flex', gap: '0.3rem' }}>
+                          <Btn variant="link" onClick={() => testDestination(d.name)}>Test</Btn>
+                          <Btn variant="link" onClick={() => removeDestination(d.name)}>Remove</Btn>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    /* ================================================================== */
+    /*  Policy Hierarchy Page (enhanced)                                    */
+    /* ================================================================== */
+    function PolicyHierarchyPage() {
+      const [nodes, setNodes] = useState([]);
+      const [showForm, setShowForm] = useState(false);
+      const [error, setError] = useState(null);
+      const [msg, setMsg] = useState(null);
+      const [form, setForm] = useState({ node_id: '', node_type: 'org', parent_id: '', display_name: '', rate_limit_rpm: '', budget_limit: '', pii_redaction_enabled: false, pii_redact_types: '' });
+
+      const load = useCallback(() => {
+        api.get('/admin/policies/hierarchy').then(setNodes).catch(() => setError('Failed to load'));
+      }, []);
+
+      useEffect(() => { load(); }, [load]);
+
+      const createNode = async () => {
+        setError(null); setMsg(null);
+        const limits = {};
+        if (form.rate_limit_rpm) limits.rate_limit_rpm = parseInt(form.rate_limit_rpm);
+        if (form.budget_limit) limits.budget_limit = parseFloat(form.budget_limit);
+        if (form.pii_redaction_enabled) limits.pii_redaction_enabled = true;
+        if (form.pii_redact_types) limits.pii_redact_types = form.pii_redact_types.split(',').map(s => s.trim());
+        try {
+          await api.post('/admin/policies/hierarchy', {
+            node_id: form.node_id,
+            node_type: form.node_type,
+            parent_id: form.parent_id || null,
+            display_name: form.display_name || form.node_id,
+            limits,
+          });
+          setMsg(`Node "${form.node_id}" created`);
+          setShowForm(false);
+          load();
+        } catch (e) { setError(e.error || 'Failed to create node'); }
+      };
+
+      const nodeTypeColor = (t) => {
+        switch (t) { case 'org': return 'badge-blue'; case 'business_unit': return 'badge-green'; case 'project': return 'badge-grey'; default: return 'badge-grey'; }
+      };
+
+      return (
+        <div>
+          <div className="page-header"><h1>Policy Hierarchy</h1><p>Org &gt; Business Unit &gt; Project &gt; Environment — most restrictive wins</p></div>
+          {error && <Flash type="error">{error}</Flash>}
+          {msg && <Flash type="success">{msg}</Flash>}
+          <div style={{ marginBottom: '1rem' }}><Btn variant="primary" onClick={() => setShowForm(true)}>Add Node</Btn></div>
+          {showForm && (
+            <div className="container" style={{ marginBottom: '1rem' }}>
+              <div className="container-header"><h2>New Policy Node</h2></div>
+              <div className="container-body">
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.5rem' }}>
+                  <div><label style={{ fontWeight: 600, fontSize: '13px' }}>Node ID</label><input style={{ display: 'block', width: '100%', padding: '0.4rem', border: '2px solid var(--awsui-color-border-input)', borderRadius: '6px', marginTop: '0.25rem' }} value={form.node_id} onChange={e => setForm({ ...form, node_id: e.target.value })} placeholder="org:acme" /></div>
+                  <div><label style={{ fontWeight: 600, fontSize: '13px' }}>Type</label><select style={{ display: 'block', width: '100%', padding: '0.4rem', border: '2px solid var(--awsui-color-border-input)', borderRadius: '6px', marginTop: '0.25rem' }} value={form.node_type} onChange={e => setForm({ ...form, node_type: e.target.value })}><option value="org">Org</option><option value="business_unit">Business Unit</option><option value="project">Project</option><option value="environment">Environment</option></select></div>
+                  <div><label style={{ fontWeight: 600, fontSize: '13px' }}>Parent ID</label><input style={{ display: 'block', width: '100%', padding: '0.4rem', border: '2px solid var(--awsui-color-border-input)', borderRadius: '6px', marginTop: '0.25rem' }} value={form.parent_id} onChange={e => setForm({ ...form, parent_id: e.target.value })} placeholder="(none for root org)" /></div>
+                  <div><label style={{ fontWeight: 600, fontSize: '13px' }}>Display Name</label><input style={{ display: 'block', width: '100%', padding: '0.4rem', border: '2px solid var(--awsui-color-border-input)', borderRadius: '6px', marginTop: '0.25rem' }} value={form.display_name} onChange={e => setForm({ ...form, display_name: e.target.value })} /></div>
+                  <div><label style={{ fontWeight: 600, fontSize: '13px' }}>Rate Limit (RPM)</label><input type="number" style={{ display: 'block', width: '100%', padding: '0.4rem', border: '2px solid var(--awsui-color-border-input)', borderRadius: '6px', marginTop: '0.25rem' }} value={form.rate_limit_rpm} onChange={e => setForm({ ...form, rate_limit_rpm: e.target.value })} /></div>
+                  <div><label style={{ fontWeight: 600, fontSize: '13px' }}>Budget Limit ($)</label><input type="number" style={{ display: 'block', width: '100%', padding: '0.4rem', border: '2px solid var(--awsui-color-border-input)', borderRadius: '6px', marginTop: '0.25rem' }} value={form.budget_limit} onChange={e => setForm({ ...form, budget_limit: e.target.value })} /></div>
+                </div>
+                <div style={{ marginTop: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                  <input type="checkbox" id="pii-enabled" checked={form.pii_redaction_enabled} onChange={e => setForm({ ...form, pii_redaction_enabled: e.target.checked })} />
+                  <label htmlFor="pii-enabled" style={{ fontWeight: 600, fontSize: '13px' }}>Enable PII Redaction</label>
+                </div>
+                {form.pii_redaction_enabled && (
+                  <div style={{ marginTop: '0.5rem' }}><label style={{ fontWeight: 600, fontSize: '13px' }}>PII Types (comma-separated)</label><input style={{ display: 'block', width: '100%', padding: '0.4rem', border: '2px solid var(--awsui-color-border-input)', borderRadius: '6px', marginTop: '0.25rem' }} value={form.pii_redact_types} onChange={e => setForm({ ...form, pii_redact_types: e.target.value })} placeholder="email, ssn, phone, credit_card, ip_address" /></div>
+                )}
+                <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.75rem' }}><Btn variant="primary" onClick={createNode} disabled={!form.node_id}>Create</Btn><Btn variant="normal" onClick={() => setShowForm(false)}>Cancel</Btn></div>
+              </div>
+            </div>
+          )}
+          <div className="container">
+            <div className="container-header"><h2>Policy Nodes <span className="counter">({nodes.length})</span></h2></div>
+            <div className="container-body no-pad">
+              {nodes.length === 0 ? (
+                <EmptyState title="No policy nodes" subtitle="Create an org node to start building your hierarchy." />
+              ) : (
+                <table>
+                  <thead><tr><th>Node ID</th><th>Type</th><th>Parent</th><th>Display Name</th><th>Rate Limit</th><th>Budget</th><th>PII</th></tr></thead>
+                  <tbody>
+                    {nodes.map(n => (
+                      <tr key={n.node_id}>
+                        <td><strong>{n.node_id}</strong></td>
+                        <td><span className={`badge ${nodeTypeColor(n.node_type)}`}>{n.node_type}</span></td>
+                        <td>{n.parent_id || '-'}</td>
+                        <td>{n.display_name}</td>
+                        <td>{n.limits.rate_limit_rpm || '-'}</td>
+                        <td>{n.limits.budget_limit ? `$${n.limits.budget_limit.toLocaleString()}` : '-'}</td>
+                        <td>{n.limits.pii_redaction_enabled ? <span className="badge badge-green">ON</span> : '-'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    /* ================================================================== */
     /*  App Shell                                                          */
     /* ================================================================== */
     function App() {
@@ -1858,6 +2312,11 @@
         case 'user-detail': content = <UserDetailPage userId={selectedUser} onBack={() => navigate('users')} />; break;
         case 'models': content = <ModelsPage />; break;
         case 'policies': content = <PoliciesPage />; break;
+        case 'policy-hierarchy': content = <PolicyHierarchyPage />; break;
+        case 'api-keys': content = <ApiKeysPage />; break;
+        case 'security': content = <SecurityPage />; break;
+        case 'webhooks': content = <WebhooksPage />; break;
+        case 'regions': content = <RegionsPage />; break;
         case 'configuration': content = <ConfigurationPage />; break;
         case 'health': content = <HealthPage />; break;
         default: content = <OverviewPage />;
@@ -1872,9 +2331,16 @@
           { key: 'projects', icon: '📁', label: 'Projects', activeViews: ['projects', 'project-detail', 'project-form'] },
           { key: 'users', icon: '👤', label: 'Users', activeViews: ['users', 'user-detail'] },
           { key: 'models', icon: '🤖', label: 'Models' },
+          { key: 'api-keys', icon: '🔑', label: 'API Keys' },
+        ]},
+        { label: 'Governance', items: [
+          { key: 'policies', icon: '🔒', label: 'Policies' },
+          { key: 'policy-hierarchy', icon: '🏛', label: 'Hierarchy' },
+          { key: 'regions', icon: '🌐', label: 'Regions' },
         ]},
         { label: 'Security', items: [
-          { key: 'policies', icon: '🔒', label: 'Policies' },
+          { key: 'security', icon: '🛡', label: 'Audit Trail' },
+          { key: 'webhooks', icon: '📡', label: 'Webhooks' },
         ]},
         { label: 'System', items: [
           { key: 'configuration', icon: '⚙', label: 'Configuration' },
