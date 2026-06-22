@@ -17,6 +17,7 @@ from starlette.applications import Starlette
 from src.gateway.admin.audit_routes import AuditAPI, create_audit_routes
 from src.gateway.admin.key_routes import KeyManagementAPI, create_key_routes
 from src.gateway.admin.policy_routes import PolicyHierarchyAPI, create_policy_hierarchy_routes
+from src.gateway.admin.quota_routes import QuotaAPI, create_quota_routes
 from src.gateway.admin.region_routes import RegionAPI, create_region_routes
 from src.gateway.admin.routes import AdminAPI, PROVIDER_MODEL_CATALOG, create_admin_routes
 from src.gateway.admin.webhook_routes import WebhookAPI, create_webhook_routes
@@ -29,6 +30,7 @@ from src.gateway.middleware.auth import AuthMiddleware
 from src.gateway.multi_region.health_monitor import SpokeHealthMonitor
 from src.gateway.multi_region.region_config import default_single_region, HubConfig
 from src.gateway.multi_region.region_router import RegionRouter
+from src.gateway.quota_enforcer import QuotaEnforcer
 from src.gateway.middleware.security import SecurityMiddleware
 from src.gateway.security.audit_trail import AuditTrail
 from src.gateway.security.event_dispatcher import EventDispatcher
@@ -93,6 +95,7 @@ class GatewayComponents:
     api_key_service: APIKeyService | None = None
     oidc_service: OIDCService | None = None
     policy_resolver: PolicyHierarchyResolver | None = None
+    quota_enforcer: QuotaEnforcer | None = None
     pii_redactor: PIIRedactor | None = None
     injection_detector: PromptInjectionDetector | None = None
     audit_trail: AuditTrail | None = None
@@ -137,6 +140,9 @@ def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComp
     policy_resolver = PolicyHierarchyResolver(persistence=persistence)
     if persistence.enabled:
         asyncio.get_event_loop().run_until_complete(policy_resolver.load_nodes())
+
+    # --- Quota enforcement ---
+    quota_enforcer = QuotaEnforcer()
 
     # --- Multi-region ---
     hub_config = default_single_region(region=app_config.aws_region)
@@ -273,6 +279,7 @@ def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComp
         api_key_service=api_key_service,
         oidc_service=oidc_service,
         policy_resolver=policy_resolver,
+        quota_enforcer=quota_enforcer,
         pii_redactor=pii_redactor,
         injection_detector=injection_detector,
         audit_trail=audit_trail,
@@ -310,12 +317,13 @@ def build_starlette_app(app_config: AppConfig | None = None) -> Starlette:
         semantic_engine=comp.semantic_engine,
     )
 
-    # Key, policy, audit, webhook, and region admin APIs
+    # Key, policy, audit, webhook, region, and quota admin APIs
     key_api = KeyManagementAPI(api_key_service=comp.api_key_service)
     policy_api = PolicyHierarchyAPI(resolver=comp.policy_resolver)
     audit_api = AuditAPI(audit_trail=comp.audit_trail)
     webhook_api = WebhookAPI(dispatcher=comp.event_dispatcher)
     region_api = RegionAPI(router=comp.region_router, monitor=comp.health_monitor)
+    quota_api = QuotaAPI(quota_enforcer=comp.quota_enforcer, policy_resolver=comp.policy_resolver)
 
     # Default chat project is the first demo project or "default"
     default_project = next(iter(comp.projects), "default")
@@ -333,6 +341,7 @@ def build_starlette_app(app_config: AppConfig | None = None) -> Starlette:
         + create_audit_routes(audit_api)
         + create_webhook_routes(webhook_api)
         + create_region_routes(region_api)
+        + create_quota_routes(quota_api)
         + create_chat_routes(chat_api)
     )
 
