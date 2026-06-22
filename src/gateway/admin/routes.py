@@ -1262,10 +1262,40 @@ class AdminAPI:
         html = index_path.read_text(encoding="utf-8")
         return HTMLResponse(html)
 
-    async def architecture(self, request: Request) -> FileResponse:
-        """Serve the architecture diagram PNG."""
-        png_path = _PROJECT_ROOT / "architecture.drawio.png"
-        return FileResponse(png_path, media_type="image/png")
+    async def architecture(self, request: Request) -> HTMLResponse:
+        """Serve the architecture diagram with interactive Draw.io viewer."""
+        drawio_path = _PROJECT_ROOT / "docs" / "architecture.drawio"
+        if not drawio_path.exists():
+            drawio_path = _PROJECT_ROOT / "architecture.drawio.png"
+            if drawio_path.exists():
+                return FileResponse(drawio_path, media_type="image/png")
+            return HTMLResponse("<h1>Architecture diagram not found</h1>", status_code=404)
+
+        import base64
+        drawio_xml = drawio_path.read_text(encoding="utf-8")
+        encoded = base64.b64encode(drawio_xml.encode()).decode()
+
+        html = f"""<!DOCTYPE html>
+<html><head>
+<meta charset="utf-8">
+<title>AxonLLM Architecture</title>
+<style>
+  body {{ margin: 0; overflow: hidden; background: #1a1a2e; }}
+  .mxgraph {{ max-width: 100%; border: none; }}
+  .toolbar {{ position: fixed; top: 10px; right: 10px; z-index: 1000; display: flex; gap: 8px; }}
+  .toolbar a {{ background: #FF9900; color: #fff; padding: 8px 16px; border-radius: 4px;
+    text-decoration: none; font-family: sans-serif; font-size: 13px; font-weight: 600; }}
+  .toolbar a:hover {{ background: #EC7211; }}
+</style>
+</head><body>
+<div class="toolbar">
+  <a href="/admin/dashboard">← Dashboard</a>
+  <a href="https://app.diagrams.net/#R{encoded}" target="_blank">Open in Draw.io</a>
+</div>
+<div class="mxgraph" style="max-width:100%;border:none;" data-mxgraph='{{"highlight":"#0000ff","nav":true,"resize":true,"toolbar":"zoom layers","edit":"_blank","xml":"{encoded}"}}'></div>
+<script type="text/javascript" src="https://viewer.diagrams.net/js/viewer-static.min.js"></script>
+</body></html>"""
+        return HTMLResponse(html)
 
 
 # ------------------------------------------------------------------
