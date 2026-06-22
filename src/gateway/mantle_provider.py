@@ -18,7 +18,6 @@ import boto3
 from botocore.auth import SigV4Auth
 from botocore.awsrequest import AWSRequest
 
-from src.gateway.adapters.mantle_adapter import MantleAdapter
 from src.gateway.models import (
     ChatCompletionRequest,
     ChatCompletionResponse,
@@ -47,7 +46,6 @@ def create_mantle_provider_fn(
     """Return a factory that creates provider_fn callables for Bedrock Mantle."""
     session = boto3.Session()
     credentials = session.get_credentials()
-    adapter = MantleAdapter()
     endpoint = f"https://bedrock-mantle.{region}.api.aws"
 
     def create(
