@@ -244,6 +244,8 @@ def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComp
         user_configs=user_configs,
         request_validator=request_validator,
         smart_routing_enabled=True,
+        quota_enforcer=quota_enforcer,
+        policy_resolver=policy_resolver,
     )
 
     # --- Efficiency analysis ---

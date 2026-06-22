@@ -36,7 +36,9 @@ from src.gateway.smart_routing import NoCandidateModelsError
 from src.gateway.streaming import simulate_streaming
 
 if TYPE_CHECKING:
+    from src.gateway.auth.policy_hierarchy import PolicyHierarchyResolver
     from src.gateway.provider_fn_factory import ProviderFnFactory
+    from src.gateway.quota_enforcer import QuotaEnforcer
 
 
 # ---------------------------------------------------------------------------
@@ -125,6 +127,8 @@ class GatewayAgent:
         user_configs: dict[str, dict] | None = None,
         request_validator: RequestValidator | None = None,
         smart_routing_enabled: bool = False,
+        quota_enforcer: QuotaEnforcer | None = None,
+        policy_resolver: PolicyHierarchyResolver | None = None,
     ) -> None:
         self.router = router
         self.rate_limiter = rate_limiter
@@ -137,6 +141,8 @@ class GatewayAgent:
         self._user_configs: dict[str, dict] = user_configs or {}
         self.request_validator = request_validator
         self._smart_routing_enabled = smart_routing_enabled
+        self._quota_enforcer = quota_enforcer
+        self._policy_resolver = policy_resolver
 
     # ------------------------------------------------------------------
     # Public API
@@ -191,6 +197,27 @@ class GatewayAgent:
                     return _error_response(
                         400, "invalid_request", first_error.message, code="invalid_message_format"
                     )
+
+        # 2.7. Policy-hierarchy quota enforcement
+        resolved_policy = None
+        if self._quota_enforcer is not None and self._policy_resolver is not None:
+            resolved_policy = await self._policy_resolver.resolve(req_ctx.project_id)
+            estimated_cost = self._estimate_request_cost(request)
+            quota_decision = self._quota_enforcer.enforce_all(
+                project_id=req_ctx.project_id,
+                model=request.model or "",
+                provider=context.get("provider"),
+                max_tokens=request.max_tokens,
+                estimated_cost=estimated_cost,
+                policy=resolved_policy,
+            )
+            if not quota_decision.allowed:
+                return _error_response(
+                    429,
+                    "quota_exceeded",
+                    quota_decision.reason,
+                    code=f"quota_{quota_decision.limit_type}",
+                )
 
         # 3. Rate limit check
         rate_result = await self.rate_limiter.check_rate_limit(
@@ -531,6 +558,10 @@ class GatewayAgent:
             )
             await self.cost_tracker.record_usage(usage_record)
 
+            # Record spend in quota enforcer for hierarchy budget tracking
+            if self._quota_enforcer is not None:
+                self._quota_enforcer.record_spend(req_ctx.project_id, cost)
+
         # 13. Budget status for streaming (already enforced pre-request)
         budget_status: BudgetStatus | None = None
 
@@ -833,6 +864,38 @@ class GatewayAgent:
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    def _estimate_request_cost(self, request: ChatCompletionRequest) -> float:
+        """Estimate the cost of a request before execution for quota pre-check.
+
+        Uses a rough token estimate from message content and the model's pricing.
+        Returns 0.0 if pricing cannot be resolved (quota budget check becomes no-op).
+        """
+        prompt_chars = 0
+        for msg in request.messages or []:
+            if isinstance(msg, dict):
+                content = msg.get("content", "")
+                if isinstance(content, str):
+                    prompt_chars += len(content)
+        estimated_prompt_tokens = max(1, prompt_chars // 4)
+        estimated_completion_tokens = request.max_tokens or 256
+
+        try:
+            chain = self.router.get_fallback_chain(request.model or "")
+        except (KeyError, Exception):
+            return 0.0
+        if not chain:
+            return 0.0
+        mapping = chain[0]
+        try:
+            return self.cost_tracker.calculate_cost(
+                mapping.provider,
+                mapping.model_id,
+                estimated_prompt_tokens,
+                estimated_completion_tokens,
+            )
+        except Exception:
+            return 0.0
 
     def _compute_effective_allowed_models(
         self, project: Project | None, user_id: str
