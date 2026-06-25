@@ -1839,6 +1839,9 @@
       const [health, setHealth] = useState(null);
       const [error, setError] = useState(null);
       const [msg, setMsg] = useState(null);
+      const [showAddForm, setShowAddForm] = useState(false);
+      const [newSpoke, setNewSpoke] = useState({ region: '', role: 'active', weight: 50, data_residency_zones: '' });
+      const [editingWeight, setEditingWeight] = useState({});
 
       const load = useCallback(() => {
         api.get('/admin/regions').then(setTopology).catch(() => setError('Failed to load topology'));
@@ -1872,24 +1875,83 @@
         } catch { setError('Status update failed'); }
       };
 
-      if (error) return <Flash type="error">{error}</Flash>;
+      const addSpoke = async (e) => {
+        e.preventDefault();
+        try {
+          const payload = { ...newSpoke, weight: parseInt(newSpoke.weight) || 50, data_residency_zones: newSpoke.data_residency_zones ? newSpoke.data_residency_zones.split(',').map(z => z.trim()) : [] };
+          await api.post('/admin/regions/spokes', payload);
+          setMsg(`Added spoke: ${newSpoke.region}`);
+          setShowAddForm(false);
+          setNewSpoke({ region: '', role: 'active', weight: 50, data_residency_zones: '' });
+          load();
+        } catch (err) { setError(err.error || 'Failed to add spoke'); }
+      };
+
+      const removeSpoke = async (region) => {
+        if (!confirm(`Remove spoke ${region}?`)) return;
+        try {
+          await api.del(`/admin/regions/spokes/${region}`);
+          setMsg(`Removed spoke: ${region}`);
+          load();
+        } catch (err) { setError(err.error || 'Failed to remove spoke'); }
+      };
+
+      const updateWeight = async (region, weight) => {
+        try {
+          await api.put(`/admin/regions/spokes/${region}`, { weight: parseInt(weight) });
+          setEditingWeight({});
+          load();
+        } catch { setError('Failed to update weight'); }
+      };
+
+      const updateRole = async (region, role) => {
+        try {
+          await api.put(`/admin/regions/spokes/${region}`, { role });
+          setMsg(`${region} role changed to ${role}`);
+          load();
+        } catch { setError('Failed to update role'); }
+      };
+
+      const toggleStrictResidency = async () => {
+        try {
+          await api.put('/admin/regions/config', { data_residency_strict: !topology.data_residency_strict });
+          load();
+        } catch { setError('Failed to update config'); }
+      };
+
+      if (error) return <Flash type="error">{error}<Btn variant="link" onClick={() => setError(null)}>dismiss</Btn></Flash>;
       if (!topology) return <Loading text="Loading regions..." />;
 
       const modeColors = { single_region: 'badge-blue', active_passive: 'badge-green', active_active: 'badge-blue' };
 
       return (
         <div>
-          <div className="page-header"><h1>Multi-Region Topology</h1><p>Hub-and-spoke routing, failover, and data residency</p></div>
-          {msg && <Flash type="success">{msg}</Flash>}
+          <div className="page-header"><h1>Multi-Region Topology</h1><p>Hub-and-spoke routing, failover, and data residency — fully configurable</p></div>
+          {msg && <Flash type="success">{msg}<Btn variant="link" onClick={() => setMsg(null)}>dismiss</Btn></Flash>}
           <div className="stat-grid">
             <div className="stat-card"><div className="stat-label">Mode</div><div className="stat-value"><span className={`badge ${modeColors[topology.mode] || 'badge-blue'}`}>{topology.mode.replace(/_/g, '-')}</span></div></div>
             <div className="stat-card"><div className="stat-label">Hub Region</div><div className="stat-value">{topology.hub_region}</div></div>
             <div className="stat-card"><div className="stat-label">Spokes</div><div className="stat-value">{topology.healthy_spokes}/{topology.total_spokes} healthy</div></div>
           </div>
-          <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '1rem' }}>
+          <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '1rem', flexWrap: 'wrap' }}>
+            <Btn variant="primary" onClick={() => setShowAddForm(!showAddForm)}>{showAddForm ? 'Cancel' : '+ Add Spoke'}</Btn>
             <Btn variant="normal" onClick={triggerHealthCheck}>Run Health Check</Btn>
             <Btn variant="danger" onClick={triggerFailover}>Trigger Failover</Btn>
           </div>
+          {showAddForm && (
+            <div className="container" style={{ marginBottom: '1rem' }}>
+              <div className="container-header"><h2>Add New Spoke</h2></div>
+              <div className="container-body">
+                <form onSubmit={addSpoke} style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: '0.75rem', alignItems: 'end' }}>
+                  <label style={{ fontSize: '12px' }}>Region<input className="input" value={newSpoke.region} onChange={e => setNewSpoke({...newSpoke, region: e.target.value})} placeholder="us-west-2" required /></label>
+                  <label style={{ fontSize: '12px' }}>Role<select className="input" value={newSpoke.role} onChange={e => setNewSpoke({...newSpoke, role: e.target.value})}><option value="primary">Primary</option><option value="failover">Failover</option><option value="active">Active</option></select></label>
+                  <label style={{ fontSize: '12px' }}>Weight<input className="input" type="number" min="0" max="100" value={newSpoke.weight} onChange={e => setNewSpoke({...newSpoke, weight: e.target.value})} /></label>
+                  <label style={{ fontSize: '12px' }}>Data Zones (comma-sep)<input className="input" value={newSpoke.data_residency_zones} onChange={e => setNewSpoke({...newSpoke, data_residency_zones: e.target.value})} placeholder="us, eu" /></label>
+                  <Btn type="submit" variant="primary">Add Spoke</Btn>
+                </form>
+              </div>
+            </div>
+          )}
           <div className="container">
             <div className="container-header"><h2>Spokes <span className="counter">({topology.spokes.length})</span></h2></div>
             <div className="container-body no-pad">
@@ -1899,14 +1961,26 @@
                   {topology.spokes.map(s => (
                     <tr key={s.region}>
                       <td><strong>{s.region}</strong></td>
-                      <td><span className={`badge ${s.role === 'primary' ? 'badge-blue' : s.role === 'failover' ? 'badge-grey' : 'badge-green'}`}>{s.role}</span></td>
+                      <td>
+                        <select value={s.role} onChange={e => updateRole(s.region, e.target.value)} style={{ border: 'none', background: 'transparent', fontWeight: 600, color: s.role === 'primary' ? '#147EBA' : s.role === 'failover' ? '#666' : '#248814', cursor: 'pointer' }}>
+                          <option value="primary">primary</option>
+                          <option value="failover">failover</option>
+                          <option value="active">active</option>
+                        </select>
+                      </td>
                       <td><span className={`badge ${s.status === 'healthy' ? 'badge-green' : s.status === 'draining' ? 'badge-grey' : 'badge-red'}`}><span className="badge-dot"></span>{s.status}</span></td>
-                      <td>{s.weight}%</td>
+                      <td>
+                        {editingWeight[s.region] !== undefined
+                          ? <input type="number" min="0" max="100" value={editingWeight[s.region]} onChange={e => setEditingWeight({...editingWeight, [s.region]: e.target.value})} onBlur={() => updateWeight(s.region, editingWeight[s.region])} onKeyDown={e => e.key === 'Enter' && updateWeight(s.region, editingWeight[s.region])} autoFocus style={{ width: '50px' }} />
+                          : <span onClick={() => setEditingWeight({...editingWeight, [s.region]: s.weight})} style={{ cursor: 'pointer', borderBottom: '1px dashed #999' }}>{s.weight}%</span>
+                        }
+                      </td>
                       <td>{s.data_residency_zones.length > 0 ? s.data_residency_zones.join(', ') : '-'}</td>
-                      <td style={{ display: 'flex', gap: '0.3rem' }}>
+                      <td style={{ display: 'flex', gap: '0.3rem', flexWrap: 'wrap' }}>
                         {s.status !== 'draining' && <Btn variant="link" onClick={() => setStatus(s.region, 'draining')}>Drain</Btn>}
                         {s.status === 'unhealthy' && <Btn variant="link" onClick={() => setStatus(s.region, 'healthy')}>Recover</Btn>}
                         {s.status === 'healthy' && <Btn variant="link" onClick={() => setStatus(s.region, 'unhealthy')}>Force Down</Btn>}
+                        <Btn variant="link" onClick={() => removeSpoke(s.region)} style={{ color: '#d13212' }}>Remove</Btn>
                       </td>
                     </tr>
                   ))}

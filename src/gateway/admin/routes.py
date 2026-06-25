@@ -1263,41 +1263,31 @@ class AdminAPI:
         return HTMLResponse(html)
 
     async def architecture(self, request: Request) -> HTMLResponse:
-        """Serve the architecture diagram with interactive Draw.io viewer."""
-        import base64
+        """Serve the architecture diagram as an SVG embedded in a full-page viewer."""
+        svg_path = _PROJECT_ROOT / "docs" / "architecture.svg"
+        if not svg_path.exists():
+            return HTMLResponse("<h1>Architecture diagram not found</h1>", status_code=404)
 
-        drawio_path = _PROJECT_ROOT / "docs" / "architecture.drawio"
-        if not drawio_path.exists():
-            return HTMLResponse(
-                "<html><body><h1>Architecture diagram not found</h1>"
-                "<p>Expected: docs/architecture.drawio</p></body></html>",
-                status_code=404,
-            )
-
-        try:
-            drawio_xml = drawio_path.read_text(encoding="utf-8")
-            encoded = base64.b64encode(drawio_xml.encode()).decode()
-        except Exception as e:
-            return HTMLResponse(f"<h1>Error reading diagram: {e}</h1>", status_code=500)
-
+        svg_content = svg_path.read_text(encoding="utf-8")
         html = (
             '<!DOCTYPE html><html><head><meta charset="utf-8">'
             "<title>AxonLLM Architecture</title>"
             "<style>"
-            "body{margin:0;overflow:hidden;background:#f4f4f4}"
-            ".toolbar{position:fixed;top:10px;right:10px;z-index:1000;display:flex;gap:8px}"
-            ".toolbar a{background:#FF9900;color:#fff;padding:8px 16px;border-radius:4px;"
-            "text-decoration:none;font-family:sans-serif;font-size:13px;font-weight:600}"
+            "body{margin:0;background:#f8f9fa;display:flex;flex-direction:column;min-height:100vh}"
+            ".toolbar{background:#232F3E;padding:10px 20px;display:flex;align-items:center;gap:12px}"
+            ".toolbar a{color:#fff;text-decoration:none;font-family:sans-serif;font-size:13px;"
+            "padding:6px 14px;border-radius:4px;background:#FF9900;font-weight:600}"
             ".toolbar a:hover{background:#EC7211}"
+            ".toolbar span{color:#fff;font-family:sans-serif;font-size:15px;font-weight:700;flex:1}"
+            ".diagram{flex:1;display:flex;align-items:center;justify-content:center;padding:20px;overflow:auto}"
+            ".diagram svg{max-width:100%;height:auto;border-radius:8px;"
+            "box-shadow:0 4px 24px rgba(0,0,0,0.1)}"
             "</style></head><body>"
             '<div class="toolbar">'
+            "<span>AxonLLM Architecture</span>"
             '<a href="/admin/dashboard">&larr; Dashboard</a>'
-            '<a href="https://app.diagrams.net/#R' + encoded + '" target="_blank">Open in Draw.io</a>'
             "</div>"
-            '<div class="mxgraph" style="max-width:100%;border:none" '
-            "data-mxgraph='{\"highlight\":\"#0000ff\",\"nav\":true,\"resize\":true,"
-            '"toolbar":"zoom layers","edit":"_blank","xml":"' + encoded + "\"}'></div>"
-            '<script src="https://viewer.diagrams.net/js/viewer-static.min.js"></script>'
+            '<div class="diagram">' + svg_content + "</div>"
             "</body></html>"
         )
         return HTMLResponse(html)

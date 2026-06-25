@@ -8,7 +8,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
-from src.gateway.multi_region.region_config import SpokeRole
+from src.gateway.multi_region.region_config import SpokeConfig, SpokeRole
 
 if TYPE_CHECKING:
     from src.gateway.multi_region.health_monitor import SpokeHealthMonitor
@@ -28,6 +28,7 @@ class RegionAPI:
         return JSONResponse(content={
             "hub_region": config.hub_region,
             "mode": self._detect_mode(config),
+            "data_residency_strict": config.data_residency_strict,
             "total_spokes": len(config.spokes),
             "healthy_spokes": len(config.active_spokes),
             "spokes": [
@@ -139,6 +140,92 @@ class RegionAPI:
             "primary_marked_unhealthy": primary.region if primary else None,
         })
 
+    async def add_spoke(self, request: Request) -> JSONResponse:
+        """POST /admin/regions/spokes — add a new spoke to the topology."""
+        body = await request.json()
+        region = body.get("region", "")
+        if not region:
+            return JSONResponse(status_code=400, content={"error": "region is required"})
+
+        if self.router.config.get_spoke(region):
+            return JSONResponse(status_code=409, content={"error": f"Spoke '{region}' already exists"})
+
+        role_str = body.get("role", "active")
+        try:
+            role = SpokeRole(role_str)
+        except ValueError:
+            return JSONResponse(status_code=400, content={"error": f"Invalid role: {role_str}. Valid: primary, failover, active"})
+
+        spoke = SpokeConfig(
+            region=region,
+            role=role,
+            weight=body.get("weight", 50),
+            endpoint=body.get("endpoint", ""),
+            providers=body.get("providers", []),
+            models=body.get("models", []),
+            data_residency_zones=body.get("data_residency_zones", []),
+            failover_priority=body.get("failover_priority", len(self.router.config.spokes)),
+        )
+        self.router.config.spokes.append(spoke)
+        return JSONResponse(status_code=201, content={"message": f"Spoke '{region}' added", "region": region})
+
+    async def remove_spoke(self, request: Request) -> JSONResponse:
+        """DELETE /admin/regions/spokes/{region} — remove a spoke."""
+        region = request.path_params["region"]
+        spoke = self.router.config.get_spoke(region)
+        if spoke is None:
+            return JSONResponse(status_code=404, content={"error": f"Spoke '{region}' not found"})
+
+        self.router.config.spokes.remove(spoke)
+        return JSONResponse(content={"message": f"Spoke '{region}' removed"})
+
+    async def update_spoke(self, request: Request) -> JSONResponse:
+        """PUT /admin/regions/spokes/{region} — update spoke configuration."""
+        region = request.path_params["region"]
+        spoke = self.router.config.get_spoke(region)
+        if spoke is None:
+            return JSONResponse(status_code=404, content={"error": f"Spoke '{region}' not found"})
+
+        body = await request.json()
+        if "weight" in body:
+            spoke.weight = int(body["weight"])
+        if "role" in body:
+            try:
+                spoke.role = SpokeRole(body["role"])
+            except ValueError:
+                return JSONResponse(status_code=400, content={"error": f"Invalid role: {body['role']}"})
+        if "data_residency_zones" in body:
+            spoke.data_residency_zones = body["data_residency_zones"]
+        if "failover_priority" in body:
+            spoke.failover_priority = int(body["failover_priority"])
+        if "providers" in body:
+            spoke.providers = body["providers"]
+        if "models" in body:
+            spoke.models = body["models"]
+
+        return JSONResponse(content={"message": f"Spoke '{region}' updated", "spoke": {
+            "region": spoke.region, "role": spoke.role.value, "weight": spoke.weight,
+            "data_residency_zones": spoke.data_residency_zones,
+        }})
+
+    async def update_config(self, request: Request) -> JSONResponse:
+        """PUT /admin/regions/config — update hub-level topology settings."""
+        body = await request.json()
+        config = self.router.config
+
+        if "hub_region" in body:
+            config.hub_region = body["hub_region"]
+        if "data_residency_strict" in body:
+            config.data_residency_strict = bool(body["data_residency_strict"])
+        if "health_check_interval_seconds" in body:
+            config.health_check_interval_seconds = int(body["health_check_interval_seconds"])
+        if "failover_threshold_consecutive" in body:
+            config.failover_threshold_consecutive = int(body["failover_threshold_consecutive"])
+        if "failover_cooldown_seconds" in body:
+            config.failover_cooldown_seconds = int(body["failover_cooldown_seconds"])
+
+        return JSONResponse(content={"message": "Topology config updated", "mode": self._detect_mode(config)})
+
     def _detect_mode(self, config) -> str:
         if len(config.spokes) <= 1:
             return "single_region"
@@ -152,9 +239,13 @@ def create_region_routes(region_api: RegionAPI) -> list[Route]:
     """Create Starlette routes for multi-region management."""
     return [
         Route("/admin/regions", region_api.get_topology, methods=["GET"]),
+        Route("/admin/regions/config", region_api.update_config, methods=["PUT"]),
         Route("/admin/regions/health", region_api.get_health, methods=["GET"]),
         Route("/admin/regions/health/check", region_api.check_health_now, methods=["POST"]),
         Route("/admin/regions/route", region_api.route_test, methods=["POST"]),
+        Route("/admin/regions/spokes", region_api.add_spoke, methods=["POST"]),
+        Route("/admin/regions/spokes/{region}", region_api.update_spoke, methods=["PUT"]),
+        Route("/admin/regions/spokes/{region}", region_api.remove_spoke, methods=["DELETE"]),
         Route("/admin/regions/failover", region_api.trigger_failover, methods=["POST"]),
         Route("/admin/regions/{region}/status", region_api.mark_spoke_status, methods=["PUT"]),
     ]

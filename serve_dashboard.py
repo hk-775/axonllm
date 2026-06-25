@@ -51,8 +51,7 @@ if __name__ == "__main__":
         check_fn=_default_check_fn,
     )
 
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(health_task.start())
+    asyncio.run(health_task.start())
 
     print(f"\n  Dashboard: http://localhost:{app_config.server_port}/admin/dashboard")
     print(f"  Chat:      http://localhost:{app_config.server_port}/chat\n")
