@@ -18,7 +18,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 
 from starlette.requests import Request
-from starlette.responses import FileResponse, HTMLResponse, JSONResponse
+from starlette.responses import HTMLResponse, JSONResponse
 from starlette.routing import Route
 
 _STATIC_DIR = pathlib.Path(__file__).resolve().parent / "static"
