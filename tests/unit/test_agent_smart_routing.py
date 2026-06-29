@@ -22,7 +22,7 @@ from src.gateway.models import (
     SmartRoutingDecision,
     TokenPricing,
     TokenUsage,
-    VirtualModelConfig,
+    ModelConfig,
 )
 from src.gateway.rate_limiter import SlidingWindowRateLimiter
 from src.gateway.router import Router

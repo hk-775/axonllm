@@ -90,7 +90,7 @@ from src.gateway.cost_tracker import CostTracker
 from src.gateway.feedback_tracker import FeedbackTracker
 from src.gateway.health_tracker import ProviderHealthTracker
 from src.gateway.model_registry import ModelRegistry
-from src.gateway.models import ProviderModelMapping, TokenPricing, VirtualModelConfig, RoutingStrategy
+from src.gateway.models import ProviderModelMapping, TokenPricing, ModelConfig, RoutingStrategy
 from src.gateway.smart_routing import NoCandidateModelsError, SmartRoutingStrategy
 
 
@@ -116,7 +116,7 @@ def _build_registry_and_leaderboard(model_names, context_windows=None, costs=Non
         if context_windows and i < len(context_windows):
             max_ctx = context_windows[i]
 
-        registry.models[name] = VirtualModelConfig(
+        registry.models[name] = ModelConfig(
             name=name,
             description=f"Model {name}",
             providers=[

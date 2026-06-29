@@ -26,7 +26,7 @@ from src.gateway.models import (
     ProviderModelMapping,
     TokenPricing,
     UsageRecord,
-    VirtualModelConfig,
+    ModelConfig,
 )
 
 
@@ -81,7 +81,7 @@ def health_tracker():
 @pytest.fixture
 def model_registry():
     registry = ModelRegistry()
-    registry.models["gpt-4"] = VirtualModelConfig(
+    registry.models["gpt-4"] = ModelConfig(
         name="gpt-4",
         description="GPT-4 class model",
         providers=[

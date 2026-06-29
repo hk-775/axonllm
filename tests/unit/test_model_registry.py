@@ -12,7 +12,7 @@ from src.gateway.model_registry import VALID_PROVIDERS, ModelRegistry
 # --- Fixtures ---
 
 MINIMAL_VALID_YAML = """\
-virtual_models:
+models:
   - name: "test-model"
     description: "A test model"
     providers:
@@ -21,7 +21,7 @@ virtual_models:
 """
 
 FULL_VALID_YAML = """\
-virtual_models:
+models:
   - name: "gpt-4"
     description: "GPT-4 class model"
     routing_strategy: "weighted"
@@ -95,8 +95,8 @@ class TestFromYaml:
         reg = ModelRegistry.from_yaml("")
         assert len(reg.models) == 0
 
-    def test_empty_virtual_models_list(self):
-        reg = ModelRegistry.from_yaml("virtual_models: []")
+    def test_empty_models_list(self):
+        reg = ModelRegistry.from_yaml("models: []")
         assert len(reg.models) == 0
 
 
@@ -122,7 +122,7 @@ class TestResolve:
 
     def test_resolve_unknown_raises(self):
         reg = ModelRegistry.from_yaml(FULL_VALID_YAML)
-        with pytest.raises(KeyError, match="Unknown virtual model"):
+        with pytest.raises(KeyError, match="Unknown model"):
             reg.resolve("nonexistent-model")
 
     def test_resolve_preserves_all_fields(self):
@@ -166,43 +166,43 @@ class TestValidate:
         errors = self._validate(config)
         assert errors == []
 
-    def test_missing_virtual_models_key(self):
+    def test_missing_models_key(self):
         errors = self._validate({})
         assert len(errors) == 1
-        assert "virtual_models" in errors[0].field
+        assert "models" in errors[0].field
 
     def test_missing_name(self):
-        config = {"virtual_models": [{"description": "x", "providers": [{"provider": "openai", "model_id": "m"}]}]}
+        config = {"models": [{"description": "x", "providers": [{"provider": "openai", "model_id": "m"}]}]}
         errors = self._validate(config)
         assert any("name" in e.field for e in errors)
 
     def test_missing_description(self):
-        config = {"virtual_models": [{"name": "x", "providers": [{"provider": "openai", "model_id": "m"}]}]}
+        config = {"models": [{"name": "x", "providers": [{"provider": "openai", "model_id": "m"}]}]}
         errors = self._validate(config)
         assert any("description" in e.field for e in errors)
 
     def test_missing_providers(self):
-        config = {"virtual_models": [{"name": "x", "description": "d"}]}
+        config = {"models": [{"name": "x", "description": "d"}]}
         errors = self._validate(config)
         assert any("providers" in e.field for e in errors)
 
     def test_empty_providers(self):
-        config = {"virtual_models": [{"name": "x", "description": "d", "providers": []}]}
+        config = {"models": [{"name": "x", "description": "d", "providers": []}]}
         errors = self._validate(config)
         assert any("empty" in e.message.lower() for e in errors)
 
     def test_invalid_provider_name(self):
-        config = {"virtual_models": [{"name": "x", "description": "d", "providers": [{"provider": "invalid_prov", "model_id": "m"}]}]}
+        config = {"models": [{"name": "x", "description": "d", "providers": [{"provider": "invalid_prov", "model_id": "m"}]}]}
         errors = self._validate(config)
         assert any("invalid_prov" in e.message for e in errors)
 
     def test_missing_model_id(self):
-        config = {"virtual_models": [{"name": "x", "description": "d", "providers": [{"provider": "openai"}]}]}
+        config = {"models": [{"name": "x", "description": "d", "providers": [{"provider": "openai"}]}]}
         errors = self._validate(config)
         assert any("model_id" in e.field for e in errors)
 
     def test_duplicate_names(self):
-        config = {"virtual_models": [
+        config = {"models": [
             {"name": "dup", "description": "d1", "providers": [{"provider": "openai", "model_id": "m1"}]},
             {"name": "dup", "description": "d2", "providers": [{"provider": "openai", "model_id": "m2"}]},
         ]}
@@ -210,13 +210,13 @@ class TestValidate:
         assert any("duplicate" in e.message.lower() for e in errors)
 
     def test_invalid_routing_strategy(self):
-        config = {"virtual_models": [{"name": "x", "description": "d", "routing_strategy": "invalid", "providers": [{"provider": "openai", "model_id": "m"}]}]}
+        config = {"models": [{"name": "x", "description": "d", "routing_strategy": "invalid", "providers": [{"provider": "openai", "model_id": "m"}]}]}
         errors = self._validate(config)
         assert any("routing strategy" in e.message.lower() for e in errors)
 
     def test_all_valid_providers_accepted(self):
         for prov in VALID_PROVIDERS:
-            config = {"virtual_models": [{"name": f"m-{prov}", "description": "d", "providers": [{"provider": prov, "model_id": "m"}]}]}
+            config = {"models": [{"name": f"m-{prov}", "description": "d", "providers": [{"provider": prov, "model_id": "m"}]}]}
             errors = self._validate(config)
             assert errors == [], f"Provider {prov} should be valid but got errors: {errors}"
 
@@ -227,7 +227,7 @@ class TestValidate:
 class TestPartialLoading:
     def test_valid_entries_loaded_invalid_skipped(self):
         yaml_str = """\
-virtual_models:
+models:
   - name: "good-model"
     description: "Valid model"
     providers:
@@ -244,7 +244,7 @@ virtual_models:
 
     def test_invalid_provider_entry_skipped(self):
         yaml_str = """\
-virtual_models:
+models:
   - name: "good"
     description: "Valid"
     providers:
@@ -262,7 +262,7 @@ virtual_models:
 
     def test_duplicate_name_second_skipped(self):
         yaml_str = """\
-virtual_models:
+models:
   - name: "dup"
     description: "First"
     providers:
@@ -313,11 +313,11 @@ class TestPrettyPrint:
         reg = ModelRegistry.from_yaml(FULL_VALID_YAML)
         yaml_out = reg.pretty_print()
         parsed = yaml.safe_load(yaml_out)
-        assert "virtual_models" in parsed
-        assert isinstance(parsed["virtual_models"], list)
+        assert "models" in parsed
+        assert isinstance(parsed["models"], list)
 
     def test_empty_registry_pretty_print(self):
         reg = ModelRegistry()
         yaml_out = reg.pretty_print()
         parsed = yaml.safe_load(yaml_out)
-        assert parsed["virtual_models"] == []
+        assert parsed["models"] == []

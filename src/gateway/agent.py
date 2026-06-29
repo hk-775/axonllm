@@ -677,7 +677,7 @@ class GatewayAgent:
                 project_id=req_ctx.project_id,
                 user_id=req_ctx.user_id,
                 provider=response.provider,
-                model=request.model,  # Use virtual model name, not provider's versioned name
+                model=request.model,  # Use model name, not provider's versioned name
                 prompt_tokens=response.usage.prompt_tokens,
                 completion_tokens=response.usage.completion_tokens,
                 total_tokens=response.usage.total_tokens,
@@ -1190,7 +1190,7 @@ class GatewayAgent:
         )
 
     async def handle_list_models(self, project_id: str | None = None, user_id: str | None = None) -> dict:
-        """Return all virtual models with descriptions and capabilities.
+        """Return all models with descriptions and capabilities.
 
         If project_id is provided and the project has allowed_models,
         only those models are returned. If user_id is provided and the
@@ -1263,7 +1263,7 @@ async def chat_completions(request_data: dict, context: dict) -> dict | AsyncIte
 
 @app.entrypoint("list_models")
 async def list_models() -> dict:
-    """List all available virtual models."""
+    """List all available models."""
     if _agent is None:
         return _error_response(500, "server_error", "Gateway agent not initialised.")
     return await _agent.handle_list_models()

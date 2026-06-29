@@ -56,8 +56,8 @@ capability_strategy = st.lists(
 )
 
 
-def virtual_model_entry_strategy(name_strategy):
-    """Strategy for a single virtual model entry dict."""
+def model_entry_strategy(name_strategy):
+    """Strategy for a single model entry dict."""
     return st.fixed_dictionaries({
         "name": name_strategy,
         "description": safe_text,
@@ -80,10 +80,10 @@ def valid_yaml_config(draw):
 
     entries = []
     for name in names:
-        entry = draw(virtual_model_entry_strategy(st.just(name)))
+        entry = draw(model_entry_strategy(st.just(name)))
         entries.append(entry)
 
-    return {"virtual_models": entries}
+    return {"models": entries}
 
 
 # ---------------------------------------------------------------------------
@@ -145,7 +145,7 @@ def test_model_registry_yaml_round_trip(config):
     reg1 = ModelRegistry.from_yaml(yaml_str)
 
     # Verify all models were loaded (config is valid, so all should load)
-    assert len(reg1.models) == len(config["virtual_models"])
+    assert len(reg1.models) == len(config["models"])
 
     # Step 3: Pretty-print back to YAML
     yaml_out = reg1.pretty_print()
@@ -163,7 +163,7 @@ def test_model_registry_yaml_round_trip(config):
 # ---------------------------------------------------------------------------
 """Property-based test: Model Registry validation rejects invalid entries and keeps valid ones.
 
-For any YAML configuration containing a mix of valid and invalid virtual model
+For any YAML configuration containing a mix of valid and invalid model
 entries, loading the configuration SHALL load all valid entries, reject all
 invalid entries, and report specific validation errors (missing required fields,
 invalid provider references, duplicate names) for each invalid entry.
@@ -235,7 +235,7 @@ invalid_kind_strategy = st.sampled_from(list(InvalidKind))
 
 @st.composite
 def invalid_entry_strategy(draw, name_strategy=safe_text):
-    """Generate a single invalid virtual model entry."""
+    """Generate a single invalid model entry."""
     kind = draw(invalid_kind_strategy)
     name = draw(name_strategy)
     return _make_invalid_entry(kind, name), kind
@@ -269,7 +269,7 @@ def mixed_valid_invalid_config(draw):
     # Build valid entries
     valid_entries = []
     for name in valid_names_list:
-        entry = draw(virtual_model_entry_strategy(st.just(name)))
+        entry = draw(model_entry_strategy(st.just(name)))
         valid_entries.append(entry)
 
     # Build invalid entries
@@ -299,7 +299,7 @@ def mixed_valid_invalid_config(draw):
         else:
             invalid_indices.add(new_idx)
 
-    config = {"virtual_models": all_entries}
+    config = {"models": all_entries}
 
     # Compute expected valid names (entries at valid_indices)
     expected_valid_names = set()
@@ -314,7 +314,7 @@ def mixed_valid_invalid_config(draw):
 def test_model_registry_validation(data):
     """Property 2: Model Registry validation rejects invalid entries and keeps valid ones.
 
-    For any YAML configuration containing a mix of valid and invalid virtual
+    For any YAML configuration containing a mix of valid and invalid
     model entries, loading the configuration SHALL load all valid entries,
     reject all invalid entries, and report specific validation errors (missing
     required fields, invalid provider references, duplicate names) for each
@@ -329,9 +329,9 @@ def test_model_registry_validation(data):
     errors = registry_for_validation.validate(config)
 
     # Each invalid entry should produce at least one validation error
-    entries = config["virtual_models"]
+    entries = config["models"]
     for idx in invalid_indices:
-        prefix = f"virtual_models[{idx}]"
+        prefix = f"models[{idx}]"
         entry_errors = [e for e in errors if e.field.startswith(prefix)]
         assert len(entry_errors) > 0, (
             f"Expected validation error(s) for invalid entry at index {idx}, "
@@ -341,7 +341,7 @@ def test_model_registry_validation(data):
     # Valid entries should NOT have validation errors
     valid_indices = set(range(len(entries))) - invalid_indices
     for idx in valid_indices:
-        prefix = f"virtual_models[{idx}]"
+        prefix = f"models[{idx}]"
         entry_errors = [e for e in errors if e.field.startswith(prefix)]
         assert len(entry_errors) == 0, (
             f"Unexpected validation error(s) for valid entry at index {idx}: "
@@ -375,7 +375,7 @@ def test_model_registry_validation(data):
 # ---------------------------------------------------------------------------
 """Property-based test: Virtual model resolution returns correct provider mappings.
 
-For any loaded ModelRegistry and any registered virtual model name, resolving
+For any loaded ModelRegistry and any registered model name, resolving
 the model SHALL return the correct list of ProviderModelMappings with the
 configured provider, model_id, weight, and fallback_order. For any unregistered
 model name, resolution SHALL raise an error.
@@ -394,10 +394,10 @@ def unregistered_name(draw, registered_names):
 
 @given(config=valid_yaml_config())
 @settings(max_examples=100)
-def test_virtual_model_resolution(config):
-    """Property 3: Virtual model resolution returns correct provider mappings.
+def test_model_resolution(config):
+    """Property 3: Model resolution returns correct provider mappings.
 
-    For any loaded ModelRegistry and any registered virtual model name,
+    For any loaded ModelRegistry and any registered model name,
     resolving the model SHALL return the correct list of ProviderModelMappings
     with the configured provider, model_id, weight, and fallback_order. For any
     unregistered model name, resolution SHALL raise an error.
@@ -410,7 +410,7 @@ def test_virtual_model_resolution(config):
     yaml_str = yaml.dump(config, default_flow_style=False, sort_keys=False)
     registry = ModelRegistry.from_yaml(yaml_str)
 
-    entries = config["virtual_models"]
+    entries = config["models"]
 
     # Step 2: For each registered model, resolve and verify mappings match config
     for entry in entries:

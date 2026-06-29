@@ -203,7 +203,7 @@ Request → Auth (OIDC/API Key) → Quota Enforcement (policy hierarchy)
 Define models in `config/models.yaml`:
 
 ```yaml
-virtual_models:
+models:
   - name: claude-sonnet
     routing_strategy: least-latency
     providers:

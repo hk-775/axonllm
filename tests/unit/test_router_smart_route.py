@@ -13,7 +13,7 @@ from src.gateway.models import (
     SmartRoutingDecision,
     TokenPricing,
     TokenUsage,
-    VirtualModelConfig,
+    ModelConfig,
 )
 from src.gateway.router import Router
 
@@ -43,7 +43,7 @@ def _make_response(provider: str = "openai", model: str = "claude-sonnet") -> Ch
 def _build_registry() -> ModelRegistry:
     """Build a ModelRegistry with models for smart routing tests."""
     registry = ModelRegistry()
-    registry.models["claude-sonnet"] = VirtualModelConfig(
+    registry.models["claude-sonnet"] = ModelConfig(
         name="claude-sonnet",
         description="Claude Sonnet",
         providers=[
@@ -54,7 +54,7 @@ def _build_registry() -> ModelRegistry:
         ],
         routing_strategy=RoutingStrategy.ROUND_ROBIN,
     )
-    registry.models["gpt-4o"] = VirtualModelConfig(
+    registry.models["gpt-4o"] = ModelConfig(
         name="gpt-4o",
         description="GPT-4o",
         providers=[

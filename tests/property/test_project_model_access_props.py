@@ -34,7 +34,7 @@ from src.gateway.models import (
     Project,
     RateLimitConfig,
     TokenUsage,
-    VirtualModelConfig,
+    ModelConfig,
     ProviderModelMapping,
 )
 from src.gateway.rate_limiter import SlidingWindowRateLimiter
@@ -318,7 +318,7 @@ def test_gateway_enforcement_consistency(allowed, requested_model):
 
     # Build a minimal registry with the requested model so routing doesn't fail
     registry = ModelRegistry()
-    registry.models[requested_model] = VirtualModelConfig(
+    registry.models[requested_model] = ModelConfig(
         name=requested_model,
         description="test",
         providers=[

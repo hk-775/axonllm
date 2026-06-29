@@ -19,7 +19,7 @@ class ClientAgent:
         self.default_project_id = default_project_id
 
     async def list_models(self, project_id: str | None = None, user_id: str | None = None) -> list[dict]:
-        """Return available virtual models filtered by access context.
+        """Return available models filtered by access context.
 
         Passes project_id and user_id through to GatewayAgent.handle_list_models
         so that only models the caller is permitted to use are returned.

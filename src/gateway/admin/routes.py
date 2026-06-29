@@ -824,14 +824,14 @@ class AdminAPI:
     # GET /admin/models
     # ------------------------------------------------------------------
 
-    async def list_virtual_models(self, request: Request) -> JSONResponse:
-        """List all virtual models with usage stats."""
+    async def list_models(self, request: Request) -> JSONResponse:
+        """List all models with usage stats."""
         models = self.model_registry.list_models()
         records = self.cost_tracker._records
 
         result = []
         for m in models:
-            # Match by virtual model name OR any provider model_id
+            # Match by model name OR any provider model_id
             model_ids = {m.name} | {p.model_id for p in m.providers}
             model_records = [r for r in records if r.model in model_ids]
             total_requests = len(model_records)
@@ -858,7 +858,7 @@ class AdminAPI:
     # ------------------------------------------------------------------
 
     async def create_model(self, request: Request) -> JSONResponse:
-        """Create a new virtual model."""
+        """Create a new model."""
         body = await request.json()
 
         name = body.get("name")
@@ -894,7 +894,7 @@ class AdminAPI:
                 entry["capabilities"] = m.capabilities
             existing_entries.append(entry)
 
-        candidate = {"virtual_models": existing_entries + [new_entry]}
+        candidate = {"models": existing_entries + [new_entry]}
         errors = self.model_registry.validate(candidate)
         if errors:
             return JSONResponse(
@@ -926,7 +926,7 @@ class AdminAPI:
     # ------------------------------------------------------------------
 
     async def update_model(self, request: Request) -> JSONResponse:
-        """Update a virtual model's configuration."""
+        """Update a model's configuration."""
         model_name = request.path_params["name"]
         model_config = self.model_registry.models.get(model_name)
         if model_config is None:
@@ -970,7 +970,7 @@ class AdminAPI:
                     entry["capabilities"] = m.capabilities
                 candidate_entries.append(entry)
 
-        candidate = {"virtual_models": candidate_entries}
+        candidate = {"models": candidate_entries}
         errors = self.model_registry.validate(candidate)
         if errors:
             return JSONResponse(
@@ -1003,7 +1003,7 @@ class AdminAPI:
     # ------------------------------------------------------------------
 
     async def delete_model(self, request: Request) -> JSONResponse:
-        """Delete a virtual model."""
+        """Delete a model."""
         model_name = request.path_params["name"]
         model_config = self.model_registry.models.get(model_name)
         if model_config is None:
@@ -1335,7 +1335,7 @@ def create_admin_routes(admin_api: AdminAPI) -> list[Route]:
         Route("/admin/users/{id:path}/efficiency", admin_api.user_efficiency, methods=["GET"]),
         Route("/admin/users/{id:path}", admin_api.get_user, methods=["GET"]),
         Route("/admin/catalog", admin_api.catalog, methods=["GET"]),
-        Route("/admin/models", admin_api.list_virtual_models, methods=["GET"]),
+        Route("/admin/models", admin_api.list_models, methods=["GET"]),
         Route("/admin/models", admin_api.create_model, methods=["POST"]),
         Route("/admin/models/{name}", admin_api.update_model, methods=["PUT"]),
         Route("/admin/models/{name}", admin_api.delete_model, methods=["DELETE"]),

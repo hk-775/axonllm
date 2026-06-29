@@ -59,11 +59,11 @@ A: If your application already uses the OpenAI SDK or OpenAI-compatible API form
 
 **Q: Which LLM providers are supported?**
 
-A: AxonLLM ships with provider adapters for OpenAI, Anthropic, AWS Bedrock, Azure OpenAI, Google Vertex AI, and Cohere. Models like GPT-4, Claude, and Gemini Pro are configured as virtual models that can route across one or more of these providers. Adding a new provider means implementing the provider adapter interface — no changes to routing, security, or cost tracking are needed.
+A: AxonLLM ships with provider adapters for OpenAI, Anthropic, AWS Bedrock, Azure OpenAI, Google Vertex AI, and Cohere. Models like GPT-4, Claude, and Gemini Pro are configured as models that can route across one or more of these providers. Adding a new provider means implementing the provider adapter interface — no changes to routing, security, or cost tracking are needed.
 
 **Q: How does routing work when I have the same model available from multiple providers?**
 
-A: You configure a virtual model (e.g., "claude-sonnet") that maps to one or more provider-specific endpoints with a routing strategy and fallback order. Strategies include round-robin, weighted, least-latency, cost-optimized, and smart (prompt-aware). If a provider is unhealthy, it is automatically excluded until it recovers. In multi-region mode, the region router first selects a healthy spoke before the provider router selects the specific endpoint.
+A: You configure a model (e.g., "claude-sonnet") that maps to one or more provider-specific endpoints with a routing strategy and fallback order. Strategies include round-robin, weighted, least-latency, cost-optimized, and smart (prompt-aware). If a provider is unhealthy, it is automatically excluded until it recovers. In multi-region mode, the region router first selects a healthy spoke before the provider router selects the specific endpoint.
 
 **Q: Can AxonLLM consult multiple models and combine their answers?**
 
@@ -163,7 +163,7 @@ Steps 4–7 and 13 are the enterprise governance layer; they are no-ops when ser
 
 **Q: How does the multi-provider factory work?**
 
-A: The `MultiProviderFactory` routes Bedrock requests through boto3 (native AWS SDK) and all other providers through an async HTTP client with session pooling. Provider configs are loaded from `config/providers.yaml` with environment variable overrides for API keys. This allows the same virtual model to be served by multiple providers with automatic failover.
+A: The `MultiProviderFactory` routes Bedrock requests through boto3 (native AWS SDK) and all other providers through an async HTTP client with session pooling. Provider configs are loaded from `config/providers.yaml` with environment variable overrides for API keys. This allows the same model to be served by multiple providers with automatic failover.
 
 **Q: What are the scaling characteristics?**
 

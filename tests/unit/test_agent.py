@@ -384,16 +384,16 @@ async def test_create_gateway_agent_factory():
 # Task 14.2 — list_models and health_check
 # ---------------------------------------------------------------------------
 
-from src.gateway.models import VirtualModelConfig, RoutingStrategy
+from src.gateway.models import ModelConfig, RoutingStrategy
 from src.gateway.health_tracker import ProviderHealthTracker
 from src.gateway.model_registry import ModelRegistry
 
 
 def _build_registry_with_models() -> ModelRegistry:
-    """Build a ModelRegistry pre-loaded with two virtual models."""
+    """Build a ModelRegistry pre-loaded with two models."""
     registry = ModelRegistry()
     registry.models = {
-        "gpt-4": VirtualModelConfig(
+        "gpt-4": ModelConfig(
             name="gpt-4",
             description="GPT-4 class model",
             providers=[
@@ -403,7 +403,7 @@ def _build_registry_with_models() -> ModelRegistry:
             routing_strategy=RoutingStrategy.WEIGHTED,
             capabilities=["chat", "streaming", "function_calling"],
         ),
-        "claude-3": VirtualModelConfig(
+        "claude-3": ModelConfig(
             name="claude-3",
             description="Claude 3 class model",
             providers=[

@@ -28,7 +28,7 @@ from src.gateway.models import (
     RateLimitResult,
     RoutingStrategy,
     TokenUsage,
-    VirtualModelConfig,
+    ModelConfig,
 )
 from src.gateway.rate_limiter import SlidingWindowRateLimiter
 from src.gateway.router import AllProvidersExhaustedError, Router
@@ -66,7 +66,7 @@ def _make_agent(project=None, user_configs=None):
 def _build_registry(model_names: list[str]) -> ModelRegistry:
     registry = ModelRegistry()
     for name in model_names:
-        registry.models[name] = VirtualModelConfig(
+        registry.models[name] = ModelConfig(
             name=name, description=f"{name} model",
             providers=[
                 ProviderModelMapping(
@@ -145,7 +145,7 @@ def test_router_selection_respects_allowed_models(allowed_subset, strategy):
     # Build a registry with all MODEL_NAMES
     registry = ModelRegistry()
     for name in MODEL_NAMES:
-        registry.models[name] = VirtualModelConfig(
+        registry.models[name] = ModelConfig(
             name=name, description=f"{name} model",
             providers=[
                 ProviderModelMapping(

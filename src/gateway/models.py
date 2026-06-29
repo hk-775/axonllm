@@ -102,7 +102,7 @@ class TokenPricing:
 
 @dataclass
 class ProviderModelMapping:
-    """Maps a virtual model to a specific provider and model identifier."""
+    """Maps a model to a specific provider and model identifier."""
 
     provider: str
     model_id: str
@@ -112,8 +112,8 @@ class ProviderModelMapping:
 
 
 @dataclass
-class VirtualModelConfig:
-    """Configuration for a virtual model with provider mappings."""
+class ModelConfig:
+    """Configuration for a model with provider mappings."""
 
     name: str
     description: str
@@ -396,8 +396,8 @@ class ModelInfo:
 
 
 @dataclass
-class VirtualModelInfo:
-    """Public-facing information about a virtual model."""
+class ModelSummary:
+    """Public-facing summary of a model."""
 
     name: str
     description: str

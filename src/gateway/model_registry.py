@@ -1,4 +1,4 @@
-"""Model Registry: loads and manages virtual model configuration from YAML."""
+"""Model Registry: loads and manages model configuration from YAML."""
 
 import logging
 from pathlib import Path
@@ -11,7 +11,7 @@ from .models import (
     RoutingStrategy,
     TokenPricing,
     ValidationError,
-    VirtualModelConfig,
+    ModelConfig,
 )
 
 logger = logging.getLogger(__name__)
@@ -22,10 +22,10 @@ VALID_ROUTING_STRATEGIES = {s.value for s in RoutingStrategy}
 
 
 class ModelRegistry:
-    """Loads and manages virtual model configuration from YAML."""
+    """Loads and manages model configuration from YAML."""
 
     def __init__(self) -> None:
-        self.models: dict[str, VirtualModelConfig] = {}
+        self.models: dict[str, ModelConfig] = {}
 
     def load(self, config_path: str) -> None:
         """Load and validate YAML configuration file.
@@ -49,42 +49,42 @@ class ModelRegistry:
         registry._load_config(config)
         return registry
 
-    def resolve(self, virtual_model: str) -> list[ProviderModelMapping]:
-        """Resolve virtual model to provider-specific mappings.
+    def resolve(self, model: str) -> list[ProviderModelMapping]:
+        """Resolve model to provider-specific mappings.
 
         Raises KeyError if model not found.
         """
-        if virtual_model not in self.models:
-            raise KeyError(f"Unknown virtual model: {virtual_model}")
-        return self.models[virtual_model].providers
+        if model not in self.models:
+            raise KeyError(f"Unknown model: {model}")
+        return self.models[model].providers
 
-    def list_models(self) -> list[VirtualModelConfig]:
-        """Return all configured virtual models."""
+    def list_models(self) -> list[ModelConfig]:
+        """Return all configured models."""
         return list(self.models.values())
 
     def validate(self, config: dict) -> list[ValidationError]:
         """Validate configuration dict. Returns list of errors (empty if valid)."""
         errors: list[ValidationError] = []
-        entries = config.get("virtual_models")
+        entries = config.get("models")
 
         if entries is None:
             errors.append(ValidationError(
-                field="virtual_models",
-                message="Missing required top-level key 'virtual_models'",
+                field="models",
+                message="Missing required top-level key 'models'",
             ))
             return errors
 
         if not isinstance(entries, list):
             errors.append(ValidationError(
-                field="virtual_models",
-                message="'virtual_models' must be a list",
+                field="models",
+                message="'models' must be a list",
             ))
             return errors
 
         seen_names: set[str] = set()
 
         for idx, entry in enumerate(entries):
-            prefix = f"virtual_models[{idx}]"
+            prefix = f"models[{idx}]"
 
             if not isinstance(entry, dict):
                 errors.append(ValidationError(
@@ -109,7 +109,7 @@ class ModelRegistry:
                 if name in seen_names:
                     errors.append(ValidationError(
                         field=f"{prefix}.name",
-                        message=f"Duplicate virtual model name: '{name}'",
+                        message=f"Duplicate model name: '{name}'",
                     ))
                 seen_names.add(name)
 
@@ -208,7 +208,7 @@ class ModelRegistry:
             entries.append(entry)
 
         return yaml.dump(
-            {"virtual_models": entries},
+            {"models": entries},
             default_flow_style=False,
             sort_keys=False,
             allow_unicode=True,
@@ -223,7 +223,7 @@ class ModelRegistry:
         # Build a set of entry indices that have errors
         error_indices = self._error_indices(errors, config)
 
-        entries = config.get("virtual_models")
+        entries = config.get("models")
         if not isinstance(entries, list):
             if errors:
                 for err in errors:
@@ -232,10 +232,9 @@ class ModelRegistry:
 
         for idx, entry in enumerate(entries):
             if idx in error_indices:
-                # Log warnings for this entry's errors and skip it
                 entry_errors = [
                     e for e in errors
-                    if e.field.startswith(f"virtual_models[{idx}]")
+                    if e.field.startswith(f"models[{idx}]")
                 ]
                 for err in entry_errors:
                     logger.warning("Skipping invalid entry: [%s] %s", err.field, err.message)
@@ -243,17 +242,16 @@ class ModelRegistry:
 
             name = entry["name"]
 
-            # Check for duplicate against already-loaded models
             if name in self.models:
                 logger.warning(
-                    "Skipping duplicate virtual model name: '%s'", name
+                    "Skipping duplicate model name: '%s'", name
                 )
                 continue
 
             self.models[name] = self._parse_entry(entry)
 
-    def _parse_entry(self, entry: dict) -> VirtualModelConfig:
-        """Parse a single validated virtual model entry."""
+    def _parse_entry(self, entry: dict) -> ModelConfig:
+        """Parse a single validated model entry."""
         strategy_str = entry.get("routing_strategy", "round-robin")
         routing_strategy = RoutingStrategy(strategy_str)
 
@@ -277,7 +275,7 @@ class ModelRegistry:
         if capabilities is not None:
             capabilities = list(capabilities)
 
-        return VirtualModelConfig(
+        return ModelConfig(
             name=entry["name"],
             description=entry["description"],
             providers=providers,
@@ -291,17 +289,15 @@ class ModelRegistry:
         bad: set[int] = set()
         for err in errors:
             field = err.field
-            # Match "virtual_models[N]" or "virtual_models[N].xxx"
-            if field.startswith("virtual_models["):
+            if field.startswith("models["):
                 bracket_end = field.index("]")
                 try:
-                    idx = int(field[len("virtual_models["):bracket_end])
+                    idx = int(field[len("models["):bracket_end])
                     bad.add(idx)
                 except ValueError:
                     pass
-            elif field == "virtual_models":
-                # Top-level error — no valid entries can be loaded
-                entries = config.get("virtual_models")
+            elif field == "models":
+                entries = config.get("models")
                 if isinstance(entries, list):
                     bad.update(range(len(entries)))
         return bad

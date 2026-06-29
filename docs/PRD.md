@@ -139,7 +139,7 @@ Stakeholders who need visibility into LLM spend and assurance that usage complie
 #### Application Developer (Secondary)
 
 - Integrates applications with the AxonLLM API
-- Selects virtual models without needing to know which provider serves them
+- Selects models without needing to know which provider serves them
 - Relies on automatic failover for application resilience
 - Uses the playground and routing explorer to understand routing behavior
 
@@ -177,8 +177,8 @@ Stakeholders who need visibility into LLM spend and assurance that usage complie
 
 | ID | Requirement | Details |
 |----|-------------|---------|
-| FR-R1 | **Virtual model abstraction** | Models are defined as virtual models that map to one or more provider-specific endpoints. Callers reference virtual model names (e.g., `claude-opus`) without knowing the underlying provider. |
-| FR-R2 | **Routing strategies** | Six configurable strategies per virtual model: **round-robin** (sequential cycling), **weighted** (proportional distribution by configured weights), **least-latency** (route to fastest provider in sliding window), **cost-optimized** (route to cheapest healthy provider based on token pricing), **smart** (classify the prompt and select the best-performing model across all providers using benchmark leaderboard scores), **ensemble** (scatter-gather-synthesize across a panel of models with a judge — see FR-R7). |
+| FR-R1 | **Model abstraction** | Models are defined as models that map to one or more provider-specific endpoints. Callers reference model names (e.g., `claude-opus`) without knowing the underlying provider. |
+| FR-R2 | **Routing strategies** | Six configurable strategies per model: **round-robin** (sequential cycling), **weighted** (proportional distribution by configured weights), **least-latency** (route to fastest provider in sliding window), **cost-optimized** (route to cheapest healthy provider based on token pricing), **smart** (classify the prompt and select the best-performing model across all providers using benchmark leaderboard scores), **ensemble** (scatter-gather-synthesize across a panel of models with a judge — see FR-R7). |
 | FR-R3 | **Automatic retry** | Retryable errors (HTTP 429, 500, 502, 503, 504) are retried with exponential backoff (base delay 1s, max 3 retries). Non-retryable errors (400, 401, 403) skip directly to fallback. |
 | FR-R4 | **Multi-provider fallback** | When retries are exhausted, the router falls back to the next provider in the configured fallback chain (ordered by `fallback_order`). The caller receives a seamless response. |
 | FR-R5 | **Health-aware routing** | Providers experiencing repeated failures are automatically marked unhealthy and excluded from routing for a configurable cooldown period (default 60s). Background health checks restore providers when recovered. |
@@ -210,7 +210,7 @@ Stakeholders who need visibility into LLM spend and assurance that usage complie
 
 | ID | Requirement | Details |
 |----|-------------|---------|
-| FR-AC1 | **Project model access lists** | Each project has a configurable list of allowed virtual models. Requests to models not in the list are rejected with HTTP 403 before reaching any provider. |
+| FR-AC1 | **Project model access lists** | Each project has a configurable list of allowed models. Requests to models not in the list are rejected with HTTP 403 before reaching any provider. |
 | FR-AC2 | **User model access lists** | Individual users have configurable allowed model lists. The effective allowed set is the intersection of project and user lists when both are set. |
 | FR-AC3 | **JWT authentication** | Requests carry JWT tokens validated via AgentCore Identity service. Claims are extracted into a RequestContext (user_id, project_id, roles, scopes). |
 | FR-AC4 | **Cedar policy evaluation** | Fine-grained authorization via Cedar policies evaluated against (principal, action, resource) tuples. Policies support ENFORCE and LOG_ONLY modes. |
@@ -253,7 +253,7 @@ Stakeholders who need visibility into LLM spend and assurance that usage complie
 | FR-AD1 | **Dashboard overview** | Real-time stats: total requests, total cost, active projects, active users, cache hit rate, provider health. |
 | FR-AD2 | **Project management** | CRUD operations for projects including budget configuration, member management, model access lists, and guardrail rules. Changes are hot-reloaded without restart. |
 | FR-AD3 | **User management** | View users with usage, set individual budgets and model access restrictions. |
-| FR-AD4 | **Model management** | View, create, update, and delete virtual model configurations. Changes persist to YAML and optionally to DynamoDB. |
+| FR-AD4 | **Model management** | View, create, update, and delete model configurations. Changes persist to YAML and optionally to DynamoDB. |
 | FR-AD5 | **Usage analytics** | Filterable usage data with breakdowns by time range, provider, model, project, and user. |
 | FR-AD6 | **Policy management** | Create and view Cedar authorization policies with ENFORCE/LOG_ONLY modes. |
 | FR-AD7 | **Provider health** | Real-time per-provider health status (healthy/unhealthy). |
@@ -363,7 +363,7 @@ Stakeholders who need visibility into LLM spend and assurance that usage complie
 | **GuardrailEngine** | Request/response content inspection against configurable rules | `guardrail_engine.py` |
 | **CacheManager** | In-memory TTL-based response cache | `cache_manager.py` |
 | **HealthTracker** | Provider health tracking with cooldown periods and latency recording | `health_tracker.py` |
-| **ModelRegistry** | Virtual model configuration loading and validation from YAML | `model_registry.py` |
+| **ModelRegistry** | Model configuration loading and validation from YAML | `model_registry.py` |
 | **RequestValidator** | Structural, semantic, and token-limit request validation | `request_validator.py` |
 | **DynamoPersistence** | DynamoDB read/write for usage records, projects, user configs | `persistence.py` |
 | **AuthMiddleware** | JWT validation + Cedar policy evaluation | `middleware/auth.py` |
@@ -403,7 +403,7 @@ Environment Variables (highest precedence)
         |
         v
 YAML Files (config/)
-  |- models.yaml        Virtual model definitions with provider mappings
+  |- models.yaml        Model definitions with provider mappings
   |- providers.yaml     Provider connection configs and API keys
   |- pricing.yaml       Per-provider, per-model token pricing
   |- demo_seed.yaml     Demo projects, users, budgets, seed data
@@ -425,7 +425,7 @@ Dataclass Configurations (runtime)
 
 | Method | Path | Description | Auth |
 |--------|------|-------------|------|
-| `GET` | `/api/models` | List available virtual models (filtered by project/user access) | Optional |
+| `GET` | `/api/models` | List available models (filtered by project/user access) | Optional |
 | `GET` | `/api/users` | List known users | Optional |
 | `POST` | `/api/chat` | Non-streaming chat completion | Required |
 | `POST` | `/api/chat/stream` | Streaming chat completion (SSE) | Required |
@@ -501,10 +501,10 @@ data: [DONE]
 | `GET` | `/admin/users/{id}` | User detail |
 | `PUT` | `/admin/users/{id}/budget` | Set user budget |
 | `PUT` | `/admin/users/{id}/allowed-models` | Set user model access |
-| `GET` | `/admin/models` | List virtual models |
-| `POST` | `/admin/models` | Create virtual model |
-| `PUT` | `/admin/models/{name}` | Update virtual model |
-| `DELETE` | `/admin/models/{name}` | Delete virtual model |
+| `GET` | `/admin/models` | List models |
+| `POST` | `/admin/models` | Create model |
+| `PUT` | `/admin/models/{name}` | Update model |
+| `DELETE` | `/admin/models/{name}` | Delete model |
 | `GET` | `/admin/catalog` | Provider model catalog |
 | `GET` | `/admin/policies` | List Cedar policies |
 | `POST` | `/admin/policies` | Create Cedar policy |
@@ -528,7 +528,7 @@ data: [DONE]
 ```
 ChatCompletionRequest
   |- messages: list[dict]          # [{role, content}]
-  |- model: str                    # Virtual model name
+  |- model: str                    # Model name
   |- temperature: float?
   |- max_tokens: int?
   |- top_p: float?
@@ -552,7 +552,7 @@ TokenUsage
   |- cache_creation_tokens: int
 
 VirtualModelConfig
-  |- name: str                     # Virtual model name
+  |- name: str                     # Model name
   |- description: str
   |- providers: list[ProviderModelMapping]
   |- routing_strategy: RoutingStrategy
@@ -883,7 +883,7 @@ All events are emitted as structured JSON with the following event types:
 | 401 | `authentication_error` | — | Invalid or missing JWT token |
 | 403 | `forbidden` | `model_not_allowed` | Model not in project or user access list |
 | 403 | `authorization_error` | — | Cedar policy denied |
-| 404 | `not_found` | `model_not_found` | Virtual model does not exist |
+| 404 | `not_found` | `model_not_found` | Model does not exist |
 | 429 | `rate_limit_error` | `rate_limit_exceeded` | User or project rate limit exceeded |
 | 429 | `budget_exceeded` | `budget_exceeded` | Project or user budget exhausted |
 | 502 | `provider_error` | `all_providers_exhausted` | All providers in fallback chain failed |
@@ -927,7 +927,7 @@ src/gateway/
   |- middleware/                  # JWT + Cedar auth middleware
 
 config/
-  |- models.yaml                 # Virtual model definitions
+  |- models.yaml                 # Model definitions
   |- providers.yaml              # Provider connection configs
   |- pricing.yaml                # Token pricing per provider/model
   |- demo_seed.yaml              # Demo data for development

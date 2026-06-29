@@ -1,4 +1,4 @@
-virtual_models:
+models:
 - name: claude-opus
   description: Claude Opus 4
   routing_strategy: least-latency
@@ -69,7 +69,7 @@ virtual_models:
     fallback_order: 0
 - name: gpt-4o
   description: GPT-4o
-  routing_strategy: round-robin
+  routing_strategy: least-latency
   providers:
   - provider: openai
     model_id: gpt-4o

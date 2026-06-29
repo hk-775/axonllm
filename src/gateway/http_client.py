@@ -94,7 +94,7 @@ class HttpClient:
         # 1. Translate request
         payload = await adapter.translate_request(request, prompt_caching_enabled=prompt_caching_enabled)
 
-        # Override model with the actual provider model ID (not the virtual model name)
+        # Override model with the actual provider model ID (not the gateway model name)
         if "model" in payload:
             payload["model"] = mapping.model_id
 

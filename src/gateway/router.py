@@ -171,14 +171,14 @@ class Router:
             self._retryable = DEFAULT_CONFIG.retry.retryable_status_codes
             self._non_retryable = DEFAULT_CONFIG.retry.non_retryable_status_codes
 
-    def _get_strategy(self, virtual_model: str) -> RoutingStrategyBase:
-        """Look up the routing strategy for a virtual model."""
-        config = self.model_registry.models[virtual_model]
+    def _get_strategy(self, model: str) -> RoutingStrategyBase:
+        """Look up the routing strategy for a model."""
+        config = self.model_registry.models[model]
         return self._strategies[config.routing_strategy]
 
-    def get_fallback_chain(self, virtual_model: str) -> list[ProviderModelMapping]:
-        """Return ordered fallback chain for a virtual model."""
-        mappings = self.model_registry.resolve(virtual_model)
+    def get_fallback_chain(self, model: str) -> list[ProviderModelMapping]:
+        """Return ordered fallback chain for a model."""
+        mappings = self.model_registry.resolve(model)
         return sorted(mappings, key=lambda m: m.fallback_order)
 
     async def smart_route(
@@ -286,7 +286,7 @@ class Router:
             project_id=project_id,
             user_id=user_id,
             provider=response.provider,
-            model=model,  # virtual model name, not provider's versioned name
+            model=model,  # model name, not provider's versioned name
             prompt_tokens=response.usage.prompt_tokens,
             completion_tokens=response.usage.completion_tokens,
             total_tokens=response.usage.total_tokens,

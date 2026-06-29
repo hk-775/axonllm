@@ -22,7 +22,7 @@ from src.gateway.models import (
     RoutingStrategy,
     TokenPricing,
     TokenUsage,
-    VirtualModelConfig,
+    ModelConfig,
 )
 from src.gateway.rate_limiter import SlidingWindowRateLimiter
 from src.gateway.router import AllProvidersExhaustedError, Router
@@ -65,14 +65,14 @@ def _make_agent(
 
 def _build_registry() -> ModelRegistry:
     registry = ModelRegistry()
-    registry.models["gpt-4"] = VirtualModelConfig(
+    registry.models["gpt-4"] = ModelConfig(
         name="gpt-4", description="GPT-4",
         providers=[
             ProviderModelMapping(provider="openai", model_id="gpt-4-turbo", fallback_order=1),
             ProviderModelMapping(provider="azure", model_id="gpt-4-azure", fallback_order=2),
         ],
     )
-    registry.models["claude-3"] = VirtualModelConfig(
+    registry.models["claude-3"] = ModelConfig(
         name="claude-3", description="Claude 3",
         providers=[
             ProviderModelMapping(provider="anthropic", model_id="claude-3-sonnet", fallback_order=1),

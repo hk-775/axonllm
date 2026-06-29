@@ -3,8 +3,8 @@
 # Each preset defines a panel of models whose responses are gathered in
 # parallel, a judge model that synthesizes the survivors into a final answer,
 # and governance settings (quorum, fallback_policy, cost_ceiling,
-# ranking_criteria). All panel and judge models are Bedrock-backed virtual
-# models defined in config/models.yaml.
+# ranking_criteria). All panel and judge models are Bedrock-backed models
+# defined in config/models.yaml.
 #
 # Loader defaults (applied at parse time):
 #   - quorum defaults to 1 when absent (Req 4.8)

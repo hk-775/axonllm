@@ -34,7 +34,7 @@ from src.gateway.models import (
     ChatCompletionRequest,
     ChatCompletionResponse,
     TokenUsage,
-    VirtualModelConfig,
+    ModelConfig,
 )
 
 
@@ -72,7 +72,7 @@ def _make_response(provider: str) -> ChatCompletionResponse:
 
 def _build_registry(providers: list[ProviderModelMapping], model_name: str = "test-model") -> ModelRegistry:
     registry = ModelRegistry()
-    registry.models[model_name] = VirtualModelConfig(
+    registry.models[model_name] = ModelConfig(
         name=model_name,
         description="test model",
         providers=providers,

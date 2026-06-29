@@ -36,7 +36,7 @@ class ChatAPI:
     # ------------------------------------------------------------------
 
     async def list_models(self, request: Request) -> JSONResponse:
-        """Return available virtual models as a JSON array."""
+        """Return available models as a JSON array."""
         try:
             user_id = request.query_params.get("user_id")
             project_id = request.query_params.get("project_id")

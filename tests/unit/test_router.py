@@ -10,7 +10,7 @@ from src.gateway.models import (
     ProviderModelMapping,
     TokenPricing,
     TokenUsage,
-    VirtualModelConfig,
+    ModelConfig,
 )
 from src.gateway.router import (
     AllProvidersExhaustedError,
@@ -41,9 +41,9 @@ def _make_response(provider: str = "openai") -> ChatCompletionResponse:
 
 
 def _build_registry() -> ModelRegistry:
-    """Build a ModelRegistry with a single virtual model backed by 3 providers."""
+    """Build a ModelRegistry with a single model backed by 3 providers."""
     registry = ModelRegistry()
-    registry.models["gpt-4"] = VirtualModelConfig(
+    registry.models["gpt-4"] = ModelConfig(
         name="gpt-4",
         description="GPT-4",
         providers=[

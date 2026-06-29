@@ -48,7 +48,7 @@ smart_routing:
 """
 
 MODELS_YAML = """\
-virtual_models:
+models:
   - name: claude-opus
     description: Claude Opus
     routing_strategy: round-robin
