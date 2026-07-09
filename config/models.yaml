@@ -189,25 +189,37 @@ models:
     fallback_order: 0
 - name: gemini-2.5-pro
   description: Gemini 2.5 Pro
-  routing_strategy: round-robin
+  routing_strategy: least-latency
   providers:
   - provider: vertex_ai
     model_id: gemini-2.5-pro
-    weight: 1.0
+    weight: 0.5
     fallback_order: 0
+  - provider: google_ai
+    model_id: gemini-2.5-pro
+    weight: 0.5
+    fallback_order: 1
 - name: gemini-2.5-flash
   description: Gemini 2.5 Flash
-  routing_strategy: round-robin
+  routing_strategy: least-latency
   providers:
   - provider: vertex_ai
     model_id: gemini-2.5-flash
-    weight: 1.0
+    weight: 0.5
     fallback_order: 0
+  - provider: google_ai
+    model_id: gemini-2.5-flash
+    weight: 0.5
+    fallback_order: 1
 - name: gemini-2.0-flash
   description: Gemini 2.0 Flash
-  routing_strategy: round-robin
+  routing_strategy: least-latency
   providers:
   - provider: vertex_ai
     model_id: gemini-2.0-flash
-    weight: 1.0
+    weight: 0.5
     fallback_order: 0
+  - provider: google_ai
+    model_id: gemini-2.0-flash
+    weight: 0.5
+    fallback_order: 1

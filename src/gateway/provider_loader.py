@@ -15,6 +15,7 @@ _ENV_KEY_MAP = {
     "openai": "OPENAI_API_KEY",
     "azure_openai": "AZURE_OPENAI_API_KEY",
     "cohere": "COHERE_API_KEY",
+    "google_ai": "GOOGLE_AI_API_KEY",
     "vertex_ai": "GCP_ACCESS_TOKEN",
 }
 

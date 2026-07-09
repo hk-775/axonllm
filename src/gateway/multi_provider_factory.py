@@ -11,6 +11,7 @@ from collections.abc import Awaitable, Callable
 from src.gateway.adapters.anthropic_adapter import AnthropicAdapter
 from src.gateway.adapters.bedrock_adapter import BedrockAdapter
 from src.gateway.adapters.cohere_adapter import CohereAdapter
+from src.gateway.adapters.google_ai_adapter import GoogleAIAdapter
 from src.gateway.adapters.mantle_adapter import MantleAdapter
 from src.gateway.adapters.openai_adapter import OpenAIAdapter
 from src.gateway.adapters.azure_adapter import AzureOpenAIAdapter
@@ -46,6 +47,7 @@ class MultiProviderFactory:
         self._adapter_registry.register("azure_openai", AzureOpenAIAdapter())
         self._adapter_registry.register("vertex_ai", VertexAIAdapter())
         self._adapter_registry.register("cohere", CohereAdapter())
+        self._adapter_registry.register("google_ai", GoogleAIAdapter())
         self._adapter_registry.register("bedrock", BedrockAdapter())
         self._adapter_registry.register("bedrock-mantle", MantleAdapter())
 

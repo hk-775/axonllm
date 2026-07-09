@@ -162,6 +162,14 @@ def _cohere_url(config: ProviderConfig, mapping: ProviderModelMapping) -> str:
     return f"{config.base_url}/v1/chat"
 
 
+def _google_ai_url(config: ProviderConfig, mapping: ProviderModelMapping) -> str:
+    api_key = config.credentials.get("api_key", "")
+    return (
+        f"{config.base_url}/v1beta/models/{mapping.model_id}:generateContent"
+        f"?key={api_key}"
+    )
+
+
 _URL_DISPATCH: dict[str, callable] = {
     "openai": _openai_url,
     "anthropic": _anthropic_url,
@@ -169,6 +177,7 @@ _URL_DISPATCH: dict[str, callable] = {
     "bedrock": _bedrock_url,
     "bedrock-mantle": _mantle_url,
     "vertex_ai": _vertex_ai_url,
+    "google_ai": _google_ai_url,
     "cohere": _cohere_url,
 }
 

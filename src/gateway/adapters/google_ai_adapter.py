@@ -1,4 +1,4 @@
-"""Google Vertex AI provider adapter for the LLM-Router."""
+"""Google AI Studio (Generative Language API) provider adapter."""
 
 import logging
 
@@ -13,9 +13,9 @@ from src.gateway.models import (
 
 logger = logging.getLogger(__name__)
 
-PROVIDER_NAME = "vertex_ai"
+PROVIDER_NAME = "google_ai"
 
-_VERTEX_MODELS = [
+_GOOGLE_AI_MODELS = [
     ModelInfo(model_id="gemini-2.5-pro", provider=PROVIDER_NAME, capabilities=["chat", "streaming", "function_calling"]),
     ModelInfo(model_id="gemini-2.5-flash", provider=PROVIDER_NAME, capabilities=["chat", "streaming", "function_calling"]),
     ModelInfo(model_id="gemini-2.0-flash", provider=PROVIDER_NAME, capabilities=["chat", "streaming", "function_calling"]),
@@ -24,21 +24,19 @@ _VERTEX_MODELS = [
 ]
 
 
-class VertexAIAdapter(ProviderAdapter):
-    """Translates between the unified Gateway format and Google Vertex AI's native API format.
+class GoogleAIAdapter(ProviderAdapter):
+    """Translates between the unified Gateway format and Google AI Studio's Generative Language API.
 
-    Vertex AI uses contents[{role, parts[{text}]}] instead of messages,
-    systemInstruction for system messages, and generationConfig for parameters.
+    Uses the same request/response format as Vertex AI (contents + generationConfig)
+    but authenticates with a simple API key passed as a query parameter.
     """
 
     PROVIDER_NAME = PROVIDER_NAME
-    _MODELS = _VERTEX_MODELS
+    _MODELS = _GOOGLE_AI_MODELS
 
     async def translate_request(
         self, request: ChatCompletionRequest, *, prompt_caching_enabled: bool = False
     ) -> dict:
-        warnings: list[str] = []
-
         contents = []
         system_text = request.system
         for msg in request.messages:
@@ -47,15 +45,14 @@ class VertexAIAdapter(ProviderAdapter):
                 if system_text is None:
                     system_text = msg.get("content", "")
                 continue
-            vertex_role = "model" if role == "assistant" else "user"
+            gemini_role = "model" if role == "assistant" else "user"
             contents.append({
-                "role": vertex_role,
+                "role": gemini_role,
                 "parts": [{"text": msg.get("content", "")}],
             })
 
         payload: dict = {
             "contents": contents,
-            "model": request.model,
         }
 
         if system_text is not None:
@@ -75,12 +72,6 @@ class VertexAIAdapter(ProviderAdapter):
 
         if gen_config:
             payload["generationConfig"] = gen_config
-
-        if request.stream:
-            warnings.append("Parameter 'stream' is not natively supported by Vertex AI; handled at gateway level")
-
-        if warnings:
-            payload["_warnings"] = warnings
 
         return payload
 
