@@ -8,15 +8,21 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 
+from src.gateway.adapters.ai21_adapter import AI21Adapter
 from src.gateway.adapters.anthropic_adapter import AnthropicAdapter
 from src.gateway.adapters.bedrock_adapter import BedrockAdapter
 from src.gateway.adapters.cohere_adapter import CohereAdapter
+from src.gateway.adapters.fireworks_adapter import FireworksAdapter
 from src.gateway.adapters.google_ai_adapter import GoogleAIAdapter
+from src.gateway.adapters.groq_adapter import GroqAdapter
 from src.gateway.adapters.mantle_adapter import MantleAdapter
 from src.gateway.adapters.openai_adapter import OpenAIAdapter
 from src.gateway.adapters.azure_adapter import AzureOpenAIAdapter
+from src.gateway.adapters.perplexity_adapter import PerplexityAdapter
 from src.gateway.adapters.registry import AdapterRegistry
+from src.gateway.adapters.together_adapter import TogetherAdapter
 from src.gateway.adapters.vertex_adapter import VertexAIAdapter
+from src.gateway.adapters.xai_adapter import XAIAdapter
 from src.gateway.bedrock_provider import create_bedrock_provider_fn
 from src.gateway.http_client import HttpClient
 from src.gateway.mantle_provider import create_mantle_provider_fn
@@ -50,6 +56,12 @@ class MultiProviderFactory:
         self._adapter_registry.register("google_ai", GoogleAIAdapter())
         self._adapter_registry.register("bedrock", BedrockAdapter())
         self._adapter_registry.register("bedrock-mantle", MantleAdapter())
+        self._adapter_registry.register("xai", XAIAdapter())
+        self._adapter_registry.register("groq", GroqAdapter())
+        self._adapter_registry.register("together", TogetherAdapter())
+        self._adapter_registry.register("fireworks", FireworksAdapter())
+        self._adapter_registry.register("perplexity", PerplexityAdapter())
+        self._adapter_registry.register("ai21", AI21Adapter())
 
         self._provider_configs = provider_configs or {}
         self._http_client = HttpClient()

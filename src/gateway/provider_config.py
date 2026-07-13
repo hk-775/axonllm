@@ -56,11 +56,14 @@ def _require_credential(config: ProviderConfig, key: str) -> str:
 def _api_key_headers(config: ProviderConfig) -> dict[str, str]:
     """Produce auth headers for the ``api_key`` auth type.
 
-    Anthropic uses ``x-api-key``; all other providers use ``Authorization: Bearer``.
+    Anthropic uses ``x-api-key``; Google AI uses query param (no header needed);
+    all other providers use ``Authorization: Bearer``.
     """
     api_key = _require_credential(config, "api_key")
     if config.provider_name == "anthropic":
         return {"x-api-key": api_key}
+    if config.provider_name == "google_ai":
+        return {}
     return {"Authorization": f"Bearer {api_key}"}
 
 
@@ -170,6 +173,14 @@ def _google_ai_url(config: ProviderConfig, mapping: ProviderModelMapping) -> str
     )
 
 
+def _google_ai_stream_url(config: ProviderConfig, mapping: ProviderModelMapping) -> str:
+    api_key = config.credentials.get("api_key", "")
+    return (
+        f"{config.base_url}/v1beta/models/{mapping.model_id}:streamGenerateContent"
+        f"?alt=sse&key={api_key}"
+    )
+
+
 _URL_DISPATCH: dict[str, callable] = {
     "openai": _openai_url,
     "anthropic": _anthropic_url,
@@ -179,6 +190,12 @@ _URL_DISPATCH: dict[str, callable] = {
     "vertex_ai": _vertex_ai_url,
     "google_ai": _google_ai_url,
     "cohere": _cohere_url,
+    "xai": _openai_url,
+    "groq": _openai_url,
+    "together": _openai_url,
+    "fireworks": _openai_url,
+    "perplexity": _openai_url,
+    "ai21": _openai_url,
 }
 
 
@@ -199,3 +216,16 @@ def build_provider_url(config: ProviderConfig, mapping: ProviderModelMapping) ->
             message=f"No URL builder for provider '{config.provider_name}'",
         )
     return builder(config, mapping)
+
+
+_STREAM_URL_DISPATCH: dict[str, callable] = {
+    "google_ai": _google_ai_stream_url,
+}
+
+
+def build_provider_stream_url(config: ProviderConfig, mapping: ProviderModelMapping) -> str:
+    """Construct the streaming endpoint URL. Falls back to the standard URL."""
+    builder = _STREAM_URL_DISPATCH.get(config.provider_name)
+    if builder is not None:
+        return builder(config, mapping)
+    return build_provider_url(config, mapping)

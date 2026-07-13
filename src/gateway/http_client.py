@@ -17,6 +17,7 @@ from src.gateway.models import (
 from src.gateway.provider_config import (
     ProviderConfig,
     build_provider_url,
+    build_provider_stream_url,
     get_auth_headers,
 )
 from src.gateway.router import ProviderError
@@ -164,8 +165,8 @@ class HttpClient:
         if "model" in payload:
             payload["model"] = mapping.model_id
 
-        # 2. Build URL
-        url = build_provider_url(config, mapping)
+        # 2. Build URL (streaming variant)
+        url = build_provider_stream_url(config, mapping)
 
         # 3. Assemble headers
         headers: dict[str, str] = {"Content-Type": "application/json"}

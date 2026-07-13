@@ -16,7 +16,9 @@ projects:
     allowed_models:
       - claude-opus
       - claude-sonnet
+      - claude-haiku
       - gpt-4o
+      - gpt-4o-mini
       - gpt-5.5
       - gpt-5.5-pro
       - gpt-5.4
@@ -24,12 +26,32 @@ projects:
       - o3
       - o4-mini
       - nova-pro
+      - nova-lite
+      - nova-micro
       - deepseek-r1
       - llama-3.3-70b
+      - llama-4-maverick
       - llama-4-scout
       - mistral-large
+      - pixtral-large
       - gpt-oss-120b
       - qwen3-235b
+      - gemini-3.5-flash
+      - gemini-3.1-pro
+      - gemini-3-pro
+      - grok-3
+      - grok-3-mini
+      - groq-llama-3.3-70b
+      - groq-llama-3.1-8b
+      - together-llama-3.3-70b
+      - together-deepseek-r1
+      - together-qwen-72b
+      - fireworks-deepseek-v4
+      - fireworks-gpt-oss-120b
+      - sonar-pro
+      - sonar-reasoning
+      - jamba-large
+      - jamba-mini
 
   - project_id: proj-beta
     name: Beta Team

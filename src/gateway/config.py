@@ -81,7 +81,14 @@ VALID_PROVIDERS: frozenset[str] = frozenset({
     "bedrock-mantle",
     "azure_openai",
     "vertex_ai",
+    "google_ai",
     "cohere",
+    "xai",
+    "groq",
+    "together",
+    "fireworks",
+    "perplexity",
+    "ai21",
 })
 
 

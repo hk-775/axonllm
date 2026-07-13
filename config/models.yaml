@@ -187,39 +187,137 @@ models:
     model_id: qwen.qwen3-vl-235b-a22b
     weight: 1.0
     fallback_order: 0
-- name: gemini-2.5-pro
-  description: Gemini 2.5 Pro
-  routing_strategy: least-latency
+- name: gemini-3.5-flash
+  description: Gemini 3.5 Flash
+  routing_strategy: round-robin
   providers:
-  - provider: vertex_ai
-    model_id: gemini-2.5-pro
-    weight: 0.5
-    fallback_order: 0
   - provider: google_ai
-    model_id: gemini-2.5-pro
-    weight: 0.5
-    fallback_order: 1
-- name: gemini-2.5-flash
-  description: Gemini 2.5 Flash
-  routing_strategy: least-latency
+    model_id: gemini-3.5-flash
+    weight: 1.0
+    fallback_order: 0
+- name: gemini-3.1-pro
+  description: Gemini 3.1 Pro
+  routing_strategy: round-robin
   providers:
-  - provider: vertex_ai
-    model_id: gemini-2.5-flash
-    weight: 0.5
-    fallback_order: 0
   - provider: google_ai
-    model_id: gemini-2.5-flash
-    weight: 0.5
-    fallback_order: 1
-- name: gemini-2.0-flash
-  description: Gemini 2.0 Flash
-  routing_strategy: least-latency
+    model_id: gemini-3.1-pro-preview
+    weight: 1.0
+    fallback_order: 0
+- name: gemini-3-pro
+  description: Gemini 3 Pro
+  routing_strategy: round-robin
   providers:
-  - provider: vertex_ai
-    model_id: gemini-2.0-flash
-    weight: 0.5
-    fallback_order: 0
   - provider: google_ai
-    model_id: gemini-2.0-flash
-    weight: 0.5
-    fallback_order: 1
+    model_id: gemini-3-pro-preview
+    weight: 1.0
+    fallback_order: 0
+# --- xAI (Grok) ---
+- name: grok-3
+  description: Grok 3
+  routing_strategy: round-robin
+  providers:
+  - provider: xai
+    model_id: grok-3
+    weight: 1.0
+    fallback_order: 0
+- name: grok-3-mini
+  description: Grok 3 Mini
+  routing_strategy: round-robin
+  providers:
+  - provider: xai
+    model_id: grok-3-mini
+    weight: 1.0
+    fallback_order: 0
+# --- Groq (fast inference) ---
+- name: groq-llama-3.3-70b
+  description: Llama 3.3 70B (Groq)
+  routing_strategy: round-robin
+  providers:
+  - provider: groq
+    model_id: llama-3.3-70b-versatile
+    weight: 1.0
+    fallback_order: 0
+- name: groq-llama-3.1-8b
+  description: Llama 3.1 8B Instant (Groq)
+  routing_strategy: round-robin
+  providers:
+  - provider: groq
+    model_id: llama-3.1-8b-instant
+    weight: 1.0
+    fallback_order: 0
+# --- Together AI ---
+- name: together-llama-3.3-70b
+  description: Llama 3.3 70B Turbo (Together)
+  routing_strategy: round-robin
+  providers:
+  - provider: together
+    model_id: meta-llama/Llama-3.3-70B-Instruct-Turbo
+    weight: 1.0
+    fallback_order: 0
+- name: together-deepseek-r1
+  description: DeepSeek R1 (Together)
+  routing_strategy: round-robin
+  providers:
+  - provider: together
+    model_id: deepseek-ai/DeepSeek-R1
+    weight: 1.0
+    fallback_order: 0
+- name: together-qwen-72b
+  description: Qwen 2.5 72B (Together)
+  routing_strategy: round-robin
+  providers:
+  - provider: together
+    model_id: Qwen/Qwen2.5-72B-Instruct-Turbo
+    weight: 1.0
+    fallback_order: 0
+# --- Fireworks AI ---
+- name: fireworks-deepseek-v4
+  description: DeepSeek V4 Pro (Fireworks)
+  routing_strategy: round-robin
+  providers:
+  - provider: fireworks
+    model_id: accounts/fireworks/models/deepseek-v4-pro
+    weight: 1.0
+    fallback_order: 0
+- name: fireworks-gpt-oss-120b
+  description: GPT-OSS 120B (Fireworks)
+  routing_strategy: round-robin
+  providers:
+  - provider: fireworks
+    model_id: accounts/fireworks/models/gpt-oss-120b
+    weight: 1.0
+    fallback_order: 0
+# --- Perplexity ---
+- name: sonar-pro
+  description: Perplexity Sonar Pro (search-augmented)
+  routing_strategy: round-robin
+  providers:
+  - provider: perplexity
+    model_id: sonar-pro
+    weight: 1.0
+    fallback_order: 0
+- name: sonar-reasoning
+  description: Perplexity Sonar Reasoning Pro
+  routing_strategy: round-robin
+  providers:
+  - provider: perplexity
+    model_id: sonar-reasoning-pro
+    weight: 1.0
+    fallback_order: 0
+# --- AI21 Labs ---
+- name: jamba-large
+  description: AI21 Jamba 1.6 Large
+  routing_strategy: round-robin
+  providers:
+  - provider: ai21
+    model_id: jamba-1.6-large
+    weight: 1.0
+    fallback_order: 0
+- name: jamba-mini
+  description: AI21 Jamba 1.6 Mini
+  routing_strategy: round-robin
+  providers:
+  - provider: ai21
+    model_id: jamba-1.6-mini
+    weight: 1.0
+    fallback_order: 0

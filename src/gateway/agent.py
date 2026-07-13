@@ -703,7 +703,7 @@ class GatewayAgent:
 
         # 15. Streaming support
         if request.stream:
-            if self.provider_fn_factory is not None:
+            if self.provider_fn_factory is not None and response.provider != "google_ai":
                 return self._stream_response_real(
                     request, response, budget_status, _rate_limit_headers,
                     prompt_caching_enabled=prompt_caching_enabled,
