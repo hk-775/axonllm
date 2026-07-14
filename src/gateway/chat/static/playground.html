@@ -6,43 +6,43 @@
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
   <title>AxonLLM — Playground</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link href="https://fonts.googleapis.com/css2?family=Open+Sans:wght@400;600;700&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
   <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
   <script crossorigin src="https://unpkg.com/@babel/standalone@7.24.7/babel.min.js"></script>
   <style>
     :root {
       /* Colors - Cloudscape Palette */
-      --color-bg: #f2f3f3;
+      --color-bg: #fafaf9;
       --color-bg-container: #ffffff;
       --color-bg-input: #ffffff;
-      --color-bg-nav: #232f3e;
+      --color-bg-nav: #1c1917;
       --color-bg-nav-hover: #354150;
       --color-bg-status-info: #f2f8fd;
       --color-bg-status-success: #f2fcf3;
       --color-bg-status-error: #fff7f7;
       --color-bg-status-warning: #fffce9;
-      --color-text-body: #000716;
-      --color-text-heading: #000716;
-      --color-text-secondary: #5f6b7a;
-      --color-text-label: #000716;
+      --color-text-body: #1c1917;
+      --color-text-heading: #1c1917;
+      --color-text-secondary: #78716c;
+      --color-text-label: #1c1917;
       --color-text-nav: #d1d5db;
       --color-text-nav-active: #ffffff;
-      --color-text-link: #0972d3;
-      --color-border: #e9ebed;
+      --color-text-link: #7c3aed;
+      --color-border: #e7e5e4;
       --color-border-input: #7d8998;
-      --color-border-input-focus: #0972d3;
-      --color-accent: #0972d3;
+      --color-border-input-focus: #7c3aed;
+      --color-accent: #7c3aed;
       --color-accent-hover: #033160;
       --color-status-success: #037f0c;
       --color-status-error: #d91515;
       --color-status-warning: #8d6605;
-      --color-status-info: #0972d3;
-      --color-brand-gradient-start: #ff9900;
-      --color-brand-gradient-end: #ffb84d;
+      --color-status-info: #7c3aed;
+      --color-brand-gradient-start: #8b5cf6;
+      --color-brand-gradient-end: #a78bfa;
 
       /* Typography */
-      --font-family: 'Open Sans', 'Amazon Ember', -apple-system, BlinkMacSystemFont, sans-serif;
+      --font-family: 'Inter', 'Open Sans', -apple-system, BlinkMacSystemFont, sans-serif;
       --font-size-base: 14px;
       --font-size-heading-lg: 24px;
       --font-size-heading-md: 18px;
@@ -61,13 +61,13 @@
       --space-3xl: 2rem;
 
       /* Border Radius */
-      --radius-sm: 4px;
-      --radius-md: 8px;
-      --radius-lg: 12px;
+      --radius-sm: 8px;
+      --radius-md: 12px;
+      --radius-lg: 16px;
 
       /* Layout */
       --sidebar-w: 220px;
-      --topbar-h: 40px;
+      --topbar-h: 0px;
     }
 
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -82,10 +82,7 @@
 
     /* ── Topbar ── */
     .topbar {
-      position: fixed; top: 0; left: 0; right: 0; z-index: 100;
-      height: var(--topbar-h);
-      background: var(--color-bg-nav);
-      display: flex; align-items: center;
+      display: none;
       padding: 0 var(--space-lg);
     }
     .topbar-brand {
@@ -152,10 +149,8 @@
       height: calc(100vh - var(--topbar-h));
       display: flex;
       flex-direction: column;
-      max-width: 850px;
-      margin-left: auto;
-      margin-right: auto;
-      padding: 0 var(--space-lg);
+      max-width: 100%;
+      padding: 0 1.5rem;
     }
 
     /* ── Chat Header ── */
@@ -304,7 +299,7 @@
       display: inline-flex;
       align-items: center;
       gap: 0.25rem;
-      background: #f2f3f3;
+      background: #fafaf9;
       border: 1px solid var(--color-border);
       padding: 0.1rem 0.45rem;
       border-radius: var(--radius-sm);
@@ -317,7 +312,7 @@
       color: var(--color-status-success);
       background: var(--color-bg-status-success);
       border: 1px solid #c6f0c8;
-      border-radius: 6px;
+      border-radius: 12px;
       padding: 0.3rem 0.6rem;
       line-height: 1.4;
     }
@@ -325,8 +320,13 @@
     /* ── Input Area ── */
     .input-area {
       flex-shrink: 0;
-      padding: var(--space-md) 0 var(--space-lg);
-      border-top: 1px solid var(--color-border);
+      padding: 1rem;
+      border: 1.5px solid var(--color-border);
+      border-radius: 16px;
+      border-top: 3px solid rgba(139,92,246,0.4);
+      background: #fff;
+      margin-top: 0.75rem;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.04);
     }
     .input-row {
       display: flex;
@@ -527,7 +527,7 @@
           <div className="chat-wrapper">
             <div className="chat-header">
               <div className="chat-header-left">
-                <h1>Playground</h1>
+                <span style={{fontSize: '13px', color: 'var(--color-text-secondary)'}}>Type Prompt - see latency, tokens, and provider selection.</span>
                 <select
                   className="model-select"
                   value={selectedModel || ''}
@@ -544,12 +544,41 @@
               </button>
             </div>
 
+            <div className="input-area">
+              <div style={{fontSize: '12px', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.5px', color: 'var(--color-text-secondary)', marginBottom: '0.5rem'}}>Your Prompt</div>
+              <div className="input-row">
+                <textarea
+                  ref={textareaRef}
+                  rows="1"
+                  placeholder={loading ? 'Waiting...' : 'Type a message...'}
+                  value={text}
+                  onChange={e => setText(e.target.value)}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter' && !e.shiftKey) {
+                      e.preventDefault();
+                      handleSend();
+                    }
+                  }}
+                  onInput={e => {
+                    e.target.style.height = 'auto';
+                    e.target.style.height = Math.min(e.target.scrollHeight, 150) + 'px';
+                  }}
+                  disabled={loading}
+                  aria-label="Message input"
+                />
+                <button
+                  className="btn-send"
+                  onClick={handleSend}
+                  disabled={loading || !text.trim()}
+                  aria-label="Send message"
+                  title="Send message"
+                >&#10148;</button>
+              </div>
+            </div>
+
             <div className="message-list">
               {messages.length === 0 ? (
                 <div className="welcome">
-                  <div className="welcome-icon">R</div>
-                  <h2>AxonLLM Playground</h2>
-                  <p>Select a model and start chatting. The router picks the best provider automatically.</p>
                 </div>
               ) : (
                 <>
@@ -586,37 +615,6 @@
                   <div ref={bottomRef} />
                 </>
               )}
-            </div>
-
-            <div className="input-area">
-              <div className="input-row">
-                <textarea
-                  ref={textareaRef}
-                  rows="1"
-                  placeholder={loading ? 'Waiting...' : 'Type a message...'}
-                  value={text}
-                  onChange={e => setText(e.target.value)}
-                  onKeyDown={e => {
-                    if (e.key === 'Enter' && !e.shiftKey) {
-                      e.preventDefault();
-                      handleSend();
-                    }
-                  }}
-                  onInput={e => {
-                    e.target.style.height = 'auto';
-                    e.target.style.height = Math.min(e.target.scrollHeight, 150) + 'px';
-                  }}
-                  disabled={loading}
-                  aria-label="Message input"
-                />
-                <button
-                  className="btn-send"
-                  onClick={handleSend}
-                  disabled={loading || !text.trim()}
-                  aria-label="Send message"
-                  title="Send message"
-                >&#10148;</button>
-              </div>
             </div>
           </div>
         </div>

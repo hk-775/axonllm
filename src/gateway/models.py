@@ -215,6 +215,9 @@ class UsageRecord:
     cache_creation_tokens: int = 0
     image_tokens: int = 0
     reasoning_tokens: int = 0
+    latency_ms: float = 0.0
+    status: str = "success"
+    routing_strategy: str = ""
 
 
 @dataclass

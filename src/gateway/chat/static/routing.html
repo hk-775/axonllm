@@ -6,43 +6,43 @@
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
   <title>AxonLLM — Routing Explorer</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link href="https://fonts.googleapis.com/css2?family=Open+Sans:wght@400;600;700&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
   <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
   <script crossorigin src="https://unpkg.com/@babel/standalone@7.24.7/babel.min.js"></script>
   <style>
     :root {
       /* Colors - Cloudscape Palette */
-      --color-bg: #f2f3f3;
+      --color-bg: #fafaf9;
       --color-bg-container: #ffffff;
       --color-bg-input: #ffffff;
-      --color-bg-nav: #232f3e;
+      --color-bg-nav: #1c1917;
       --color-bg-nav-hover: #354150;
       --color-bg-status-info: #f2f8fd;
       --color-bg-status-success: #f2fcf3;
       --color-bg-status-error: #fff7f7;
       --color-bg-status-warning: #fffce9;
-      --color-text-body: #000716;
-      --color-text-heading: #000716;
-      --color-text-secondary: #5f6b7a;
-      --color-text-label: #000716;
+      --color-text-body: #1c1917;
+      --color-text-heading: #1c1917;
+      --color-text-secondary: #78716c;
+      --color-text-label: #1c1917;
       --color-text-nav: #d1d5db;
       --color-text-nav-active: #ffffff;
-      --color-text-link: #0972d3;
-      --color-border: #e9ebed;
+      --color-text-link: #7c3aed;
+      --color-border: #e7e5e4;
       --color-border-input: #7d8998;
-      --color-border-input-focus: #0972d3;
-      --color-accent: #0972d3;
+      --color-border-input-focus: #7c3aed;
+      --color-accent: #7c3aed;
       --color-accent-hover: #033160;
       --color-status-success: #037f0c;
       --color-status-error: #d91515;
       --color-status-warning: #8d6605;
-      --color-status-info: #0972d3;
-      --color-brand-gradient-start: #ff9900;
-      --color-brand-gradient-end: #ffb84d;
+      --color-status-info: #7c3aed;
+      --color-brand-gradient-start: #8b5cf6;
+      --color-brand-gradient-end: #a78bfa;
 
       /* Typography */
-      --font-family: 'Open Sans', 'Amazon Ember', -apple-system, BlinkMacSystemFont, sans-serif;
+      --font-family: 'Inter', 'Open Sans', -apple-system, BlinkMacSystemFont, sans-serif;
       --font-size-base: 14px;
       --font-size-heading-lg: 24px;
       --font-size-heading-md: 18px;
@@ -61,13 +61,13 @@
       --space-3xl: 2rem;
 
       /* Border Radius */
-      --radius-sm: 4px;
-      --radius-md: 8px;
-      --radius-lg: 12px;
+      --radius-sm: 8px;
+      --radius-md: 12px;
+      --radius-lg: 16px;
 
       /* Layout */
       --sidebar-w: 220px;
-      --topbar-h: 40px;
+      --topbar-h: 0px;
     }
 
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -82,10 +82,7 @@
 
     /* ── Topbar ── */
     .topbar {
-      position: fixed; top: 0; left: 0; right: 0; z-index: 100;
-      height: var(--topbar-h);
-      background: var(--color-bg-nav);
-      display: flex; align-items: center;
+      display: none;
       padding: 0 var(--space-lg);
     }
     .topbar-brand {
@@ -148,35 +145,44 @@
 
     /* ── Page Layout ── */
     .page-wrapper {
-      max-width: 850px;
-      margin: 0 auto;
-      padding: var(--space-2xl) var(--space-lg);
+      max-width: 100%;
+      padding: 1.5rem;
       margin-top: var(--topbar-h);
     }
 
     /* ── Page Header ── */
     .page-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0.75rem 0;
+      border-bottom: 1px solid var(--color-border);
       margin-bottom: var(--space-xl);
     }
     .page-header h1 {
-      font-size: var(--font-size-heading-lg);
+      font-size: var(--font-size-heading-md);
       font-weight: 700;
       color: var(--color-text-heading);
     }
     .page-header p {
       color: var(--color-text-secondary);
-      font-size: var(--font-size-base);
-      margin-top: var(--space-xs);
+      font-size: var(--font-size-small);
     }
 
     /* ── Container / Card ── */
     .container {
       background: var(--color-bg-container);
-      border: 1px solid var(--color-border);
-      border-radius: var(--radius-lg);
+      border: 1.5px solid var(--color-border);
+      border-radius: 16px;
+      border-top: 3px solid rgba(139,92,246,0.4);
       margin-bottom: var(--space-xl);
       overflow: hidden;
-      box-shadow: 0 1px 2px rgba(0,7,22,0.05);
+      box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+      transition: box-shadow 200ms, transform 200ms;
+    }
+    .container:hover {
+      box-shadow: 0 0 20px rgba(139,92,246,0.08), 0 4px 12px rgba(0,0,0,0.04);
+      transform: translateY(-1px);
     }
     .container-header {
       padding: 0.85rem var(--space-xl);
@@ -671,10 +677,7 @@
           </header>
 
           <div className="page-wrapper">
-            <div className="page-header">
-              <h1>🔀 Routing Explorer</h1>
-              <p>Just type a prompt. AxonLLM picks the model and provider automatically, then shows you exactly what it chose and why.</p>
-            </div>
+            <p style={{color: 'var(--color-text-secondary)', fontSize: '13px', marginBottom: 'var(--space-xl)'}}>Type a prompt — AxonLLM picks the model and provider automatically, then shows what it chose and why.</p>
 
             <div className="container">
               <div className="container-header">Your Prompt</div>

@@ -1033,6 +1033,37 @@ class AdminAPI:
 
 
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # GET /admin/traces
+    # ------------------------------------------------------------------
+
+    async def traces(self, request: Request) -> JSONResponse:
+        """Return recent request traces for the live traces view."""
+        records = self.cost_tracker._records
+        limit = int(request.query_params.get("limit", "100"))
+        recent = records[-limit:] if len(records) > limit else records
+
+        traces = []
+        for r in reversed(recent):
+            traces.append({
+                "request_id": r.request_id,
+                "timestamp": r.timestamp.isoformat() if r.timestamp else None,
+                "model": r.model,
+                "provider": r.provider,
+                "user_id": r.user_id,
+                "project_id": r.project_id,
+                "prompt_tokens": r.prompt_tokens,
+                "completion_tokens": r.completion_tokens,
+                "total_tokens": r.total_tokens,
+                "cost": r.cost,
+                "latency_ms": getattr(r, "latency_ms", 0),
+                "status": getattr(r, "status", "success"),
+                "cached_tokens": r.cached_tokens,
+                "routing_strategy": getattr(r, "routing_strategy", ""),
+            })
+
+        return JSONResponse({"traces": traces, "total": len(records)})
+
     # GET /admin/efficiency
     # ------------------------------------------------------------------
 
@@ -1342,6 +1373,7 @@ def create_admin_routes(admin_api: AdminAPI) -> list[Route]:
         Route("/admin/policies", admin_api.list_policies, methods=["GET"]),
         Route("/admin/policies", admin_api.create_policy, methods=["POST"]),
         Route("/admin/health", admin_api.health, methods=["GET"]),
+        Route("/admin/traces", admin_api.traces, methods=["GET"]),
         Route("/admin/efficiency", admin_api.efficiency_overview, methods=["GET"]),
         Route("/admin/projects/{id}/efficiency", admin_api.project_efficiency, methods=["GET"]),
     ]

@@ -127,7 +127,7 @@ def test_create_admin_routes_returns_routes(admin_api):
     """Verify create_admin_routes returns a list of Route objects."""
     routes = create_admin_routes(admin_api)
     assert isinstance(routes, list)
-    assert len(routes) == 28
+    assert len(routes) == 29
 
     paths = [r.path for r in routes]
     assert "/admin/dashboard" in paths

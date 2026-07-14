@@ -99,7 +99,7 @@ usage_seeds:
     cache_creation_tokens: 50
   - project_id: proj-alpha
     user_id: user-alice
-    provider: vertex_ai
+    provider: google_ai
     model: gemini-pro
     prompt_tokens: 400
     completion_tokens: 250
@@ -113,7 +113,7 @@ usage_seeds:
     cost: 0.054
   - project_id: proj-alpha
     user_id: user-bob
-    provider: vertex_ai
+    provider: google_ai
     model: gemini-pro
     prompt_tokens: 600
     completion_tokens: 350
@@ -134,7 +134,7 @@ usage_seeds:
     cost: 0.002
   - project_id: proj-beta
     user_id: user-carol
-    provider: vertex_ai
+    provider: google_ai
     model: gemini-pro
     prompt_tokens: 900
     completion_tokens: 450

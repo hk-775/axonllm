@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 import warnings
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, AsyncIterator
@@ -422,6 +423,7 @@ class GatewayAgent:
                 return resp
 
         # 10. Route and execute
+        _request_start = time.perf_counter()
         try:
             prompt_caching_enabled = project.prompt_caching_enabled if project else False
 
@@ -672,12 +674,13 @@ class GatewayAgent:
                 cache_creation_tokens=response.usage.cache_creation_tokens,
             )
             request_id = response.id
+            _latency_ms = (time.perf_counter() - _request_start) * 1000
             usage_record = UsageRecord(
                 request_id=request_id,
                 project_id=req_ctx.project_id,
                 user_id=req_ctx.user_id,
                 provider=response.provider,
-                model=request.model,  # Use model name, not provider's versioned name
+                model=request.model,
                 prompt_tokens=response.usage.prompt_tokens,
                 completion_tokens=response.usage.completion_tokens,
                 total_tokens=response.usage.total_tokens,
@@ -685,6 +688,8 @@ class GatewayAgent:
                 timestamp=datetime.now(timezone.utc),
                 cached_tokens=response.usage.cached_tokens,
                 cache_creation_tokens=response.usage.cache_creation_tokens,
+                latency_ms=_latency_ms,
+                status="success",
             )
             await self.cost_tracker.record_usage(usage_record)
 
