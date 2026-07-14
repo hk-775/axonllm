@@ -287,23 +287,6 @@ models:
     model_id: accounts/fireworks/models/gpt-oss-120b
     weight: 1.0
     fallback_order: 0
-# --- Perplexity ---
-- name: sonar-pro
-  description: Perplexity Sonar Pro (search-augmented)
-  routing_strategy: round-robin
-  providers:
-  - provider: perplexity
-    model_id: sonar-pro
-    weight: 1.0
-    fallback_order: 0
-- name: sonar-reasoning
-  description: Perplexity Sonar Reasoning Pro
-  routing_strategy: round-robin
-  providers:
-  - provider: perplexity
-    model_id: sonar-reasoning-pro
-    weight: 1.0
-    fallback_order: 0
 # --- AI21 Labs ---
 - name: jamba-large
   description: AI21 Jamba 1.6 Large

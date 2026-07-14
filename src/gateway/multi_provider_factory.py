@@ -18,7 +18,6 @@ from src.gateway.adapters.groq_adapter import GroqAdapter
 from src.gateway.adapters.mantle_adapter import MantleAdapter
 from src.gateway.adapters.openai_adapter import OpenAIAdapter
 from src.gateway.adapters.azure_adapter import AzureOpenAIAdapter
-from src.gateway.adapters.perplexity_adapter import PerplexityAdapter
 from src.gateway.adapters.registry import AdapterRegistry
 from src.gateway.adapters.together_adapter import TogetherAdapter
 from src.gateway.adapters.vertex_adapter import VertexAIAdapter
@@ -60,7 +59,6 @@ class MultiProviderFactory:
         self._adapter_registry.register("groq", GroqAdapter())
         self._adapter_registry.register("together", TogetherAdapter())
         self._adapter_registry.register("fireworks", FireworksAdapter())
-        self._adapter_registry.register("perplexity", PerplexityAdapter())
         self._adapter_registry.register("ai21", AI21Adapter())
 
         self._provider_configs = provider_configs or {}

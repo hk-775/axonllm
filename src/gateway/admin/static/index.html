@@ -5,142 +5,149 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>AxonLLM</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link href="https://fonts.googleapis.com/css2?family=Open+Sans:wght@400;600;700&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
   <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
   <script crossorigin src="https://unpkg.com/@babel/standalone@7.24.7/babel.min.js"></script>
   <style>
     :root {
-      --awsui-color-background: #f2f3f3;
+      --awsui-color-background: #fafaf9;
       --awsui-color-background-container: #ffffff;
       --awsui-color-background-input: #ffffff;
-      --awsui-color-background-nav: #232f3e;
-      --awsui-color-background-nav-hover: #354150;
-      --awsui-color-background-sidebar: #232f3e;
-      --awsui-color-background-status-info: #f2f8fd;
-      --awsui-color-background-status-success: #f2fcf3;
-      --awsui-color-background-status-error: #fff7f7;
-      --awsui-color-background-status-warning: #fffce9;
-      --awsui-color-text-body: #000716;
-      --awsui-color-text-heading: #000716;
-      --awsui-color-text-secondary: #5f6b7a;
-      --awsui-color-text-label: #000716;
-      --awsui-color-text-nav: #d1d5db;
-      --awsui-color-text-nav-active: #ffffff;
-      --awsui-color-text-link: #0972d3;
-      --awsui-color-text-interactive-active: #0972d3;
-      --awsui-color-border: #e9ebed;
-      --awsui-color-border-divider: #e9ebed;
-      --awsui-color-border-input: #7d8998;
-      --awsui-color-border-input-focus: #0972d3;
-      --awsui-color-primary: #0972d3;
-      --awsui-color-primary-hover: #033160;
-      --awsui-color-status-success: #037f0c;
-      --awsui-color-status-error: #d91515;
-      --awsui-color-status-warning: #8d6605;
-      --awsui-color-status-info: #0972d3;
-      --sidebar-w: 220px;
-      --topbar-h: 40px;
+      --awsui-color-background-nav: #ffffff;
+      --awsui-color-background-nav-hover: #f5f5f4;
+      --awsui-color-background-sidebar: #ffffff;
+      --awsui-color-background-status-info: #f0f9ff;
+      --awsui-color-background-status-success: #f0fdf4;
+      --awsui-color-background-status-error: #fef2f2;
+      --awsui-color-background-status-warning: #fffbeb;
+      --awsui-color-text-body: #1c1917;
+      --awsui-color-text-heading: #0c0a09;
+      --awsui-color-text-secondary: #78716c;
+      --awsui-color-text-label: #1c1917;
+      --awsui-color-text-nav: #78716c;
+      --awsui-color-text-nav-active: #7c3aed;
+      --awsui-color-text-link: #7c3aed;
+      --awsui-color-text-interactive-active: #7c3aed;
+      --awsui-color-border: #e7e5e4;
+      --awsui-color-border-divider: #f5f5f4;
+      --awsui-color-border-input: #d6d3d1;
+      --awsui-color-border-input-focus: #7c3aed;
+      --awsui-color-primary: #7c3aed;
+      --awsui-color-primary-hover: #6d28d9;
+      --awsui-color-status-success: #16a34a;
+      --awsui-color-status-error: #dc2626;
+      --awsui-color-status-warning: #d97706;
+      --awsui-color-status-info: #2563eb;
+      --sidebar-w: 240px;
+      --topbar-h: 0px;
     }
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     body {
-      font-family: 'Open Sans', 'Amazon Ember', -apple-system, BlinkMacSystemFont, sans-serif;
+      font-family: 'Inter', 'Open Sans', -apple-system, BlinkMacSystemFont, sans-serif;
       background: var(--awsui-color-background);
       color: var(--awsui-color-text-body);
       line-height: 1.5;
       font-size: 14px;
       -webkit-font-smoothing: antialiased;
     }
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { border-radius: 999px; background: #d6d3d1; }
+    ::-webkit-scrollbar-thumb:hover { background: #a8a29e; }
 
-    /* ── Top Navigation Bar (AWS-style dark bar) ── */
+    /* ── Top Ribbon (replaces dark topbar) ── */
     .topbar {
-      position: fixed; top: 0; left: 0; right: 0; z-index: 100;
-      height: var(--topbar-h);
-      background: var(--awsui-color-background-nav);
-      display: flex; align-items: center;
-      padding: 0 1rem;
-      border-bottom: none;
+      position: fixed; top: 0; left: var(--sidebar-w); right: 0; z-index: 100;
+      height: 44px;
+      background: linear-gradient(to right, rgba(245,243,255,0.7), rgba(255,255,255,0.8), rgba(238,242,255,0.7));
+      backdrop-filter: blur(8px);
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 0 2rem;
+      border-bottom: 1px solid rgba(139,92,246,0.1);
     }
     .topbar-brand {
       display: flex; align-items: center; gap: 0.5rem;
-      color: #fff; font-size: 14px; font-weight: 700;
-      margin-right: 1.5rem;
-      letter-spacing: -0.2px;
     }
     .topbar-brand .logo-icon {
-      width: 22px; height: 22px;
-      background: linear-gradient(135deg, #ff9900, #ffb84d);
-      border-radius: 4px;
-      display: flex; align-items: center; justify-content: center;
-      font-size: 12px; font-weight: 700; color: #232f3e;
-    }
-    .topbar-service {
-      color: var(--awsui-color-text-nav);
-      font-size: 14px; font-weight: 400;
-      padding: 0 0.75rem;
-      height: var(--topbar-h);
-      display: flex; align-items: center;
-      border-left: 1px solid rgba(255,255,255,0.15);
+      display: none;
     }
     .topbar-right {
-      margin-left: auto;
       display: flex; align-items: center; gap: 0.75rem;
     }
     .topbar-status {
-      display: flex; align-items: center; gap: 0.35rem;
-      font-size: 12px; color: var(--awsui-color-text-nav);
+      display: flex; align-items: center; gap: 0.4rem;
+      font-size: 11px; font-weight: 600; color: #7c3aed;
+      background: rgba(255,255,255,0.8); border: 1px solid rgba(139,92,246,0.2);
+      padding: 0.25rem 0.75rem; border-radius: 999px;
+      text-transform: uppercase; letter-spacing: 0.5px;
     }
     .topbar-status .dot {
-      width: 6px; height: 6px; border-radius: 50%;
-      background: #1aab2a;
+      width: 7px; height: 7px; border-radius: 50%;
+      background: #10b981; animation: pulse 2s infinite;
     }
+    @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
 
-    /* ── Sidebar ── */
+    /* ── Sidebar (Ostiari-style: white, colored section borders) ── */
     .sidebar {
-      position: fixed; top: var(--topbar-h); left: 0; bottom: 0;
+      position: fixed; top: 0; left: 0; bottom: 0;
       width: var(--sidebar-w);
       background: var(--awsui-color-background-sidebar);
+      border-right: 1px solid var(--awsui-color-border);
       overflow-y: auto;
       z-index: 50;
+      display: flex; flex-direction: column;
     }
-    .sidebar-section { padding: 0.75rem 0 0.25rem; }
+    .sidebar-logo {
+      display: flex; align-items: center; gap: 0.6rem;
+      height: 64px; padding: 0 1.25rem;
+      border-bottom: 1px solid #f5f5f4;
+    }
+    .sidebar-logo svg { height: 28px; }
+    .sidebar-logo span { font-size: 17px; font-weight: 700; color: #1c1917; letter-spacing: -0.3px; }
+    .sidebar-section { padding: 1rem 0.75rem 0.25rem; border-left: 2px solid transparent; margin-left: 0.5rem; }
+    .sidebar-section:nth-child(1) { border-left-color: #a78bfa; }
+    .sidebar-section:nth-child(2) { border-left-color: #10b981; }
+    .sidebar-section:nth-child(3) { border-left-color: #f43f5e; }
+    .sidebar-section:nth-child(4) { border-left-color: #0ea5e9; }
+    .sidebar-section:nth-child(5) { border-left-color: #f59e0b; }
+    .sidebar-section:nth-child(6) { border-left-color: #78716c; }
     .sidebar-section-label {
-      font-size: 11px; font-weight: 700; text-transform: uppercase;
-      letter-spacing: 0.8px;
-      color: #9ba7b6;
-      padding: 0 1rem 0.35rem;
+      font-size: 10px; font-weight: 700; text-transform: uppercase;
+      letter-spacing: 1px;
+      color: #a8a29e;
+      padding: 0 0.5rem 0.5rem;
     }
     .nav-item {
-      display: flex; align-items: center; gap: 0.5rem;
+      display: flex; align-items: center; gap: 0.6rem;
       width: 100%; text-align: left;
       background: none; border: none;
-      color: var(--awsui-color-text-nav);
-      padding: 0.45rem 1rem;
+      color: #78716c;
+      padding: 0.55rem 0.75rem;
       cursor: pointer;
-      font-size: 13px; font-weight: 400;
+      font-size: 13px; font-weight: 500;
       font-family: inherit;
-      transition: background 100ms, color 100ms;
-      border-left: 3px solid transparent;
+      transition: all 120ms;
+      border-radius: 12px;
+      border: none;
     }
     .nav-item:hover {
-      background: var(--awsui-color-background-nav-hover);
-      color: #fff;
+      background: #f5f5f4;
+      color: #1c1917;
     }
     .nav-item.active {
-      background: rgba(9,114,211,0.18);
-      color: #fff;
-      border-left-color: #539fe5;
+      background: #f5f3ff;
+      color: #7c3aed;
       font-weight: 600;
     }
-    .nav-item .nav-icon { font-size: 14px; width: 18px; text-align: center; flex-shrink: 0; opacity: 0.7; }
-    .nav-item.active .nav-icon { opacity: 1; }
+    .nav-item .nav-icon { font-size: 14px; width: 18px; text-align: center; flex-shrink: 0; }
 
     /* ── Main Content ── */
     .main {
-      margin-left: var(--sidebar-w);
-      margin-top: var(--topbar-h);
+      margin-left: 0;
+      margin-top: 44px;
       padding: 1.5rem 2rem 2rem;
-      min-height: calc(100vh - var(--topbar-h));
+      min-height: calc(100vh - 44px);
     }
 
     /* ── Page Header (Cloudscape-style) ── */
@@ -160,15 +167,31 @@
       display: flex; justify-content: space-between; align-items: flex-start;
     }
 
-    /* ── Container (Cloudscape container pattern) ── */
+    /* ── Container (card pattern) ── */
     .container {
       background: var(--awsui-color-background-container);
-      border: 1px solid var(--awsui-color-border);
-      border-radius: 12px;
+      border: 1.5px solid var(--awsui-color-border);
+      border-radius: 16px;
       margin-bottom: 1.25rem;
       overflow: hidden;
-      box-shadow: 0 1px 2px rgba(0,7,22,0.05);
+      box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+      transition: box-shadow 300ms, border-color 300ms, transform 300ms;
+      border-top: 3px solid rgba(139,92,246,0.4);
     }
+    .container:hover {
+      box-shadow: 0 0 24px rgba(139,92,246,0.1), 0 6px 16px rgba(0,0,0,0.04);
+      transform: translateY(-1px);
+    }
+    .container:nth-child(5n+1) { border-top-color: rgba(14,165,233,0.5); }
+    .container:nth-child(5n+2) { border-top-color: rgba(245,158,11,0.5); }
+    .container:nth-child(5n+3) { border-top-color: rgba(139,92,246,0.5); }
+    .container:nth-child(5n+4) { border-top-color: rgba(20,184,166,0.5); }
+    .container:nth-child(5n+5) { border-top-color: rgba(244,63,94,0.5); }
+    .container:nth-child(5n+1):hover { box-shadow: 0 0 24px rgba(14,165,233,0.12), 0 6px 16px rgba(0,0,0,0.04); }
+    .container:nth-child(5n+2):hover { box-shadow: 0 0 24px rgba(245,158,11,0.12), 0 6px 16px rgba(0,0,0,0.04); }
+    .container:nth-child(5n+3):hover { box-shadow: 0 0 24px rgba(139,92,246,0.12), 0 6px 16px rgba(0,0,0,0.04); }
+    .container:nth-child(5n+4):hover { box-shadow: 0 0 24px rgba(20,184,166,0.12), 0 6px 16px rgba(0,0,0,0.04); }
+    .container:nth-child(5n+5):hover { box-shadow: 0 0 24px rgba(244,63,94,0.12), 0 6px 16px rgba(0,0,0,0.04); }
     .container-header {
       padding: 0.85rem 1.25rem;
       border-bottom: 1px solid var(--awsui-color-border);
@@ -212,11 +235,28 @@
     }
     .stat-card {
       background: var(--awsui-color-background-container);
-      border: 1px solid var(--awsui-color-border);
-      border-radius: 12px;
-      padding: 1rem 1.25rem;
-      box-shadow: 0 1px 2px rgba(0,7,22,0.05);
+      border: 1.5px solid var(--awsui-color-border);
+      border-radius: 16px;
+      padding: 1.25rem 1.5rem;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+      transition: all 300ms;
     }
+    .stat-card:hover { transform: translateY(-2px); }
+    .stat-grid .stat-card:nth-child(5n+1) { border-color: rgba(14,165,233,0.3); box-shadow: 0 4px 20px rgba(14,165,233,0.08); }
+    .stat-grid .stat-card:nth-child(5n+2) { border-color: rgba(245,158,11,0.3); box-shadow: 0 4px 20px rgba(245,158,11,0.08); }
+    .stat-grid .stat-card:nth-child(5n+3) { border-color: rgba(139,92,246,0.3); box-shadow: 0 4px 20px rgba(139,92,246,0.08); }
+    .stat-grid .stat-card:nth-child(5n+4) { border-color: rgba(20,184,166,0.3); box-shadow: 0 4px 20px rgba(20,184,166,0.08); }
+    .stat-grid .stat-card:nth-child(5n+5) { border-color: rgba(244,63,94,0.3); box-shadow: 0 4px 20px rgba(244,63,94,0.08); }
+    .stat-grid .stat-card:nth-child(5n+1):hover { box-shadow: 0 8px 32px rgba(14,165,233,0.2), 0 0 0 1px rgba(14,165,233,0.25); }
+    .stat-grid .stat-card:nth-child(5n+2):hover { box-shadow: 0 8px 32px rgba(245,158,11,0.2), 0 0 0 1px rgba(245,158,11,0.25); }
+    .stat-grid .stat-card:nth-child(5n+3):hover { box-shadow: 0 8px 32px rgba(139,92,246,0.2), 0 0 0 1px rgba(139,92,246,0.25); }
+    .stat-grid .stat-card:nth-child(5n+4):hover { box-shadow: 0 8px 32px rgba(20,184,166,0.2), 0 0 0 1px rgba(20,184,166,0.25); }
+    .stat-grid .stat-card:nth-child(5n+5):hover { box-shadow: 0 8px 32px rgba(244,63,94,0.2), 0 0 0 1px rgba(244,63,94,0.25); }
+    .stat-grid .stat-card:nth-child(5n+1) .stat-label { color: #0284c7; }
+    .stat-grid .stat-card:nth-child(5n+2) .stat-label { color: #d97706; }
+    .stat-grid .stat-card:nth-child(5n+3) .stat-label { color: #7c3aed; }
+    .stat-grid .stat-card:nth-child(5n+4) .stat-label { color: #0d9488; }
+    .stat-grid .stat-card:nth-child(5n+5) .stat-label { color: #e11d48; }
     .stat-card .stat-label {
       font-size: 12px; font-weight: 600;
       color: var(--awsui-color-text-secondary);
@@ -264,21 +304,23 @@
     /* ── Status Indicators / Badges ── */
     .badge {
       display: inline-flex; align-items: center; gap: 0.3rem;
-      padding: 0.15rem 0.55rem;
-      border-radius: 4px;
-      font-size: 12px; font-weight: 600;
+      padding: 0.2rem 0.6rem;
+      border-radius: 8px;
+      font-size: 11px; font-weight: 600;
     }
-    .badge-green { background: var(--awsui-color-background-status-success); color: var(--awsui-color-status-success); }
-    .badge-red { background: var(--awsui-color-background-status-error); color: var(--awsui-color-status-error); }
-    .badge-yellow { background: var(--awsui-color-background-status-warning); color: var(--awsui-color-status-warning); }
-    .badge-blue { background: var(--awsui-color-background-status-info); color: var(--awsui-color-status-info); }
-    .badge-purple { background: #f5f0ff; color: #6941c6; }
-    .badge-neutral { background: #f2f3f3; color: var(--awsui-color-text-secondary); }
+    .badge-green { background: #dcfce7; color: #166534; }
+    .badge-red { background: #fee2e2; color: #991b1b; }
+    .badge-yellow { background: #fef3c7; color: #92400e; }
+    .badge-blue { background: #dbeafe; color: #1e40af; }
+    .badge-orange { background: #ffedd5; color: #9a3412; }
+    .badge-purple { background: #ede9fe; color: #5b21b6; }
+    .badge-grey { background: #f5f5f4; color: #57534e; }
+    .badge-neutral { background: #f5f5f4; color: #57534e; }
     .badge .badge-dot {
       width: 6px; height: 6px; border-radius: 50%;
     }
-    .badge-green .badge-dot { background: var(--awsui-color-status-success); }
-    .badge-red .badge-dot { background: var(--awsui-color-status-error); }
+    .badge-green .badge-dot { background: #16a34a; }
+    .badge-red .badge-dot { background: #dc2626; }
 
     .tag {
       display: inline-block;
@@ -312,11 +354,11 @@
 
     /* ── Buttons (Cloudscape-style) ── */
     const btnStyles = {
-      base: { display: 'inline-flex', alignItems: 'center', gap: '0.35rem', padding: '0.4rem 1rem', border: 'none', borderRadius: '8px', cursor: 'pointer', fontSize: '14px', fontWeight: 600, fontFamily: 'inherit', transition: 'all 100ms' },
-      primary: { background: '#0972d3', color: '#fff', border: '2px solid #0972d3' },
-      normal: { background: '#fff', color: '#000716', border: '2px solid #7d8998' },
-      link: { background: 'none', color: '#0972d3', border: 'none', padding: '0.2rem 0', fontWeight: 600 },
-      danger: { background: '#fff', color: '#d91515', border: '2px solid #d91515' },
+      base: { display: 'inline-flex', alignItems: 'center', gap: '0.4rem', padding: '0.5rem 1rem', border: 'none', borderRadius: '12px', cursor: 'pointer', fontSize: '13px', fontWeight: 600, fontFamily: 'inherit', transition: 'all 120ms', boxShadow: '0 1px 2px rgba(0,0,0,0.05)' },
+      primary: { background: '#7c3aed', color: '#fff', border: 'none' },
+      normal: { background: '#fff', color: '#1c1917', border: '1.5px solid #e7e5e4' },
+      link: { background: 'none', color: '#7c3aed', border: 'none', padding: '0.2rem 0', fontWeight: 600, boxShadow: 'none' },
+      danger: { background: '#fef2f2', color: '#dc2626', border: 'none' },
     };
 
     function Btn({ variant = 'normal', children, style, ...props }) {
@@ -2510,6 +2552,293 @@
     }
 
     /* ================================================================== */
+    /*  Sandbox Page                                                       */
+    /* ================================================================== */
+    function SandboxPage() {
+      const [tab, setTab] = useState('chat');
+      const [chatMessages, setChatMessages] = useState([]);
+      const [chatInput, setChatInput] = useState('');
+      const [chatLoading, setChatLoading] = useState(false);
+      const [chatModel, setChatModel] = useState('');
+      const [models, setModels] = useState([]);
+      const [streamEnabled, setStreamEnabled] = useState(true);
+
+      // Playground state
+      const [pgModels, setPgModels] = useState(['', '']);
+      const [pgPrompt, setPgPrompt] = useState('');
+      const [pgResults, setPgResults] = useState([null, null]);
+      const [pgLoading, setPgLoading] = useState([false, false]);
+
+      // Routing state
+      const [routeModel, setRouteModel] = useState('');
+      const [routePrompt, setRoutePrompt] = useState('');
+      const [routeResults, setRouteResults] = useState([]);
+      const [routeLoading, setRouteLoading] = useState(false);
+      const [routeCount, setRouteCount] = useState(5);
+
+      useEffect(() => { api.get('/api/models').then(setModels).catch(() => {}); }, []);
+      useEffect(() => { if (models.length && !chatModel) setChatModel(models[0]?.name); }, [models]);
+
+      const sendChat = async () => {
+        if (!chatInput.trim() || chatLoading) return;
+        const userMsg = { role: 'user', content: chatInput };
+        setChatMessages(prev => [...prev, userMsg]);
+        setChatInput('');
+        setChatLoading(true);
+        try {
+          if (streamEnabled) {
+            const resp = await fetch('/api/chat/stream', {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ model: chatModel, messages: [...chatMessages, userMsg].map(m => ({ role: m.role, content: m.content })) }),
+            });
+            let fullContent = '';
+            let model = '';
+            const reader = resp.body.getReader();
+            const decoder = new TextDecoder();
+            setChatMessages(prev => [...prev, { role: 'assistant', content: '', model: chatModel, streaming: true }]);
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              const text = decoder.decode(value);
+              for (const line of text.split('\n')) {
+                if (!line.startsWith('data: ')) continue;
+                const data = line.slice(6);
+                if (data === '[DONE]') break;
+                try {
+                  const parsed = JSON.parse(data);
+                  if (parsed.content) fullContent += parsed.content;
+                  if (parsed.model) model = parsed.model;
+                } catch {}
+              }
+              setChatMessages(prev => { const msgs = [...prev]; msgs[msgs.length - 1] = { role: 'assistant', content: fullContent, model, streaming: true }; return msgs; });
+            }
+            setChatMessages(prev => { const msgs = [...prev]; msgs[msgs.length - 1] = { ...msgs[msgs.length - 1], streaming: false }; return msgs; });
+          } else {
+            const data = await api.post('/api/chat', { model: chatModel, messages: [...chatMessages, userMsg].map(m => ({ role: m.role, content: m.content })) });
+            setChatMessages(prev => [...prev, { role: 'assistant', content: data.content || data.error?.message || 'No response', model: data.model, provider: data.provider }]);
+          }
+        } catch (e) {
+          setChatMessages(prev => [...prev, { role: 'assistant', content: `Error: ${e.message}` }]);
+        }
+        setChatLoading(false);
+      };
+
+      const runPlayground = async () => {
+        if (!pgPrompt.trim()) return;
+        const results = [null, null];
+        const loading = [true, true];
+        setPgLoading(loading);
+        setPgResults(results);
+        for (let i = 0; i < 2; i++) {
+          if (!pgModels[i]) { setPgLoading(prev => { const n = [...prev]; n[i] = false; return n; }); continue; }
+          try {
+            const start = performance.now();
+            const data = await api.post('/api/chat', { model: pgModels[i], messages: [{ role: 'user', content: pgPrompt }] });
+            const elapsed = Math.round(performance.now() - start);
+            results[i] = { content: data.content, model: data.model, provider: data.provider, tokens: data.usage, latency: elapsed };
+          } catch (e) { results[i] = { content: `Error: ${e.message}`, error: true }; }
+          setPgResults([...results]);
+          setPgLoading(prev => { const n = [...prev]; n[i] = false; return n; });
+        }
+      };
+
+      const runRouting = async () => {
+        if (!routeModel || !routePrompt.trim()) return;
+        setRouteLoading(true);
+        setRouteResults([]);
+        const results = [];
+        for (let i = 0; i < routeCount; i++) {
+          try {
+            const start = performance.now();
+            const data = await api.post('/api/chat', { model: routeModel, messages: [{ role: 'user', content: routePrompt }] });
+            const elapsed = Math.round(performance.now() - start);
+            results.push({ provider: data.provider, model: data.model, latency: elapsed, tokens: data.usage?.total_tokens || 0 });
+          } catch (e) { results.push({ provider: 'error', model: '', latency: 0, error: e.message }); }
+          setRouteResults([...results]);
+        }
+        setRouteLoading(false);
+      };
+
+      const tabStyle = (t) => ({
+        display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.625rem 1rem', fontSize: '13px', fontWeight: 600,
+        borderRadius: '10px 10px 0 0', cursor: 'pointer', transition: 'all 100ms',
+        background: tab === t ? '#fff' : 'transparent', color: tab === t ? '#0f1b2d' : '#5f6b7a',
+        borderBottom: tab === t ? '2px solid #0972d3' : '2px solid transparent',
+      });
+
+      return (
+        <div>
+          <div className="page-header">
+            <h1>Sandbox</h1>
+            <p>Test models, compare responses, and explore routing behavior</p>
+          </div>
+
+          {/* Tabs */}
+          <div style={{ display: 'flex', gap: '0.25rem', borderBottom: '1px solid #e9ebed', marginBottom: '1.25rem' }}>
+            <button style={tabStyle('chat')} onClick={() => setTab('chat')}>💬 Chat</button>
+            <button style={tabStyle('playground')} onClick={() => setTab('playground')}>⚗️ Playground</button>
+            <button style={tabStyle('routing')} onClick={() => setTab('routing')}>🔀 Routing</button>
+          </div>
+
+          {/* Chat Tab */}
+          {tab === 'chat' && (
+            <div className="container" style={{ display: 'flex', flexDirection: 'column', height: 'calc(100vh - 260px)' }}>
+              <div className="container-header" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                  <select value={chatModel} onChange={e => setChatModel(e.target.value)} style={{ padding: '0.4rem 0.75rem', borderRadius: '8px', border: '1px solid #e9ebed', fontSize: '13px', fontWeight: 600 }}>
+                    {models.map(m => <option key={m.name} value={m.name}>{m.name}</option>)}
+                  </select>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', fontSize: '12px', color: '#5f6b7a', cursor: 'pointer' }}>
+                    <input type="checkbox" checked={streamEnabled} onChange={e => setStreamEnabled(e.target.checked)} /> Stream
+                  </label>
+                </div>
+                <button onClick={() => setChatMessages([])} className="btn" style={{ fontSize: '11px', padding: '0.3rem 0.6rem' }}>Clear</button>
+              </div>
+              <div style={{ flex: 1, overflow: 'auto', padding: '1.25rem', display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+                {chatMessages.length === 0 && (
+                  <div style={{ textAlign: 'center', padding: '3rem 0', color: '#8d9bae' }}>
+                    <div style={{ fontSize: '32px', marginBottom: '0.5rem' }}>💬</div>
+                    <p style={{ fontSize: '13px' }}>Send a message to test any model.</p>
+                    <p style={{ fontSize: '11px', marginTop: '0.25rem' }}>Try: "Explain quantum computing in one sentence"</p>
+                  </div>
+                )}
+                {chatMessages.map((msg, i) => (
+                  <div key={i} style={{ display: 'flex', justifyContent: msg.role === 'user' ? 'flex-end' : 'flex-start' }}>
+                    <div style={{ maxWidth: '70%', borderRadius: '16px', padding: '0.75rem 1rem', background: msg.role === 'user' ? '#0972d3' : '#f2f3f3', color: msg.role === 'user' ? '#fff' : '#0f1b2d' }}>
+                      <p style={{ fontSize: '13px', whiteSpace: 'pre-wrap', margin: 0 }}>{msg.content}{msg.streaming && chatLoading ? '▊' : ''}</p>
+                      {msg.model && <p style={{ fontSize: '10px', marginTop: '0.35rem', opacity: 0.6 }}>{msg.provider ? `${msg.provider} / ` : ''}{msg.model}</p>}
+                    </div>
+                  </div>
+                ))}
+                {chatLoading && chatMessages.length > 0 && !chatMessages[chatMessages.length-1]?.streaming && (
+                  <div style={{ display: 'flex', justifyContent: 'flex-start' }}>
+                    <div style={{ background: '#f2f3f3', borderRadius: '16px', padding: '0.75rem 1rem' }}>
+                      <span style={{ fontSize: '13px', color: '#5f6b7a' }}>Thinking...</span>
+                    </div>
+                  </div>
+                )}
+              </div>
+              <div style={{ borderTop: '1px solid #e9ebed', padding: '0.75rem 1.25rem', display: 'flex', gap: '0.5rem' }}>
+                <input value={chatInput} onChange={e => setChatInput(e.target.value)} onKeyDown={e => e.key === 'Enter' && sendChat()}
+                  placeholder="Type a message..." style={{ flex: 1, padding: '0.6rem 1rem', borderRadius: '10px', border: '1px solid #e9ebed', fontSize: '13px', outline: 'none' }} />
+                <button onClick={sendChat} disabled={chatLoading} className="btn-primary" style={{ padding: '0.6rem 1rem', borderRadius: '10px' }}>Send</button>
+              </div>
+            </div>
+          )}
+
+          {/* Playground Tab */}
+          {tab === 'playground' && (
+            <div>
+              <div className="container" style={{ marginBottom: '1rem' }}>
+                <div className="container-body" style={{ padding: '1rem' }}>
+                  <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'flex-end', flexWrap: 'wrap' }}>
+                    <div style={{ flex: '1 1 200px' }}>
+                      <label style={{ fontSize: '11px', fontWeight: 700, color: '#5f6b7a', textTransform: 'uppercase', letterSpacing: '0.3px' }}>Model A</label>
+                      <select value={pgModels[0]} onChange={e => setPgModels([e.target.value, pgModels[1]])} style={{ width: '100%', marginTop: '0.3rem', padding: '0.5rem', borderRadius: '8px', border: '1px solid #e9ebed', fontSize: '13px' }}>
+                        <option value="">Select...</option>
+                        {models.map(m => <option key={m.name} value={m.name}>{m.name}</option>)}
+                      </select>
+                    </div>
+                    <div style={{ flex: '1 1 200px' }}>
+                      <label style={{ fontSize: '11px', fontWeight: 700, color: '#5f6b7a', textTransform: 'uppercase', letterSpacing: '0.3px' }}>Model B</label>
+                      <select value={pgModels[1]} onChange={e => setPgModels([pgModels[0], e.target.value])} style={{ width: '100%', marginTop: '0.3rem', padding: '0.5rem', borderRadius: '8px', border: '1px solid #e9ebed', fontSize: '13px' }}>
+                        <option value="">Select...</option>
+                        {models.map(m => <option key={m.name} value={m.name}>{m.name}</option>)}
+                      </select>
+                    </div>
+                    <button onClick={runPlayground} disabled={pgLoading[0] || pgLoading[1]} className="btn-primary" style={{ padding: '0.5rem 1.25rem' }}>Compare</button>
+                  </div>
+                  <textarea value={pgPrompt} onChange={e => setPgPrompt(e.target.value)} placeholder="Enter your prompt here..."
+                    style={{ width: '100%', marginTop: '0.75rem', padding: '0.75rem', borderRadius: '10px', border: '1px solid #e9ebed', fontSize: '13px', minHeight: '80px', resize: 'vertical', outline: 'none' }} />
+                </div>
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
+                {[0, 1].map(idx => (
+                  <div key={idx} className="container">
+                    <div className="container-header"><h2>{pgModels[idx] || `Model ${idx === 0 ? 'A' : 'B'}`}</h2></div>
+                    <div className="container-body" style={{ minHeight: '200px' }}>
+                      {pgLoading[idx] ? (
+                        <div style={{ textAlign: 'center', padding: '2rem', color: '#8d9bae' }}>Generating...</div>
+                      ) : pgResults[idx] ? (
+                        <div>
+                          <p style={{ fontSize: '13px', whiteSpace: 'pre-wrap', lineHeight: 1.6 }}>{pgResults[idx].content}</p>
+                          {!pgResults[idx].error && (
+                            <div style={{ marginTop: '0.75rem', paddingTop: '0.75rem', borderTop: '1px solid #e9ebed', display: 'flex', gap: '1rem', fontSize: '11px', color: '#5f6b7a' }}>
+                              <span>Provider: <strong>{pgResults[idx].provider}</strong></span>
+                              <span>Latency: <strong>{pgResults[idx].latency}ms</strong></span>
+                              {pgResults[idx].tokens && <span>Tokens: <strong>{pgResults[idx].tokens.total_tokens}</strong></span>}
+                            </div>
+                          )}
+                        </div>
+                      ) : (
+                        <div style={{ textAlign: 'center', padding: '2rem', color: '#8d9bae', fontSize: '12px' }}>Select a model and click Compare</div>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Routing Tab */}
+          {tab === 'routing' && (
+            <div>
+              <div className="container" style={{ marginBottom: '1rem' }}>
+                <div className="container-body" style={{ padding: '1rem' }}>
+                  <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'flex-end', flexWrap: 'wrap' }}>
+                    <div style={{ flex: '1 1 200px' }}>
+                      <label style={{ fontSize: '11px', fontWeight: 700, color: '#5f6b7a', textTransform: 'uppercase', letterSpacing: '0.3px' }}>Model</label>
+                      <select value={routeModel} onChange={e => setRouteModel(e.target.value)} style={{ width: '100%', marginTop: '0.3rem', padding: '0.5rem', borderRadius: '8px', border: '1px solid #e9ebed', fontSize: '13px' }}>
+                        <option value="">Select...</option>
+                        {models.filter(m => m.providers.length > 1).map(m => <option key={m.name} value={m.name}>{m.name} ({m.providers.join(', ')})</option>)}
+                        {models.filter(m => m.providers.length === 1).map(m => <option key={m.name} value={m.name}>{m.name}</option>)}
+                      </select>
+                    </div>
+                    <div style={{ width: '80px' }}>
+                      <label style={{ fontSize: '11px', fontWeight: 700, color: '#5f6b7a', textTransform: 'uppercase' }}>Runs</label>
+                      <input type="number" value={routeCount} onChange={e => setRouteCount(Math.max(1, Math.min(20, +e.target.value)))}
+                        style={{ width: '100%', marginTop: '0.3rem', padding: '0.5rem', borderRadius: '8px', border: '1px solid #e9ebed', fontSize: '13px', textAlign: 'center' }} />
+                    </div>
+                    <button onClick={runRouting} disabled={routeLoading} className="btn-primary" style={{ padding: '0.5rem 1.25rem' }}>Run</button>
+                  </div>
+                  <input value={routePrompt} onChange={e => setRoutePrompt(e.target.value)} placeholder="Test prompt (e.g., 'hi')"
+                    style={{ width: '100%', marginTop: '0.75rem', padding: '0.6rem 0.75rem', borderRadius: '10px', border: '1px solid #e9ebed', fontSize: '13px', outline: 'none' }} />
+                </div>
+              </div>
+              {routeResults.length > 0 && (
+                <div className="container">
+                  <div className="container-header"><h2>Routing Results <span className="counter">({routeResults.length}/{routeCount})</span></h2></div>
+                  <div className="container-body no-pad">
+                    <table>
+                      <thead><tr><th>#</th><th>Provider</th><th>Model</th><th>Latency</th><th>Tokens</th></tr></thead>
+                      <tbody>
+                        {routeResults.map((r, i) => (
+                          <tr key={i} style={r.error ? { background: '#fff7f7' } : {}}>
+                            <td>{i + 1}</td>
+                            <td><strong>{r.provider}</strong></td>
+                            <td style={{ fontSize: '12px', color: '#5f6b7a' }}>{r.model}</td>
+                            <td>{r.latency}ms</td>
+                            <td>{r.tokens || '-'}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                    {routeResults.length > 1 && !routeLoading && (
+                      <div style={{ padding: '0.75rem 1rem', borderTop: '1px solid #e9ebed', fontSize: '12px', color: '#5f6b7a', display: 'flex', gap: '1.5rem' }}>
+                        <span>Avg latency: <strong>{Math.round(routeResults.reduce((a, r) => a + r.latency, 0) / routeResults.length)}ms</strong></span>
+                        <span>Providers used: <strong>{[...new Set(routeResults.map(r => r.provider))].join(', ')}</strong></span>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    /* ================================================================== */
     /*  App Shell                                                          */
     /* ================================================================== */
     function App() {
@@ -2544,10 +2873,14 @@
         case 'regions': content = <RegionsPage />; break;
         case 'configuration': content = <ConfigurationPage />; break;
         case 'health': content = <HealthPage />; break;
+        case 'sandbox': content = <SandboxPage />; break;
         default: content = <OverviewPage />;
       }
 
       const navSections = [
+        { label: 'Sandbox', items: [
+          { key: 'sandbox', icon: '🧪', label: 'Sandbox' },
+        ]},
         { label: 'Analytics', items: [
           { key: 'overview', icon: '📊', label: 'Overview' },
           { key: 'efficiency', icon: '⚡', label: 'Efficiency' },
@@ -2580,23 +2913,22 @@
       };
 
       return (
-        <div>
-          <header className="topbar" role="banner">
-            <div className="topbar-brand">
-              <div className="logo-icon">R</div>
-              AxonLLM
-            </div>
-            <div style={{color: '#ff9900', fontSize: '13px', fontWeight: 600, fontStyle: 'italic', letterSpacing: '0.3px', marginRight: '1rem', whiteSpace: 'nowrap'}}>The neural control plane for enterprise LLMs</div>
-            <a href="/chat" style={{color: 'var(--awsui-color-text-nav)', textDecoration: 'none', fontSize: '14px', padding: '0 0.75rem', height: 'var(--topbar-h)', display: 'flex', alignItems: 'center', borderLeft: '1px solid rgba(255,255,255,0.15)', transition: 'background 100ms, color 100ms'}} onMouseOver={e => {e.currentTarget.style.background='var(--awsui-color-background-nav-hover)';e.currentTarget.style.color='#fff'}} onMouseOut={e => {e.currentTarget.style.background='';e.currentTarget.style.color='var(--awsui-color-text-nav)'}}>💬 Chat</a>
-            <a href="/playground" style={{color: 'var(--awsui-color-text-nav)', textDecoration: 'none', fontSize: '14px', padding: '0 0.75rem', height: 'var(--topbar-h)', display: 'flex', alignItems: 'center', borderLeft: '1px solid rgba(255,255,255,0.15)', transition: 'background 100ms, color 100ms'}} onMouseOver={e => {e.currentTarget.style.background='var(--awsui-color-background-nav-hover)';e.currentTarget.style.color='#fff'}} onMouseOut={e => {e.currentTarget.style.background='';e.currentTarget.style.color='var(--awsui-color-text-nav)'}}>🧪 Playground</a>
-            <a href="/routing" style={{color: 'var(--awsui-color-text-nav)', textDecoration: 'none', fontSize: '14px', padding: '0 0.75rem', height: 'var(--topbar-h)', display: 'flex', alignItems: 'center', borderLeft: '1px solid rgba(255,255,255,0.15)', transition: 'background 100ms, color 100ms'}} onMouseOver={e => {e.currentTarget.style.background='var(--awsui-color-background-nav-hover)';e.currentTarget.style.color='#fff'}} onMouseOut={e => {e.currentTarget.style.background='';e.currentTarget.style.color='var(--awsui-color-text-nav)'}}>🔀 Routing</a>
-            <a href="/admin/architecture" target="_blank" style={{color: 'var(--awsui-color-text-nav)', textDecoration: 'none', fontSize: '14px', padding: '0 0.75rem', height: 'var(--topbar-h)', display: 'flex', alignItems: 'center', borderLeft: '1px solid rgba(255,255,255,0.15)', transition: 'background 100ms, color 100ms'}} onMouseOver={e => {e.currentTarget.style.background='var(--awsui-color-background-nav-hover)';e.currentTarget.style.color='#fff'}} onMouseOut={e => {e.currentTarget.style.background='';e.currentTarget.style.color='var(--awsui-color-text-nav)'}}>🏗️ Architecture</a>
-            <div className="topbar-right">
-              <div className="topbar-status"><div className="dot"></div>System Online</div>
-            </div>
-          </header>
+        <div style={{display: 'flex', minHeight: '100vh'}}>
+          {/* Sidebar */}
           <aside className="sidebar" role="navigation" aria-label="Main navigation">
-            <nav>
+            <div className="sidebar-logo">
+              <svg width="28" height="28" viewBox="0 0 32 32" fill="none">
+                <rect width="32" height="32" rx="8" fill="url(#axon-grad)"/>
+                <path d="M8 22L16 10L24 22" stroke="white" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"/>
+                <circle cx="16" cy="10" r="2.5" fill="white"/>
+                <circle cx="8" cy="22" r="2" fill="white" opacity="0.7"/>
+                <circle cx="24" cy="22" r="2" fill="white" opacity="0.7"/>
+                <line x1="12" y1="16" x2="20" y2="16" stroke="white" strokeWidth="1.5" opacity="0.5"/>
+                <defs><linearGradient id="axon-grad" x1="0" y1="0" x2="32" y2="32"><stop stopColor="#8b5cf6"/><stop offset="1" stopColor="#6d28d9"/></linearGradient></defs>
+              </svg>
+              <span>AxonLLM</span>
+            </div>
+            <nav style={{flex: 1, padding: '0.5rem 0.5rem', overflow: 'auto'}}>
               {navSections.map(section => (
                 <div key={section.label} className="sidebar-section">
                   <div className="sidebar-section-label">{section.label}</div>
@@ -2609,10 +2941,28 @@
                 </div>
               ))}
             </nav>
+            <div style={{borderTop: '1px solid #f5f5f4', padding: '0.75rem 1.25rem'}}>
+              <p style={{fontSize: '11px', color: '#a8a29e'}}>v0.1.0 · 10 providers</p>
+            </div>
           </aside>
-          <main className="main" role="main">
-            {content}
-          </main>
+
+          {/* Main */}
+          <div style={{flex: 1, marginLeft: 'var(--sidebar-w)', display: 'flex', flexDirection: 'column'}}>
+            {/* Top ribbon */}
+            <header className="topbar" role="banner">
+              <div className="topbar-brand">
+                <div className="topbar-status"><div className="dot"></div>AxonLLM Control Plane</div>
+              </div>
+              <div className="topbar-right">
+                <div style={{borderRadius: '999px', background: 'rgba(255,255,255,0.6)', border: '1px solid rgba(214,211,209,0.5)', padding: '0.2rem 0.75rem'}}>
+                  <span style={{fontSize: '10px', color: '#78716c'}}>Multi-provider routing · Real-time analytics</span>
+                </div>
+              </div>
+            </header>
+            <main className="main" role="main">
+              {content}
+            </main>
+          </div>
         </div>
       );
     }

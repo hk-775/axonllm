@@ -48,8 +48,6 @@ projects:
       - together-qwen-72b
       - fireworks-deepseek-v4
       - fireworks-gpt-oss-120b
-      - sonar-pro
-      - sonar-reasoning
       - jamba-large
       - jamba-mini
 

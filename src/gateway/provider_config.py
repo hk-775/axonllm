@@ -194,7 +194,6 @@ _URL_DISPATCH: dict[str, callable] = {
     "groq": _openai_url,
     "together": _openai_url,
     "fireworks": _openai_url,
-    "perplexity": _openai_url,
     "ai21": _openai_url,
 }
 
