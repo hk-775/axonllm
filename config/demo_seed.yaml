@@ -56,6 +56,9 @@ projects:
       - claude-sonnet-5
       - claude-opus-4-8
       - claude-haiku-4-5-mantle
+      - gpt-oss-120b-mantle
+      - deepseek-v3-mantle
+      - qwen3-32b-mantle
 
   - project_id: proj-beta
     name: Beta Team

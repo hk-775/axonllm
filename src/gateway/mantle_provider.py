@@ -1,10 +1,19 @@
-"""Bedrock Mantle provider — OpenAI Responses API + Anthropic Messages API via SigV4.
+"""Bedrock Mantle provider — routes to the right Mantle API by model via SigV4.
 
-Uses the bedrock-mantle.{region}.api.aws endpoint which supports:
-- OpenAI Responses API (/openai/v1/responses) for OpenAI models (GPT-5.5, etc.)
-- Anthropic Messages API (/v1/messages) for Claude models
-- SigV4 or Bedrock API key authentication
-- All billing through AWS account
+Uses the bedrock-mantle.{region}.api.aws endpoint, which exposes three
+inference APIs, each serving a different subset of models:
+- Anthropic Messages API (/anthropic/v1/messages) — Claude models (anthropic.*)
+- OpenAI Responses API (/openai/v1/responses) — frontier GPT models (gpt-5.x)
+- Chat Completions API (/v1/chat/completions) — everything else, including
+  gpt-oss, DeepSeek, Qwen, and other open-weight families
+
+Model IDs are prefixed by family (anthropic.*, openai.*, deepseek.*, qwen.*,
+...). The prefix does NOT uniquely determine the API: openai.gpt-5.6-* uses
+the Responses API while openai.gpt-oss-* uses Chat Completions. We therefore
+pick a preferred API by heuristic and fall back to Chat Completions when the
+provider reports the model is not supported on the chosen route.
+
+Auth: SigV4 (bedrock service). All billing flows through the AWS account.
 """
 
 from __future__ import annotations
@@ -28,16 +37,26 @@ from src.gateway.router import ProviderError
 
 _MANTLE_SERVICE = "bedrock"
 
-_OPENAI_PREFIXES = ("openai.",)
 _ANTHROPIC_PREFIXES = ("anthropic.",)
-
-
-def _is_openai_model(model_id: str) -> bool:
-    return any(model_id.startswith(p) for p in _OPENAI_PREFIXES)
+# openai.* models split across two APIs: the frontier gpt-5.x line uses the
+# Responses API; open-weight openai.gpt-oss-* uses Chat Completions.
+_RESPONSES_PREFIXES = ("openai.gpt-5", "openai.gpt-4", "openai.o1", "openai.o3", "openai.o4")
 
 
 def _is_anthropic_model(model_id: str) -> bool:
     return any(model_id.startswith(p) for p in _ANTHROPIC_PREFIXES)
+
+
+def _prefers_responses_api(model_id: str) -> bool:
+    return any(model_id.startswith(p) for p in _RESPONSES_PREFIXES)
+
+
+def _is_unsupported_route_error(exc: ProviderError) -> bool:
+    """True when Mantle rejects a model for the chosen API path (not a real failure)."""
+    msg = exc.message.lower()
+    return exc.status_code == 400 and (
+        "does not support" in msg or "isn't supported on this route" in msg
+    )
 
 
 def create_mantle_provider_fn(
@@ -52,19 +71,27 @@ def create_mantle_provider_fn(
         request: ChatCompletionRequest, prompt_caching_enabled: bool = False
     ) -> Callable[[ProviderModelMapping], Awaitable[ChatCompletionResponse]]:
         async def provider_fn(mapping: ProviderModelMapping) -> ChatCompletionResponse:
+            model_id = mapping.model_id
             try:
-                if _is_openai_model(mapping.model_id):
-                    return await _invoke_responses_api(
-                        credentials, endpoint, region, request, mapping,
-                    )
-                elif _is_anthropic_model(mapping.model_id):
+                # Anthropic models always use the Messages API.
+                if _is_anthropic_model(model_id):
                     return await _invoke_messages_api(
                         credentials, endpoint, region, request, mapping,
                     )
-                else:
-                    return await _invoke_responses_api(
-                        credentials, endpoint, region, request, mapping,
-                    )
+                # Frontier GPT models use the Responses API; if Mantle reports
+                # the model isn't supported there, fall back to Chat Completions.
+                if _prefers_responses_api(model_id):
+                    try:
+                        return await _invoke_responses_api(
+                            credentials, endpoint, region, request, mapping,
+                        )
+                    except ProviderError as exc:
+                        if not _is_unsupported_route_error(exc):
+                            raise
+                # Everything else (gpt-oss, DeepSeek, Qwen, ...) uses Chat Completions.
+                return await _invoke_chat_completions_api(
+                    credentials, endpoint, region, request, mapping,
+                )
             except ProviderError:
                 raise
             except Exception as exc:
@@ -228,6 +255,65 @@ async def _invoke_messages_api(
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             total_tokens=prompt_tokens + completion_tokens,
+        ),
+        model=mapping.model_id,
+        provider=mapping.provider,
+    )
+
+
+async def _invoke_chat_completions_api(
+    credentials,
+    endpoint: str,
+    region: str,
+    request: ChatCompletionRequest,
+    mapping: ProviderModelMapping,
+) -> ChatCompletionResponse:
+    """Call the OpenAI-compatible Chat Completions API on Mantle.
+
+    Serves open-weight families (gpt-oss, DeepSeek, Qwen, etc.) at the
+    top-level /v1/chat/completions path and returns standard OpenAI
+    chat.completion JSON.
+    """
+    messages = list(request.messages)
+    if request.system and not any(m.get("role") == "system" for m in messages):
+        messages = [{"role": "system", "content": request.system}, *messages]
+
+    payload: dict = {
+        "model": mapping.model_id,
+        "messages": messages,
+    }
+    if request.max_tokens is not None:
+        payload["max_tokens"] = request.max_tokens
+    if request.temperature is not None:
+        payload["temperature"] = request.temperature
+    if request.top_p is not None:
+        payload["top_p"] = request.top_p
+
+    url = f"{endpoint}/v1/chat/completions"
+    body = json.dumps(payload)
+
+    response_data = await asyncio.to_thread(_sigv4_request, credentials, region, url, body)
+
+    choices = response_data.get("choices", [])
+    first = choices[0] if choices else {}
+    message = first.get("message", {})
+    text = message.get("content") or ""
+
+    usage_data = response_data.get("usage", {})
+    prompt_tokens = usage_data.get("prompt_tokens", 0)
+    completion_tokens = usage_data.get("completion_tokens", 0)
+
+    return ChatCompletionResponse(
+        id=response_data.get("id", "mantle-response"),
+        choices=[{
+            "index": 0,
+            "message": {"role": "assistant", "content": text},
+            "finish_reason": first.get("finish_reason", "stop"),
+        }],
+        usage=TokenUsage(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=usage_data.get("total_tokens", prompt_tokens + completion_tokens),
         ),
         model=mapping.model_id,
         provider=mapping.provider,
