@@ -2772,6 +2772,7 @@
         { label: 'System', items: [
           { key: 'health', icon: '💚', label: 'Health' },
           { key: 'configuration', icon: '⚙', label: 'Configuration' },
+          { key: 'architecture', icon: '🗺', label: 'Architecture', href: '/admin/architecture' },
         ]},
       ];
 
@@ -2801,7 +2802,7 @@
                 <div key={section.label} className="sidebar-section">
                   <div className="sidebar-section-label">{section.label}</div>
                   {section.items.map(item => (
-                    <button key={item.key} className={`nav-item ${isActive(item) ? 'active' : ''}`} onClick={() => navigate(item.key)}>
+                    <button key={item.key} className={`nav-item ${isActive(item) ? 'active' : ''}`} onClick={() => item.href ? (window.location.href = item.href) : navigate(item.key)}>
                       <span className="nav-icon">{item.icon}</span>
                       {item.label}
                     </button>
