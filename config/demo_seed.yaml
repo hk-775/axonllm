@@ -163,6 +163,10 @@ policies:
     description: Allow all users read access
     policy_text: 'permit(principal, action == Action::"read", resource);'
     mode: ENFORCE
+  - name: allow-all-write
+    description: Allow authenticated users to make requests (write actions)
+    policy_text: 'permit(principal, action == Action::"write", resource);'
+    mode: ENFORCE
   - name: restrict-gpt4
     description: Restrict GPT-4 to senior devs
     policy_text: 'forbid(principal, action, resource) unless { principal.role == "senior" };'

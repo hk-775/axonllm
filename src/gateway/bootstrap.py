@@ -25,6 +25,7 @@ from src.gateway.admin.routes import AdminAPI, PROVIDER_MODEL_CATALOG, create_ad
 from src.gateway.admin.webhook_routes import WebhookAPI, create_webhook_routes
 from src.gateway.agent import GatewayAgent
 from src.gateway.auth.api_key_service import APIKeyService
+from src.gateway.auth.cedar_policy import CedarPolicyService
 from src.gateway.auth.oidc_service import OIDCConfig, OIDCService
 from src.gateway.auth.policy_hierarchy import PolicyHierarchyResolver
 from src.gateway.efficiency_analyzer import EfficiencyAnalyzer
@@ -401,7 +402,7 @@ def build_starlette_app(app_config: AppConfig | None = None) -> Starlette:
         AuthMiddleware,
         oidc_service=comp.oidc_service,
         api_key_service=comp.api_key_service,
-        policy_service=None,
+        policy_service=CedarPolicyService(comp.policies) if comp.policies else None,
         mode=app_config.auth_mode,
     )
 

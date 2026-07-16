@@ -342,3 +342,84 @@ class TestFullPipelineE2E:
 
         # Chain is intact
         assert audit_trail.verify_chain()
+
+
+# ---------------------------------------------------------------------------
+# Cedar policy enforcement (end-to-end through AuthMiddleware in ENFORCE mode)
+# ---------------------------------------------------------------------------
+
+from src.gateway.auth.cedar_policy import CedarPolicyService  # noqa: E402
+
+
+def _cedar_app(policies):
+    """Build a minimal app whose AuthMiddleware enforces the given Cedar policies.
+
+    Note: API-key auth assigns the fixed role "service" (see
+    AuthMiddleware._authenticate_api_key), so these end-to-end tests cover
+    action-scoped permit/forbid. Role/attribute-conditioned policies are
+    covered directly in test_cedar_policy.py where the context is constructed.
+    """
+    persistence = FakePersistence()
+    resolver = PolicyHierarchyResolver(persistence=persistence, cache_ttl_seconds=0)
+    _run(persistence.save_policy_node(
+        PolicyNode("proj:ml", "project", None, "ML",
+                   limits={"budget_limit": 1000.0, "allowed_models": ["test-model"]})
+    ))
+
+    api_key_service = APIKeyService(persistence=persistence)
+    _, raw_key = _run(api_key_service.issue_key(
+        project_id="proj:ml", name="k", scopes=["chat:completions"], created_by="admin",
+    ))
+
+    agent = GatewayAgent(
+        router=FakeRouter(),
+        rate_limiter=SlidingWindowRateLimiter(config=RateLimitConfig()),
+        guardrail_engine=GuardrailEngine(),
+        cache_manager=CacheManager(),
+        cost_tracker=CostTracker(pricing_config={}),
+        projects={"proj:ml": Project(project_id="proj:ml", name="ML")},
+        quota_enforcer=QuotaEnforcer(),
+        policy_resolver=resolver,
+    )
+    client_agent = ClientAgent(agent, default_project_id="proj:ml", default_user_id="u")
+    app = Starlette(routes=create_chat_routes(ChatAPI(client_agent)))
+    app.add_middleware(SecurityMiddleware)
+    app.add_middleware(
+        AuthMiddleware,
+        api_key_service=api_key_service,
+        policy_service=CedarPolicyService(policies),
+        mode="ENFORCE",
+    )
+    return TestClient(app), raw_key
+
+
+_READ_PERMIT = {"name": "r", "policy_text": 'permit(principal, action == Action::"read", resource);', "mode": "ENFORCE"}
+_WRITE_PERMIT = {"name": "w", "policy_text": 'permit(principal, action == Action::"write", resource);', "mode": "ENFORCE"}
+# A forbid keyed on a role the "service" principal does not have -> always denies.
+_FORBID_UNLESS_ADMIN = {"name": "a", "policy_text": 'forbid(principal, action, resource) unless { principal.role == "admin" };', "mode": "ENFORCE"}
+
+
+class TestCedarPolicyE2E:
+    def _post(self, client, key):
+        return client.post("/api/chat", json={
+            "model": "test-model", "messages": [{"role": "user", "content": "hi"}],
+        }, headers={"X-Api-Key": key})
+
+    def test_write_permitted(self):
+        client, key = _cedar_app([_WRITE_PERMIT])
+        assert self._post(client, key).status_code == 200
+
+    def test_denied_when_no_permit_matches(self):
+        # Only a read permit; a POST (write) has no matching permit -> 403.
+        client, key = _cedar_app([_READ_PERMIT])
+        assert self._post(client, key).status_code == 403
+
+    def test_forbid_overrides_permit(self):
+        # write is permitted, but a forbid the service principal can't satisfy wins.
+        client, key = _cedar_app([_WRITE_PERMIT, _FORBID_UNLESS_ADMIN])
+        assert self._post(client, key).status_code == 403
+
+    def test_log_only_forbid_does_not_block(self):
+        log_forbid = {**_FORBID_UNLESS_ADMIN, "mode": "LOG_ONLY"}
+        client, key = _cedar_app([_WRITE_PERMIT, log_forbid])
+        assert self._post(client, key).status_code == 200
