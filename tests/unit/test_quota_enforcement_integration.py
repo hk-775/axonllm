@@ -139,3 +139,95 @@ class TestQuotaEnforcementInFlow:
         # We can't easily get a full response without a real model registry,
         # so we verify the wiring: spend starts at 0
         assert enforcer.get_spend("proj:ml") == 0.0
+
+
+class CapturingProviderFactory:
+    """Records the max_tokens on the request that reaches the provider."""
+
+    def __init__(self):
+        self.seen_max_tokens = "unset"
+
+    def create(self, request, **kwargs):
+        self.seen_max_tokens = request.max_tokens
+
+        async def _call(mapping):
+            return ChatCompletionResponse(
+                id="resp-1",
+                choices=[{"message": {"role": "assistant", "content": "ok"}, "index": 0}],
+                usage=TokenUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+                model=mapping.model_id,
+                provider=mapping.provider,
+            )
+        return _call
+
+
+@pytest.fixture
+def setup_with_token_limit():
+    """Agent whose policy caps max_tokens_per_request, with a resolvable model."""
+    from src.gateway.health_tracker import ProviderHealthTracker
+    from src.gateway.model_registry import ModelRegistry
+    from src.gateway.models import ModelConfig, ProviderModelMapping
+
+    persistence = FakePersistence()
+    resolver = PolicyHierarchyResolver(persistence=persistence, cache_ttl_seconds=0)
+    proj = PolicyNode("proj:ml", "project", None, "ML",
+                      limits={"budget_limit": 100.0,
+                              "allowed_models": ["claude-sonnet"],
+                              "max_tokens_per_request": 1000})
+    _run(persistence.save_policy_node(proj))
+
+    registry = ModelRegistry()
+    registry.models = {
+        "claude-sonnet": ModelConfig(
+            name="claude-sonnet",
+            description="test",
+            providers=[ProviderModelMapping(provider="bedrock", model_id="claude-sonnet-x")],
+        )
+    }
+    router = Router(model_registry=registry, health_tracker=ProviderHealthTracker())
+    factory = CapturingProviderFactory()
+
+    agent = GatewayAgent(
+        router=router,
+        rate_limiter=SlidingWindowRateLimiter(config=RateLimitConfig(user_rpm=9999, project_rpm=9999)),
+        guardrail_engine=GuardrailEngine(),
+        cache_manager=CacheManager(),
+        cost_tracker=CostTracker(pricing_config={}),
+        projects={"proj:ml": Project(project_id="proj:ml", name="ML")},
+        provider_fn_factory=factory,
+        quota_enforcer=QuotaEnforcer(),
+        policy_resolver=resolver,
+    )
+    return agent, factory
+
+
+class TestMaxTokensCapping:
+    def test_omitted_max_tokens_is_capped_to_policy(self, setup_with_token_limit):
+        """A request with no max_tokens must be bounded by the policy ceiling."""
+        agent, factory = setup_with_token_limit
+        _run(agent.handle_chat_completion(
+            {"model": "claude-sonnet", "messages": [{"role": "user", "content": "hi"}]},
+            {"project_id": "proj:ml", "user_id": "u1"},
+        ))
+        assert factory.seen_max_tokens == 1000
+
+    def test_oversized_explicit_max_tokens_is_rejected(self, setup_with_token_limit):
+        """An explicit max_tokens over the limit is rejected (429), not silently capped."""
+        agent, factory = setup_with_token_limit
+        result = _run(agent.handle_chat_completion(
+            {"model": "claude-sonnet", "messages": [{"role": "user", "content": "hi"}],
+             "max_tokens": 50000},
+            {"project_id": "proj:ml", "user_id": "u1"},
+        ))
+        assert result["status_code"] == 429
+        assert result["error"]["code"] == "quota_max_tokens_per_request"
+        assert factory.seen_max_tokens == "unset"  # never reached the provider
+
+    def test_within_limit_max_tokens_is_preserved(self, setup_with_token_limit):
+        agent, factory = setup_with_token_limit
+        _run(agent.handle_chat_completion(
+            {"model": "claude-sonnet", "messages": [{"role": "user", "content": "hi"}],
+             "max_tokens": 200},
+            {"project_id": "proj:ml", "user_id": "u1"},
+        ))
+        assert factory.seen_max_tokens == 200

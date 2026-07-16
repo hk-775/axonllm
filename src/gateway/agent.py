@@ -235,6 +235,14 @@ class GatewayAgent:
                     code=f"quota_{quota_decision.limit_type}",
                 )
 
+            # Apply the policy's max_tokens ceiling. This also bounds requests
+            # that omit max_tokens entirely — otherwise an unbounded (streaming)
+            # response could exhaust resources or amplify cost on shared
+            # provider credentials.
+            request.max_tokens = self._quota_enforcer.cap_max_tokens(
+                request.max_tokens, resolved_policy
+            )
+
         # 2.8. Prompt injection detection
         request_id = f"req_{__import__('uuid').uuid4().hex[:12]}"
         pii_mapping = None
