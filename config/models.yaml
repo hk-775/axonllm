@@ -59,6 +59,54 @@ models:
     model_id: openai.gpt-5.4
     weight: 1.0
     fallback_order: 0
+- name: gpt-5.6-sol
+  description: GPT-5.6 Sol (Mantle)
+  routing_strategy: round-robin
+  providers:
+  - provider: bedrock-mantle
+    model_id: openai.gpt-5.6-sol
+    weight: 1.0
+    fallback_order: 0
+- name: gpt-5.6-terra
+  description: GPT-5.6 Terra (Mantle)
+  routing_strategy: round-robin
+  providers:
+  - provider: bedrock-mantle
+    model_id: openai.gpt-5.6-terra
+    weight: 1.0
+    fallback_order: 0
+- name: gpt-5.6-luna
+  description: GPT-5.6 Luna (Mantle)
+  routing_strategy: round-robin
+  providers:
+  - provider: bedrock-mantle
+    model_id: openai.gpt-5.6-luna
+    weight: 1.0
+    fallback_order: 0
+- name: claude-sonnet-5
+  description: Claude Sonnet 5 (Mantle)
+  routing_strategy: round-robin
+  providers:
+  - provider: bedrock-mantle
+    model_id: anthropic.claude-sonnet-5
+    weight: 1.0
+    fallback_order: 0
+- name: claude-opus-4-8
+  description: Claude Opus 4.8 (Mantle)
+  routing_strategy: round-robin
+  providers:
+  - provider: bedrock-mantle
+    model_id: anthropic.claude-opus-4-8
+    weight: 1.0
+    fallback_order: 0
+- name: claude-haiku-4-5-mantle
+  description: Claude Haiku 4.5 (Mantle)
+  routing_strategy: round-robin
+  providers:
+  - provider: bedrock-mantle
+    model_id: anthropic.claude-haiku-4-5
+    weight: 1.0
+    fallback_order: 0
 - name: gpt-4.1
   description: GPT-4.1
   routing_strategy: round-robin

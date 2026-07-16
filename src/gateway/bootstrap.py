@@ -57,7 +57,7 @@ from src.gateway.guardrail_engine import GuardrailEngine
 from src.gateway.health_tracker import ProviderHealthTracker
 from src.gateway.model_leaderboard import ModelLeaderboard
 from src.gateway.model_registry import ModelRegistry
-from src.gateway.models import Project, RateLimitConfig, UsageRecord
+from src.gateway.models import PolicyNode, Project, RateLimitConfig, UsageRecord
 from src.gateway.multi_provider_factory import MultiProviderFactory
 from src.gateway.persistence import DynamoPersistence
 from src.gateway.provider_loader import load_provider_configs
@@ -203,6 +203,7 @@ def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComp
         seed = load_demo_seed_config(app_config.demo_seed_config_path)
         projects, user_configs, policies = _apply_seed_data(
             seed, cost_tracker, health_tracker, all_model_names,
+            quota_enforcer, policy_resolver,
         )
 
     # --- DynamoDB persisted state (merges on top of seed data) ---
@@ -428,6 +429,8 @@ def _apply_seed_data(
     cost_tracker: CostTracker,
     health_tracker: ProviderHealthTracker,
     all_model_names: list[str],
+    quota_enforcer: QuotaEnforcer,
+    policy_resolver: PolicyHierarchyResolver,
 ) -> tuple[dict[str, Project], dict[str, dict], list[dict]]:
     """Apply demo seed data to components. Returns (projects, user_configs, policies)."""
     projects: dict[str, Project] = {}
@@ -448,6 +451,16 @@ def _apply_seed_data(
                 proj.project_id,
                 budget_limit=proj.budget_limit,
                 alert_threshold=proj.alert_threshold,
+            )
+        # Seed a policy node so the quota endpoint can resolve the project's
+        # budget_limit (the resolver reads limits from PolicyNodes, not projects).
+        if proj.budget_limit is not None:
+            policy_resolver._nodes[proj.project_id] = PolicyNode(
+                node_id=proj.project_id,
+                node_type="project",
+                parent_id=None,
+                display_name=proj.name,
+                limits={"budget_limit": proj.budget_limit},
             )
 
     # User budgets
@@ -478,6 +491,14 @@ def _apply_seed_data(
                 cached_tokens=s.get("cached_tokens", 0),
                 cache_creation_tokens=s.get("cache_creation_tokens", 0),
             ))
+            # Mirror spend into the quota enforcer so /admin/quotas reflects
+            # seeded usage (enforcer tracks spend separately from cost_tracker).
+            await quota_enforcer.record_spend(
+                s["project_id"],
+                s.get("cost", 0.0),
+                budget_limit=projects[s["project_id"]].budget_limit
+                if s["project_id"] in projects else None,
+            )
 
     asyncio.run(_seed_usage())
 

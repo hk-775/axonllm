@@ -50,6 +50,12 @@ projects:
       - fireworks-gpt-oss-120b
       - jamba-large
       - jamba-mini
+      - gpt-5.6-sol
+      - gpt-5.6-terra
+      - gpt-5.6-luna
+      - claude-sonnet-5
+      - claude-opus-4-8
+      - claude-haiku-4-5-mantle
 
   - project_id: proj-beta
     name: Beta Team
