@@ -35,6 +35,24 @@ class TestClassifyMath:
         result = classifier.classify("Solve this equation: 2x + 3 = 7")
         assert result.task_type == "math"
 
+    def test_math_division_with_spaces(self, classifier):
+        result = classifier.classify("compute 10 / 2 please")
+        assert result.task_type == "math"
+
+    def test_prose_with_numbers_not_math(self, classifier):
+        # Numbers + prose punctuation (%, hyphens, dates) must not trigger math.
+        result = classifier.classify(
+            "Summarize this report: Q3 revenue grew to $4.2B, up 12% "
+            "year-over-year, with 3-5% margins."
+        )
+        assert result.task_type == "summarization"
+
+    def test_summarization_with_date_range_not_math(self, classifier):
+        result = classifier.classify(
+            "Please summarize the following article about the 2023-2024 season."
+        )
+        assert result.task_type == "summarization"
+
 
 class TestClassifyCreativeWriting:
     def test_creative_prompt(self, classifier):

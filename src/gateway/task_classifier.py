@@ -2,7 +2,16 @@
 
 from __future__ import annotations
 
+import re
+
 from src.gateway.models import ClassificationResult
+
+# Matches a genuine arithmetic expression: two numbers joined by an operator.
+# Strong operators (+, *, =, ^) may be written without spaces ("2+2", "x=5");
+# ambiguous prose punctuation (-, /) must be space-delimited ("10 / 2") so that
+# hyphenated words ("year-over-year"), ranges ("3-5%") and dates ("2023-2024")
+# do NOT get misread as math.
+_ARITHMETIC_RE = re.compile(r"\d\s*[+*=^]\s*\d|\d\s+[-/]\s+\d")
 
 
 class TaskClassifier:
@@ -117,11 +126,10 @@ class TaskClassifier:
             scores["creative_writing"] += 2.0
             matched.setdefault("creative_writing", []).append("write_a_heuristic")
 
-        # Contains math operators and numbers → boost math
-        math_operators = ["+", "-", "*", "/", "=", "^", "!", "%"]
-        has_number = any(c.isdigit() for c in original)
-        has_operator = any(op in original for op in math_operators)
-        if has_number and has_operator:
+        # Contains a genuine arithmetic expression (number-operator-number) →
+        # boost math. Guards against prose that merely contains digits and
+        # punctuation (percentages, dates, ranges, hyphenated words).
+        if _ARITHMETIC_RE.search(original):
             scores.setdefault("math", 0.0)
             scores["math"] += 1.5
             matched.setdefault("math", []).append("math_operators_heuristic")
