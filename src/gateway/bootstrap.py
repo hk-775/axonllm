@@ -36,6 +36,7 @@ from src.gateway.multi_region.region_config import default_single_region
 from src.gateway.multi_region.region_router import RegionRouter
 from src.gateway.quota_enforcer import QuotaEnforcer
 from src.gateway.middleware.security import SecurityMiddleware
+from src.gateway.observability.trace_forwarder import TraceForwarder
 from src.gateway.security.audit_trail import AuditTrail
 from src.gateway.security.event_dispatcher import EventDispatcher
 from src.gateway.security.injection_detector import PromptInjectionDetector
@@ -159,6 +160,10 @@ def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComp
     injection_detector = PromptInjectionDetector()
     audit_trail = AuditTrail(persistence=persistence)
     event_dispatcher = EventDispatcher()
+    # Forwards request traces to an embedding Ostiari when detected (OSTIARI_TRACES_URL
+    # set, or an in-process sink registered via observability.trace_forwarder). No-op
+    # for standalone AxonLLM.
+    trace_forwarder = TraceForwarder()
 
     # --- Budget threshold alerting ---
     def _budget_alert(project_id, threshold_pct, current_spend, budget_limit):
@@ -285,6 +290,7 @@ def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComp
         audit_trail=audit_trail,
         event_dispatcher=event_dispatcher,
         region_router=region_router,
+        trace_forwarder=trace_forwarder,
     )
 
     # --- Efficiency analysis ---
