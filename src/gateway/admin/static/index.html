@@ -4,11 +4,10 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>AxonLLM</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
-  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-  <script crossorigin src="https://unpkg.com/@babel/standalone@7.24.7/babel.min.js"></script>
+  <!-- Vendored locally (no unpkg/CDN) so the dashboard works air-gapped. Served by /admin/static. -->
+  <script src="/admin/static/vendor/react.production.min.js"></script>
+  <script src="/admin/static/vendor/react-dom.production.min.js"></script>
+  <script src="/admin/static/vendor/babel.min.js"></script>
   <style>
     :root {
       --awsui-color-background: #fafaf9;
@@ -339,11 +338,58 @@
   <script type="text/babel">
     const { useState, useEffect, useCallback } = React;
 
+    /* ── API key (for ENFORCE mode) ──
+       The gateway defaults to ENFORCE, so admin calls need a Bearer token.
+       Stored in sessionStorage (cleared on tab close). Get one via `axon issue-key`. */
+    const AUTH_KEY = 'axon_admin_api_key';
+    const getApiKey = () => sessionStorage.getItem(AUTH_KEY) || '';
+    const setApiKey = (k) => k ? sessionStorage.setItem(AUTH_KEY, k) : sessionStorage.removeItem(AUTH_KEY);
+    const promptForKey = () => {
+      const k = window.prompt(
+        'This gateway requires an API key (ENFORCE mode).\n' +
+        'Paste an admin API key (create one with: axon issue-key):'
+      );
+      if (k) setApiKey(k.trim());
+      return getApiKey();
+    };
+
+    const authHeaders = (extra) => {
+      const h = Object.assign({}, extra || {});
+      const key = getApiKey();
+      if (key) h['Authorization'] = 'Bearer ' + key;
+      return h;
+    };
+
+    // Turn any failed response into a readable Error (status + server message),
+    // instead of rejecting with an opaque object. On 401, prompt for a key and retry once.
+    async function request(method, url, body, _retried) {
+      const opts = { method, headers: authHeaders(body != null ? { 'Content-Type': 'application/json' } : {}) };
+      if (body != null) opts.body = JSON.stringify(body);
+      let r;
+      try {
+        r = await fetch(url, opts);
+      } catch (netErr) {
+        throw new Error('Network error: ' + (netErr && netErr.message ? netErr.message : 'request failed'));
+      }
+      if (r.status === 401 && !_retried) {
+        if (promptForKey()) return request(method, url, body, true);
+        throw new Error('Authentication required (401). Provide an admin API key.');
+      }
+      let data = null;
+      try { data = await r.json(); } catch (e) { /* non-JSON body */ }
+      if (r.ok) return data;
+      const msg = (data && data.error && (data.error.message || data.error.type)) ||
+                  (data && data.message) || ('HTTP ' + r.status);
+      const err = new Error(msg);
+      err.status = r.status;
+      throw err;
+    }
+
     const api = {
-      get: (url) => fetch(url).then(r => r.ok ? r.json() : r.json().then(e => Promise.reject(e))),
-      post: (url, body) => fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(r => r.json().then(d => r.ok ? d : Promise.reject(d))),
-      put: (url, body) => fetch(url, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(r => r.json().then(d => r.ok ? d : Promise.reject(d))),
-      del: (url) => fetch(url, { method: 'DELETE' }).then(r => r.ok ? r.json() : r.json().then(e => Promise.reject(e))),
+      get: (url) => request('GET', url),
+      post: (url, body) => request('POST', url, body),
+      put: (url, body) => request('PUT', url, body),
+      del: (url) => request('DELETE', url),
     };
 
     const fmt = {
@@ -444,7 +490,7 @@
       useEffect(() => {
         Promise.all([api.get('/admin/overview'), api.get('/admin/health')])
           .then(([o, h]) => { setData(o); setHealth(h); })
-          .catch(() => setError('Failed to load overview data.'));
+          .catch(e => setError('Failed to load overview data: ' + (e && e.message ? e.message : 'unknown error')));
       }, []);
 
       if (error) return <Flash type="error">{error}</Flash>;
@@ -496,7 +542,7 @@
       const [projects, setProjects] = useState(null);
       const [error, setError] = useState(null);
 
-      useEffect(() => { api.get('/admin/projects').then(setProjects).catch(() => setError('Failed to load projects')); }, []);
+      useEffect(() => { api.get('/admin/projects').then(setProjects).catch(e => setError('Failed to load projects: ' + (e && e.message ? e.message : 'unknown error'))); }, []);
 
       if (error) return <Flash type="error">{error}</Flash>;
       if (!projects) return <Loading text="Loading projects..." />;
@@ -559,7 +605,7 @@
       const [addingModel, setAddingModel] = useState('');
 
       const loadProject = useCallback(() => {
-        api.get(`/admin/projects/${projectId}`).then(setProject).catch(() => setError('Failed to load project'));
+        api.get(`/admin/projects/${projectId}`).then(setProject).catch(e => setError('Failed to load project: ' + (e && e.message ? e.message : 'unknown error')));
       }, [projectId]);
 
       const loadProjectModels = useCallback(() => {
@@ -861,7 +907,7 @@
       const [users, setUsers] = useState(null);
       const [error, setError] = useState(null);
 
-      useEffect(() => { api.get('/admin/users').then(setUsers).catch(() => setError('Failed to load users')); }, []);
+      useEffect(() => { api.get('/admin/users').then(setUsers).catch(e => setError('Failed to load users: ' + (e && e.message ? e.message : 'unknown error'))); }, []);
 
       if (error) return <Flash type="error">{error}</Flash>;
       if (!users) return <Loading text="Loading users..." />;
@@ -926,7 +972,7 @@
             alert_threshold: u.alert_threshold != null ? String(u.alert_threshold) : '',
           });
           setAccessModels(u.allowed_models || []);
-        }).catch(() => setError('Failed to load user'));
+        }).catch(e => setError('Failed to load user: ' + (e && e.message ? e.message : 'unknown error')));
         api.get('/admin/models').then(models => {
           setAllModels(models.map(m => m.name));
         }).catch(() => {});
@@ -1088,7 +1134,7 @@
       const [expanded, setExpanded] = useState(null);
       const [msg, setMsg] = useState(null);
 
-      const loadModels = useCallback(() => { api.get('/admin/models').then(setModels).catch(() => setError('Failed to load models')); }, []);
+      const loadModels = useCallback(() => { api.get('/admin/models').then(setModels).catch(e => setError('Failed to load models: ' + (e && e.message ? e.message : 'unknown error'))); }, []);
       useEffect(() => { loadModels(); }, [loadModels]);
 
       const strategies = ['round-robin', 'weighted', 'least-latency', 'cost-optimized'];
@@ -1173,7 +1219,7 @@
       const [editPolicy, setEditPolicy] = useState(null);
       const [msg, setMsg] = useState(null);
 
-      const loadPolicies = useCallback(() => { api.get('/admin/policies').then(setPolicies).catch(() => setError('Failed to load policies')); }, []);
+      const loadPolicies = useCallback(() => { api.get('/admin/policies').then(setPolicies).catch(e => setError('Failed to load policies: ' + (e && e.message ? e.message : 'unknown error'))); }, []);
       useEffect(() => { loadPolicies(); }, [loadPolicies]);
 
       const handleSave = async (policy) => {
@@ -1386,7 +1432,7 @@
       const [health, setHealth] = useState(null);
       const [error, setError] = useState(null);
 
-      useEffect(() => { api.get('/admin/health').then(setHealth).catch(() => setError('Failed to load health')); }, []);
+      useEffect(() => { api.get('/admin/health').then(setHealth).catch(e => setError('Failed to load health: ' + (e && e.message ? e.message : 'unknown error'))); }, []);
 
       if (error) return <Flash type="error">{error}</Flash>;
       if (!health) return <Loading text="Loading health..." />;
@@ -1444,7 +1490,7 @@
       const [deleteTarget, setDeleteTarget] = useState(null);
 
       const loadModels = useCallback(() => {
-        api.get('/admin/models').then(setModels).catch(() => setError('Failed to load models'));
+        api.get('/admin/models').then(setModels).catch(e => setError('Failed to load models: ' + (e && e.message ? e.message : 'unknown error')));
       }, []);
 
       const loadCatalog = useCallback(() => {
@@ -2015,7 +2061,7 @@
       const [editingWeight, setEditingWeight] = useState({});
 
       const load = useCallback(() => {
-        api.get('/admin/regions').then(setTopology).catch(() => setError('Failed to load topology'));
+        api.get('/admin/regions').then(setTopology).catch(e => setError('Failed to load topology: ' + (e && e.message ? e.message : 'unknown error')));
         api.get('/admin/regions/health').then(setHealth).catch(() => {});
       }, []);
 
@@ -2176,7 +2222,7 @@
 
       const loadKeys = useCallback(() => {
         if (!projectId) return;
-        api.get(`/admin/projects/${encodeURIComponent(projectId)}/keys`).then(setKeys).catch(() => setError('Failed to load keys'));
+        api.get(`/admin/projects/${encodeURIComponent(projectId)}/keys`).then(setKeys).catch(e => setError('Failed to load keys: ' + (e && e.message ? e.message : 'unknown error')));
       }, [projectId]);
 
       useEffect(() => { loadKeys(); }, [loadKeys]);
@@ -2271,7 +2317,7 @@
       const [error, setError] = useState(null);
 
       const loadEvents = useCallback(() => {
-        api.get('/admin/audit/security?limit=50').then(r => setRecords(r.records)).catch(() => setError('Failed to load events'));
+        api.get('/admin/audit/security?limit=50').then(r => setRecords(r.records)).catch(e => setError('Failed to load events: ' + (e && e.message ? e.message : 'unknown error')));
       }, []);
       const loadStats = useCallback(() => {
         api.get('/admin/audit/stats').then(setStats).catch(() => {});
@@ -2348,7 +2394,7 @@
       const [form, setForm] = useState({ name: '', type: 'webhook', url: '', event_filter: '' });
 
       const load = useCallback(() => {
-        api.get('/admin/webhooks').then(d => { setDestinations(d.destinations); setStats(d.stats); }).catch(() => setError('Failed to load'));
+        api.get('/admin/webhooks').then(d => { setDestinations(d.destinations); setStats(d.stats); }).catch(e => setError('Failed to load: ' + (e && e.message ? e.message : 'unknown error')));
       }, []);
 
       useEffect(() => { load(); }, [load]);
@@ -2442,7 +2488,7 @@
       const [form, setForm] = useState({ node_id: '', node_type: 'org', parent_id: '', display_name: '', rate_limit_rpm: '', budget_limit: '', pii_redaction_enabled: false, pii_redact_types: '' });
 
       const load = useCallback(() => {
-        api.get('/admin/policies/hierarchy').then(setNodes).catch(() => setError('Failed to load'));
+        api.get('/admin/policies/hierarchy').then(setNodes).catch(e => setError('Failed to load: ' + (e && e.message ? e.message : 'unknown error')));
       }, []);
 
       useEffect(() => { load(); }, [load]);
