@@ -9,9 +9,11 @@ If you discover a potential security issue, please report it responsibly via the
 ## Development Setup
 
 ```bash
-pip install -e ".[dev]"
-pip install uvicorn boto3
+pip install -e ".[dev]"   # installs the package (import path: src.gateway) + test deps
 ```
+
+Runtime deps (`uvicorn`, `boto3`, …) are declared in `pyproject.toml` and installed
+by the line above — no separate install needed.
 
 ## Running Tests
 
