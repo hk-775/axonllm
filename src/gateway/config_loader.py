@@ -54,7 +54,33 @@ def load_app_config() -> AppConfig:
         catalog_config_path=os.environ.get("AXON_CATALOG_CONFIG", "config/catalog.yaml"),
         ensemble_config_path=os.environ.get("AXON_ENSEMBLE_CONFIG", "config/ensemble.yaml"),
         load_demo_data=os.environ.get("AXON_LOAD_DEMO_DATA", "false").lower() == "true",
+        oidc_issuer=os.environ.get("AXON_OIDC_ISSUER", ""),
+        oidc_audience=os.environ.get("AXON_OIDC_AUDIENCE", ""),
+        auth_mode=_load_auth_mode(),
     )
+
+
+def _load_auth_mode() -> str:
+    """Resolve the auth enforcement mode from AXON_AUTH_MODE.
+
+    Defaults to ENFORCE (fail-closed): a deploy that sets nothing gets
+    authentication and admin RBAC enforced. Set AXON_AUTH_MODE=LOG_ONLY
+    explicitly for local development / demos where you want the gateway to
+    run without credentials. An unrecognized value falls back to ENFORCE
+    rather than silently disabling auth.
+    """
+    raw = os.environ.get("AXON_AUTH_MODE", "ENFORCE").strip().upper()
+    if raw not in ("ENFORCE", "LOG_ONLY"):
+        logger.warning(
+            "Unrecognized AXON_AUTH_MODE=%r — falling back to ENFORCE (fail-closed)", raw
+        )
+        return "ENFORCE"
+    if raw == "LOG_ONLY":
+        logger.warning(
+            "AXON_AUTH_MODE=LOG_ONLY — authentication and admin RBAC are NOT enforced. "
+            "Use this only for local development, never in production."
+        )
+    return raw
 
 
 # ---------------------------------------------------------------------------

@@ -145,4 +145,4 @@ class AppConfig:
     load_demo_data: bool = False
     oidc_issuer: str = ""
     oidc_audience: str = ""
-    auth_mode: str = "LOG_ONLY"
+    auth_mode: str = "ENFORCE"  # fail-closed by default; set AXON_AUTH_MODE=LOG_ONLY for local dev only

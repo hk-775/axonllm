@@ -49,7 +49,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         oidc_service: OIDCService | None = None,
         api_key_service: APIKeyService | None = None,
         policy_service: PolicyService | None = None,
-        mode: str = "LOG_ONLY",
+        mode: str = "ENFORCE",
         public_paths: frozenset[str] | None = None,
     ):
         super().__init__(app)
