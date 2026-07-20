@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 class AdminRBACMiddleware(BaseHTTPMiddleware):
     """Enforces role/scope requirements on admin endpoints."""
 
-    def __init__(self, app, mode: str = "LOG_ONLY"):
+    def __init__(self, app, mode: str = "ENFORCE"):
         super().__init__(app)
         self.mode = mode
 

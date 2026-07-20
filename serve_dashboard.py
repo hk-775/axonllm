@@ -10,7 +10,6 @@ import os
 import uvicorn
 
 from src.gateway.bootstrap import build_starlette_app
-from src.gateway.config import AppConfig
 from src.gateway.config_loader import load_app_config
 from src.gateway.health_check_task import HealthCheckTask
 from src.gateway.health_tracker import ProviderHealthTracker
@@ -22,6 +21,13 @@ def build_app() -> tuple:
     # Default to loading demo data when running the dev server directly
     if "AXON_LOAD_DEMO_DATA" not in os.environ:
         os.environ["AXON_LOAD_DEMO_DATA"] = "true"
+
+    # The local dev server is meant to be run without credentials so the admin
+    # dashboard (which sends no auth header yet — see task #10) works out of the
+    # box. Production defaults to ENFORCE; only this dev entrypoint opts out, and
+    # only when the operator hasn't set AXON_AUTH_MODE themselves.
+    if "AXON_AUTH_MODE" not in os.environ:
+        os.environ["AXON_AUTH_MODE"] = "LOG_ONLY"
 
     app_config = load_app_config()
     app = build_starlette_app(app_config)
