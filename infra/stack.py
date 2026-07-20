@@ -43,36 +43,22 @@ class AxonLLMStack(Stack):
             ),
         )
 
-        # --- DynamoDB tables ---
-        audit_table = dynamodb.Table(
+        # --- DynamoDB table ---
+        # The application (src/gateway/persistence.py) uses a SINGLE-TABLE design:
+        # one table with a composite PK/SK (uppercase) key and an `entity_type`
+        # attribute discriminating usage records, projects, user configs, API keys,
+        # policies, feedback, and audit records. The table name here MUST match the
+        # AXON_DYNAMODB_TABLE env var passed to the container below, and the key
+        # schema MUST be PK (HASH) / SK (RANGE), both String.
+        state_table = dynamodb.Table(
             self,
-            "AuditTrail",
-            table_name="axonllm-audit-trail",
-            partition_key=dynamodb.Attribute(name="pk", type=dynamodb.AttributeType.STRING),
-            sort_key=dynamodb.Attribute(name="sk", type=dynamodb.AttributeType.STRING),
+            "StateTable",
+            table_name="axonllm-state",
+            partition_key=dynamodb.Attribute(name="PK", type=dynamodb.AttributeType.STRING),
+            sort_key=dynamodb.Attribute(name="SK", type=dynamodb.AttributeType.STRING),
             billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
             removal_policy=RemovalPolicy.RETAIN,
             point_in_time_recovery=True,
-        )
-
-        keys_table = dynamodb.Table(
-            self,
-            "ApiKeysTable",
-            table_name="axonllm-api-keys",
-            partition_key=dynamodb.Attribute(name="pk", type=dynamodb.AttributeType.STRING),
-            sort_key=dynamodb.Attribute(name="sk", type=dynamodb.AttributeType.STRING),
-            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
-            removal_policy=RemovalPolicy.RETAIN,
-        )
-
-        policies_table = dynamodb.Table(
-            self,
-            "PoliciesTable",
-            table_name="axonllm-policies",
-            partition_key=dynamodb.Attribute(name="pk", type=dynamodb.AttributeType.STRING),
-            sort_key=dynamodb.Attribute(name="sk", type=dynamodb.AttributeType.STRING),
-            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
-            removal_policy=RemovalPolicy.RETAIN,
         )
 
         # --- ECS Cluster ---
@@ -117,6 +103,7 @@ class AxonLLMStack(Stack):
                 environment={
                     "AWS_DEFAULT_REGION": self.region,
                     "LLM_ROUTER_DYNAMODB_ENABLED": "true",
+                    "AXON_DYNAMODB_TABLE": state_table.table_name,
                     "AXON_AUTH_MODE": "ENFORCE",
                     "AXON_SERVER_PORT": "8000",
                 },
@@ -172,10 +159,8 @@ class AxonLLMStack(Stack):
             )
         )
 
-        # DynamoDB
-        audit_table.grant_read_write_data(task_role)
-        keys_table.grant_read_write_data(task_role)
-        policies_table.grant_read_write_data(task_role)
+        # DynamoDB — single state table (matches AXON_DYNAMODB_TABLE)
+        state_table.grant_read_write_data(task_role)
 
         # Secrets Manager (read-only for API keys)
         api_keys_secret.grant_read(task_role)

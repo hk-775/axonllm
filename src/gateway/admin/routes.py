@@ -537,9 +537,19 @@ class AdminAPI:
                 "healthy" if self.health_tracker.is_healthy(provider) else "unhealthy"
             )
 
+        # Surface persistence reachability so a misconfigured/missing DynamoDB
+        # table or IAM denial is visible here instead of silently dropping writes.
+        persistence_health = None
+        overall = "ok"
+        if self._persistence is not None:
+            persistence_health = await self._persistence.health_status()
+            if persistence_health.get("enabled") and persistence_health.get("reachable") is False:
+                overall = "degraded"
+
         return JSONResponse({
-            "status": "ok",
+            "status": overall,
             "providers": provider_health,
+            "persistence": persistence_health,
             "runtime": "running",
         })
 
