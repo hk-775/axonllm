@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 import tiktoken
@@ -264,13 +265,25 @@ class CostTracker:
     # Internal helpers
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _as_aware(ts: datetime) -> datetime:
+        """Coerce a timestamp to tz-aware UTC so time-window filters never mix
+        naive and aware datetimes (which raises TypeError). Records may arrive
+        naive from older callers or persisted rows; filter bounds may be either.
+        """
+        if ts is None:
+            return ts
+        return ts.replace(tzinfo=timezone.utc) if ts.tzinfo is None else ts
+
     def _apply_filters(self, filters: UsageFilters) -> list[UsageRecord]:
         """Return records matching all non-None filter criteria."""
         result = self._records
         if filters.start_time is not None:
-            result = [r for r in result if r.timestamp >= filters.start_time]
+            start = self._as_aware(filters.start_time)
+            result = [r for r in result if self._as_aware(r.timestamp) >= start]
         if filters.end_time is not None:
-            result = [r for r in result if r.timestamp <= filters.end_time]
+            end = self._as_aware(filters.end_time)
+            result = [r for r in result if self._as_aware(r.timestamp) <= end]
         if filters.provider is not None:
             result = [r for r in result if r.provider == filters.provider]
         if filters.model is not None:

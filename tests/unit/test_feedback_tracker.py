@@ -1,6 +1,6 @@
 """Unit tests for FeedbackTracker."""
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -15,7 +15,7 @@ def _make_record(
 ) -> FeedbackRecord:
     return FeedbackRecord(
         request_id="req-1",
-        timestamp=timestamp or datetime.utcnow(),
+        timestamp=timestamp or datetime.now(timezone.utc),
         task_type=task_type,
         confidence=0.85,
         selected_model=model,
