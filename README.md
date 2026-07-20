@@ -269,10 +269,14 @@ Request → Auth (OIDC/API Key) → Quota Enforcement (policy hierarchy)
 | `AWS_DEFAULT_REGION` | `us-east-1` | AWS region for Bedrock |
 | `AXON_LOAD_DEMO_DATA` | `false` | Load demo projects/users on startup |
 | `LLM_ROUTER_DYNAMODB_ENABLED` | `false` | Enable DynamoDB persistence |
+| `AXON_DYNAMODB_TABLE` | `axonllm-state` | DynamoDB table name (must match the provisioned table) |
 | `AXON_SERVER_PORT` | `8000` | Server port |
-| `AXON_AUTH_MODE` | `LOG_ONLY` | Auth enforcement: `LOG_ONLY` or `ENFORCE` |
+| `AXON_AUTH_MODE` | `ENFORCE` | Auth enforcement: `ENFORCE` (default, fail-closed) or `LOG_ONLY` (local dev) |
 | `AXON_OIDC_ISSUER` | — | OIDC token issuer URL |
 | `AXON_OIDC_AUDIENCE` | — | OIDC expected audience |
+| `OSTIARI_TRACES_URL` | — | When set, forward request traces to this Ostiari ingest URL (e.g. `http://control-plane:8000/api/traces/ingest`) |
+| `OSTIARI_GATEWAY_ID` | `axonllm` | Gateway identifier reported in Ostiari's Live Traces |
+| `OSTIARI_TRACES_TIMEOUT` | `3.0` | Per-request timeout (seconds) for trace forwarding |
 
 ### Models
 
@@ -378,6 +382,38 @@ docker run -p 8000:8000 \
 | OIDC | Configure `AXON_OIDC_ISSUER` and `AXON_OIDC_AUDIENCE` for SSO |
 | TLS | Terminate TLS at ALB/CloudFront, not at the gateway |
 | Budgets | Set org-level budget limits before granting project access |
+
+## Embedding in Ostiari (trace forwarding)
+
+When AxonLLM runs embedded inside [Ostiari](https://github.com/…), each completed
+request is forwarded as a trace event into Ostiari's Live Traces view. Forwarding
+activates automatically when Ostiari is *detected* — no code change to standalone
+deployments (with neither of the following, it's a no-op).
+
+**Two delivery paths (either or both):**
+
+1. **HTTP** — set `OSTIARI_TRACES_URL` to Ostiari's control-plane ingest endpoint:
+
+   ```bash
+   OSTIARI_TRACES_URL=http://control-plane:8000/api/traces/ingest \
+   OSTIARI_GATEWAY_ID=axon-prod-1 \
+   python serve_dashboard.py
+   ```
+
+2. **In-process** — when co-located in the same process, the embedding host registers
+   a sink; AxonLLM calls it directly (no network hop, no dependency on the `ostiari`
+   package):
+
+   ```python
+   from src.gateway.observability.trace_forwarder import register_sink
+   register_sink(lambda event: ostiari_storage.save_trace_event(event))
+   ```
+
+Each forwarded event carries the model, provider, token counts, cost, latency, and
+user/project in Ostiari's trace shape. AxonLLM is a routing/cost layer, not a risk
+scorer, so it sends neutral risk fields (`tier="allow"`, `score=0`) and leaves risk
+scoring to Ostiari. Forwarding is best-effort: a slow or unavailable Ostiari never
+slows or fails a request.
 
 ## Contributing
 
