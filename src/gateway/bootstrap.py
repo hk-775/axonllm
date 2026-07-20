@@ -43,6 +43,7 @@ from src.gateway.security.pii_redactor import PIIRedactor
 from src.gateway.cache_manager import CacheManager
 from src.gateway.chat.client_agent import ClientAgent
 from src.gateway.chat.routes import ChatAPI, create_chat_routes
+from src.gateway.chat.openai_routes import OpenAICompatAPI, create_openai_routes
 from src.gateway.config import AppConfig
 from src.gateway.config_loader import (
     DemoSeedData,
@@ -373,6 +374,7 @@ def build_starlette_app(app_config: AppConfig | None = None) -> Starlette:
         default_user_id="chat-user",
     )
     chat_api = ChatAPI(client_agent)
+    openai_api = OpenAICompatAPI(client_agent)
 
     async def health_check(request: Request) -> JSONResponse:
         return JSONResponse({"status": "healthy"})
@@ -387,6 +389,7 @@ def build_starlette_app(app_config: AppConfig | None = None) -> Starlette:
         + create_region_routes(region_api)
         + create_quota_routes(quota_api)
         + create_chat_routes(chat_api)
+        + create_openai_routes(openai_api)
     )
 
     app = Starlette(routes=routes)
