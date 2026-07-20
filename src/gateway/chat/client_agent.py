@@ -36,6 +36,7 @@ class ClientAgent:
         temperature: float | None = None,
         max_tokens: int | None = None,
         user_id: str | None = None,
+        project_id: str | None = None,
         provider: str | None = None,
         smart_routing: bool = False,
     ) -> dict:
@@ -44,7 +45,9 @@ class ClientAgent:
             model, messages, stream=False,
             temperature=temperature, max_tokens=max_tokens,
         )
-        context = self._build_context(user_id=user_id, provider=provider, smart_routing=smart_routing)
+        context = self._build_context(
+            user_id=user_id, project_id=project_id, provider=provider, smart_routing=smart_routing,
+        )
         response = await self.gateway_agent.handle_chat_completion(request_data, context)
 
         # Extract rate limit headers to pass through
@@ -86,6 +89,7 @@ class ClientAgent:
         temperature: float | None = None,
         max_tokens: int | None = None,
         user_id: str | None = None,
+        project_id: str | None = None,
         provider: str | None = None,
     ) -> AsyncIterator[dict]:
         """Streaming chat completion. Yields chunk dicts."""
@@ -93,7 +97,7 @@ class ClientAgent:
             model, messages, stream=True,
             temperature=temperature, max_tokens=max_tokens,
         )
-        context = self._build_context(user_id=user_id, provider=provider)
+        context = self._build_context(user_id=user_id, project_id=project_id, provider=provider)
         result = await self.gateway_agent.handle_chat_completion(request_data, context)
 
         # If the gateway returned an error dict directly (e.g. rate limit)
@@ -166,10 +170,16 @@ class ClientAgent:
             request_data["max_tokens"] = max_tokens
         return request_data
 
-    def _build_context(self, user_id: str | None = None, provider: str | None = None, smart_routing: bool = False) -> dict:
+    def _build_context(
+        self,
+        user_id: str | None = None,
+        project_id: str | None = None,
+        provider: str | None = None,
+        smart_routing: bool = False,
+    ) -> dict:
         ctx: dict[str, Any] = {
             "user_id": user_id or self.default_user_id,
-            "project_id": self.default_project_id,
+            "project_id": project_id or self.default_project_id,
         }
         if provider:
             ctx["provider"] = provider

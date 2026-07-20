@@ -25,6 +25,28 @@ if TYPE_CHECKING:
 _STATIC_DIR = pathlib.Path(__file__).resolve().parent / "static"
 
 
+def _identity_from_context(request: Request) -> tuple[str | None, str | None]:
+    """Resolve the trustworthy (user_id, project_id) for attribution.
+
+    Identity comes from the authenticated request context established by
+    AuthMiddleware — never from the request body, which a caller can forge.
+    For an authenticated request (API key or OIDC) we use the context's
+    user_id/project_id so quota/budget/model-access is attributed to the real
+    tenant. In an ANONYMOUS context (local dev / LOG_ONLY mode) we return
+    (None, None) so ClientAgent falls back to its configured defaults and the
+    dev chat UI keeps working without credentials.
+    """
+    ctx = getattr(request.state, "context", None)
+    if ctx is None:
+        return None, None
+    # AuthMethod.ANONYMOUS => unauthenticated (dev/LOG_ONLY); don't trust it for attribution.
+    if getattr(ctx.auth_method, "value", None) == "anonymous":
+        return None, None
+    user_id = ctx.user_id or None
+    project_id = ctx.project_id or None
+    return user_id, project_id
+
+
 class ChatAPI:
     """Route handlers for the client-facing chat interface."""
 
@@ -38,8 +60,9 @@ class ChatAPI:
     async def list_models(self, request: Request) -> JSONResponse:
         """Return available models as a JSON array."""
         try:
-            user_id = request.query_params.get("user_id")
-            project_id = request.query_params.get("project_id")
+            # Access-filtered model list is scoped to the authenticated identity,
+            # not query params (which a caller can set to any project/user).
+            user_id, project_id = _identity_from_context(request)
             models = await self.client_agent.list_models(
                 project_id=project_id, user_id=user_id,
             )
@@ -80,8 +103,11 @@ class ChatAPI:
         messages = body["messages"]
         temperature = body.get("temperature")
         max_tokens = body.get("max_tokens")
-        user_id = body.get("user_id")
         provider = body.get("provider")
+        # Identity for attribution comes from the authenticated context, NOT the
+        # request body — the body's user_id/project_id are ignored so a caller
+        # cannot impersonate another tenant's quota/budget/model-access context.
+        user_id, project_id = _identity_from_context(request)
         # Extract smart_routing flag from context
         context = body.get("context", {})
         smart_routing = context.get("smart_routing", False) if isinstance(context, dict) else False
@@ -89,7 +115,7 @@ class ChatAPI:
         try:
             response = await self.client_agent.chat(
                 model, messages, temperature=temperature, max_tokens=max_tokens,
-                user_id=user_id, provider=provider, smart_routing=smart_routing,
+                user_id=user_id, project_id=project_id, provider=provider, smart_routing=smart_routing,
             )
         except Exception:
             return JSONResponse(
@@ -133,8 +159,9 @@ class ChatAPI:
         messages = body["messages"]
         temperature = body.get("temperature")
         max_tokens = body.get("max_tokens")
-        user_id = body.get("user_id")
         provider = body.get("provider")
+        # Identity for attribution comes from the authenticated context, not the body.
+        user_id, project_id = _identity_from_context(request)
 
         # Collect the first response to check for errors / rate limit headers
         # before starting the SSE stream
@@ -144,7 +171,7 @@ class ChatAPI:
         try:
             result = self.client_agent.chat_stream(
                 model, messages, temperature=temperature, max_tokens=max_tokens,
-                user_id=user_id, provider=provider,
+                user_id=user_id, project_id=project_id, provider=provider,
             )
         except Exception as exc:
             logging.getLogger("gateway.chat").error("Stream error: %s\n%s", exc, traceback.format_exc())
