@@ -22,10 +22,17 @@ class DynamoPersistence:
 
     def __init__(
         self,
-        table_name: str = "llm-router-state",
+        table_name: str | None = None,
         region: str = "us-east-1",
     ):
-        self._table_name = table_name
+        # Table name comes from AXON_DYNAMODB_TABLE so the app and the CDK stack
+        # agree on a single source of truth. The CDK provisions a table by this
+        # exact name (see infra/stack.py) and passes it in via the env var; the
+        # "axonllm-state" fallback matches the stack default for local/manual runs.
+        self._table_name = (
+            table_name
+            or os.environ.get("AXON_DYNAMODB_TABLE", "axonllm-state")
+        )
         self._region = region
         self._enabled = os.environ.get(
             "LLM_ROUTER_DYNAMODB_ENABLED", "false"
@@ -33,11 +40,60 @@ class DynamoPersistence:
         self._table = None
         self._dynamodb = None
         self._init_lock = threading.Lock()
+        # Set to a short reason string when a write is dropped, so a health probe
+        # can surface silent persistence failures instead of losing data quietly.
+        self.last_write_error: str | None = None
 
     @property
     def enabled(self) -> bool:
         """Whether DynamoDB persistence is active."""
         return self._enabled
+
+    def _record_write_failure(self, what: str, ident: str) -> None:
+        """Log a dropped write at ERROR and remember it for the health probe.
+
+        A silently-swallowed write means billing/usage/config data is lost with
+        no signal — the failure mode that made persistence dead-on-arrival. We
+        still don't raise (a provider call shouldn't 500 because Dynamo hiccuped),
+        but we log loudly and expose it via health_status() so ops can detect it.
+        """
+        self.last_write_error = f"{what} {ident}"
+        logger.error("Failed to persist %s %s to DynamoDB", what, ident, exc_info=True)
+
+    async def health_status(self) -> dict:
+        """Report persistence reachability for a health probe.
+
+        Returns {"enabled": bool, "reachable": bool, "table": str,
+        "last_write_error": str | None}. When enabled, performs a cheap
+        describe_table so a misconfigured/missing table or IAM denial surfaces
+        instead of silently dropping every write.
+        """
+        status = {
+            "enabled": self._enabled,
+            "table": self._table_name,
+            "last_write_error": self.last_write_error,
+            "reachable": None,
+        }
+        if not self._enabled:
+            return status
+
+        def _describe() -> bool:
+            import boto3
+
+            if self._dynamodb is None:
+                self._dynamodb = boto3.resource("dynamodb", region_name=self._region)
+            self._dynamodb.meta.client.describe_table(TableName=self._table_name)
+            return True
+
+        try:
+            status["reachable"] = await asyncio.to_thread(_describe)
+        except Exception as exc:
+            status["reachable"] = False
+            status["error"] = f"{type(exc).__name__}: {exc}"
+            logger.error(
+                "DynamoDB table %s not reachable: %s", self._table_name, exc, exc_info=True
+            )
+        return status
 
     def _get_table(self):
         """Lazily create the boto3 DynamoDB Table resource (thread-safe)."""
@@ -302,7 +358,7 @@ class DynamoPersistence:
         try:
             await asyncio.to_thread(_put)
         except Exception:
-            logger.warning("Failed to save usage record %s", record.request_id, exc_info=True)
+            self._record_write_failure("usage record", record.request_id)
 
     async def load_usage_records(self) -> list[UsageRecord]:
         """Scan DynamoDB for all usage records and deserialize them."""
@@ -351,7 +407,7 @@ class DynamoPersistence:
         try:
             await asyncio.to_thread(_put)
         except Exception:
-            logger.warning("Failed to save project %s", project.project_id, exc_info=True)
+            self._record_write_failure("project", project.project_id)
 
     async def load_projects(self) -> dict[str, Project]:
         """Scan DynamoDB for all projects and deserialize them."""
@@ -401,7 +457,7 @@ class DynamoPersistence:
         try:
             await asyncio.to_thread(_put)
         except Exception:
-            logger.warning("Failed to save user config for %s", user_id, exc_info=True)
+            self._record_write_failure("user config", user_id)
 
     async def load_user_configs(self) -> dict[str, dict]:
         """Scan DynamoDB for all user configs and deserialize them."""
@@ -478,7 +534,7 @@ class DynamoPersistence:
         try:
             await asyncio.to_thread(_put)
         except Exception:
-            logger.warning("Failed to save feedback record %s", record.request_id, exc_info=True)
+            self._record_write_failure("feedback record", record.request_id)
 
     async def load_feedback_records(self) -> list[FeedbackRecord]:
         if not self._enabled:
@@ -575,7 +631,7 @@ class DynamoPersistence:
         try:
             await asyncio.to_thread(_put)
         except Exception:
-            logger.warning("Failed to save API key %s", key.key_id, exc_info=True)
+            self._record_write_failure("API key", key.key_id)
 
     async def get_api_key_by_hash(self, key_hash: str) -> APIKey | None:
         if not self._enabled:
@@ -693,7 +749,7 @@ class DynamoPersistence:
         try:
             await asyncio.to_thread(_put)
         except Exception:
-            logger.warning("Failed to save policy node %s", node.node_id, exc_info=True)
+            self._record_write_failure("policy node", node.node_id)
 
     async def get_policy_node(self, node_id: str) -> PolicyNode | None:
         if not self._enabled:
