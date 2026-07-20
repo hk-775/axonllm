@@ -32,7 +32,7 @@ docker compose up
 ## Features
 
 ### Routing & Providers
-- **Multi-provider routing** — Bedrock, Anthropic, OpenAI, Azure, Vertex AI, Cohere
+- **Multi-provider routing** — 13 provider adapters: Bedrock, Bedrock Mantle, Anthropic, OpenAI, Azure, Vertex AI, Google AI, Cohere, AI21, Fireworks, Groq, Together, xAI
 - **5 routing strategies** — round-robin, weighted, least-latency, cost-optimized, smart (intent-aware)
 - **Ensemble routing** — scatter-gather-synthesize across a panel of models with configurable quorum
 - **Multi-region hub-and-spoke** — single-region, active-passive failover, or active-active with weighted distribution
@@ -56,7 +56,7 @@ docker compose up
 - **Admin RBAC** — admin endpoints require `admin` role or `admin:*` scope (ENFORCE mode)
 
 ### Observability
-- **Admin dashboard** — 9 pages: Overview, Efficiency, Projects, Users, Models, Policies, Hierarchy, Quotas, Regions, API Keys, Audit Trail, Webhooks, Configuration, Health
+- **Admin dashboard** — Sandbox, Overview, Traces, Efficiency, Audit Log, Models, Projects, Users, API Keys, Policies, Quotas, Regions, Webhooks, Health, Configuration, Architecture
 - **Token efficiency analytics** — detect waste, recommend cheaper models, score prompt quality
 - **Streaming** — SSE streaming for all providers with PII re-injection
 
@@ -65,11 +65,18 @@ docker compose up
 | Provider | Auth | Status |
 |----------|------|--------|
 | AWS Bedrock | AWS credentials (automatic) | Working |
+| AWS Bedrock Mantle | AWS credentials (automatic) | Working |
 | Anthropic | API key | Working |
 | OpenAI | API key | Working |
 | Azure OpenAI | API key | Adapter ready |
 | Google Vertex AI | GCP service account | Adapter ready |
+| Google AI (Gemini) | API key | Adapter ready |
 | Cohere | API key | Adapter ready |
+| AI21 | API key | Adapter ready |
+| Fireworks | API key | Adapter ready |
+| Groq | API key | Adapter ready |
+| Together | API key | Adapter ready |
+| xAI | API key | Adapter ready |
 
 ## Quick Start
 
@@ -218,7 +225,7 @@ Request → Auth (OIDC/API Key) → Quota Enforcement (policy hierarchy)
 6. **Access checks** — project and user model restrictions
 7. **Budget check** — project and user spend limits
 8. **Guardrails** — content policy evaluation
-9. **Cache** — semantic cache lookup
+9. **Cache** — exact-match response cache (SHA-256 of model + messages + params)
 10. **Region routing** — select spoke based on health, data residency, model availability
 11. **Provider routing** — strategy-based model selection + fallback
 12. **Response guardrails** — output filtering
