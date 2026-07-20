@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
 from src.gateway.models import FeedbackRecord
@@ -73,10 +73,19 @@ class FeedbackTracker:
         # Return the most recent records up to limit
         return filtered[-limit:]
 
+    @staticmethod
+    def _as_aware(ts: datetime) -> datetime:
+        """Coerce a timestamp to tz-aware UTC so comparisons never mix naive/aware.
+
+        Records may arrive with naive timestamps from older callers; the cutoff is
+        always aware. Comparing the two raises TypeError, so normalize before comparing.
+        """
+        return ts.replace(tzinfo=timezone.utc) if ts.tzinfo is None else ts
+
     def _prune(self) -> None:
         """Remove records older than retention period and trim to max_records."""
-        cutoff = datetime.utcnow() - timedelta(hours=self._retention_hours)
-        self._records = [r for r in self._records if r.timestamp >= cutoff]
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=self._retention_hours)
+        self._records = [r for r in self._records if self._as_aware(r.timestamp) >= cutoff]
 
         # Trim oldest records if over max
         if len(self._records) > self._max_records:

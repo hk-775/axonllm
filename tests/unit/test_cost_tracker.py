@@ -249,3 +249,42 @@ class TestGetAggregatedUsage:
         report = await tracker.get_aggregated_usage(UsageFilters(model="gpt-4"))
         assert report.total_requests == 1
         assert report.total_cost == pytest.approx(5.0)
+
+
+# ---------------------------------------------------------------------------
+# Regression (task #7) — time-window filters must tolerate mixed naive/aware
+# timestamps. Production now writes aware timestamps, but persisted/legacy
+# records may be naive and filter bounds may be either; comparing the two used
+# to raise TypeError in _apply_filters.
+# ---------------------------------------------------------------------------
+
+from datetime import timezone as _tz
+
+
+class TestMixedTimezoneFilters:
+    def _tracker_with_mixed_records(self):
+        tracker = CostTracker(_pricing_config())
+        tracker._records = [
+            _make_record(request_id="naive", timestamp=datetime.utcnow()),           # naive
+            _make_record(request_id="aware", timestamp=datetime.now(_tz.utc)),        # aware
+        ]
+        return tracker
+
+    def test_aware_start_bound_over_mixed_records(self):
+        tracker = self._tracker_with_mixed_records()
+        out = tracker._apply_filters(
+            UsageFilters(start_time=datetime(2020, 1, 1, tzinfo=_tz.utc))
+        )
+        assert len(out) == 2  # no TypeError, both pass the ancient lower bound
+
+    def test_naive_start_bound_over_mixed_records(self):
+        tracker = self._tracker_with_mixed_records()
+        out = tracker._apply_filters(UsageFilters(start_time=datetime(2020, 1, 1)))
+        assert len(out) == 2
+
+    def test_end_bound_over_mixed_records(self):
+        tracker = self._tracker_with_mixed_records()
+        out = tracker._apply_filters(
+            UsageFilters(end_time=datetime(2100, 1, 1, tzinfo=_tz.utc))
+        )
+        assert len(out) == 2
