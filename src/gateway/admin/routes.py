@@ -11,6 +11,8 @@ Provides Starlette routes for:
 
 from __future__ import annotations
 
+import csv
+import io
 import logging
 import pathlib
 import uuid
@@ -18,7 +20,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 
 from starlette.requests import Request
-from starlette.responses import HTMLResponse, JSONResponse
+from starlette.responses import HTMLResponse, JSONResponse, StreamingResponse
 from starlette.routing import Route
 
 _STATIC_DIR = pathlib.Path(__file__).resolve().parent / "static"
@@ -479,6 +481,106 @@ class AdminAPI:
                 for b in report.breakdown
             ],
         })
+
+    # ------------------------------------------------------------------
+    # GET /admin/usage/export
+    # ------------------------------------------------------------------
+
+    async def usage_export(self, request: Request):
+        """Export usage for chargeback/FinOps.
+
+        Same filters as /admin/usage, plus:
+          - format=csv (default) | json
+          - level=records (default, one row per request) | breakdown (aggregated)
+
+        `records` is the detail an owner needs to attribute spend per request;
+        `breakdown` is the aggregated summary (by provider/model/project/user).
+        CSV streams as a file attachment.
+        """
+        params = request.query_params
+        filters = UsageFilters(
+            start_time=_parse_datetime(params.get("start_time")),
+            end_time=_parse_datetime(params.get("end_time")),
+            provider=params.get("provider"),
+            model=params.get("model"),
+            project_id=params.get("project_id"),
+            user_id=params.get("user_id"),
+        )
+        fmt = (params.get("format") or "csv").lower()
+        level = (params.get("level") or "records").lower()
+        if fmt not in ("csv", "json"):
+            return JSONResponse(
+                {"error": {"type": "invalid_request", "message": "format must be csv or json"}},
+                status_code=400,
+            )
+        if level not in ("records", "breakdown"):
+            return JSONResponse(
+                {"error": {"type": "invalid_request", "message": "level must be records or breakdown"}},
+                status_code=400,
+            )
+
+        if level == "records":
+            columns = [
+                "request_id", "timestamp", "project_id", "user_id", "provider", "model",
+                "prompt_tokens", "completion_tokens", "total_tokens", "cached_tokens",
+                "cost", "latency_ms", "status", "routing_strategy",
+            ]
+            rows = [
+                {
+                    "request_id": r.request_id,
+                    "timestamp": r.timestamp.isoformat() if r.timestamp else "",
+                    "project_id": r.project_id,
+                    "user_id": r.user_id,
+                    "provider": r.provider,
+                    "model": r.model,
+                    "prompt_tokens": r.prompt_tokens,
+                    "completion_tokens": r.completion_tokens,
+                    "total_tokens": r.total_tokens,
+                    "cached_tokens": getattr(r, "cached_tokens", 0),
+                    "cost": r.cost,
+                    "latency_ms": getattr(r, "latency_ms", 0),
+                    "status": getattr(r, "status", "success"),
+                    "routing_strategy": getattr(r, "routing_strategy", ""),
+                }
+                for r in self.cost_tracker._apply_filters(filters)
+            ]
+        else:
+            report = await self.cost_tracker.get_aggregated_usage(filters)
+            columns = ["group_by", "group_key", "requests", "tokens", "cost"]
+            rows = [
+                {
+                    "group_by": b.group_by,
+                    "group_key": b.group_key,
+                    "requests": b.requests,
+                    "tokens": b.tokens,
+                    "cost": b.cost,
+                }
+                for b in report.breakdown
+            ]
+
+        if fmt == "json":
+            return JSONResponse({"level": level, "rows": rows})
+
+        # CSV as a streamed file attachment
+        def _csv_iter():
+            buf = io.StringIO()
+            writer = csv.DictWriter(buf, fieldnames=columns)
+            writer.writeheader()
+            yield buf.getvalue()
+            buf.seek(0)
+            buf.truncate(0)
+            for row in rows:
+                writer.writerow(row)
+                yield buf.getvalue()
+                buf.seek(0)
+                buf.truncate(0)
+
+        filename = f"axonllm-usage-{level}.csv"
+        return StreamingResponse(
+            _csv_iter(),
+            media_type="text/csv",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
 
     # ------------------------------------------------------------------
     # GET /admin/policies
@@ -1370,6 +1472,7 @@ def create_admin_routes(admin_api: AdminAPI) -> list[Route]:
         Route("/admin/projects/{id}", admin_api.get_project, methods=["GET"]),
         Route("/admin/projects/{id}", admin_api.update_project, methods=["PUT"]),
         Route("/admin/usage", admin_api.usage, methods=["GET"]),
+        Route("/admin/usage/export", admin_api.usage_export, methods=["GET"]),
         Route("/admin/users", admin_api.list_users, methods=["GET"]),
         Route("/admin/users/{id:path}/allowed-models", admin_api.set_user_allowed_models, methods=["PUT"]),
         Route("/admin/users/{id:path}/budget", admin_api.set_user_budget, methods=["PUT"]),

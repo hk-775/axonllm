@@ -237,6 +237,8 @@ Request → Auth (OIDC/API Key) → Quota Enforcement (policy hierarchy)
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
+| `/admin/usage` | GET | Aggregated usage (filters: `start_time`, `end_time`, `provider`, `model`, `project_id`, `user_id`) |
+| `/admin/usage/export` | GET | Export usage for chargeback. `format=csv` (default, file attachment) or `json`; `level=records` (per-request, default) or `breakdown` (aggregated). Same filters as `/admin/usage`. |
 | `/admin/quotas/{project_id}` | GET | Current quota state for a project |
 | `/admin/quotas/{project_id}/reset` | POST | Reset spend counter |
 | `/admin/quotas/simulate` | POST | Test if a request would be allowed |
