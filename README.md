@@ -120,6 +120,54 @@ curl -X POST http://localhost:8000/admin/quotas/simulate \
   -d '{"project_id": "proj:ml", "model": "claude-opus", "estimated_cost": 0.05}'
 ```
 
+### OpenAI-compatible endpoint — drop-in `base_url` swap
+
+AxonLLM exposes an OpenAI-compatible surface at `/v1`, so existing code that uses
+the OpenAI SDK can point at the gateway by changing only the `base_url` and the
+API key — no request/response reshaping. Routing, quotas, guardrails, and cost
+attribution all still apply.
+
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="http://localhost:8000/v1",   # AxonLLM instead of api.openai.com
+    api_key="axon_your_key_here",          # an AxonLLM API key (axon_...)
+)
+
+# Non-streaming
+resp = client.chat.completions.create(
+    model="claude-sonnet",
+    messages=[{"role": "user", "content": "Hello"}],
+)
+print(resp.choices[0].message.content)
+
+# Streaming
+for chunk in client.chat.completions.create(
+    model="claude-sonnet",
+    messages=[{"role": "user", "content": "Count to 3"}],
+    stream=True,
+):
+    print(chunk.choices[0].delta.content or "", end="")
+```
+
+Raw HTTP:
+
+```bash
+curl -X POST http://localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer axon_your_key_here' \
+  -d '{"model": "claude-sonnet", "messages": [{"role": "user", "content": "Hello"}]}'
+
+curl http://localhost:8000/v1/models \
+  -H 'Authorization: Bearer axon_your_key_here'
+```
+
+Attribution (user/project for quotas and cost) is taken from the authenticated
+API key, not the request body. Supported: `model`, `messages`, `temperature`,
+`max_tokens`, `stream`. Ensemble/smart-routing model names (e.g. `ensemble:quality`)
+work here too.
+
 ## Web Interfaces
 
 | Page | URL | Purpose |
