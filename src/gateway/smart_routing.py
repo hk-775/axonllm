@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
 from src.gateway.cost_tracker import CostTracker
 from src.gateway.feedback_tracker import FeedbackTracker
@@ -268,7 +268,7 @@ class SmartRoutingStrategy(RoutingStrategyBase):
         """Record a feedback entry for the routing decision."""
         feedback = FeedbackRecord(
             request_id=str(uuid.uuid4()),
-            timestamp=datetime.utcnow(),
+            timestamp=datetime.now(timezone.utc),
             task_type=decision.task_type,
             confidence=decision.confidence,
             selected_model=decision.selected_model,

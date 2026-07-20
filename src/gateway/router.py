@@ -291,7 +291,7 @@ class Router:
             completion_tokens=response.usage.completion_tokens,
             total_tokens=response.usage.total_tokens,
             cost=cost,
-            timestamp=datetime.datetime.utcnow(),
+            timestamp=datetime.datetime.now(datetime.timezone.utc),
             cached_tokens=response.usage.cached_tokens,
             cache_creation_tokens=response.usage.cache_creation_tokens,
         )

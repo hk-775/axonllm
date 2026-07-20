@@ -15,7 +15,7 @@ from __future__ import annotations
 import logging
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from src.gateway.models import (
@@ -294,7 +294,7 @@ class SemanticEfficiencyEngine:
                 optimal_model="unknown",
                 estimated_monthly_savings=0.0,
                 patterns=[],
-                updated_at=datetime.utcnow(),
+                updated_at=datetime.now(timezone.utc),
             )
             self._user_profiles[user_id] = profile
             return profile
@@ -335,7 +335,7 @@ class SemanticEfficiencyEngine:
             optimal_model=optimal_model,
             estimated_monthly_savings=round(estimated_savings, 2),
             patterns=patterns,
-            updated_at=datetime.utcnow(),
+            updated_at=datetime.now(timezone.utc),
         )
         self._user_profiles[user_id] = profile
         return profile

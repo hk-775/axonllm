@@ -9,7 +9,7 @@ import json
 import logging
 import os
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 
 from src.gateway.models import APIKey, FeedbackRecord, GuardrailRule, PolicyNode, Project, UsageRecord
@@ -278,7 +278,7 @@ class DynamoPersistence:
             retention_period_hours=int(item.get("retention_period_hours", 24)),
             rate_limit_rpm=int(item["rate_limit_rpm"]) if item.get("rate_limit_rpm") is not None else None,
             members=members,
-            created_at=datetime.fromisoformat(item["created_at"]) if "created_at" in item else datetime.utcnow(),
+            created_at=datetime.fromisoformat(item["created_at"]) if "created_at" in item else datetime.now(timezone.utc),
         )
 
     # --- UserConfig serialization ---
@@ -728,7 +728,7 @@ class DynamoPersistence:
             parent_id=item.get("parent_id"),
             display_name=item.get("display_name", item["node_id"]),
             limits=limits,
-            created_at=datetime.fromisoformat(item["created_at"]) if "created_at" in item else datetime.utcnow(),
+            created_at=datetime.fromisoformat(item["created_at"]) if "created_at" in item else datetime.now(timezone.utc),
         )
 
     async def save_policy_node(self, node: PolicyNode) -> None:

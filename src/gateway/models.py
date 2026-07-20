@@ -1,8 +1,17 @@
 """Core data models and types for the LLM-Router service."""
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
+
+
+def _utcnow() -> datetime:
+    """Timezone-aware UTC now — the default factory for created_at fields.
+
+    Aware (not naive datetime.utcnow()) so these timestamps compare and sort
+    cleanly against tz-aware timestamps produced elsewhere in the gateway.
+    """
+    return datetime.now(timezone.utc)
 
 
 # --- Enums ---
@@ -168,7 +177,7 @@ class Project:
     retention_period_hours: int = 24
     rate_limit_rpm: int | None = None
     members: list[str] = field(default_factory=list)
-    created_at: datetime = field(default_factory=datetime.utcnow)
+    created_at: datetime = field(default_factory=_utcnow)
 
 
 @dataclass
@@ -316,7 +325,7 @@ class APIKey:
     name: str
     scopes: list[str]
     created_by: str
-    created_at: datetime = field(default_factory=datetime.utcnow)
+    created_at: datetime = field(default_factory=_utcnow)
     expires_at: datetime | None = None
     revoked: bool = False
     revoked_at: datetime | None = None
@@ -332,7 +341,7 @@ class PolicyNode:
     parent_id: str | None
     display_name: str
     limits: dict = field(default_factory=dict)
-    created_at: datetime = field(default_factory=datetime.utcnow)
+    created_at: datetime = field(default_factory=_utcnow)
 
 
 @dataclass
