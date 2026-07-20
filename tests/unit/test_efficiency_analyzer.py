@@ -376,3 +376,39 @@ class TestTokenVelocity:
         report = analyzer.analyze_user("alice")
 
         assert report.metrics.token_velocity_per_hour == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Regression — mixed naive/aware timestamps must not crash
+# (usage records reach the analyzer from sources that write naive
+# datetime.utcnow() and tz-aware datetime.now(timezone.utc); comparing them
+# raised TypeError and 500'd /admin/efficiency — "Failed to load efficiency data")
+# ---------------------------------------------------------------------------
+
+
+class TestMixedTimezoneTimestamps:
+    def test_get_all_user_metrics_with_mixed_tz(self):
+        from datetime import timezone
+
+        records = [
+            _make_record(user_id="alice", timestamp=datetime.utcnow()),               # naive
+            _make_record(user_id="alice", timestamp=datetime.now(timezone.utc)),      # aware
+        ]
+        analyzer = EfficiencyAnalyzer(_build_tracker(records))
+        metrics = analyzer.get_all_user_metrics()  # must not raise
+        assert len(metrics) == 1
+        assert metrics[0].entity_id == "alice"
+
+    def test_analyze_user_velocity_and_duplicates_with_mixed_tz(self):
+        from datetime import timezone
+
+        naive = datetime.utcnow()
+        aware = datetime.now(timezone.utc)
+        records = [
+            _make_record(user_id="bob", timestamp=naive),
+            _make_record(user_id="bob", timestamp=aware),
+        ]
+        analyzer = EfficiencyAnalyzer(_build_tracker(records))
+        report = analyzer.analyze_user("bob")  # exercises velocity + duplicate helpers
+        assert report.metrics.total_requests == 2
+        assert report.metrics.token_velocity_per_hour >= 0.0

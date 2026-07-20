@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from src.gateway.models import (
@@ -24,6 +24,19 @@ if TYPE_CHECKING:
     from src.gateway.cost_tracker import CostTracker
 
 logger = logging.getLogger(__name__)
+
+
+def _as_aware(ts: datetime) -> datetime:
+    """Coerce a timestamp to timezone-aware UTC.
+
+    UsageRecords reach the analyzer from mixed sources — some write naive
+    timestamps (datetime.utcnow()), others tz-aware ones (datetime.now(timezone.utc),
+    or datetime.fromisoformat on persisted ISO strings). Comparing a naive and an
+    aware datetime raises TypeError, so normalize before any sort/subtraction.
+    """
+    if ts.tzinfo is None:
+        return ts.replace(tzinfo=timezone.utc)
+    return ts
 
 
 # ---------------------------------------------------------------------------
@@ -269,7 +282,7 @@ class EfficiencyAnalyzer:
         records: list[UsageRecord],
     ) -> list[EfficiencyAlert]:
         alerts: list[EfficiencyAlert] = []
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
 
         if metrics.completion_prompt_ratio < self._thresholds["low_completion_prompt_ratio"]:
             alerts.append(EfficiencyAlert(
@@ -503,7 +516,7 @@ class EfficiencyAnalyzer:
     def _compute_token_velocity(self, records: list[UsageRecord]) -> float:
         if len(records) < 2:
             return 0.0
-        timestamps = sorted(r.timestamp for r in records)
+        timestamps = sorted(_as_aware(r.timestamp) for r in records)
         time_span = (timestamps[-1] - timestamps[0]).total_seconds()
         if time_span <= 0:
             return 0.0
@@ -519,7 +532,7 @@ class EfficiencyAnalyzer:
         fingerprints: dict[str, list[datetime]] = defaultdict(list)
         for r in records:
             key = f"{r.model}:{r.prompt_tokens}:{r.completion_tokens}"
-            fingerprints[key].append(r.timestamp)
+            fingerprints[key].append(_as_aware(r.timestamp))
 
         duplicates = 0
         for key, timestamps in fingerprints.items():
