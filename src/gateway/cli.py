@@ -2,7 +2,6 @@
 
 import argparse
 import os
-import subprocess
 import sys
 from pathlib import Path
 
@@ -52,7 +51,7 @@ def cmd_chat(args):
                 print(f"\n\033[2m{usage.get('total_tokens', 0)} tokens\033[0m")
     except Exception as e:
         print(f"Error: {e}")
-        print(f"Is the server running? Try: axon serve")
+        print("Is the server running? Try: axon serve")
         sys.exit(1)
 
 
@@ -83,7 +82,7 @@ def main():
     sub = parser.add_subparsers(dest="command")
 
     # demo
-    p_demo = sub.add_parser("demo", help="Start server + generate real traffic for a live demo")
+    sub.add_parser("demo", help="Start server + generate real traffic for a live demo")
 
     # serve
     p_serve = sub.add_parser("serve", help="Start the AxonLLM gateway server")

@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 
 from starlette.applications import Starlette
 from starlette.requests import Request
@@ -488,7 +488,7 @@ def _apply_seed_data(
                 completion_tokens=ct,
                 total_tokens=pt + ct,
                 cost=s.get("cost", 0.0),
-                timestamp=datetime.utcnow(),
+                timestamp=datetime.now(timezone.utc),
                 cached_tokens=s.get("cached_tokens", 0),
                 cache_creation_tokens=s.get("cache_creation_tokens", 0),
             ))
