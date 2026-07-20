@@ -127,7 +127,7 @@ def test_create_admin_routes_returns_routes(admin_api):
     """Verify create_admin_routes returns a list of Route objects."""
     routes = create_admin_routes(admin_api)
     assert isinstance(routes, list)
-    assert len(routes) == 30
+    assert len(routes) == 31
 
     paths = [r.path for r in routes]
     assert "/admin/dashboard" in paths
@@ -751,3 +751,20 @@ class TestUsageExport:
         r = client.get("/admin/usage/export")
         assert r.status_code == 200
         assert len(r.text.strip().splitlines()) == 1  # header only
+
+
+# ── Static asset serving (task #10: vendored JS for air-gap) ────────
+
+class TestStaticAssets:
+    def test_serves_vendored_js(self, client):
+        r = client.get("/admin/static/vendor/react.production.min.js")
+        assert r.status_code == 200
+        assert "javascript" in r.headers["content-type"]
+
+    def test_missing_asset_404(self, client):
+        assert client.get("/admin/static/vendor/nope.js").status_code == 404
+
+    def test_traversal_is_blocked(self, client):
+        # Escape attempt must not read files outside the static dir.
+        assert client.get("/admin/static/..%2f..%2froutes.py").status_code == 404
+        assert client.get("/admin/static/../routes.py").status_code == 404

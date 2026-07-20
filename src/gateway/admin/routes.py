@@ -1405,6 +1405,44 @@ class AdminAPI:
         html = index_path.read_text(encoding="utf-8")
         return HTMLResponse(html)
 
+    # ------------------------------------------------------------------
+    # GET /admin/static/{path}
+    # ------------------------------------------------------------------
+
+    async def static_asset(self, request: Request):
+        """Serve vendored dashboard assets (React, Babel) from static/.
+
+        Vendored locally so the dashboard works in air-gapped / offline
+        deployments — no runtime dependency on unpkg.com. Path is confined to
+        the static dir to prevent traversal.
+        """
+        from starlette.responses import PlainTextResponse, Response
+
+        rel = request.path_params.get("path", "")
+        # Confine to _STATIC_DIR — reject anything that escapes it.
+        target = (_STATIC_DIR / rel).resolve()
+        try:
+            target.relative_to(_STATIC_DIR.resolve())
+        except ValueError:
+            return PlainTextResponse("Not found", status_code=404)
+        if not target.is_file():
+            return PlainTextResponse("Not found", status_code=404)
+
+        suffix = target.suffix.lower()
+        media_type = {
+            ".js": "application/javascript",
+            ".css": "text/css",
+            ".svg": "image/svg+xml",
+            ".woff2": "font/woff2",
+            ".woff": "font/woff",
+            ".html": "text/html",
+        }.get(suffix, "application/octet-stream")
+        return Response(
+            target.read_bytes(),
+            media_type=media_type,
+            headers={"Cache-Control": "public, max-age=3600"},
+        )
+
     async def architecture(self, request: Request) -> HTMLResponse:
         """Serve the architecture diagram as an SVG embedded in a full-page viewer."""
         svg_path = _PROJECT_ROOT / "docs" / "architecture.svg"
@@ -1460,6 +1498,7 @@ def create_admin_routes(admin_api: AdminAPI) -> list[Route]:
     """Return Starlette Route objects for the admin API."""
     return [
         Route("/admin/dashboard", admin_api.dashboard, methods=["GET"]),
+        Route("/admin/static/{path:path}", admin_api.static_asset, methods=["GET"]),
         Route("/admin/architecture", admin_api.architecture, methods=["GET"]),
         Route("/admin/overview", admin_api.overview, methods=["GET"]),
         Route("/admin/projects", admin_api.list_projects, methods=["GET"]),
