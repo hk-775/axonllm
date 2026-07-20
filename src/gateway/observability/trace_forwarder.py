@@ -158,12 +158,18 @@ class TraceForwarder:
     async def _deliver_http(self, event: dict[str, Any]) -> None:
         if not self._url:
             return
+        headers = {"Content-Type": "application/json"}
+        # Shared secret Ostiari requires when OSTIARI_INGEST_KEY is set on its side
+        # (control-plane traces ingest). Sent as X-Ingest-Key; omitted if unset.
+        ingest_key = os.environ.get("OSTIARI_INGEST_KEY", "").strip()
+        if ingest_key:
+            headers["X-Ingest-Key"] = ingest_key
         try:
             client = self._get_http_client()
             resp = await client.post(
                 self._url,
                 json=event,
-                headers={"Content-Type": "application/json"},
+                headers=headers,
                 timeout=float(os.environ.get("OSTIARI_TRACES_TIMEOUT", "3.0")),
             )
             if resp.status_code >= 400:

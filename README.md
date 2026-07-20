@@ -276,6 +276,7 @@ Request → Auth (OIDC/API Key) → Quota Enforcement (policy hierarchy)
 | `AXON_OIDC_AUDIENCE` | — | OIDC expected audience |
 | `OSTIARI_TRACES_URL` | — | When set, forward request traces to this Ostiari ingest URL (e.g. `http://control-plane:8000/api/traces/ingest`) |
 | `OSTIARI_GATEWAY_ID` | `axonllm` | Gateway identifier reported in Ostiari's Live Traces |
+| `OSTIARI_INGEST_KEY` | — | Shared secret sent as `X-Ingest-Key` when Ostiari's ingest endpoint requires auth |
 | `OSTIARI_TRACES_TIMEOUT` | `3.0` | Per-request timeout (seconds) for trace forwarding |
 
 ### Models

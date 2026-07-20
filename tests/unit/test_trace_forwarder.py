@@ -126,6 +126,22 @@ class TestHttpDelivery:
         assert call.args[0] == "http://cp:8000/api/traces/ingest"
         assert call.kwargs["json"]["action"] == "chat.completion"
         assert call.kwargs["json"]["params"]["cost"] == 0.0123
+        # No ingest key configured → no X-Ingest-Key header.
+        assert "X-Ingest-Key" not in call.kwargs["headers"]
+
+    def test_sends_ingest_key_header_when_configured(self, monkeypatch):
+        monkeypatch.setenv("OSTIARI_INGEST_KEY", "s3cret")
+        fwd = TraceForwarder(url="http://cp:8000/api/traces/ingest")
+        mock_client = MagicMock()
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_client.post = AsyncMock(return_value=mock_resp)
+        fwd._http_client = mock_client
+
+        asyncio.run(fwd.forward(_record()))
+
+        headers = mock_client.post.call_args.kwargs["headers"]
+        assert headers["X-Ingest-Key"] == "s3cret"
 
     def test_http_failure_is_swallowed(self):
         fwd = TraceForwarder(url="http://cp:8000/api/traces/ingest")
