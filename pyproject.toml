@@ -37,16 +37,24 @@ dev = [
 ]
 
 [project.scripts]
-axon = "gateway.cli:main"
-axon-demo = "gateway.cli:demo"
+axon = "src.gateway.cli:main"
+axon-demo = "src.gateway.cli:demo"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+# Put the repo root on sys.path so `import src.gateway...` resolves without
+# relying on the CWD happening to be the repo root.
+pythonpath = ["."]
 
 [build-system]
 requires = ["setuptools>=68.0"]
 build-backend = "setuptools.build_meta"
 
+# The codebase imports everything as `src.gateway.*` (65 modules), so the
+# installed package root is `src`. Package it explicitly rather than via
+# find(where=["src"]) — the latter installs a top-level `gateway` that then
+# fails on its own internal `from src.gateway...` imports when run out-of-tree.
 [tool.setuptools.packages.find]
-where = ["src"]
+where = ["."]
+include = ["src*"]

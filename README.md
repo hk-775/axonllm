@@ -94,10 +94,31 @@ AXON_LOAD_DEMO_DATA=true python serve_dashboard.py
 
 Open http://localhost:8000/admin/dashboard.
 
+The dev server (`serve_dashboard.py`) runs in `LOG_ONLY` mode, so local requests
+work **without** an API key. Any non-dev deployment defaults to `ENFORCE` (see
+[Environment Variables](#environment-variables)) and requires one.
+
+### Get an API key
+
+Under `ENFORCE`, every request needs an `axon_` key. Mint the first one from the
+CLI — this works in-process and does **not** require an existing admin credential
+(so there's no chicken-and-egg):
+
+```bash
+axon issue-key --project my-project --name my-first-key
+# → axon_xxxxxxxx…   (shown once — store it)
+```
+
+For the key to be recognized by a running server, persistence must be enabled and
+pointed at the same table the server uses (`LLM_ROUTER_DYNAMODB_ENABLED=true`,
+`AXON_DYNAMODB_TABLE=…`); the CLI warns if it isn't. Pass the key as
+`Authorization: Bearer <key>` or `X-Api-Key: <key>`, or export `AXON_API_KEY` for
+the `axon chat` / `axon models` commands.
+
 ### Try it
 
 ```bash
-# Simple chat
+# Simple chat (drop the -H line when hitting the LOG_ONLY dev server)
 curl -X POST http://localhost:8000/api/chat \
   -H 'Content-Type: application/json' \
   -H 'X-Api-Key: axon_your_key_here' \
