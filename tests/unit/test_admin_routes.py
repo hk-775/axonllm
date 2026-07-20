@@ -127,7 +127,7 @@ def test_create_admin_routes_returns_routes(admin_api):
     """Verify create_admin_routes returns a list of Route objects."""
     routes = create_admin_routes(admin_api)
     assert isinstance(routes, list)
-    assert len(routes) == 29
+    assert len(routes) == 30
 
     paths = [r.path for r in routes]
     assert "/admin/dashboard" in paths
@@ -689,3 +689,65 @@ class TestVirtualModelCRUD:
         resp = client.delete("/admin/models/nonexistent")
         assert resp.status_code == 404
         assert "not found" in resp.json()["error"]["message"].lower()
+
+
+# ── Usage export (task #9) ──────────────────────────────────────────
+
+class TestUsageExport:
+    def _seed(self, cost_tracker):
+        cost_tracker._records = [
+            _make_usage_record(project_id="proj-a", user_id="alice", provider="openai", model="gpt-4"),
+            _make_usage_record(project_id="proj-a", user_id="bob", provider="openai", model="gpt-4"),
+            _make_usage_record(project_id="proj-b", user_id="carol", provider="anthropic", model="claude-3"),
+        ]
+
+    def test_csv_records_is_attachment_with_header(self, client, cost_tracker):
+        self._seed(cost_tracker)
+        r = client.get("/admin/usage/export")
+        assert r.status_code == 200
+        assert "text/csv" in r.headers["content-type"]
+        assert 'attachment; filename="axonllm-usage-records.csv"' in r.headers["content-disposition"]
+        lines = r.text.strip().splitlines()
+        assert lines[0].startswith("request_id,timestamp,project_id,user_id,provider,model")
+        assert len(lines) - 1 == 3  # header + 3 rows
+
+    def test_csv_breakdown(self, client, cost_tracker):
+        self._seed(cost_tracker)
+        r = client.get("/admin/usage/export?level=breakdown")
+        assert r.status_code == 200
+        assert r.text.strip().splitlines()[0] == "group_by,group_key,requests,tokens,cost"
+
+    def test_json_records(self, client, cost_tracker):
+        self._seed(cost_tracker)
+        r = client.get("/admin/usage/export?format=json&level=records")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["level"] == "records"
+        assert len(body["rows"]) == 3
+        assert {"request_id", "project_id", "user_id", "cost", "total_tokens"} <= set(body["rows"][0])
+
+    def test_json_breakdown(self, client, cost_tracker):
+        self._seed(cost_tracker)
+        r = client.get("/admin/usage/export?format=json&level=breakdown")
+        assert r.status_code == 200
+        assert all({"group_by", "group_key", "requests", "cost"} <= set(row) for row in r.json()["rows"])
+
+    def test_filter_by_project(self, client, cost_tracker):
+        self._seed(cost_tracker)
+        r = client.get("/admin/usage/export?format=json&project_id=proj-a")
+        assert r.status_code == 200
+        assert len(r.json()["rows"]) == 2  # only proj-a
+
+    def test_invalid_format_400(self, client, cost_tracker):
+        self._seed(cost_tracker)
+        assert client.get("/admin/usage/export?format=xml").status_code == 400
+
+    def test_invalid_level_400(self, client, cost_tracker):
+        self._seed(cost_tracker)
+        assert client.get("/admin/usage/export?level=bogus").status_code == 400
+
+    def test_empty_export_is_header_only(self, client, cost_tracker):
+        cost_tracker._records = []
+        r = client.get("/admin/usage/export")
+        assert r.status_code == 200
+        assert len(r.text.strip().splitlines()) == 1  # header only
