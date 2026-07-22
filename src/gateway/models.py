@@ -78,12 +78,19 @@ class ChatCompletionResponse:
 
 @dataclass
 class StreamChunk:
-    """A single chunk in a streaming completion response."""
+    """A single chunk in a streaming completion response.
+
+    ``usage`` is populated on the final chunk when the provider reports token
+    counts in-stream (OpenAI ``stream_options.include_usage``; Anthropic
+    ``message_delta``). It drives accurate end-of-stream cost accounting; when
+    absent the gateway estimates from the accumulated text.
+    """
 
     id: str
     choices: list[dict]
     model: str
     is_final: bool = False
+    usage: TokenUsage | None = None
 
 
 # --- Model Registry & Pricing ---
