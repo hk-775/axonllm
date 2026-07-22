@@ -60,15 +60,40 @@ class AuditAPI:
         })
 
     async def verify_integrity(self, request: Request) -> JSONResponse:
-        """GET /admin/audit/verify"""
-        is_valid = self.audit_trail.verify_chain()
-        total_records = len(self.audit_trail._buffer)
+        """GET /admin/audit/verify[?durable=true][&project_id=]
 
+        Default verifies the in-memory buffer. ``durable=true`` verifies the
+        persisted chain (detects tampering with stored rows / cross-restart gaps).
+        """
+        durable = request.query_params.get("durable", "").lower() in ("1", "true", "yes")
+        if durable:
+            result = await self.audit_trail.verify_persisted_chain(
+                project_id=request.query_params.get("project_id"))
+            return JSONResponse(content={
+                "scope": "durable",
+                "chain_valid": result["valid"],
+                "checked": result.get("checked", 0),
+                "broken_at": result.get("broken_at"),
+                "reason": result.get("reason"),
+                "status": "intact" if result["valid"] else "TAMPERED",
+            })
+        is_valid = self.audit_trail.verify_chain()
         return JSONResponse(content={
+            "scope": "buffer",
             "chain_valid": is_valid,
-            "total_records_in_buffer": total_records,
+            "total_records_in_buffer": len(self.audit_trail._buffer),
             "status": "intact" if is_valid else "TAMPERED",
         })
+
+    async def export_records(self, request: Request) -> JSONResponse:
+        """GET /admin/audit/export[?project_id=]
+
+        Full audit history (durable store when enabled, else buffer) as JSON with
+        chain hashes, for SIEM / S3 / offline verification.
+        """
+        records = await self.audit_trail.export_records(
+            project_id=request.query_params.get("project_id"))
+        return JSONResponse(content={"count": len(records), "records": records})
 
     async def get_stats(self, request: Request) -> JSONResponse:
         """GET /admin/audit/stats"""
@@ -130,6 +155,7 @@ def create_audit_routes(audit_api: AuditAPI) -> list[Route]:
     return [
         Route("/admin/audit/records", audit_api.query_records, methods=["GET"]),
         Route("/admin/audit/verify", audit_api.verify_integrity, methods=["GET"]),
+        Route("/admin/audit/export", audit_api.export_records, methods=["GET"]),
         Route("/admin/audit/stats", audit_api.get_stats, methods=["GET"]),
         Route("/admin/audit/security", audit_api.get_security_events, methods=["GET"]),
     ]
