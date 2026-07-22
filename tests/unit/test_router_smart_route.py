@@ -129,8 +129,9 @@ class TestSmartRoute:
         )
         # Verify request.model was updated
         assert request.model == "claude-sonnet"
-        # Verify factory.create was called with the updated request
-        mock_factory.create.assert_called_once_with(request)
+        # Verify factory.create was called with the updated request (spoke=None
+        # in the single-region default).
+        mock_factory.create.assert_called_once_with(request, spoke=None)
         # Verify response is correct
         assert response.provider == "anthropic"
         assert decision.task_type == "coding"

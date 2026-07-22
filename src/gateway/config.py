@@ -146,6 +146,7 @@ class AppConfig:
     demo_seed_config_path: str = "config/demo_seed.yaml"
     catalog_config_path: str = "config/catalog.yaml"
     ensemble_config_path: str = "config/ensemble.yaml"
+    spokes_config_path: str = "config/spokes.yaml"
     load_demo_data: bool = False
     oidc_issuer: str = ""
     oidc_audience: str = ""

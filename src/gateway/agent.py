@@ -443,12 +443,16 @@ class GatewayAgent:
 
         # 10. Route and execute
         _request_start = time.perf_counter()
+        # Multi-region: the selected spoke overrides the provider endpoint/region
+        # for the actual call (not just response metadata). None → default region.
+        target_spoke = region_decision.target_spoke if region_decision is not None else None
         try:
             prompt_caching_enabled = project.prompt_caching_enabled if project else False
 
             if self.provider_fn_factory is not None:
                 provider_fn = self.provider_fn_factory.create(
                     request, prompt_caching_enabled=prompt_caching_enabled,
+                    spoke=target_spoke,
                 )
             else:
                 provider_fn = self._make_provider_fn()
@@ -582,7 +586,7 @@ class GatewayAgent:
                         _rate_limit_headers, resolved_policy, pii_mapping,
                         request_id, _request_start,
                         preferred_provider=None, effective_allowed=effective_allowed,
-                        smart_routing_decision=smart_decision,
+                        smart_routing_decision=smart_decision, spoke=target_spoke,
                     )
                 response, smart_routing_decision = await self.router.smart_route(
                     request,
@@ -591,6 +595,7 @@ class GatewayAgent:
                     allowed_models=effective_allowed,
                     project_id=req_ctx.project_id,
                     user_id=req_ctx.user_id,
+                    spoke=target_spoke,
                 )
             else:
                 # TRUE STREAMING (#18): direct single-model streaming opens the
@@ -602,7 +607,7 @@ class GatewayAgent:
                         request_id, _request_start,
                         preferred_provider=context.get("provider"),
                         effective_allowed=effective_allowed,
-                        smart_routing_decision=None,
+                        smart_routing_decision=None, spoke=target_spoke,
                     )
                 response = await self.router.execute_with_fallback(
                     request, provider_fn,
@@ -845,6 +850,7 @@ class GatewayAgent:
         preferred_provider: str | None,
         effective_allowed: list[str] | None,
         smart_routing_decision: Any = None,
+        spoke: Any = None,
     ) -> AsyncIterator[dict]:
         """Real end-to-end streaming (#18): one provider call, first token ASAP.
 
@@ -882,7 +888,7 @@ class GatewayAgent:
                 open_errors.append({"provider": mapping.provider, "message": "skipped (unhealthy)"})
                 continue
             adapter = factory._adapter_registry.get(mapping.provider)
-            config = factory._provider_configs.get(mapping.provider)
+            config = factory.config_for(mapping.provider, spoke)  # region override
             if adapter is None or config is None:
                 open_errors.append({"provider": mapping.provider, "message": "no adapter/config"})
                 continue

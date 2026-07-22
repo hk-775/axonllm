@@ -206,12 +206,13 @@ class Router:
         allowed_models: set[str] | None = None,
         project_id: str | None = None,
         user_id: str | None = None,
+        spoke=None,
     ) -> tuple[ChatCompletionResponse, SmartRoutingDecision]:
         """Smart routing: select model, then execute with fallback.
 
         1. Call smart_strategy.select_model() to pick the best model
         2. Update request.model to the selected model
-        3. Create provider_fn for the selected model
+        3. Create provider_fn for the selected model (region-spoke aware)
         4. Call execute_with_fallback() with the selected model
         5. If all providers for that model fail, fall back to the default model
         6. Return response + decision metadata
@@ -223,7 +224,7 @@ class Router:
             prompt, allowed_models, project_id, user_id,
         )
         request.model = decision.selected_model
-        provider_fn = provider_fn_factory.create(request)
+        provider_fn = provider_fn_factory.create(request, spoke=spoke)
         try:
             response = await self.execute_with_fallback(
                 request, provider_fn, allowed_models=allowed_models,
@@ -234,7 +235,7 @@ class Router:
             if decision.selected_model == default_model:
                 raise
             request.model = default_model
-            provider_fn = provider_fn_factory.create(request)
+            provider_fn = provider_fn_factory.create(request, spoke=spoke)
             decision = SmartRoutingDecision(
                 task_type=decision.task_type,
                 confidence=decision.confidence,

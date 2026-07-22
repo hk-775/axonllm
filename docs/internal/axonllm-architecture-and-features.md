@@ -262,9 +262,25 @@ Step 9; a hit short-circuits the provider call (cost $0). Off unless configured.
 
 **RegionRouter** (step 9.5) selects the target **spoke** by: (1) **data residency**
 (strict mode + user residency constraint), (2) **health** (drop unhealthy/draining
-spokes via **SpokeHealthMonitor**), (3) **model availability** on the spoke.
-Config in `multi_region/region_config.py` (hub + spokes). `default_single_region`
-for the common one-region case.
+spokes via **SpokeHealthMonitor**), (3) **model availability** on the spoke, then
+weighted/failover selection.
+
+The selection is **wired end-to-end** (not just response metadata): the chosen
+spoke's `endpoint` overrides the provider `base_url` for that request, and its
+`region` rewrites the AWS SigV4 credential region — so Bedrock/Mantle calls use a
+boto3 client bound to the spoke's region and HTTP providers hit the spoke's
+endpoint. Threaded through the direct, smart-routing, and streaming paths (the
+`ProviderFnFactory`/`MultiProviderFactory` `config_for()` + region-bound
+provider fns). Ensemble fan-out stays on the default region.
+
+**SpokeHealthMonitor** runs as a background task (started by the app lifespan
+when >1 spoke is configured; single-region skips it), checking each spoke's
+`health_check_url` and flipping status after N consecutive failures.
+
+**Config:** `config/spokes.yaml` (`AXON_SPOKES_CONFIG`) → `HubConfig` via
+`spoke_loader.load_hub_config`; absent/empty/malformed falls back to
+`default_single_region`, so single-region deploys need no config and multi-region
+is purely additive.
 
 ---
 
