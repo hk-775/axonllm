@@ -112,6 +112,30 @@ class AuditTrail:
             logger.warning("Could not reload audit chain head; starting from genesis",
                            exc_info=True)
 
+    def initialize_sync(self) -> None:
+        """Loop-safe startup init for bootstrap (works standalone AND embedded).
+
+        Standalone (no running loop): run initialize() to completion now.
+        Embedded (called from within a running event loop, e.g. Ostiari builds
+        the agent inside its request handler): don't call asyncio.run — that
+        raises "cannot be called from a running event loop". Instead schedule
+        initialize() as a background task on the running loop so the chain head
+        still reloads without blocking or crashing the build.
+        """
+        if self._initialized or not (self._persistence and self._persistence.enabled):
+            # Nothing to load — mark done so record() doesn't re-check.
+            self._initialized = self._initialized or not (
+                self._persistence and self._persistence.enabled)
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop is not None and loop.is_running():
+            loop.create_task(self.initialize())   # embedded: defer to the live loop
+        else:
+            asyncio.run(self.initialize())         # standalone: run now
+
     async def record(
         self,
         event_type: AuditEventType,

@@ -103,3 +103,39 @@ async def test_export_from_buffer_when_no_persistence():
     rows = await a.export_records()
     assert len(rows) == 1
     assert rows[0]["record_hash"] and rows[0]["prev_hash"] == "genesis"
+
+
+async def test_initialize_sync_is_loop_safe_when_embedded():
+    """Embedded case (Ostiari builds the agent inside a running loop) +
+    persistence on: initialize_sync must NOT raise (no asyncio.run in a live
+    loop); it defers the reload to the running loop."""
+    p = FakePersistence()
+    seed = AuditTrail(persistence=p)
+    await seed.record(AuditEventType.LLM_REQUEST, "u", "proj", "r1", {})
+    head = p.rows[-1]["record_hash"]
+
+    a = AuditTrail(persistence=p)
+    a.initialize_sync()                 # called from within this running loop
+    import asyncio
+    await asyncio.sleep(0.05)           # let the deferred task run
+    assert a._last_hash == head
+
+
+def test_initialize_sync_standalone_no_loop():
+    """Standalone case (no running loop): initialize_sync runs to completion."""
+    import asyncio
+
+    p = FakePersistence()
+    asyncio.run(AuditTrail(persistence=p).record(
+        AuditEventType.LLM_REQUEST, "u", "proj", "r1", {}))
+    head = p.rows[-1]["record_hash"]
+
+    a = AuditTrail(persistence=p)
+    a.initialize_sync()                 # no running loop → runs now
+    assert a._last_hash == head
+
+
+def test_initialize_sync_no_persistence():
+    a = AuditTrail(persistence=None)
+    a.initialize_sync()                 # no crash, stays genesis
+    assert a._last_hash == "genesis"
