@@ -1,9 +1,9 @@
 """Sliding window rate limiter for user-level and project-level limits."""
 
-import asyncio
 from datetime import datetime, timedelta, timezone
 
 from src.gateway.models import RateLimitConfig, RateLimitResult
+from src.gateway.striped_lock import StripedLock
 
 
 class SlidingWindowRateLimiter:
@@ -21,7 +21,11 @@ class SlidingWindowRateLimiter:
         # Separate timestamp stores: key -> list of datetime
         self._user_requests: dict[str, list[datetime]] = {}
         self._project_requests: dict[str, list[datetime]] = {}
-        self._lock = asyncio.Lock()
+        # Per-key locks instead of one global lock. A check touches both a user
+        # bucket and a project bucket, so we lock BOTH keys (namespaced so a user
+        # id can't collide with a project id) via multi() in canonical order —
+        # different (user, project) pairs proceed concurrently, deadlock-free.
+        self._locks = StripedLock()
 
     def _cleanup(self, timestamps: list[datetime], cutoff: datetime) -> list[datetime]:
         """Remove timestamps older than the cutoff."""
@@ -35,7 +39,7 @@ class SlidingWindowRateLimiter:
         Checks both user-level and project-level limits.
         Returns allow/deny with limit, remaining, and reset metadata.
         """
-        async with self._lock:
+        async with self._locks.multi(f"u:{user_id}", f"p:{project_id}"):
             now = datetime.now(timezone.utc)
             window = timedelta(seconds=self.config.window_seconds)
             cutoff = now - window

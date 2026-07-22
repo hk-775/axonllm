@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import datetime
+import random
 import time
 from typing import TYPE_CHECKING, Awaitable, Callable
 
@@ -162,14 +163,30 @@ class Router:
             self.max_retries = retry_config.max_retries
             self.base_delay = retry_config.base_delay
             self.cooldown_seconds = retry_config.cooldown_seconds
+            self._jitter = retry_config.jitter
             self._retryable = retry_config.retryable_status_codes
             self._non_retryable = retry_config.non_retryable_status_codes
         else:
             self.max_retries = max_retries
             self.base_delay = base_delay
             self.cooldown_seconds = cooldown_seconds
+            self._jitter = DEFAULT_CONFIG.retry.jitter
             self._retryable = DEFAULT_CONFIG.retry.retryable_status_codes
             self._non_retryable = DEFAULT_CONFIG.retry.non_retryable_status_codes
+
+    def _backoff_delay(self, attempt: int) -> float:
+        """Exponential backoff with jitter for retry ``attempt`` (0-based).
+
+        Full delay is ``base_delay * 2**attempt``; jitter randomizes the lower
+        ``jitter`` fraction of it so concurrent clients retrying the same failed
+        provider don't resynchronize into a thundering herd. jitter=0 → fixed.
+        """
+        full = self.base_delay * (2 ** attempt)
+        j = self._jitter
+        if j <= 0:
+            return full
+        # Draw from [(1-j)*full, full] — "equal jitter".
+        return random.uniform(full * (1.0 - j), full)
 
     def _get_strategy(self, model: str) -> RoutingStrategyBase:
         """Look up the routing strategy for a model."""
@@ -556,8 +573,7 @@ class Router:
 
                 if exc.status_code in self._retryable:
                     if attempt < self.max_retries:
-                        delay = self.base_delay * (2 ** attempt)
-                        await asyncio.sleep(delay)
+                        await asyncio.sleep(self._backoff_delay(attempt))
                 else:
                     attempts.append(
                         {

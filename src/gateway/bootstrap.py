@@ -230,11 +230,9 @@ def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComp
         )
         projects.update(loaded_projects)
         user_configs.update(loaded_user_configs)
-        existing_ids = {r.request_id for r in cost_tracker._records}
-        for rec in loaded_records:
-            if rec.request_id not in existing_ids:
-                cost_tracker._records.append(rec)
-                existing_ids.add(rec.request_id)
+        # Rehydrate via load_records so the running spend counters (which back
+        # budget checks) are seeded from history, not just the record list.
+        cost_tracker.load_records(loaded_records)
 
     # --- Smart routing components ---
     leaderboard = ModelLeaderboard()
