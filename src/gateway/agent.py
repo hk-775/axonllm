@@ -142,6 +142,7 @@ class GatewayAgent:
         event_dispatcher: EventDispatcher | None = None,
         region_router: RegionRouter | None = None,
         trace_forwarder: TraceForwarder | None = None,
+        otlp_exporter: Any = None,
     ) -> None:
         self.router = router
         self.rate_limiter = rate_limiter
@@ -162,6 +163,7 @@ class GatewayAgent:
         self._event_dispatcher = event_dispatcher
         self._region_router = region_router
         self._trace_forwarder = trace_forwarder
+        self._otlp_exporter = otlp_exporter
 
     # ------------------------------------------------------------------
     # Public API
@@ -709,6 +711,15 @@ class GatewayAgent:
             # and is a no-op when Ostiari isn't detected.
             if self._trace_forwarder is not None:
                 await self._trace_forwarder.forward(usage_record)
+
+            # Native OTLP span export — STANDALONE path only. When embedded in
+            # Ostiari (trace_forwarder "detected" it), Ostiari emits the span with
+            # its governance signal, so we suppress here to avoid a double-export
+            # (exactly one span per request in either mode).
+            if self._otlp_exporter is not None and not (
+                self._trace_forwarder is not None and self._trace_forwarder.enabled
+            ):
+                self._otlp_exporter.export_usage(usage_record)
 
             # Record spend in quota enforcer for hierarchy budget tracking
             if self._quota_enforcer is not None:
@@ -1328,6 +1339,8 @@ def create_gateway_agent(
     audit_trail: AuditTrail | None = None,
     event_dispatcher: EventDispatcher | None = None,
     region_router: RegionRouter | None = None,
+    trace_forwarder: TraceForwarder | None = None,
+    otlp_exporter: Any = None,
 ) -> GatewayAgent:
     """Create and wire a GatewayAgent, also setting the module-level singleton."""
     global _agent
@@ -1349,6 +1362,8 @@ def create_gateway_agent(
         audit_trail=audit_trail,
         event_dispatcher=event_dispatcher,
         region_router=region_router,
+        trace_forwarder=trace_forwarder,
+        otlp_exporter=otlp_exporter,
     )
     _agent = agent
     return agent

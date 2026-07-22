@@ -28,12 +28,19 @@ Issues = "https://github.com/axonllm/axonllm/issues"
 Documentation = "https://github.com/axonllm/axonllm#readme"
 
 [project.optional-dependencies]
+# Native OTLP span export (standalone observability). Opt-in at deploy time
+# via OTEL_EXPORTER_OTLP_ENDPOINT; the exporter degrades to a no-op if absent.
+otel = [
+    "opentelemetry-exporter-otlp-proto-http>=1.20",
+]
 dev = [
     "hypothesis>=6.100.0",
     "httpx>=0.25.0",
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
     "pytest-mock>=3.12.0",
+    # so CI exercises the OTLP span-mapping path
+    "opentelemetry-exporter-otlp-proto-http>=1.20",
 ]
 
 [project.scripts]
