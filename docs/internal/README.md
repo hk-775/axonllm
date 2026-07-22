@@ -1,11 +1,21 @@
 # Internal docs — NOT for open-source distribution
 
-The material in this directory is **internal sales / competitive collateral**. It is
-intentionally kept out of the published product surface:
+The material in this directory is **internal engineering + sales / competitive
+collateral**. It is intentionally kept out of the published product surface:
 
 - Do not link to it from the public `README.md` or user-facing docs.
 - Do not include it in release artifacts or marketing pages.
 - It is not part of the Python package (`pyproject.toml` packages only `src*`).
+
+## Contents
+
+- **`axonllm-architecture-and-features.md`** — architecture & feature reference
+  (what each feature is, why, and the request/data flow). The engineering source
+  of truth; kept in sync as features land.
+- **`REVIEW-TODO.md`** — remediation backlog from the product/security review:
+  what's completed, what's human-only (#1 key rotation), and what's deploy-coupled.
+- **`Competitive-Analysis.md`**, **`Competitive-Battle-Card.md`** — competitive
+  collateral (accuracy rules below).
 
 ## Accuracy rules for competitive material
 

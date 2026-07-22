@@ -234,7 +234,12 @@ provider call: the response is not fetched blocking-then-chunked.
     response (no PII plaintext held in memory). The hierarchy resolver treats
     "reinject off" as the more-private setting: once a parent disables it, a
     child cannot re-enable.
-- **AuditTrail** (`security/audit_trail.py`) — records each request (step 11.6).
+- **AuditTrail** (`security/audit_trail.py`) — hash-chained, append-only record of
+  each request (step 11.6). The chain head **reloads from the durable store on
+  startup** (`initialize`/loop-safe `initialize_sync`), so continuity survives
+  restarts; `verify_persisted_chain` re-checks the **durable** rows (detects
+  content tampering *and* row removal/reorder), and `/admin/audit/export` streams
+  the full history (with chain hashes) for SIEM / S3 / offline verification.
 - **EventDispatcher** — security/webhook event fan-out.
 
 ---
