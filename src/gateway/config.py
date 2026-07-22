@@ -20,6 +20,10 @@ class RetryConfig:
     max_retries: int = 3
     base_delay: float = 1.0
     cooldown_seconds: int = 60
+    # Fraction of the backoff delay that is randomized, to avoid synchronized
+    # retry storms (thundering herd). 0.0 = no jitter (fixed exponential),
+    # 0.5 = delay drawn from [0.5, 1.0] * base*2**attempt.
+    jitter: float = 0.5
     retryable_status_codes: frozenset[int] = frozenset({429, 500, 502, 503, 504})
     non_retryable_status_codes: frozenset[int] = frozenset({400, 401, 403})
 

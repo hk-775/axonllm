@@ -172,6 +172,10 @@ provider call: the response is not fetched blocking-then-chunked.
 
 - **CostTracker** — per-request `UsageRecord` (real input/output tokens, model,
   provider, cost from the pricing table); the spine of budgets + analytics.
+  Budget checks read **running per-project/per-user spend counters** (O(1)), not
+  a sum over the record list — and the counters are authoritative, so trimming
+  the in-memory record cap no longer under-counts spend. Rehydrate from
+  persisted history via `load_records()`.
 - **EfficiencyAnalyzer** (Level 1) — ratio heuristics over UsageRecords (e.g.
   expensive-model-on-cheap-task, output/input ratios) to flag waste.
 - **SemanticEfficiencyEngine** — deeper semantic efficiency signals.
@@ -185,6 +189,14 @@ provider call: the response is not fetched blocking-then-chunked.
   `cap_max_tokens`). Step 2.7.
 - **SlidingWindowRateLimiter** — per-key RPM window (step 3), local or Redis-backed.
 - Project/user **access + budget** checks (steps 4–7) gate model use and spend.
+- **Concurrency:** both the rate limiter and quota enforcer shard their state
+  behind **per-key locks** (`StripedLock`), so requests for different
+  projects/users don't serialize on one global lock. The rate limiter locks both
+  the user and project key (in canonical order, deadlock-free) since a check
+  mutates both buckets.
+- **Retries** use exponential backoff **with jitter** (`RetryConfig.jitter`,
+  default 0.5 → delay drawn from `[(1-j), 1]·base·2^attempt`) to avoid
+  synchronized retry storms against a failing provider.
 
 ---
 

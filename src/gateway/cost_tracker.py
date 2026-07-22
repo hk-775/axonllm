@@ -43,6 +43,12 @@ class CostTracker:
     ):
         self.pricing_config = pricing_config
         self._records: list[UsageRecord] = []
+        # Running spend counters keyed by project_id / user_id. These are the
+        # AUTHORITATIVE source for budget checks: O(1) instead of summing the
+        # whole record list, and they survive record-list trimming (which used
+        # to drop the oldest 50k records and silently under-count budgets).
+        self._project_spend: defaultdict[str, float] = defaultdict(float)
+        self._user_spend: defaultdict[str, float] = defaultdict(float)
         self._budgets: dict[str, dict] = budgets or {}
         self._user_budgets: dict[str, dict] = {}
         self._persistence = persistence
@@ -85,9 +91,7 @@ class CostTracker:
         budget_limit: float | None = budget_info.get("budget_limit")
         alert_threshold: float | None = budget_info.get("alert_threshold")
 
-        current_spend = sum(
-            r.cost for r in self._records if r.user_id == user_id
-        )
+        current_spend = self._user_spend.get(user_id, 0.0)
 
         is_over_budget = (
             budget_limit is not None and current_spend >= budget_limit
@@ -170,9 +174,35 @@ class CostTracker:
     # Usage recording
     # ------------------------------------------------------------------
 
+    def _bump_spend(self, usage: UsageRecord) -> None:
+        """Add one record's cost to the running spend counters."""
+        if usage.project_id:
+            self._project_spend[usage.project_id] += usage.cost
+        if usage.user_id:
+            self._user_spend[usage.user_id] += usage.cost
+
+    def load_records(self, records: list[UsageRecord]) -> None:
+        """Rehydrate the in-memory store from persisted usage records.
+
+        Appends records (de-duped by request_id) AND updates the running spend
+        counters, so budgets are correct after a restart. Use this instead of
+        appending to ``_records`` directly — a raw append would leave the
+        counters (which back budget checks) stale.
+        """
+        existing = {r.request_id for r in self._records}
+        for rec in records:
+            if rec.request_id in existing:
+                continue
+            self._records.append(rec)
+            existing.add(rec.request_id)
+            self._bump_spend(rec)
+
     async def record_usage(self, usage: UsageRecord) -> None:
         """Persist a usage record to the in-memory store."""
         self._records.append(usage)
+        # Counters are authoritative for budgets, so update them BEFORE any
+        # trimming — trimming the record list must not lose spend.
+        self._bump_spend(usage)
         if len(self._records) > self.MAX_RECORDS:
             self._records = self._records[-(self.MAX_RECORDS // 2):]
 
@@ -216,9 +246,7 @@ class CostTracker:
         budget_limit: float | None = budget_info.get("budget_limit")
         alert_threshold: float | None = budget_info.get("alert_threshold")
 
-        current_spend = sum(
-            r.cost for r in self._records if r.project_id == project_id
-        )
+        current_spend = self._project_spend.get(project_id, 0.0)
 
         is_over_budget = (
             budget_limit is not None and current_spend >= budget_limit

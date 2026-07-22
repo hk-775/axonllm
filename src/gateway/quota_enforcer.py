@@ -10,10 +10,11 @@ Takes a ResolvedPolicy (from the hierarchy walk) and enforces:
 
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
+
+from src.gateway.striped_lock import StripedLock
 
 if TYPE_CHECKING:
     from src.gateway.models import ResolvedPolicy
@@ -46,7 +47,9 @@ class QuotaEnforcer:
         self._spend_tracker: dict[str, float] = {}
         self._alerted_thresholds: dict[str, set[float]] = {}
         self._alert_callbacks: list = []
-        self._lock = asyncio.Lock()
+        # Per-project locks: rate-limit and spend state are keyed by project_id,
+        # so a single global lock needlessly serialized unrelated projects.
+        self._locks = StripedLock()
 
     def on_budget_alert(self, callback) -> None:
         """Register a callback for budget threshold alerts.
@@ -62,7 +65,7 @@ class QuotaEnforcer:
         if policy.rate_limit_rpm is None:
             return QuotaDecision(allowed=True)
 
-        async with self._lock:
+        async with self._locks.acquire(project_id):
             now = datetime.now(timezone.utc)
             window = timedelta(seconds=60)
             cutoff = now - window
@@ -187,7 +190,7 @@ class QuotaEnforcer:
 
     async def record_spend(self, project_id: str, cost: float, budget_limit: float | None = None) -> None:
         """Record spend for budget tracking. Fires alerts at threshold crossings."""
-        async with self._lock:
+        async with self._locks.acquire(project_id):
             prev = self._spend_tracker.get(project_id, 0.0)
             new_spend = prev + cost
             self._spend_tracker[project_id] = new_spend
