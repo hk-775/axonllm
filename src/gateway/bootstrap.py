@@ -36,6 +36,7 @@ from src.gateway.multi_region.region_config import default_single_region
 from src.gateway.multi_region.region_router import RegionRouter
 from src.gateway.quota_enforcer import QuotaEnforcer
 from src.gateway.middleware.security import SecurityMiddleware
+from src.gateway.observability.otlp_exporter import OTLPSpanExporter
 from src.gateway.observability.trace_forwarder import TraceForwarder
 from src.gateway.security.audit_trail import AuditTrail
 from src.gateway.security.event_dispatcher import EventDispatcher
@@ -168,6 +169,10 @@ def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComp
     # set, or an in-process sink registered via observability.trace_forwarder). No-op
     # for standalone AxonLLM.
     trace_forwarder = TraceForwarder()
+    # Native OTLP span export for the STANDALONE deploy (opt-in via
+    # OTEL_EXPORTER_OTLP_ENDPOINT). Suppressed by the agent when embedded in
+    # Ostiari — Ostiari emits the governance span there. No-op if OTEL SDK absent.
+    otlp_exporter = OTLPSpanExporter()
 
     # --- Budget threshold alerting ---
     def _budget_alert(project_id, threshold_pct, current_spend, budget_limit):
@@ -295,6 +300,7 @@ def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComp
         event_dispatcher=event_dispatcher,
         region_router=region_router,
         trace_forwarder=trace_forwarder,
+        otlp_exporter=otlp_exporter,
     )
 
     # --- Efficiency analysis ---

@@ -225,11 +225,25 @@ for the common one-region case.
 
 ## 12. Observability & the Ostiari tie-in
 
+Two complementary paths, chosen automatically by whether AxonLLM is embedded:
+
 - **TraceForwarder** (`observability/trace_forwarder.py`) — maps each `UsageRecord`
-  to a trace event and forwards it. Notably it can forward to **Ostiari**
-  (`_ostiari_url`) — so AxonLLM usage shows up in Ostiari's trace pipeline — and
-  to registered **Sinks** (OTLP / Langfuse / LangSmith / Arize style).
-- Standard OTEL spans + Prometheus metrics on the standalone server.
+  to Ostiari's trace-event shape and forwards it to an **embedding Ostiari** (via
+  an in-process sink registered with `register_sink()`, or HTTP to
+  `OSTIARI_TRACES_URL`). Ostiari then emits the OTEL span with its governance
+  signal (risk tier, decision, session parent grouping). No-op standalone.
+- **OTLPSpanExporter** (`observability/otlp_exporter.py`) — the **standalone**
+  OTEL path. Opt-in via `OTEL_EXPORTER_OTLP_ENDPOINT`; maps each `UsageRecord` to
+  one OTEL span (`gen_ai.request.model`, `gen_ai.usage.*`, plus `axon.*` for
+  provider/cost/routing) and ships it over OTLP. Spans go through a
+  `BatchSpanProcessor` (background thread) so a down collector never blocks the
+  request. Degrades to a no-op if the OTEL SDK isn't installed (`pip install
+  'axonllm[otel]'`).
+- **No double-export:** the agent calls the native exporter only when the
+  TraceForwarder is *not* "Ostiari-detected". Standalone → native span; embedded
+  → Ostiari owns the span. Exactly one span per request in either mode. Both use
+  the same deterministic id scheme, so a request that traverses both layers
+  correlates to one trace.
 
 ---
 

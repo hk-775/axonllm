@@ -4,8 +4,9 @@ Provides structured JSON log emission for requests, failures, and startup,
 with per-project log level support. Log entries include a ``trace_id`` field
 when one is supplied on the entry, so an upstream tracing system can correlate
 logs — but this module does not itself emit OpenTelemetry spans or depend on
-the opentelemetry SDK. (Real distributed tracing is tracked as a separate
-enhancement.)
+the opentelemetry SDK. OTEL span export lives in
+``observability/otlp_exporter.py`` (standalone) and ``observability/
+trace_forwarder.py`` (embedded in Ostiari).
 """
 
 import json
@@ -21,8 +22,8 @@ class GatewayLogger:
 
     Emits JSON-formatted log entries for processed requests, provider failures,
     and startup configuration summaries. Supports per-project log levels and
-    passes through a ``trace_id`` field when present for log correlation (no
-    OpenTelemetry span emission — see module docstring).
+    passes through a ``trace_id`` field when present for log correlation
+    (OTEL span emission lives in observability/, not here — see module docstring).
     """
 
     def __init__(self, default_level: str = DEFAULT_CONFIG.logging.default_level):
