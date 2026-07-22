@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import time
 import warnings
 from datetime import datetime, timezone
@@ -16,9 +17,11 @@ from src.gateway.models import (
     ChatCompletionResponse,
     EnsemblePreset,
     Project,
+    ProviderModelMapping,
     RequestContext,
     ResolvedPolicy,
     StreamChunk,
+    TokenUsage,
     UsageRecord,
 )
 from src.gateway.rate_limiter import SlidingWindowRateLimiter
@@ -46,6 +49,9 @@ if TYPE_CHECKING:
     from src.gateway.security.event_dispatcher import EventDispatcher
     from src.gateway.security.injection_detector import PromptInjectionDetector
     from src.gateway.security.pii_redactor import PIIRedactor, RedactionMapping
+
+
+logger = logging.getLogger("gateway.agent")
 
 
 # ---------------------------------------------------------------------------
@@ -562,6 +568,22 @@ class GatewayAgent:
                     per_call_cost_estimate=per_call,
                 )
             elif self._is_smart_routing_request(request, context):
+                # TRUE STREAMING (#18): for a streaming smart request, resolve the
+                # model WITHOUT a blocking call, then open the provider stream so
+                # the first token flows immediately. Non-streaming keeps the
+                # execute-then-return path.
+                if request.stream and self._can_stream_true():
+                    smart_decision = await self.router._smart_strategy.select_model(
+                        prompt, effective_allowed, req_ctx.project_id, req_ctx.user_id,
+                    )
+                    request.model = smart_decision.selected_model
+                    return self._stream_true(
+                        request, context, req_ctx, prompt_caching_enabled,
+                        _rate_limit_headers, resolved_policy, pii_mapping,
+                        request_id, _request_start,
+                        preferred_provider=None, effective_allowed=effective_allowed,
+                        smart_routing_decision=smart_decision,
+                    )
                 response, smart_routing_decision = await self.router.smart_route(
                     request,
                     self.provider_fn_factory,
@@ -571,6 +593,17 @@ class GatewayAgent:
                     user_id=req_ctx.user_id,
                 )
             else:
+                # TRUE STREAMING (#18): direct single-model streaming opens the
+                # provider stream directly — no blocking call, no double billing.
+                if request.stream and self._can_stream_true():
+                    return self._stream_true(
+                        request, context, req_ctx, prompt_caching_enabled,
+                        _rate_limit_headers, resolved_policy, pii_mapping,
+                        request_id, _request_start,
+                        preferred_provider=context.get("provider"),
+                        effective_allowed=effective_allowed,
+                        smart_routing_decision=None,
+                    )
                 response = await self.router.execute_with_fallback(
                     request, provider_fn,
                     preferred_provider=context.get("provider"),
@@ -771,6 +804,264 @@ class GatewayAgent:
     # ------------------------------------------------------------------
     # Streaming
     # ------------------------------------------------------------------
+
+    def _can_stream_true(self) -> bool:
+        """True when the real end-to-end streaming path is usable.
+
+        Requires a ProviderFnFactory (owns the HttpClient.execute_streaming SSE
+        path). Without one we fall back to the old select-then-simulate path.
+        """
+        return self.provider_fn_factory is not None
+
+    def _resolve_stream_chain(
+        self, model: str, preferred_provider: str | None,
+    ) -> list[ProviderModelMapping]:
+        """Ordered provider mappings to try when opening the stream.
+
+        Mirrors execute_with_fallback's ordering: a preferred provider first,
+        then remaining providers by fallback_order — but for the streaming path
+        we only fall back BEFORE the first byte reaches the client.
+        """
+        chain = self.router.get_fallback_chain(model)
+        if preferred_provider:
+            chain = sorted(
+                chain,
+                key=lambda m: (m.provider != preferred_provider, m.fallback_order),
+            )
+        return chain
+
+    async def _stream_true(
+        self,
+        request: ChatCompletionRequest,
+        context: dict,
+        req_ctx: RequestContext,
+        prompt_caching_enabled: bool,
+        rate_limit_headers: dict[str, str] | None,
+        resolved_policy: ResolvedPolicy | None,
+        pii_mapping: RedactionMapping | None,
+        request_id: str,
+        request_start: float,
+        *,
+        preferred_provider: str | None,
+        effective_allowed: list[str] | None,
+        smart_routing_decision: Any = None,
+    ) -> AsyncIterator[dict]:
+        """Real end-to-end streaming (#18): one provider call, first token ASAP.
+
+        Opens the provider SSE stream directly (no prior blocking call), relays
+        each chunk as it arrives (with PII re-injection), accumulates the text
+        and token usage, and runs cost / audit / trace / session accounting once
+        the stream completes. Provider fallback applies only while opening the
+        stream; after the first byte a mid-stream failure surfaces as a stream
+        error (a switch is impossible once the client has received bytes).
+        """
+        factory = self.provider_fn_factory
+        assert factory is not None
+
+        # Access-list enforcement (execute_with_fallback did this for the
+        # blocking path; smart routing already filtered by effective_allowed).
+        if (
+            smart_routing_decision is None
+            and effective_allowed is not None
+            and request.model not in effective_allowed
+        ):
+            yield {"data": {"error": {"type": "forbidden",
+                    "message": f"Model '{request.model}' is not allowed",
+                    "code": "model_not_allowed"}}}
+            yield {"data": "[DONE]"}
+            return
+
+        chain = self._resolve_stream_chain(request.model, preferred_provider)
+
+        # --- Open the stream, falling back across providers pre-first-byte ---
+        stream = None
+        chosen = None
+        open_errors: list[dict] = []
+        for mapping in chain:
+            if not self.router.health_tracker.is_healthy(mapping.provider):
+                open_errors.append({"provider": mapping.provider, "message": "skipped (unhealthy)"})
+                continue
+            adapter = factory._adapter_registry.get(mapping.provider)
+            config = factory._provider_configs.get(mapping.provider)
+            if adapter is None or config is None:
+                open_errors.append({"provider": mapping.provider, "message": "no adapter/config"})
+                continue
+            # google_ai uses a distinct SSE shape not handled by execute_streaming.
+            if mapping.provider == "google_ai":
+                open_errors.append({"provider": mapping.provider, "message": "streaming unsupported"})
+                continue
+            try:
+                candidate = factory._http_client.execute_streaming(
+                    request, mapping, adapter, config,
+                    prompt_caching_enabled=prompt_caching_enabled,
+                )
+                # Prime the generator to surface a pre-stream provider error
+                # (non-2xx) here, so we can still fall back to the next provider.
+                first_chunk = await candidate.__anext__()
+                stream, chosen = candidate, mapping
+                break
+            except StopAsyncIteration:
+                stream, chosen, first_chunk = candidate, mapping, None
+                break
+            except Exception as exc:  # noqa: BLE001 — try the next provider
+                open_errors.append({"provider": mapping.provider, "message": str(exc)})
+                self.router.health_tracker.mark_unhealthy(
+                    mapping.provider, getattr(self.router, "cooldown_seconds", 60))
+                continue
+
+        if chosen is None:
+            yield {"data": {"error": {"type": "provider_error",
+                    "message": f"All providers failed to start streaming: {open_errors}",
+                    "code": "all_providers_exhausted"}}}
+            yield {"data": "[DONE]"}
+            return
+
+        # --- Relay chunks; accumulate text + usage for end-of-stream accounting ---
+        if rate_limit_headers:
+            yield {"_rate_limit_headers": rate_limit_headers}
+
+        pii_buffer: dict = {"pending": ""}
+        accumulated: list[str] = []
+        final_usage: TokenUsage | None = None
+        stream_status = "success"
+        response_model = chosen.model_id
+
+        async def _emit(chunk: StreamChunk):
+            nonlocal final_usage, response_model
+            if chunk.usage is not None:
+                final_usage = self._merge_stream_usage(final_usage, chunk.usage)
+            if chunk.model:
+                response_model = chunk.model
+            for ch in chunk.choices:
+                delta = ch.get("delta", {})
+                c = delta.get("content", "")
+                if isinstance(c, str) and c:
+                    accumulated.append(c)
+            # A usage-only trailing chunk (OpenAI include_usage) has empty
+            # choices — capture its usage above but don't emit an empty SSE chunk.
+            if not chunk.choices:
+                return None
+            chunk_dict = self._chunk_to_dict(chunk)
+            if pii_mapping and pii_mapping.redacted_count > 0:
+                chunk_dict = self._reinject_chunk_pii(chunk_dict, pii_mapping, pii_buffer)
+            return {"data": chunk_dict}
+
+        try:
+            if first_chunk is not None:
+                out = await _emit(first_chunk)
+                if out is not None:
+                    yield out
+                # Keep consuming to the end of the SSE stream. We do NOT stop on
+                # is_final: providers that report usage in-stream (OpenAI) send
+                # the usage chunk AFTER the finish_reason chunk, and we need it
+                # for accurate end-of-stream cost accounting.
+                async for chunk in stream:
+                    out = await _emit(chunk)
+                    if out is not None:
+                        yield out
+        except Exception as exc:  # noqa: BLE001 — after first byte, no fallback
+            stream_status = "error"
+            yield {"data": {"error": {"type": "stream_error", "message": str(exc)}}}
+        finally:
+            await self._finalize_stream(
+                request=request, req_ctx=req_ctx, request_id=request_id,
+                request_start=request_start, resolved_policy=resolved_policy,
+                pii_mapping=pii_mapping, provider=chosen.provider,
+                model=request.model, response_model=response_model,
+                text="".join(accumulated), usage=final_usage, status=stream_status,
+            )
+            yield {"data": "[DONE]"}
+
+    def _merge_stream_usage(
+        self, current: TokenUsage | None, incoming: TokenUsage,
+    ) -> TokenUsage:
+        """Merge usage across stream events (Anthropic splits input/output).
+
+        Takes the max of each field so a later event's cumulative counts win,
+        while a field only one event reports (input on message_start, output on
+        message_delta) is preserved.
+        """
+        if current is None:
+            return incoming
+        prompt = max(current.prompt_tokens, incoming.prompt_tokens)
+        completion = max(current.completion_tokens, incoming.completion_tokens)
+        return TokenUsage(
+            prompt_tokens=prompt,
+            completion_tokens=completion,
+            total_tokens=prompt + completion,
+            cached_tokens=max(current.cached_tokens, incoming.cached_tokens),
+            cache_creation_tokens=max(
+                current.cache_creation_tokens, incoming.cache_creation_tokens),
+        )
+
+    async def _finalize_stream(
+        self, *, request, req_ctx, request_id, request_start, resolved_policy,
+        pii_mapping, provider, model, response_model, text, usage, status,
+    ) -> None:
+        """End-of-stream accounting: usage, cost, audit, trace, OTLP, quota.
+
+        Mirrors the non-streaming steps 11.6/12 exactly, but on the accumulated
+        stream result. When the provider didn't report usage, estimate tokens
+        from the prompt + accumulated text via tiktoken (flagged approximate).
+        """
+        approximate = usage is None
+        if usage is None:
+            prompt_text = " ".join(
+                m.get("content", "") for m in (request.messages or [])
+                if isinstance(m, dict) and isinstance(m.get("content"), str)
+            )
+            try:
+                prompt_tokens = await self.cost_tracker.estimate_tokens(prompt_text, model)
+                completion_tokens = await self.cost_tracker.estimate_tokens(text, model)
+            except Exception:  # noqa: BLE001 — estimation must never fail the stream
+                prompt_tokens = completion_tokens = 0
+            usage = TokenUsage(
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=prompt_tokens + completion_tokens,
+            )
+
+        # Audit trail (step 11.6 parity)
+        if self._audit_trail is not None:
+            await self._audit_trail.record_llm_request(
+                user_id=req_ctx.user_id, project_id=req_ctx.project_id,
+                request_id=request_id, model=response_model, provider=provider,
+                message_count=len(request.messages or []),
+                pii_redacted_count=pii_mapping.redacted_count if pii_mapping else 0,
+                injection_score=0.0,
+            )
+
+        # Cost tracking (step 12 parity)
+        cost = self.cost_tracker.calculate_cost(
+            provider, model, usage.prompt_tokens, usage.completion_tokens,
+            cached_tokens=usage.cached_tokens,
+            cache_creation_tokens=usage.cache_creation_tokens,
+        )
+        latency_ms = (time.perf_counter() - request_start) * 1000
+        usage_record = UsageRecord(
+            request_id=request_id, project_id=req_ctx.project_id, user_id=req_ctx.user_id,
+            provider=provider, model=model,
+            prompt_tokens=usage.prompt_tokens, completion_tokens=usage.completion_tokens,
+            total_tokens=usage.total_tokens, cost=cost,
+            timestamp=datetime.now(timezone.utc),
+            cached_tokens=usage.cached_tokens,
+            cache_creation_tokens=usage.cache_creation_tokens,
+            latency_ms=latency_ms, status=status, routing_strategy="stream",
+        )
+        await self.cost_tracker.record_usage(usage_record)
+
+        if self._trace_forwarder is not None:
+            await self._trace_forwarder.forward(usage_record)
+        if self._otlp_exporter is not None and not (
+            self._trace_forwarder is not None and self._trace_forwarder.enabled
+        ):
+            self._otlp_exporter.export_usage(usage_record)
+        if self._quota_enforcer is not None:
+            budget_limit = resolved_policy.budget_limit if resolved_policy else None
+            await self._quota_enforcer.record_spend(
+                req_ctx.project_id, cost, budget_limit=budget_limit)
+        if approximate:
+            logger.debug("stream usage estimated (provider reported none) req=%s", request_id)
 
     async def _stream_response(
         self,

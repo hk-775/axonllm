@@ -195,6 +195,22 @@ class TestTranslateStreamChunk:
         chunk = adapter.translate_stream_chunk(raw)
         assert chunk.is_final is False
 
+    def test_message_start_carries_input_usage(self, adapter):
+        raw = {"type": "message_start", "message": {
+            "id": "m1", "model": "claude-sonnet",
+            "usage": {"input_tokens": 42, "output_tokens": 0,
+                      "cache_read_input_tokens": 8}}}
+        chunk = adapter.translate_stream_chunk(raw)
+        assert chunk.usage is not None
+        assert chunk.usage.prompt_tokens == 42
+        assert chunk.usage.cached_tokens == 8
+
+    def test_message_delta_carries_output_usage(self, adapter):
+        raw = {"type": "message_delta", "usage": {"input_tokens": 42, "output_tokens": 17}}
+        chunk = adapter.translate_stream_chunk(raw)
+        assert chunk.usage is not None
+        assert chunk.usage.completion_tokens == 17
+
 
 # --- list_models ---
 

@@ -3,7 +3,7 @@
 import logging
 
 from src.gateway.adapters.anthropic_style import AnthropicStyleAdapter
-from src.gateway.models import ModelInfo, StreamChunk
+from src.gateway.models import ModelInfo, StreamChunk, TokenUsage
 
 logger = logging.getLogger(__name__)
 
@@ -23,14 +23,39 @@ class AnthropicAdapter(AnthropicStyleAdapter):
     _MODELS = _ANTHROPIC_MODELS
 
     def translate_stream_chunk(self, chunk: dict) -> StreamChunk:
-        """Anthropic streaming uses message_start with nested message.id/model."""
+        """Anthropic streaming uses message_start with nested message.id/model.
+
+        Usage arrives in two events: ``message_start`` carries input_tokens (and
+        cache tokens) in message.usage; ``message_delta`` carries the cumulative
+        output_tokens. We attach whatever usage the event carries; the agent's
+        end-of-stream accumulator merges input+output across the stream.
+        """
         chunk_type = chunk.get("type", "")
         delta_content = ""
         is_final = False
+        usage = None
 
         if chunk_type == "content_block_delta":
             delta = chunk.get("delta", {})
             delta_content = delta.get("text", "")
+        elif chunk_type == "message_start":
+            u = chunk.get("message", {}).get("usage", {}) or {}
+            if u:
+                usage = TokenUsage(
+                    prompt_tokens=u.get("input_tokens", 0),
+                    completion_tokens=u.get("output_tokens", 0),
+                    total_tokens=u.get("input_tokens", 0) + u.get("output_tokens", 0),
+                    cached_tokens=u.get("cache_read_input_tokens", 0),
+                    cache_creation_tokens=u.get("cache_creation_input_tokens", 0),
+                )
+        elif chunk_type == "message_delta":
+            u = chunk.get("usage", {}) or {}
+            if u:
+                usage = TokenUsage(
+                    prompt_tokens=u.get("input_tokens", 0),
+                    completion_tokens=u.get("output_tokens", 0),
+                    total_tokens=u.get("input_tokens", 0) + u.get("output_tokens", 0),
+                )
         elif chunk_type == "message_stop":
             is_final = True
 
@@ -55,4 +80,5 @@ class AnthropicAdapter(AnthropicStyleAdapter):
                 else chunk.get("model", "")
             ),
             is_final=is_final,
+            usage=usage,
         )

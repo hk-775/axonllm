@@ -133,6 +133,39 @@ google_ai, cohere, groq, fireworks, together, ai21, xai, mantle**. Each adapter
 translates the unified `ChatCompletionRequest` to the provider's API and back.
 `HttpClient` handles transport (incl. streaming).
 
+### Streaming (true end-to-end)
+
+For a streaming **direct** or **smart-routed** request the gateway opens the
+provider SSE stream directly and relays chunks as they arrive — the first token
+reaches the client without waiting for the full completion. There is **one**
+provider call: the response is not fetched blocking-then-chunked.
+
+- **Model selection without execution:** smart routing resolves the model via
+  `select_model()` (no blocking call), then the stream opens on the chosen model.
+- **Fallback is pre-first-byte only:** the provider chain is tried while opening
+  the stream; once the first byte is sent, a mid-stream failure surfaces as a
+  stream error (a provider switch is impossible after the client has bytes). The
+  non-streaming path keeps full fallback.
+- **End-of-stream accounting:** text and token usage are accumulated as chunks
+  flow; cost / audit / trace / OTLP / quota all run once the stream completes —
+  identical bookkeeping to the non-streaming path.
+- **Usage:** providers are asked to report usage in-stream (OpenAI
+  `stream_options.include_usage`; Anthropic `message_start`/`message_delta`
+  already carry it). The OpenAI usage chunk arrives *after* the finish_reason
+  chunk, so the stream is drained fully rather than stopping on `is_final`. When
+  a provider reports nothing, tokens are estimated from the accumulated text via
+  tiktoken (flagged approximate).
+- **PII re-injection** works across real chunk boundaries via the same buffering
+  used elsewhere (a `[EMAIL_1]` token split across two chunks is reassembled).
+- **Ensemble** is unchanged: it withholds output until the judge/best-single
+  result is ready (it inherently cannot stream mid-panel), then streams the final
+  result. `google_ai` uses a distinct SSE shape and falls back to the buffered
+  path. Without a `ProviderFnFactory` the gateway keeps the legacy
+  select-then-simulate behavior.
+- **Embedded in Ostiari:** the embed calls AxonLLM with `stream=False` (Ostiari
+  terminates/governs/re-originates streaming at its own layer), so this path is
+  standalone-only — the embed is unaffected.
+
 ---
 
 ## 5. Cost tracking & efficiency

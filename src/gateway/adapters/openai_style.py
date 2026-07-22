@@ -52,6 +52,9 @@ class OpenAIStyleAdapter(ProviderAdapter):
             payload["stop"] = request.stop
         if request.stream:
             payload["stream"] = True
+            # Ask the provider to include a final usage chunk so end-of-stream
+            # cost accounting uses real token counts (else we estimate).
+            payload["stream_options"] = {"include_usage": True}
 
         return payload
 
@@ -76,11 +79,27 @@ class OpenAIStyleAdapter(ProviderAdapter):
         choices = chunk.get("choices", [])
         is_final = bool(choices and choices[-1].get("finish_reason") is not None)
 
+        # With stream_options.include_usage, OpenAI sends a trailing chunk that
+        # has empty choices and a populated usage object. Treat it as final and
+        # attach the token counts for end-of-stream cost accounting.
+        usage = None
+        usage_data = chunk.get("usage")
+        if usage_data:
+            prompt_tokens = usage_data.get("prompt_tokens", 0)
+            completion_tokens = usage_data.get("completion_tokens", 0)
+            usage = TokenUsage(
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=usage_data.get("total_tokens", prompt_tokens + completion_tokens),
+            )
+            is_final = True
+
         return StreamChunk(
             id=chunk.get("id", ""),
             choices=choices,
             model=chunk.get("model", ""),
             is_final=is_final,
+            usage=usage,
         )
 
     async def list_models(self) -> list[ModelInfo]:

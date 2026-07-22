@@ -209,8 +209,11 @@ class HttpClient:
                     chunk = adapter.translate_stream_chunk(parsed)
                     yield chunk
 
-                    if chunk.is_final:
-                        return
+                    # NB: do NOT stop on chunk.is_final. Providers that report
+                    # usage in-stream (OpenAI stream_options.include_usage) send
+                    # the usage chunk AFTER the finish_reason chunk, so returning
+                    # on is_final would drop it. Read until the SSE [DONE]
+                    # sentinel (above) or the connection closes.
         except ProviderError:
             raise
         except aiohttp.ClientError as exc:

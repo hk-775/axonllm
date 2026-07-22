@@ -155,6 +155,23 @@ class TestTranslateStreamChunk:
         assert chunk.is_final is False
         assert chunk.choices == []
 
+    def test_usage_chunk_from_include_usage(self, adapter):
+        # stream_options.include_usage → trailing chunk with empty choices + usage.
+        raw = {"id": "x", "choices": [], "model": "gpt-4o",
+               "usage": {"prompt_tokens": 30, "completion_tokens": 12, "total_tokens": 42}}
+        chunk = adapter.translate_stream_chunk(raw)
+        assert chunk.is_final is True
+        assert chunk.usage is not None
+        assert chunk.usage.prompt_tokens == 30 and chunk.usage.completion_tokens == 12
+
+    async def test_stream_request_sets_include_usage(self, adapter):
+        from src.gateway.models import ChatCompletionRequest
+        req = ChatCompletionRequest(messages=[{"role": "user", "content": "hi"}],
+                                    model="gpt-4o", stream=True)
+        payload = await adapter.translate_request(req)
+        assert payload["stream"] is True
+        assert payload["stream_options"] == {"include_usage": True}
+
 
 # --- list_models ---
 
