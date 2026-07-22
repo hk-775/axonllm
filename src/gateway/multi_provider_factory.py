@@ -6,7 +6,9 @@
 
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Awaitable, Callable
+from typing import TYPE_CHECKING
 
 from src.gateway.adapters.ai21_adapter import AI21Adapter
 from src.gateway.adapters.anthropic_adapter import AnthropicAdapter
@@ -32,6 +34,9 @@ from src.gateway.models import (
 )
 from src.gateway.provider_config import ProviderConfig
 from src.gateway.router import ProviderError
+
+if TYPE_CHECKING:
+    from src.gateway.multi_region.region_config import SpokeConfig
 
 
 class MultiProviderFactory:
@@ -63,6 +68,7 @@ class MultiProviderFactory:
 
         self._provider_configs = provider_configs or {}
         self._http_client = HttpClient()
+        self._bedrock_region = bedrock_region
 
         # Bedrock provider (boto3-based, Converse API)
         self._bedrock_create = create_bedrock_provider_fn(region=bedrock_region)
@@ -70,15 +76,66 @@ class MultiProviderFactory:
         # Bedrock Mantle provider (OpenAI-compatible Chat Completions)
         self._mantle_create = create_mantle_provider_fn(region=bedrock_region)
 
+        # Per-region bedrock/mantle fn factories, built on demand for spokes in
+        # a region other than the default (boto3 clients bake in their region).
+        self._bedrock_by_region: dict[str, Callable] = {bedrock_region: self._bedrock_create}
+        self._mantle_by_region: dict[str, Callable] = {bedrock_region: self._mantle_create}
+
+    def config_for(
+        self, provider: str, spoke: SpokeConfig | None = None,
+    ) -> ProviderConfig | None:
+        """Provider config with a region-spoke override applied (endpoint/region).
+
+        Mirrors ProviderFnFactory.config_for so multi-region routing targets the
+        selected spoke's endpoint/region for HTTP providers.
+        """
+        base = self._provider_configs.get(provider)
+        if base is None or spoke is None:
+            return base
+        overrides: dict = {}
+        if spoke.endpoint:
+            overrides["base_url"] = spoke.endpoint
+        if spoke.region and base.auth_type == "aws_credentials":
+            creds = dict(base.credentials)
+            creds["region"] = spoke.region
+            overrides["credentials"] = creds
+        if not overrides:
+            return base
+        return dataclasses.replace(base, **overrides)
+
+    def _bedrock_fn_for(self, region: str) -> Callable:
+        fn = self._bedrock_by_region.get(region)
+        if fn is None:
+            fn = create_bedrock_provider_fn(region=region)
+            self._bedrock_by_region[region] = fn
+        return fn
+
+    def _mantle_fn_for(self, region: str) -> Callable:
+        fn = self._mantle_by_region.get(region)
+        if fn is None:
+            fn = create_mantle_provider_fn(region=region)
+            self._mantle_by_region[region] = fn
+        return fn
+
     def create(
         self,
         request: ChatCompletionRequest,
         prompt_caching_enabled: bool = False,
+        spoke: SpokeConfig | None = None,
     ) -> Callable[[ProviderModelMapping], Awaitable[ChatCompletionResponse]]:
-        """Return a provider_fn that dispatches based on provider type."""
-        bedrock_fn = self._bedrock_create(request, prompt_caching_enabled=prompt_caching_enabled)
+        """Return a provider_fn that dispatches based on provider type.
 
-        mantle_fn = self._mantle_create(request, prompt_caching_enabled=prompt_caching_enabled)
+        When multi-region routing supplies a ``spoke`` in a non-default region,
+        Bedrock/Mantle calls use a client bound to that region and HTTP-provider
+        calls use the spoke's endpoint/region override.
+        """
+        # Bedrock/Mantle are region-bound at the boto3 client; pick the region's
+        # client when the spoke names a different region.
+        region = spoke.region if (spoke and spoke.region) else self._bedrock_region
+        bedrock_fn = self._bedrock_fn_for(region)(
+            request, prompt_caching_enabled=prompt_caching_enabled)
+        mantle_fn = self._mantle_fn_for(region)(
+            request, prompt_caching_enabled=prompt_caching_enabled)
 
         async def _provider_fn(mapping: ProviderModelMapping) -> ChatCompletionResponse:
             # Bedrock Mantle — OpenAI-compatible via SigV4
@@ -99,7 +156,7 @@ class MultiProviderFactory:
                     message=f"No adapter registered for provider '{mapping.provider}'",
                 )
 
-            config = self._provider_configs.get(mapping.provider)
+            config = self.config_for(mapping.provider, spoke)
             if config is None:
                 raise ProviderError(
                     status_code=500,

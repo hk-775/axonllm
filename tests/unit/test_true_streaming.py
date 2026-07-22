@@ -57,8 +57,11 @@ class FakeFactory:
         self._provider_configs = {p: MagicMock() for p in providers}
         self._http_client = http_client
 
-    def create(self, request, prompt_caching_enabled=False):
+    def create(self, request, prompt_caching_enabled=False, spoke=None):
         return AsyncMock()
+
+    def config_for(self, provider, spoke=None):
+        return self._provider_configs.get(provider)
 
 
 def _rate_limiter():

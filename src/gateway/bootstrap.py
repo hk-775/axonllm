@@ -7,6 +7,7 @@ module instead of duplicating inline wiring.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -32,8 +33,8 @@ from src.gateway.efficiency_analyzer import EfficiencyAnalyzer
 from src.gateway.middleware.admin_rbac import AdminRBACMiddleware
 from src.gateway.middleware.auth import AuthMiddleware
 from src.gateway.multi_region.health_monitor import SpokeHealthMonitor
-from src.gateway.multi_region.region_config import default_single_region
 from src.gateway.multi_region.region_router import RegionRouter
+from src.gateway.multi_region.spoke_loader import load_hub_config
 from src.gateway.quota_enforcer import QuotaEnforcer
 from src.gateway.middleware.security import SecurityMiddleware
 from src.gateway.observability.otlp_exporter import OTLPSpanExporter
@@ -152,7 +153,10 @@ def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComp
     quota_enforcer = QuotaEnforcer()
 
     # --- Multi-region ---
-    hub_config = default_single_region(region=app_config.aws_region)
+    # Load a real hub/spoke topology from spokes.yaml when present; otherwise a
+    # single-region default (single-region deploys need no config file).
+    hub_config = load_hub_config(
+        app_config.spokes_config_path, default_region=app_config.aws_region)
     region_router = RegionRouter(hub_config=hub_config)
     health_monitor = SpokeHealthMonitor(hub_config=hub_config)
 
@@ -406,7 +410,25 @@ def build_starlette_app(app_config: AppConfig | None = None) -> Starlette:
         + create_openai_routes(openai_api)
     )
 
-    app = Starlette(routes=routes)
+    # Lifespan: run the spoke health monitor in the background for real
+    # multi-region deployments. Single-region (one spoke) doesn't need it, so we
+    # skip it there to avoid a pointless timer.
+    monitor = comp.health_monitor
+    multi_region = monitor is not None and not monitor.config.is_single_region
+
+    @contextlib.asynccontextmanager
+    async def _lifespan(_app):
+        if multi_region:
+            await monitor.start()
+            logger.info("Spoke health monitor started (%d spokes)",
+                        len(monitor.config.spokes))
+        try:
+            yield
+        finally:
+            if multi_region:
+                await monitor.stop()
+
+    app = Starlette(routes=routes, lifespan=_lifespan)
 
     # Security middleware (lightweight marker for LLM endpoints)
     app.add_middleware(SecurityMiddleware)

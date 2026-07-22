@@ -53,6 +53,7 @@ def load_app_config() -> AppConfig:
         demo_seed_config_path=os.environ.get("AXON_DEMO_SEED_CONFIG", "config/demo_seed.yaml"),
         catalog_config_path=os.environ.get("AXON_CATALOG_CONFIG", "config/catalog.yaml"),
         ensemble_config_path=os.environ.get("AXON_ENSEMBLE_CONFIG", "config/ensemble.yaml"),
+        spokes_config_path=os.environ.get("AXON_SPOKES_CONFIG", "config/spokes.yaml"),
         load_demo_data=os.environ.get("AXON_LOAD_DEMO_DATA", "false").lower() == "true",
         oidc_issuer=os.environ.get("AXON_OIDC_ISSUER", ""),
         oidc_audience=os.environ.get("AXON_OIDC_AUDIENCE", ""),
