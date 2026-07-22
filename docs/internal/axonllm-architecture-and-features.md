@@ -243,6 +243,20 @@ provider call: the response is not fetched blocking-then-chunked.
 
 - **APIKeyService** — API-key issuance/validation (virtual keys).
 - **OIDCService** — OIDC login (OAuth2 Auth Code + PKCE), JWT validation.
+- **SamlService** — SAML 2.0 SSO (SP side): SP metadata, SP-initiated
+  AuthnRequest redirect, and an ACS endpoint that verifies the IdP-signed
+  assertion and maps it to a RequestContext. Signature verification is
+  **pure-Python** (`signxml` over lxml + `cryptography` — no libxml2/xmlsec1
+  system build); XXE/entity-expansion is blocked via lxml parser controls (no
+  DOCTYPE). Enforces audience + NotOnOrAfter/NotBefore. Config via `AXON_SAML_*`
+  env; disabled (503) until configured. Endpoints: `/saml/login|acs|metadata`.
+- **ScimStore + SCIM 2.0 endpoints** — IdP-driven joiner/mover/leaver. RFC
+  7643/7644 `/scim/v2/Users` + `/scim/v2/Groups` (list with `userName eq` +
+  pagination, GET/POST/PUT/PATCH/DELETE; PATCH `active=false` deprovisions).
+  Store is DynamoPersistence-backed (`SCIM#USER#`/`SCIM#GROUP#`) with in-memory
+  fallback; a user's effective roles = own roles ∪ group roles. Protected by an
+  `AXON_SCIM_TOKEN` bearer secret (disabled/503 until set). `/scim/*` and
+  `/saml/*` bypass the user-auth chain (they carry their own auth).
 - **CedarPolicyService** — Cedar-based authorization policies.
 - **PolicyHierarchyResolver** — resolves effective policy (org → project → user),
   feeding the quota enforcer.

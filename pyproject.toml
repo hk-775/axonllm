@@ -33,6 +33,12 @@ Documentation = "https://github.com/axonllm/axonllm#readme"
 otel = [
     "opentelemetry-exporter-otlp-proto-http>=1.20",
 ]
+# Enterprise identity: SAML SSO assertion verification. Pure-Python — signxml +
+# lxml install from wheels (no libxml2/xmlsec1 system build). XXE/entity-expansion
+# is blocked via lxml parser controls (no defusedxml needed).
+saml = [
+    "signxml>=3.2",
+]
 dev = [
     "hypothesis>=6.100.0",
     "httpx>=0.25.0",
@@ -41,6 +47,8 @@ dev = [
     "pytest-mock>=3.12.0",
     # so CI exercises the OTLP span-mapping path
     "opentelemetry-exporter-otlp-proto-http>=1.20",
+    # so CI exercises SAML signature verification
+    "signxml>=3.2",
 ]
 
 [project.scripts]

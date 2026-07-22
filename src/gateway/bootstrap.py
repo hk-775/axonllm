@@ -29,6 +29,10 @@ from src.gateway.auth.api_key_service import APIKeyService
 from src.gateway.auth.cedar_policy import CedarPolicyService
 from src.gateway.auth.oidc_service import OIDCConfig, OIDCService
 from src.gateway.auth.policy_hierarchy import PolicyHierarchyResolver
+from src.gateway.auth.saml_routes import SamlAPI, create_saml_routes
+from src.gateway.auth.saml_service import SamlService, load_saml_config
+from src.gateway.auth.scim_routes import ScimAPI, create_scim_routes
+from src.gateway.auth.scim_service import ScimStore
 from src.gateway.efficiency_analyzer import EfficiencyAnalyzer
 from src.gateway.middleware.admin_rbac import AdminRBACMiddleware
 from src.gateway.middleware.auth import AuthMiddleware
@@ -102,6 +106,8 @@ class GatewayComponents:
     catalog: dict
     api_key_service: APIKeyService | None = None
     oidc_service: OIDCService | None = None
+    scim_store: ScimStore | None = None
+    saml_service: SamlService | None = None
     policy_resolver: PolicyHierarchyResolver | None = None
     quota_enforcer: QuotaEnforcer | None = None
     pii_redactor: PIIRedactor | None = None
@@ -145,6 +151,13 @@ def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComp
         alb_region=app_config.aws_region,
     )
     oidc_service = OIDCService(config=oidc_config)
+
+    # --- Enterprise identity: SCIM provisioning + SAML SSO ---
+    scim_store = ScimStore(persistence=persistence)
+    if persistence.enabled:
+        asyncio.run(scim_store.initialize())
+    saml_service = SamlService(config=load_saml_config())
+
     policy_resolver = PolicyHierarchyResolver(persistence=persistence)
     if persistence.enabled:
         asyncio.run(policy_resolver.load_nodes())
@@ -337,6 +350,8 @@ def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComp
         catalog=catalog,
         api_key_service=api_key_service,
         oidc_service=oidc_service,
+        scim_store=scim_store,
+        saml_service=saml_service,
         policy_resolver=policy_resolver,
         quota_enforcer=quota_enforcer,
         pii_redactor=pii_redactor,
@@ -383,6 +398,8 @@ def build_starlette_app(app_config: AppConfig | None = None) -> Starlette:
     webhook_api = WebhookAPI(dispatcher=comp.event_dispatcher)
     region_api = RegionAPI(router=comp.region_router, monitor=comp.health_monitor)
     quota_api = QuotaAPI(quota_enforcer=comp.quota_enforcer, policy_resolver=comp.policy_resolver)
+    scim_api = ScimAPI(store=comp.scim_store)
+    saml_api = SamlAPI(service=comp.saml_service)
 
     # Default chat project is the first demo project or "default"
     default_project = next(iter(comp.projects), "default")
@@ -406,6 +423,8 @@ def build_starlette_app(app_config: AppConfig | None = None) -> Starlette:
         + create_webhook_routes(webhook_api)
         + create_region_routes(region_api)
         + create_quota_routes(quota_api)
+        + create_scim_routes(scim_api)
+        + create_saml_routes(saml_api)
         + create_chat_routes(chat_api)
         + create_openai_routes(openai_api)
     )
