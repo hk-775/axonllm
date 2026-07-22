@@ -3,7 +3,13 @@
 import pytest
 
 from src.gateway.models import ResolvedPolicy
-from src.gateway.security.pii_redactor import PIIRedactor, RedactionMapping
+from src.gateway.security.pii_redactor import (
+    PII_PATTERNS,
+    PIIRedactor,
+    RedactionMapping,
+    env_default_enabled,
+    env_default_types,
+)
 
 
 @pytest.fixture
@@ -121,3 +127,146 @@ class TestReinjection:
         response = "Sure, I'll contact [EMAIL_1] right away."
         reinjected = redactor.reinject_response(response, mapping)
         assert reinjected == "Sure, I'll contact john@x.com right away."
+
+
+class TestEnvDefault:
+    """AXON_PII_REDACTION_DEFAULT makes a deploy safe-by-default (#17)."""
+
+    def test_env_unset_keeps_optin_off(self, redactor, monkeypatch):
+        monkeypatch.delenv("AXON_PII_REDACTION_DEFAULT", raising=False)
+        assert env_default_enabled() is False
+        policy = ResolvedPolicy()  # nothing configured
+        result, mapping = redactor.redact("email me at a@b.com", policy)
+        assert result == "email me at a@b.com"
+        assert mapping.redacted_count == 0
+
+    def test_env_on_redacts_unconfigured_policy(self, redactor, monkeypatch):
+        monkeypatch.setenv("AXON_PII_REDACTION_DEFAULT", "true")
+        assert env_default_enabled() is True
+        policy = ResolvedPolicy()  # policy leaves redaction off
+        result, mapping = redactor.redact("email me at a@b.com", policy)
+        assert "a@b.com" not in result
+        assert mapping.redacted_count == 1
+
+    def test_explicit_policy_off_is_respected_over_env(self, redactor, monkeypatch):
+        # effective_policy only fills in when a policy DOESN'T enable redaction;
+        # env can turn it on, but an explicit type-limited policy still wins.
+        monkeypatch.setenv("AXON_PII_REDACTION_DEFAULT", "on")
+        policy = ResolvedPolicy(pii_redaction_enabled=True, pii_redact_types=["ssn"])
+        # email present but only ssn configured → email must NOT be redacted
+        result, mapping = redactor.redact("a@b.com and 123-45-6789", policy)
+        assert "a@b.com" in result
+        assert "123-45-6789" not in result
+
+    def test_env_default_types_narrowing(self, monkeypatch):
+        monkeypatch.setenv("AXON_PII_REDACT_TYPES", "email, ssn")
+        assert env_default_types() == ["email", "ssn"]
+
+    def test_env_default_types_unknown_ignored(self, monkeypatch):
+        monkeypatch.setenv("AXON_PII_REDACT_TYPES", "email, bogus")
+        assert env_default_types() == ["email"]
+
+    def test_env_default_types_all_when_unset(self, monkeypatch):
+        monkeypatch.delenv("AXON_PII_REDACT_TYPES", raising=False)
+        assert set(env_default_types()) == set(PII_PATTERNS.keys())
+
+    def test_embed_safe_env_unset_passes_through(self, redactor, monkeypatch):
+        """Ostiari embed: env NOT set → effective_policy is a no-op, so the
+        embedded agent never double-redacts what Ostiari already tokenized."""
+        monkeypatch.delenv("AXON_PII_REDACTION_DEFAULT", raising=False)
+        policy = ResolvedPolicy()
+        # simulate Ostiari having already redacted → content carries tokens
+        msgs = [{"role": "user", "content": "contact [EMAIL_1] now"}]
+        result, mapping = redactor.redact_messages(msgs, policy)
+        assert result[0]["content"] == "contact [EMAIL_1] now"
+        assert mapping.redacted_count == 0
+
+
+class TestTokenNotReRedacted:
+    """A second redaction pass over already-tokenized text is a no-op."""
+
+    def test_tokens_are_not_pii_shaped(self, redactor, monkeypatch):
+        monkeypatch.setenv("AXON_PII_REDACTION_DEFAULT", "true")
+        policy = ResolvedPolicy()
+        once, m1 = redactor.redact("mail a@b.com, ssn 123-45-6789", policy)
+        twice, m2 = redactor.redact(once, policy)
+        assert once == twice           # idempotent
+        assert m2.redacted_count == 0  # nothing left to redact
+
+
+class TestMultimodalContent:
+    """redact_messages must reach text parts inside list/multimodal content."""
+
+    def test_openai_style_text_parts(self, redactor):
+        policy = ResolvedPolicy(pii_redaction_enabled=True, pii_redact_types=["email"])
+        msgs = [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "reach me at a@b.com"},
+                {"type": "image_url", "image_url": {"url": "http://x/y.png"}},
+            ],
+        }]
+        result, mapping = redactor.redact_messages(msgs, policy)
+        parts = result[0]["content"]
+        assert "a@b.com" not in parts[0]["text"]
+        assert "[EMAIL_1]" in parts[0]["text"]
+        assert parts[1] == {"type": "image_url", "image_url": {"url": "http://x/y.png"}}
+        assert mapping.redacted_count == 1
+
+    def test_bedrock_style_text_field(self, redactor):
+        policy = ResolvedPolicy(pii_redaction_enabled=True, pii_redact_types=["ssn"])
+        msgs = [{"role": "user", "content": [{"text": "ssn 123-45-6789"}]}]
+        result, mapping = redactor.redact_messages(msgs, policy)
+        assert "123-45-6789" not in result[0]["content"][0]["text"]
+
+    def test_non_text_parts_untouched(self, redactor):
+        policy = ResolvedPolicy(pii_redaction_enabled=True, pii_redact_types=["email"])
+        msgs = [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "u"}}]}]
+        result, mapping = redactor.redact_messages(msgs, policy)
+        assert result[0]["content"][0] == {"type": "image_url", "image_url": {"url": "u"}}
+        assert mapping.redacted_count == 0
+
+
+class TestInternationalPatterns:
+    def test_iban(self, redactor):
+        policy = ResolvedPolicy(pii_redaction_enabled=True, pii_redact_types=["iban"])
+        result, mapping = redactor.redact("acct DE89370400440532013000 ok", policy)
+        assert "DE89370400440532013000" not in result
+        assert mapping.redacted_count == 1
+
+    def test_ipv6(self, redactor):
+        policy = ResolvedPolicy(pii_redaction_enabled=True, pii_redact_types=["ipv6"])
+        result, mapping = redactor.redact("host 2001:db8:85a3:0:0:8a2e:370:7334 up", policy)
+        assert "[IPV6_1]" in result
+
+
+class TestNoReinjectMode:
+    """Permanent-redaction mode: no plaintext retained, no reinject."""
+
+    def test_no_plaintext_retained(self, redactor):
+        policy = ResolvedPolicy(
+            pii_redaction_enabled=True, pii_redact_types=["email"], pii_reinject=False)
+        result, mapping = redactor.redact("mail a@b.com", policy)
+        assert "a@b.com" not in result
+        assert mapping.redacted_count == 1
+        assert mapping._forward == {}      # nothing stored
+        assert mapping._dedup == {}        # sealed after redaction
+
+    def test_reinject_is_noop_when_permanent(self, redactor):
+        policy = ResolvedPolicy(
+            pii_redaction_enabled=True, pii_redact_types=["email"], pii_reinject=False)
+        _, mapping = redactor.redact("mail a@b.com", policy)
+        assert redactor.reinject_response("saw [EMAIL_1]", mapping) == "saw [EMAIL_1]"
+
+    def test_reversible_mode_still_reinjects(self, redactor):
+        policy = ResolvedPolicy(
+            pii_redaction_enabled=True, pii_redact_types=["email"], pii_reinject=True)
+        _, mapping = redactor.redact("mail a@b.com", policy)
+        assert redactor.reinject_response("saw [EMAIL_1]", mapping) == "saw a@b.com"
+
+    def test_dedup_still_works_in_permanent_mode(self, redactor):
+        policy = ResolvedPolicy(
+            pii_redaction_enabled=True, pii_redact_types=["email"], pii_reinject=False)
+        result, mapping = redactor.redact("a@b.com and again a@b.com", policy)
+        assert result.count("[EMAIL_1]") == 2
+        assert mapping.redacted_count == 1

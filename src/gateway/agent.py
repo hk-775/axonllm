@@ -1173,6 +1173,11 @@ class GatewayAgent:
         Uses a buffer to handle tokens split across chunk boundaries.
         Buffer holds {"pending": str} — text that might be a partial token.
         """
+        # Permanent-redaction mode retains no mapping, so there is nothing to
+        # re-inject. Skip the buffering entirely (it would otherwise hold back
+        # any legitimate "[" in the model's output waiting for a closing "]").
+        if not mapping.reversible:
+            return chunk_dict
         choices = chunk_dict.get("choices", [])
         new_choices = []
         for choice in choices:
