@@ -154,6 +154,11 @@ class PolicyHierarchyResolver:
                 merged = set(current.pii_redact_types) | set(node_pii_types)
                 current.pii_redact_types = sorted(merged)
 
+        # PII reinject: the more private setting wins. Once a parent turns off
+        # re-injection (permanent redaction), a child can never turn it back on.
+        if limits.get("pii_reinject") is False:
+            current.pii_reinject = False
+
         return current
 
     async def set_node(self, node: PolicyNode) -> None:

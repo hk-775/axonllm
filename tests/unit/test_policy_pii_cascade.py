@@ -91,6 +91,25 @@ class TestPIIRedactionCascade:
         assert policy.pii_redaction_enabled is False
         assert policy.pii_redact_types is None
 
+    def test_reinject_defaults_true(self, resolver, persistence):
+        org = PolicyNode("org:a", "org", None, "A",
+                         limits={"pii_redaction_enabled": True, "pii_redact_types": ["email"]})
+        _run(persistence.save_policy_node(org))
+        policy = _run(resolver.resolve("org:a"))
+        assert policy.pii_reinject is True
+
+    def test_parent_permanent_redaction_wins(self, resolver, persistence):
+        # Parent turns OFF reinject (permanent redaction) — child cannot re-enable.
+        org = PolicyNode("org:strict", "org", None, "Strict",
+                         limits={"pii_redaction_enabled": True, "pii_redact_types": ["email"],
+                                 "pii_reinject": False})
+        proj = PolicyNode("proj:x", "project", "org:strict", "X",
+                          limits={"pii_reinject": True})
+        _run(persistence.save_policy_node(org))
+        _run(persistence.save_policy_node(proj))
+        policy = _run(resolver.resolve("proj:x"))
+        assert policy.pii_reinject is False
+
     def test_full_hierarchy_accumulates_types(self, resolver, persistence):
         nodes = [
             PolicyNode("org:acme", "org", None, "Acme",

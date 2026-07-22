@@ -355,6 +355,10 @@ class ResolvedPolicy:
     allowed_providers: list[str] | None = None
     pii_redaction_enabled: bool = False
     pii_redact_types: list[str] | None = None
+    # When False, redaction is permanent: no reversible mapping is retained and
+    # the original PII is NOT re-injected into the response. Strict-regime mode
+    # (no plaintext held in memory). Defaults to True to preserve behavior.
+    pii_reinject: bool = True
 
 
 # --- Validation ---
