@@ -87,7 +87,54 @@ class AuditTrail:
         self._buffer: deque[AuditRecord] = deque(maxlen=buffer_size)
         self._buffer_size = buffer_size
         self._last_hash = "genesis"
+        self._initialized = False
         self._lock = asyncio.Lock()
+
+    async def initialize(self) -> None:
+        """Reload the hash-chain head from the durable store on startup.
+
+        Without this the chain restarted from "genesis" every boot, so a new
+        record's prev_hash didn't link to the last *persisted* record and
+        cross-restart tamper detection was impossible. Idempotent + safe when
+        persistence is disabled (stays at "genesis").
+        """
+        if self._initialized:
+            return
+        self._initialized = True
+        if not (self._persistence and self._persistence.enabled):
+            return
+        try:
+            head = await self._persistence.get_latest_audit_hash()
+            if head:
+                self._last_hash = head
+                logger.info("Audit chain head reloaded from durable store")
+        except Exception:
+            logger.warning("Could not reload audit chain head; starting from genesis",
+                           exc_info=True)
+
+    def initialize_sync(self) -> None:
+        """Loop-safe startup init for bootstrap (works standalone AND embedded).
+
+        Standalone (no running loop): run initialize() to completion now.
+        Embedded (called from within a running event loop, e.g. Ostiari builds
+        the agent inside its request handler): don't call asyncio.run — that
+        raises "cannot be called from a running event loop". Instead schedule
+        initialize() as a background task on the running loop so the chain head
+        still reloads without blocking or crashing the build.
+        """
+        if self._initialized or not (self._persistence and self._persistence.enabled):
+            # Nothing to load — mark done so record() doesn't re-check.
+            self._initialized = self._initialized or not (
+                self._persistence and self._persistence.enabled)
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop is not None and loop.is_running():
+            loop.create_task(self.initialize())   # embedded: defer to the live loop
+        else:
+            asyncio.run(self.initialize())         # standalone: run now
 
     async def record(
         self,
@@ -214,6 +261,66 @@ class AuditTrail:
                 return False
 
         return True
+
+    async def verify_persisted_chain(self, project_id: str | None = None) -> dict:
+        """Verify the hash chain of the DURABLE store (not just the buffer).
+
+        The in-memory ``verify_chain`` can't detect tampering with persisted rows
+        or gaps across restarts. This reloads the persisted records, rebuilds
+        AuditRecords, and checks each row's own hash and its link to the prior
+        row. Returns {valid, checked, [broken_at]}.
+        """
+        if not (self._persistence and self._persistence.enabled):
+            return {"valid": True, "checked": 0, "note": "persistence disabled"}
+        rows = await self._persistence.load_audit_records(project_id)
+        prev = "genesis"
+        checked = 0
+        for row in rows:
+            try:
+                rec = AuditRecord(
+                    record_id=row["record_id"],
+                    event_type=AuditEventType(row["event_type"]),
+                    timestamp=datetime.fromisoformat(row["timestamp"]),
+                    user_id=row.get("user_id", ""),
+                    project_id=row.get("project_id", ""),
+                    request_id=row.get("request_id", ""),
+                    data=json.loads(row["data"]) if isinstance(row.get("data"), str) else (row.get("data") or {}),
+                    prev_hash=row.get("prev_hash", ""),
+                    record_hash=row.get("record_hash", ""),
+                )
+            except Exception:
+                return {"valid": False, "broken_at": row.get("record_id"),
+                        "reason": "unreadable row", "checked": checked}
+            if rec.compute_hash() != rec.record_hash:
+                return {"valid": False, "broken_at": rec.record_id,
+                        "reason": "record_hash mismatch (content altered)", "checked": checked}
+            if checked > 0 and rec.prev_hash != prev:
+                return {"valid": False, "broken_at": rec.record_id,
+                        "reason": "prev_hash link broken (row removed/reordered)", "checked": checked}
+            prev = rec.record_hash
+            checked += 1
+        return {"valid": True, "checked": checked}
+
+    async def export_records(self, project_id: str | None = None) -> list[dict]:
+        """Return all audit records as JSON-serializable dicts, for SIEM/S3 export.
+
+        Prefers the durable store (complete history); falls back to the in-memory
+        buffer when persistence is disabled. Each row includes the chain hashes so
+        an external verifier can re-check integrity.
+        """
+        if self._persistence and self._persistence.enabled:
+            return await self._persistence.load_audit_records(project_id)
+        out = []
+        for r in self._buffer:
+            if project_id and r.project_id != project_id:
+                continue
+            out.append({
+                "record_id": r.record_id, "event_type": r.event_type.value,
+                "timestamp": r.timestamp.isoformat(), "user_id": r.user_id,
+                "project_id": r.project_id, "request_id": r.request_id,
+                "data": r.data, "prev_hash": r.prev_hash, "record_hash": r.record_hash,
+            })
+        return out
 
     async def _persist(self, record: AuditRecord) -> None:
         """Persist audit record to DynamoDB."""

@@ -393,6 +393,52 @@ class DynamoPersistence:
             logger.warning("Failed to load usage records from DynamoDB", exc_info=True)
             return []
 
+    async def load_audit_records(self, project_id: str | None = None) -> list[dict]:
+        """Load persisted audit records (raw dicts), ordered by SK (timestamp).
+
+        Audit rows use PK ``AUDIT#<project_id>`` / SK
+        ``AUDIT#<iso>#<record_id>``. Returns them chronologically so the hash
+        chain can be reloaded/verified against the durable store.
+        """
+        if not self._enabled:
+            return []
+
+        def _scan():
+            from boto3.dynamodb.conditions import Attr
+
+            table = self._get_table()
+            flt = Attr("PK").begins_with("AUDIT#")
+            if project_id:
+                flt = Attr("PK").eq(f"AUDIT#{project_id}")
+            items = []
+            response = table.scan(FilterExpression=flt)
+            items.extend(response.get("Items", []))
+            while "LastEvaluatedKey" in response:
+                response = table.scan(
+                    FilterExpression=flt,
+                    ExclusiveStartKey=response["LastEvaluatedKey"],
+                )
+                items.extend(response.get("Items", []))
+            return items
+
+        try:
+            raw = await asyncio.to_thread(_scan)
+            raw = [self._convert_decimals_to_native(i) for i in raw]
+            raw.sort(key=lambda i: i.get("SK", ""))
+            return raw
+        except Exception:
+            logger.warning("Failed to load audit records from DynamoDB", exc_info=True)
+            return []
+
+    async def get_latest_audit_hash(self) -> str | None:
+        """Return the most recent persisted audit record_hash (the chain head).
+
+        Used to reload chain continuity on startup so the hash chain survives
+        restarts. None when no audit rows exist.
+        """
+        rows = await self.load_audit_records()
+        return rows[-1].get("record_hash") if rows else None
+
     async def save_project(self, project: Project) -> None:
         """Serialize and write a Project to DynamoDB."""
         if not self._enabled:

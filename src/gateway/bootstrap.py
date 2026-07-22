@@ -159,6 +159,10 @@ def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComp
     pii_redactor = PIIRedactor()
     injection_detector = PromptInjectionDetector()
     audit_trail = AuditTrail(persistence=persistence)
+    # Reload the hash-chain head so audit continuity survives restarts. Loop-safe:
+    # runs now when standalone, defers to the running loop when embedded (Ostiari)
+    # — never calls asyncio.run inside an active loop.
+    audit_trail.initialize_sync()
     event_dispatcher = EventDispatcher()
     # Forwards request traces to an embedding Ostiari when detected (OSTIARI_TRACES_URL
     # set, or an in-process sink registered via observability.trace_forwarder). No-op
