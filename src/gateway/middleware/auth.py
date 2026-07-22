@@ -60,9 +60,18 @@ class AuthMiddleware(BaseHTTPMiddleware):
         self.public_paths = public_paths or PUBLIC_PATHS
 
     async def dispatch(self, request: Request, call_next) -> Response:
-        # Skip auth for public paths and static assets
+        # Skip auth for public paths and static assets.
+        # /scim/* and /saml/* carry their OWN auth (SCIM bearer token; SAML is
+        # the login flow itself), so the gateway's user-auth chain is bypassed
+        # for them — they must not require an existing session to authenticate.
         path = request.url.path
-        if path in self.public_paths or path.startswith("/admin/static") or path.startswith("/chat/static"):
+        if (
+            path in self.public_paths
+            or path.startswith("/admin/static")
+            or path.startswith("/chat/static")
+            or path.startswith("/scim/")
+            or path.startswith("/saml/")
+        ):
             request.state.context = RequestContext(
                 user_id="anonymous",
                 project_id="",

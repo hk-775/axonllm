@@ -12,7 +12,16 @@ import threading
 from datetime import datetime, timezone
 from decimal import Decimal
 
-from src.gateway.models import APIKey, FeedbackRecord, GuardrailRule, PolicyNode, Project, UsageRecord
+from src.gateway.models import (
+    APIKey,
+    FeedbackRecord,
+    GuardrailRule,
+    PolicyNode,
+    Project,
+    ScimGroup,
+    ScimUser,
+    UsageRecord,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -840,6 +849,146 @@ class DynamoPersistence:
             return [self.deserialize_policy_node(item) for item in raw_items]
         except Exception:
             logger.warning("Failed to load policy nodes from DynamoDB", exc_info=True)
+            return []
+
+    # --- SCIM identity (users + groups) ---
+
+    @staticmethod
+    def _serialize_scim_user(user: ScimUser) -> dict:
+        return {
+            "PK": f"SCIM#USER#{user.id}", "SK": "SCIM_USER",
+            "entity_type": "scim_user",
+            "id": user.id, "user_name": user.user_name, "active": user.active,
+            "external_id": user.external_id or "", "display_name": user.display_name,
+            "emails": user.emails, "groups": user.groups, "roles": user.roles,
+            "project_id": user.project_id,
+            "created_at": user.created_at.isoformat(),
+            "updated_at": user.updated_at.isoformat(),
+        }
+
+    @staticmethod
+    def _deserialize_scim_user(item: dict) -> ScimUser:
+        from datetime import datetime as _dt
+        return ScimUser(
+            id=item["id"], user_name=item["user_name"], active=bool(item.get("active", True)),
+            external_id=item.get("external_id") or None,
+            display_name=item.get("display_name", ""),
+            emails=list(item.get("emails", []) or []),
+            groups=list(item.get("groups", []) or []),
+            roles=list(item.get("roles", []) or []),
+            project_id=item.get("project_id", ""),
+            created_at=_dt.fromisoformat(item["created_at"]) if item.get("created_at") else datetime.now(timezone.utc),
+            updated_at=_dt.fromisoformat(item["updated_at"]) if item.get("updated_at") else datetime.now(timezone.utc),
+        )
+
+    @staticmethod
+    def _serialize_scim_group(group: ScimGroup) -> dict:
+        return {
+            "PK": f"SCIM#GROUP#{group.id}", "SK": "SCIM_GROUP",
+            "entity_type": "scim_group",
+            "id": group.id, "display_name": group.display_name,
+            "external_id": group.external_id or "",
+            "members": group.members, "roles": group.roles,
+            "created_at": group.created_at.isoformat(),
+            "updated_at": group.updated_at.isoformat(),
+        }
+
+    @staticmethod
+    def _deserialize_scim_group(item: dict) -> ScimGroup:
+        from datetime import datetime as _dt
+        return ScimGroup(
+            id=item["id"], display_name=item["display_name"],
+            external_id=item.get("external_id") or None,
+            members=list(item.get("members", []) or []),
+            roles=list(item.get("roles", []) or []),
+            created_at=_dt.fromisoformat(item["created_at"]) if item.get("created_at") else datetime.now(timezone.utc),
+            updated_at=_dt.fromisoformat(item["updated_at"]) if item.get("updated_at") else datetime.now(timezone.utc),
+        )
+
+    async def save_scim_user(self, user: ScimUser) -> None:
+        if not self._enabled:
+            return
+        item = self._serialize_scim_user(user)
+        try:
+            await asyncio.to_thread(lambda: self._get_table().put_item(Item=item))
+        except Exception:
+            self._record_write_failure("SCIM user", user.id)
+
+    async def save_scim_group(self, group: ScimGroup) -> None:
+        if not self._enabled:
+            return
+        item = self._serialize_scim_group(group)
+        try:
+            await asyncio.to_thread(lambda: self._get_table().put_item(Item=item))
+        except Exception:
+            self._record_write_failure("SCIM group", group.id)
+
+    async def delete_scim_user(self, user_id: str) -> None:
+        if not self._enabled:
+            return
+        try:
+            await asyncio.to_thread(
+                lambda: self._get_table().delete_item(
+                    Key={"PK": f"SCIM#USER#{user_id}", "SK": "SCIM_USER"}))
+        except Exception:
+            self._record_write_failure("SCIM user delete", user_id)
+
+    async def delete_scim_group(self, group_id: str) -> None:
+        if not self._enabled:
+            return
+        try:
+            await asyncio.to_thread(
+                lambda: self._get_table().delete_item(
+                    Key={"PK": f"SCIM#GROUP#{group_id}", "SK": "SCIM_GROUP"}))
+        except Exception:
+            self._record_write_failure("SCIM group delete", group_id)
+
+    async def load_scim_users(self) -> list[ScimUser]:
+        if not self._enabled:
+            return []
+
+        def _scan():
+            from boto3.dynamodb.conditions import Attr
+            table = self._get_table()
+            items, response = [], table.scan(
+                FilterExpression=Attr("entity_type").eq("scim_user"))
+            items.extend(response.get("Items", []))
+            while "LastEvaluatedKey" in response:
+                response = table.scan(
+                    FilterExpression=Attr("entity_type").eq("scim_user"),
+                    ExclusiveStartKey=response["LastEvaluatedKey"])
+                items.extend(response.get("Items", []))
+            return items
+
+        try:
+            raw = await asyncio.to_thread(_scan)
+            return [self._deserialize_scim_user(self._convert_decimals_to_native(i)) for i in raw]
+        except Exception:
+            logger.warning("Failed to load SCIM users from DynamoDB", exc_info=True)
+            return []
+
+    async def load_scim_groups(self) -> list[ScimGroup]:
+        if not self._enabled:
+            return []
+
+        def _scan():
+            from boto3.dynamodb.conditions import Attr
+            table = self._get_table()
+            items, response = [], table.scan(
+                FilterExpression=Attr("entity_type").eq("scim_group"))
+            items.extend(response.get("Items", []))
+            while "LastEvaluatedKey" in response:
+                response = table.scan(
+                    FilterExpression=Attr("entity_type").eq("scim_group"),
+                    ExclusiveStartKey=response["LastEvaluatedKey"])
+                items.extend(response.get("Items", []))
+            return items
+
+        try:
+            raw = await asyncio.to_thread(_scan)
+            return [self._deserialize_scim_group(self._convert_decimals_to_native(i)) for i in raw]
+        except Exception:
+            logger.warning("Failed to load SCIM groups from DynamoDB", exc_info=True)
             return []
 
     # --- Generic item write (used by audit trail) ---

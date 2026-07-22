@@ -52,6 +52,8 @@ docker compose up
 
 ### Identity & Access
 - **Multi-strategy auth** — ALB OIDC JWT, Bearer token (OIDC or API key), X-Api-Key header
+- **SAML 2.0 SSO** — SP-initiated login + ACS with pure-Python signed-assertion verification (no xmlsec1 system dependency)
+- **SCIM 2.0 provisioning** — `/scim/v2/Users` + `/scim/v2/Groups` for IdP-driven joiner/mover/leaver (Okta, Entra ID, …)
 - **API key management** — issue, rotate, revoke, scope-restricted keys
 - **Admin RBAC** — admin endpoints require `admin` role or `admin:*` scope (ENFORCE mode)
 
@@ -276,6 +278,11 @@ Request → Auth (OIDC/API Key) → Quota Enforcement (policy hierarchy)
 | `AXON_AUTH_MODE` | `ENFORCE` | Auth enforcement: `ENFORCE` (default, fail-closed) or `LOG_ONLY` (local dev) |
 | `AXON_OIDC_ISSUER` | — | OIDC token issuer URL |
 | `AXON_OIDC_AUDIENCE` | — | OIDC expected audience |
+| `AXON_SCIM_TOKEN` | — | Bearer secret the IdP uses for SCIM provisioning; SCIM is disabled until set |
+| `AXON_SAML_SP_ENTITY_ID` | — | SP entity id (SAML audience) |
+| `AXON_SAML_ACS_URL` | — | Assertion Consumer Service URL (this gateway's `/saml/acs`) |
+| `AXON_SAML_IDP_SSO_URL` | — | IdP SSO redirect endpoint |
+| `AXON_SAML_IDP_CERT` / `AXON_SAML_IDP_CERT_FILE` | — | IdP signing certificate (PEM inline or file path); SAML disabled until set |
 | `OSTIARI_TRACES_URL` | — | When set, forward request traces to this Ostiari ingest URL (e.g. `http://control-plane:8000/api/traces/ingest`) |
 | `OSTIARI_GATEWAY_ID` | `axonllm` | Gateway identifier reported in Ostiari's Live Traces |
 | `OSTIARI_INGEST_KEY` | — | Shared secret sent as `X-Ingest-Key` when Ostiari's ingest endpoint requires auth |

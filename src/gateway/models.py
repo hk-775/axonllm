@@ -303,6 +303,7 @@ class AuthMethod(Enum):
 
     OIDC_JWT = "oidc_jwt"
     API_KEY = "api_key"
+    SSO = "sso"          # SAML 2.0 assertion
     ANONYMOUS = "anonymous"
 
 
@@ -588,3 +589,49 @@ class EnsembleDecision:
     fallback_used: bool = False  # True when best-single fallback returned
     judge_invoked: bool = False
     error: str | None = None  # set when quorum not met / synthesis failed
+
+
+# --- SCIM 2.0 identity (enterprise provisioning) ---
+
+
+@dataclass
+class ScimUser:
+    """A SCIM 2.0 User resource (IdP-provisioned identity).
+
+    ``active`` drives joiner/mover/leaver: an IdP deprovision sends
+    ``active=false`` (or DELETE), which revokes the user's access. ``groups`` is
+    the set of group ids the user belongs to; group→roles mapping produces the
+    roles surfaced in RequestContext.
+    """
+
+    id: str
+    user_name: str
+    active: bool = True
+    external_id: str | None = None
+    display_name: str = ""
+    emails: list[dict] = field(default_factory=list)  # [{"value","primary"}]
+    groups: list[str] = field(default_factory=list)   # group ids
+    roles: list[str] = field(default_factory=list)
+    project_id: str = ""
+    created_at: datetime = field(default_factory=_utcnow)
+    updated_at: datetime = field(default_factory=_utcnow)
+
+    @property
+    def primary_email(self) -> str:
+        for e in self.emails:
+            if e.get("primary"):
+                return e.get("value", "")
+        return self.emails[0].get("value", "") if self.emails else ""
+
+
+@dataclass
+class ScimGroup:
+    """A SCIM 2.0 Group resource. ``roles`` are granted to member users."""
+
+    id: str
+    display_name: str
+    external_id: str | None = None
+    members: list[str] = field(default_factory=list)  # user ids
+    roles: list[str] = field(default_factory=list)
+    created_at: datetime = field(default_factory=_utcnow)
+    updated_at: datetime = field(default_factory=_utcnow)
