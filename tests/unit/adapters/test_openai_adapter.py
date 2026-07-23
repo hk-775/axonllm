@@ -57,6 +57,33 @@ class TestTranslateRequest:
         assert result["stream"] is True
 
     @pytest.mark.asyncio
+    async def test_reasoning_model_uses_max_completion_tokens(self, adapter):
+        # Regression: o1/o3/o4 reasoning models reject max_tokens (require
+        # max_completion_tokens) and only accept the default temperature.
+        # Sending max_tokens/temperature 400s and trips the openai breaker.
+        for model in ("o4-mini", "o1", "o3-mini", "o3-2025-01-31"):
+            req = ChatCompletionRequest(
+                messages=[{"role": "user", "content": "2+2"}],
+                model=model, max_tokens=50, temperature=0.7, top_p=0.9,
+            )
+            r = await adapter.translate_request(req)
+            assert r.get("max_completion_tokens") == 50, model
+            assert "max_tokens" not in r, model
+            assert "temperature" not in r, model   # reasoning models: default temp only
+            assert "top_p" not in r, model
+
+    @pytest.mark.asyncio
+    async def test_non_reasoning_model_uses_max_tokens(self, adapter):
+        for model in ("gpt-4o", "gpt-4o-mini"):
+            req = ChatCompletionRequest(
+                messages=[{"role": "user", "content": "hi"}],
+                model=model, max_tokens=50, temperature=0.7,
+            )
+            r = await adapter.translate_request(req)
+            assert r.get("max_tokens") == 50 and "max_completion_tokens" not in r, model
+            assert r.get("temperature") == 0.7, model
+
+    @pytest.mark.asyncio
     async def test_system_message_prepended(self, adapter):
         req = ChatCompletionRequest(
             messages=[{"role": "user", "content": "Hi"}],
