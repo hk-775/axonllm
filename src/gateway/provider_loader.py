@@ -9,7 +9,9 @@ import yaml
 
 from src.gateway.provider_config import ProviderConfig
 
-# Environment variable names for API keys per provider
+# Environment variable names for API keys per provider. Env vars take
+# precedence over any api_key in providers.yaml, so secrets stay out of config
+# files (see providers.yaml.example).
 _ENV_KEY_MAP = {
     "anthropic": "ANTHROPIC_API_KEY",
     "openai": "OPENAI_API_KEY",
@@ -17,6 +19,11 @@ _ENV_KEY_MAP = {
     "cohere": "COHERE_API_KEY",
     "google_ai": "GOOGLE_AI_API_KEY",
     "vertex_ai": "GCP_ACCESS_TOKEN",
+    "xai": "XAI_API_KEY",
+    "groq": "GROQ_API_KEY",
+    "together": "TOGETHER_API_KEY",
+    "fireworks": "FIREWORKS_API_KEY",
+    "ai21": "AI21_API_KEY",
 }
 
 
