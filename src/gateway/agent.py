@@ -916,10 +916,40 @@ class GatewayAgent:
                 continue
 
         if chosen is None:
-            yield {"data": {"error": {"type": "provider_error",
-                    "message": f"All providers failed to start streaming: {open_errors}",
-                    "code": "all_providers_exhausted"}}}
-            yield {"data": "[DONE]"}
+            # No provider could open a REAL SSE stream. This is expected for
+            # providers that don't stream over HttpClient — notably boto3-based
+            # Bedrock and google_ai (distinct SSE shape). Rather than fail the
+            # request, fall back to the pre-#18 behavior: run the normal
+            # blocking call and simulate-stream the complete response. Only treat
+            # it as an error if the fallback itself can't run.
+            logger.debug("true-streaming unavailable (%s); falling back to buffered "
+                         "simulate-stream for model=%s", open_errors, request.model)
+            try:
+                provider_fn = factory.create(
+                    request, prompt_caching_enabled=prompt_caching_enabled, spoke=spoke)
+                response = await self.router.execute_with_fallback(
+                    request, provider_fn,
+                    preferred_provider=preferred_provider,
+                    allowed_models=effective_allowed,
+                )
+            except Exception as exc:  # noqa: BLE001 — genuine provider failure
+                yield {"data": {"error": {"type": "provider_error",
+                        "message": f"All providers failed: {exc}",
+                        "code": "all_providers_exhausted"}}}
+                yield {"data": "[DONE]"}
+                return
+            async for chunk_dict in self._stream_response(
+                response, budget_status=None, rate_limit_headers=rate_limit_headers,
+                pii_mapping=pii_mapping):
+                yield chunk_dict
+            # _stream_response already emits [DONE]; record accounting on the
+            # buffered response so cost/audit still fire for this request.
+            await self._finalize_stream(
+                request=request, req_ctx=req_ctx, request_id=request_id,
+                request_start=request_start, resolved_policy=resolved_policy,
+                pii_mapping=pii_mapping, provider=response.provider,
+                model=request.model, response_model=response.model,
+                text="", usage=response.usage, status="success")
             return
 
         # --- Relay chunks; accumulate text + usage for end-of-stream accounting ---
