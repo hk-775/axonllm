@@ -4,6 +4,7 @@ Both providers use the same request/response/streaming format.
 Subclasses only need to set PROVIDER_NAME and _MODELS.
 """
 
+import re
 from datetime import datetime, timezone
 
 from src.gateway.adapters.base import ProviderAdapter
@@ -16,6 +17,15 @@ from src.gateway.models import (
     StreamChunk,
     TokenUsage,
 )
+
+# OpenAI reasoning models: o1, o3, o4 families (incl. -mini/-preview and dated
+# variants like o3-2025-...). They require max_completion_tokens (not
+# max_tokens) and only accept the default temperature.
+_OPENAI_REASONING_RE = re.compile(r"^o[134]([.-]|$)")
+
+
+def _is_openai_reasoning_model(model_id: str) -> bool:
+    return bool(_OPENAI_REASONING_RE.match((model_id or "").strip().lower()))
 
 
 class OpenAIStyleAdapter(ProviderAdapter):
@@ -42,11 +52,20 @@ class OpenAIStyleAdapter(ProviderAdapter):
             "model": request.model,
         }
 
-        if request.temperature is not None:
+        # OpenAI reasoning models (o1/o3/o4 families) reject 'max_tokens' (they
+        # require 'max_completion_tokens') and only accept temperature=1. Detect
+        # by model id and adjust, so smart routing to these models doesn't 400
+        # and trip the provider's circuit breaker.
+        is_reasoning = _is_openai_reasoning_model(request.model)
+
+        if request.temperature is not None and not is_reasoning:
             payload["temperature"] = request.temperature
         if request.max_tokens is not None:
-            payload["max_tokens"] = request.max_tokens
-        if request.top_p is not None:
+            if is_reasoning:
+                payload["max_completion_tokens"] = request.max_tokens
+            else:
+                payload["max_tokens"] = request.max_tokens
+        if request.top_p is not None and not is_reasoning:
             payload["top_p"] = request.top_p
         if request.stop is not None:
             payload["stop"] = request.stop
