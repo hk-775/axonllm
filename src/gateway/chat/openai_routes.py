@@ -71,8 +71,13 @@ class OpenAICompatAPI:
             return _error(400, "Invalid JSON in request body")
 
         model = body.get("model")
-        if not model or not isinstance(model, str):
-            return _error(400, "you must provide a model parameter")
+        # Smart routing (auto model selection): model == "auto" or empty/missing.
+        # Otherwise a concrete model string is required. Lets standard OpenAI
+        # clients opt into task-aware routing via `model: "auto"`.
+        model = model if isinstance(model, str) else ""
+        smart_routing = model.strip().lower() in ("", "auto")
+        if smart_routing:
+            model = ""
         messages = body.get("messages")
         if not messages or not isinstance(messages, list):
             return _error(400, "you must provide a messages parameter")
@@ -83,14 +88,17 @@ class OpenAICompatAPI:
         user_id, project_id = _identity(request)
 
         if stream:
-            return await self._stream(model, messages, temperature, max_tokens, user_id, project_id)
-        return await self._complete(model, messages, temperature, max_tokens, user_id, project_id)
+            return await self._stream(model, messages, temperature, max_tokens,
+                                      user_id, project_id, smart_routing)
+        return await self._complete(model, messages, temperature, max_tokens,
+                                    user_id, project_id, smart_routing)
 
-    async def _complete(self, model, messages, temperature, max_tokens, user_id, project_id):
+    async def _complete(self, model, messages, temperature, max_tokens, user_id,
+                        project_id, smart_routing=False):
         try:
             resp = await self.client_agent.chat(
                 model, messages, temperature=temperature, max_tokens=max_tokens,
-                user_id=user_id, project_id=project_id,
+                user_id=user_id, project_id=project_id, smart_routing=smart_routing,
             )
         except Exception:
             logger.exception("chat completion failed")
@@ -121,16 +129,21 @@ class OpenAICompatAPI:
                 "total_tokens": usage.get("total_tokens", 0),
             },
         }
+        # Surface the smart-routing decision (task_type + selected model) as an
+        # extension field. Standard OpenAI clients ignore unknown keys.
+        if "smart_routing" in resp:
+            completion["x_smart_routing"] = resp["smart_routing"]
         return JSONResponse(completion)
 
-    async def _stream(self, model, messages, temperature, max_tokens, user_id, project_id):
+    async def _stream(self, model, messages, temperature, max_tokens, user_id,
+                      project_id, smart_routing=False):
         completion_id = f"chatcmpl-{uuid.uuid4().hex}"
         created = int(time.time())
 
         try:
             chunks = self.client_agent.chat_stream(
                 model, messages, temperature=temperature, max_tokens=max_tokens,
-                user_id=user_id, project_id=project_id,
+                user_id=user_id, project_id=project_id, smart_routing=smart_routing,
             )
         except Exception:
             logger.exception("stream setup failed")

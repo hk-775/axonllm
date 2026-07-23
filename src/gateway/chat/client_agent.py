@@ -91,13 +91,17 @@ class ClientAgent:
         user_id: str | None = None,
         project_id: str | None = None,
         provider: str | None = None,
+        smart_routing: bool = False,
     ) -> AsyncIterator[dict]:
         """Streaming chat completion. Yields chunk dicts."""
         request_data = self._build_request_data(
             model, messages, stream=True,
             temperature=temperature, max_tokens=max_tokens,
         )
-        context = self._build_context(user_id=user_id, project_id=project_id, provider=provider)
+        context = self._build_context(
+            user_id=user_id, project_id=project_id, provider=provider,
+            smart_routing=smart_routing,
+        )
         result = await self.gateway_agent.handle_chat_completion(request_data, context)
 
         # If the gateway returned an error dict directly (e.g. rate limit)

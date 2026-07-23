@@ -160,6 +160,9 @@ class ChatAPI:
         temperature = body.get("temperature")
         max_tokens = body.get("max_tokens")
         provider = body.get("provider")
+        # Smart-routing flag (Auto mode): empty model + context.smart_routing.
+        ctx = body.get("context", {})
+        smart_routing = ctx.get("smart_routing", False) if isinstance(ctx, dict) else False
         # Identity for attribution comes from the authenticated context, not the body.
         user_id, project_id = _identity_from_context(request)
 
@@ -172,6 +175,7 @@ class ChatAPI:
             result = self.client_agent.chat_stream(
                 model, messages, temperature=temperature, max_tokens=max_tokens,
                 user_id=user_id, project_id=project_id, provider=provider,
+                smart_routing=smart_routing,
             )
         except Exception as exc:
             logging.getLogger("gateway.chat").error("Stream error: %s\n%s", exc, traceback.format_exc())
