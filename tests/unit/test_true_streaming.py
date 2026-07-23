@@ -215,6 +215,57 @@ class TestUsageAfterFinalChunk:
         assert all(e["data"]["choices"] for e in emitted) or True  # no empty-choice chunk emitted
 
 
+class TestBufferedFallbackForNonHttpProvider:
+    """Regression: providers that don't stream over HttpClient (boto3 Bedrock,
+    google_ai) have no HTTP config. _stream_true must fall back to a blocking
+    call + simulate-stream rather than erroring 'all_providers_exhausted'.
+    (Caught live: real Bedrock streaming was never exercised by the fakes.)"""
+
+    async def test_no_http_config_falls_back_to_buffered_stream(self):
+        from unittest.mock import AsyncMock, MagicMock
+
+        from src.gateway.models import ChatCompletionResponse, TokenUsage
+
+        chain = [ProviderModelMapping(provider="bedrock", model_id="claude-sonnet")]
+        router = _router(chain)
+        # The fallback path SHOULD call execute_with_fallback → return a response.
+        resp = ChatCompletionResponse(
+            id="r1",
+            choices=[{"index": 0, "message": {"role": "assistant", "content": "1, 2, 3"}}],
+            usage=TokenUsage(10, 5, 15), model="claude-sonnet", provider="bedrock")
+        router.execute_with_fallback = AsyncMock(return_value=resp)
+
+        # Factory with NO http config for bedrock (config_for → None), like the
+        # real MultiProviderFactory (bedrock goes through boto3).
+        factory = MagicMock()
+        factory._adapter_registry = {"bedrock": MagicMock()}
+        factory._provider_configs = {}
+        factory._http_client = MagicMock()
+        factory.config_for = MagicMock(return_value=None)   # boto3 provider → no HTTP config
+        factory.create = MagicMock(return_value=AsyncMock())
+
+        cost_tracker = MagicMock(spec=CostTracker)
+        cost_tracker.calculate_cost = MagicMock(return_value=0.01)
+        cost_tracker.record_usage = AsyncMock()
+        _no_budget(cost_tracker)
+        agent = _agent(router, factory, cost_tracker=cost_tracker)
+
+        out = await _drain(agent.handle_chat_completion(_req(), _ctx()))
+
+        # Fell back to the blocking call...
+        router.execute_with_fallback.assert_awaited_once()
+        # ...streamed the buffered content (not an all_providers_exhausted error)...
+        text = "".join(
+            c["data"]["choices"][0]["delta"].get("content", "")
+            for c in out if isinstance(c.get("data"), dict) and c["data"].get("choices"))
+        assert "1, 2, 3" == text
+        assert not any(
+            isinstance(c.get("data"), dict) and "error" in c["data"] for c in out)
+        assert out[-1] == {"data": "[DONE]"}
+        # ...and end-of-stream accounting still ran once.
+        cost_tracker.record_usage.assert_awaited_once()
+
+
 class TestPreFirstByteFallback:
     async def test_falls_back_to_next_provider_before_first_byte(self):
         # First provider raises on open; second streams fine.
