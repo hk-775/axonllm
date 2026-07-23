@@ -663,6 +663,9 @@
               messages: conversationHistory,
               user_id: selectedUser,
               provider: selectedProvider,
+              // Empty model = "Auto (router picks)" → enable smart routing so the
+              // backend classifies the prompt and selects a model.
+              context: selectedModel ? {} : { smart_routing: true },
             }),
           });
 

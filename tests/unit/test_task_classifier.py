@@ -25,6 +25,22 @@ class TestClassifyCoding:
         result = classifier.classify("Help me debug this code that has a syntax error")
         assert result.task_type == "coding"
 
+    def test_write_a_function_is_coding_not_creative(self, classifier):
+        # Regression: "write a ..." + a coding signal must classify as coding,
+        # not creative_writing (the "write a" heuristic used to blindly boost
+        # creative_writing even for code prompts).
+        for prompt in (
+            "write a python function to reverse a linked list",
+            "write a bash script to tail logs",
+            "create a REST API endpoint in typescript",
+        ):
+            assert classifier.classify(prompt).task_type == "coding", prompt
+
+    def test_write_a_poem_still_creative(self, classifier):
+        # The coding routing must NOT hijack genuinely creative "write a" prompts.
+        for prompt in ("write a poem about the sea", "write a short story about a robot"):
+            assert classifier.classify(prompt).task_type == "creative_writing", prompt
+
 
 class TestClassifyMath:
     def test_math_prompt(self, classifier):

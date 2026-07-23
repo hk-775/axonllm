@@ -21,6 +21,10 @@ class TaskClassifier:
         "coding": [
             "code", "function", "bug", "implement", "class", "method", "api",
             "debug", "refactor", "syntax", "compile", "programming", "algorithm",
+            "script", "regex", "query", "sql", "endpoint",
+            # common languages / runtimes — strong coding signals
+            "python", "javascript", "typescript", "java", "golang", "rust",
+            "c++", "bash", "shell",
             "```",
         ],
         "reasoning": [
@@ -119,12 +123,18 @@ class TaskClassifier:
             if "```" not in matched.get("coding", []):
                 matched.setdefault("coding", []).append("```")
 
-        # Starts with "Write a" or "Create a" → boost creative_writing
+        # Starts with "Write a" / "Create a": ambiguous — "write a poem" is
+        # creative, "write a function" is coding. Route the boost to coding when
+        # the prompt already has any coding signal; otherwise creative_writing.
         stripped = original.strip()
         if stripped.lower().startswith("write a") or stripped.lower().startswith("create a"):
-            scores.setdefault("creative_writing", 0.0)
-            scores["creative_writing"] += 2.0
-            matched.setdefault("creative_writing", []).append("write_a_heuristic")
+            if scores.get("coding", 0.0) > 0:
+                scores["coding"] += 2.0
+                matched.setdefault("coding", []).append("write_a_code_heuristic")
+            else:
+                scores.setdefault("creative_writing", 0.0)
+                scores["creative_writing"] += 2.0
+                matched.setdefault("creative_writing", []).append("write_a_heuristic")
 
         # Contains a genuine arithmetic expression (number-operator-number) →
         # boost math. Guards against prose that merely contains digits and

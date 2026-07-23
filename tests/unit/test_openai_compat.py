@@ -23,17 +23,19 @@ class _FakeClientAgent:
         self.last_call: dict = {}
 
     async def chat(self, model, messages, temperature=None, max_tokens=None,
-                   user_id=None, project_id=None):
-        self.last_call = {"user_id": user_id, "project_id": project_id, "model": model}
+                   user_id=None, project_id=None, smart_routing=False):
+        self.last_call = {"user_id": user_id, "project_id": project_id,
+                          "model": model, "smart_routing": smart_routing}
         return {
-            "id": "internal-1", "model": model, "provider": "test",
+            "id": "internal-1", "model": model or "auto-selected", "provider": "test",
             "content": "hello there",
             "usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
         }
 
     async def chat_stream(self, model, messages, temperature=None, max_tokens=None,
-                          user_id=None, project_id=None):
-        self.last_call = {"user_id": user_id, "project_id": project_id, "model": model}
+                          user_id=None, project_id=None, smart_routing=False):
+        self.last_call = {"user_id": user_id, "project_id": project_id,
+                          "model": model, "smart_routing": smart_routing}
         for tok in ["one ", "two ", "three"]:
             yield {"id": "internal-1", "model": model, "content": tok, "is_final": False}
         yield {"done": True}
@@ -95,11 +97,17 @@ class TestChatCompletions:
         assert agent.last_call["user_id"] is None
         assert agent.last_call["project_id"] is None
 
-    def test_missing_model_is_400(self):
-        client, _ = _make_client()
-        r = client.post("/v1/chat/completions", json={"messages": [{"role": "user", "content": "x"}]})
-        assert r.status_code == 400
-        assert r.json()["error"]["type"] == "invalid_request_error"
+    def test_missing_or_auto_model_triggers_smart_routing(self):
+        # Empty/missing model and model="auto" now opt into smart routing rather
+        # than 400 — lets standard OpenAI clients request task-aware routing.
+        client, agent = _make_client()
+        for body in ({"messages": [{"role": "user", "content": "x"}]},
+                     {"model": "", "messages": [{"role": "user", "content": "x"}]},
+                     {"model": "auto", "messages": [{"role": "user", "content": "x"}]}):
+            r = client.post("/v1/chat/completions", json=body)
+            assert r.status_code == 200
+            assert agent.last_call["smart_routing"] is True
+            assert agent.last_call["model"] == ""
 
     def test_missing_messages_is_400(self):
         client, _ = _make_client()
