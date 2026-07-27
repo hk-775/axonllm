@@ -34,6 +34,21 @@ APIKeys.docx
 *.docx
 *.pdf
 
+# Internal strategy / competitive collateral — never commit.
+#
+# docs/internal/README.md opens with "NOT for open-source distribution", but the
+# whole directory was tracked anyway — competitive analysis and battle card
+# included — along with two copies of the PRFAQ. The rule above only covers
+# binaries, so the .md originals sailed straight through.
+#
+# .gitignore does nothing for files git already tracks: if one of these shows up
+# staged, untrack it with `git rm --cached` rather than only adding a pattern.
+docs/internal/
+PRFAQ*
+launch-materials*
+*Investment Business Case*
+*Funding Plan*
+
 # AgentCore build artifacts
 .bedrock_agentcore/
 .bedrock_agentcore.yaml
