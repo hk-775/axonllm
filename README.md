@@ -33,6 +33,7 @@ docker compose up
 
 ### Routing & Providers
 - **Multi-provider routing** — 13 provider adapters: Bedrock, Bedrock Mantle, Anthropic, OpenAI, Azure, Vertex AI, Google AI, Cohere, AI21, Fireworks, Groq, Together, xAI
+- **Tool calling (function calling)** — send OpenAI-shaped `tools`/`tool_choice`; each adapter translates into its provider's own dialect (Anthropic `input_schema`, Bedrock `toolSpec`, Gemini `functionDeclarations`, Cohere `parameter_definitions`) and translates the call back. One tool definition works across every provider.
 - **5 routing strategies** — round-robin, weighted, least-latency, cost-optimized, smart (intent-aware)
 - **Ensemble routing** — scatter-gather-synthesize across a panel of models with configurable quorum
 - **Multi-region hub-and-spoke** — single-region, active-passive failover, or active-active with weighted distribution
@@ -195,8 +196,57 @@ curl http://localhost:8000/v1/models \
 
 Attribution (user/project for quotas and cost) is taken from the authenticated
 API key, not the request body. Supported: `model`, `messages`, `temperature`,
-`max_tokens`, `stream`. Ensemble/smart-routing model names (e.g. `ensemble:quality`)
-work here too.
+`max_tokens`, `stream`, `tools`, `tool_choice`. Ensemble/smart-routing model names
+(e.g. `ensemble:quality`) work here too.
+
+### Tool calling — one definition, every provider
+
+Define tools once in OpenAI's shape. Each adapter translates them into its
+provider's dialect on the way out and translates the model's call back into
+`tool_calls` on the way in, so the same loop works whether the request lands on
+Bedrock, Anthropic, Gemini, or Cohere.
+
+```python
+tools = [{
+    "type": "function",
+    "function": {
+        "name": "db_query",
+        "description": "Run a read-only SQL query",
+        "parameters": {
+            "type": "object",
+            "properties": {"sql": {"type": "string"}},
+            "required": ["sql"],
+        },
+    },
+}]
+
+messages = [{"role": "user", "content": "How many rows are in the orders table?"}]
+resp = client.chat.completions.create(model="claude-sonnet", messages=messages, tools=tools)
+
+call = resp.choices[0].message.tool_calls[0]        # finish_reason == "tool_calls"
+args = json.loads(call.function.arguments)          # {"sql": "SELECT COUNT(*) FROM orders"}
+
+messages += [
+    {"role": "assistant", "tool_calls": [call.model_dump()]},
+    {"role": "tool", "tool_call_id": call.id, "content": "42"},
+]
+resp = client.chat.completions.create(model="claude-sonnet", messages=messages, tools=tools)
+# → "There are 42 rows in the orders table."
+```
+
+Notes that matter in practice:
+
+- **`arguments` is a JSON string** in OpenAI's shape (and an object in every other
+  dialect). AxonLLM re-encodes at each boundary; a model that emits malformed JSON
+  yields `{}` rather than failing the request, so your tool reports the bad call.
+- **Keep schemas to plain JSON Schema.** Gemini *rejects* unknown keys
+  (`additionalProperties`, `$schema`, `title`, `default`) rather than ignoring
+  them, so AxonLLM strips them recursively — but a schema that leans on them means
+  something different than you wrote.
+- **Not every model supports tools.** Routing honors your `model`; smart routing
+  picks by task, not by tool support, so pin a model when a call requires them.
+- Cohere's v1 chat has no `tool_choice` equivalent — a non-`auto` value comes back
+  as a response warning rather than being silently ignored.
 
 ## Web Interfaces
 

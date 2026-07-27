@@ -3,7 +3,7 @@
 **Audience:** internal (engineering, product, exec).
 **Purpose:** one place that explains what each AxonLLM feature is, why it exists,
 and the request/data flow through the system. Reflects `src/gateway/` as of
-2026-07-22.
+2026-07-26.
 
 > **Note:** unlike Ostiari's `docs/internal/` (git-ignored), this repo's
 > `docs/internal/` is **tracked** — keep anything you don't want committed out of
@@ -59,7 +59,7 @@ Every request runs an ordered 16-step pipeline. Each step can short-circuit with
 a typed error; most are optional (enabled by the components wired in).
 
 ```
- 1. Parse request (ChatCompletionRequest)
+ 1. Parse request (ChatCompletionRequest — incl. tools/tool_choice)
  2. Extract context (project_id, user_id, scopes, metadata)
  2.5 Request validation (model exists, shape) — skipped for smart/ensemble
  2.7 Policy-hierarchy quota enforcement (rate + budget + token caps)
@@ -132,6 +132,53 @@ providers behind one interface: **bedrock, openai, anthropic, azure, vertex,
 google_ai, cohere, groq, fireworks, together, ai21, xai, mantle**. Each adapter
 translates the unified `ChatCompletionRequest` to the provider's API and back.
 `HttpClient` handles transport (incl. streaming).
+
+### Tool calling (function calling)
+
+`ChatCompletionRequest` carries OpenAI-shaped `tools` / `tool_choice`; each adapter
+translates **both directions** — spec out, tool call back. Five dialects, and they
+are not symmetric:
+
+| | Tool spec | Assistant call | Tool result | Signals a call via |
+|---|---|---|---|---|
+| **OpenAI-style** (openai, azure, groq, fireworks, together, ai21, xai, mantle) | `tools[].function.parameters` | `tool_calls[]` | `role:"tool"` | `finish_reason:"tool_calls"` |
+| **Anthropic-style** (anthropic, bedrock invoke) | `tools[].input_schema` | `tool_use` block | `tool_result` block | `stop_reason:"tool_use"` |
+| **Bedrock Converse** | `toolConfig..toolSpec` | `toolUse` block | `toolResult` block | `stopReason:"tool_use"` |
+| **Gemini** (google_ai, vertex) | `functionDeclarations` | `functionCall` part | `functionResponse` part | *the part itself* — `finishReason` stays `STOP` |
+| **Cohere** | `parameter_definitions` | history `tool_calls` | top-level `tool_results` | `tool_calls` present |
+
+Where the work lives: `adapters/openai_style.py` (pass-through, shared by 8
+providers), `adapters/anthropic_style.py` (`_openai_tool_to_anthropic`,
+`_openai_tool_choice_to_anthropic`, `_openai_msg_to_anthropic`),
+`adapters/gemini_tools.py` (shared by both Google adapters),
+`adapters/cohere_adapter.py`, and `bedrock_provider.py` (`_converse_message`,
+`_converse_tool_choice`) for the Converse path.
+
+Four cross-cutting details, each a bug that had to be found once:
+
+- **`arguments` encoding** — OpenAI carries tool arguments as a JSON *string*;
+  every other dialect uses an object. Re-encoded at each boundary; malformed model
+  output yields `{}` rather than failing the request (the tool reports the bad call).
+- **Gemini schema filtering** — Gemini *rejects* unknown JSON Schema keys
+  (`additionalProperties`, `$schema`, `title`, `default`) instead of ignoring them,
+  so a schema written for OpenAI 400s the whole request. `_clean_schema` filters
+  recursively against `_ALLOWED_SCHEMA_KEYS`.
+- **`tool_choice` has no Cohere equivalent** — a non-`auto` value surfaces as a
+  response warning rather than being dropped silently.
+- **Smart routing reads the last real *user* text**, not the last message: mid-loop
+  rounds end in a tool result, which classified as a different task type and could
+  send round two of a loop to a different model than round one.
+
+Two adjacent components had to change for a tool loop to survive the pipeline at
+all: `request_validator.py` accepts an assistant turn with `tool_calls` and no
+`content` (the normal shape of a tool call — rejecting it broke every loop at round
+two), and `cache_manager.py` includes tools in the cache key (the same prompt with
+a tool list returns a call and without one returns prose, so omitting them served a
+cached tool-free reply to a request that needed a call).
+
+`agent.py`'s PII path uses `dataclasses.replace` rather than rebuilding the request
+field-by-field — the field-by-field rebuild is exactly how `tools` went missing, and
+it would drop the next field added too, but only for requests containing PII.
 
 ### Streaming (true end-to-end)
 
@@ -374,6 +421,7 @@ Ostiari's `docs/internal/ostiari-architecture-and-features.md` §6.
 | Smart routing | `smart_routing.py`, `task_classifier.py`, `model_leaderboard.py`, `feedback_tracker.py` |
 | Ensemble | `ensemble.py`, `ensemble_config.py`, `config/ensemble.yaml` |
 | Providers | `adapters/`, `provider_fn_factory.py`, `multi_provider_factory.py`, `http_client.py` |
+| Tool calling | `adapters/{openai_style,anthropic_style,gemini_tools,cohere_adapter}.py`, `bedrock_provider.py`, `models.py` |
 | Cost / efficiency | `cost_tracker.py`, `efficiency_analyzer.py`, `semantic_efficiency.py` |
 | Quota / rate | `quota_enforcer.py`, `rate_limiter.py`, `request_validator.py` |
 | Guardrails / security | `guardrail_engine.py`, `security/{injection_detector,pii_redactor,audit_trail,event_dispatcher}.py` |
@@ -389,6 +437,6 @@ Ostiari's `docs/internal/ostiari-architecture-and-features.md` §6.
 ## 17. One-liner
 
 **AxonLLM** = an embeddable, OpenAI-compatible **LLM routing engine** — smart +
-ensemble + fallback across 13 providers, with cost/efficiency, guardrails,
-quotas, caching, and multi-region — that runs standalone or in-process as the
-routing brain beneath a governance layer (Ostiari).
+ensemble + fallback across 13 providers, with tool-calling translation,
+cost/efficiency, guardrails, quotas, caching, and multi-region — that runs
+standalone or in-process as the routing brain beneath a governance layer (Ostiari).

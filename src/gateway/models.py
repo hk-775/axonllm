@@ -41,7 +41,15 @@ class HealthStatus(Enum):
 
 @dataclass
 class ChatCompletionRequest:
-    """OpenAI-compatible chat completion request."""
+    """OpenAI-compatible chat completion request.
+
+    ``tools``/``tool_choice`` are OpenAI-shaped
+    (``{"type": "function", "function": {"name", "description", "parameters"}}``)
+    and each adapter translates them into its provider's dialect. They must be
+    carried, not dropped: a request whose tools go missing still gets a fluent
+    HTTP 200 from a model that was never told the tools exist — it just answers
+    that it has no such capability, which reads as success and isn't.
+    """
 
     messages: list[dict]
     model: str
@@ -51,6 +59,8 @@ class ChatCompletionRequest:
     stop: list[str] | None = None
     stream: bool = False
     system: str | None = None
+    tools: list[dict] | None = None
+    tool_choice: str | dict | None = None
 
 
 @dataclass

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import time
 import warnings
@@ -296,16 +297,12 @@ class GatewayAgent:
                 request.messages or [], effective_policy
             )
             if pii_mapping.redacted_count > 0:
-                request = ChatCompletionRequest(
-                    messages=redacted_messages,
-                    model=request.model,
-                    temperature=request.temperature,
-                    max_tokens=request.max_tokens,
-                    top_p=request.top_p,
-                    stop=request.stop,
-                    stream=request.stream,
-                    system=request.system,
-                )
+                # replace() rather than re-listing every field: a hand-rolled
+                # rebuild silently drops any field added later (that is exactly
+                # how `tools` went missing), and dropping one here would strip
+                # the caller's tools from every request that happened to contain
+                # PII — an intermittent failure far harder to find than a total one.
+                request = dataclasses.replace(request, messages=redacted_messages)
                 if self._audit_trail is not None:
                     redacted_types = list(pii_mapping._counters.keys())
                     await self._audit_trail.record_pii_redaction(
@@ -460,11 +457,28 @@ class GatewayAgent:
             # Compute effective allowed models from project + user access lists
             effective_allowed = self._compute_effective_allowed_models(project, req_ctx.user_id)
 
-            # Extract prompt from last user message (shared by smart + ensemble)
+            # Extract prompt from last user message (shared by smart + ensemble).
+            # In a tool loop the final message is a tool result, and mid-loop
+            # assistant turns have content=None — classifying either as "the
+            # prompt" would route later rounds of one conversation to a different
+            # model than the round that chose the tool. Walk back to the last real
+            # user text instead, and keep it a str so the classifier can't crash.
             prompt = ""
-            if request.messages:
-                last_msg = request.messages[-1]
-                prompt = last_msg.get("content", "") if isinstance(last_msg, dict) else ""
+            for last_msg in reversed(request.messages or []):
+                if not isinstance(last_msg, dict) or last_msg.get("role") != "user":
+                    continue
+                content = last_msg.get("content")
+                if isinstance(content, str) and content:
+                    prompt = content
+                    break
+                if isinstance(content, list):
+                    text = " ".join(
+                        b.get("text", "") for b in content
+                        if isinstance(b, dict) and b.get("type") == "text"
+                    ).strip()
+                    if text:
+                        prompt = text
+                        break
 
             # Check if smart routing / ensemble routing should be used
             smart_routing_decision = None
@@ -1445,6 +1459,8 @@ class GatewayAgent:
             stop=data.get("stop"),
             stream=data.get("stream", False),
             system=data.get("system"),
+            tools=data.get("tools"),
+            tool_choice=data.get("tool_choice"),
         )
 
     def _extract_context(self, context: dict) -> RequestContext:

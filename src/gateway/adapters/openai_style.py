@@ -69,6 +69,11 @@ class OpenAIStyleAdapter(ProviderAdapter):
             payload["top_p"] = request.top_p
         if request.stop is not None:
             payload["stop"] = request.stop
+        # Tools are already in OpenAI's own dialect — pass them straight through.
+        if request.tools:
+            payload["tools"] = request.tools
+            if request.tool_choice is not None:
+                payload["tool_choice"] = request.tool_choice
         if request.stream:
             payload["stream"] = True
             # Ask the provider to include a final usage chunk so end-of-stream
