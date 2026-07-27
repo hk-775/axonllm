@@ -5,6 +5,53 @@ All notable changes to AxonLLM will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Tool calling (function calling) pass-through across every provider.**
+  `ChatCompletionRequest` now carries `tools` and `tool_choice`, and each adapter
+  translates them into its provider's own dialect in both directions:
+  - **OpenAI / Azure** — native shape, passed through.
+  - **Anthropic** — `input_schema`, `tool_use` / `tool_result` content blocks,
+    `stop_reason: "tool_use"` → `finish_reason: "tool_calls"`.
+  - **Bedrock Converse** — `toolConfig..toolSpec`, `toolUse` / `toolResult` blocks,
+    `stopReason` mapping.
+  - **Google AI / Vertex** — `functionDeclarations`, `functionCall` /
+    `functionResponse` parts, via the shared `adapters/gemini_tools.py`.
+  - **Cohere** — `parameter_definitions` (JSON Schema unrolled into per-parameter
+    type/description/required triples) and top-level `tool_results`.
+- 60 tests in `tests/unit/adapters/test_tool_translation.py` covering each dialect,
+  the tool-loop round trip, the cache key, and request validation.
+- Documentation: tool-calling walkthrough in `README.md`, the per-dialect
+  translation table and cross-cutting gotchas in
+  `docs/internal/axonllm-architecture-and-features.md` §4, and PRD §6.10 (FR-T1…T7)
+  with the tool-call request/response shapes in §9.1. PRD OQ7 ("should we support
+  tool use?") is resolved — implemented as per-provider translation rather than
+  pass-through, since only OpenAI-style providers accept OpenAI's shape.
+
+### Fixed
+- **Tool specs were silently dropped.** `ChatCompletionRequest` had no `tools`
+  field, so `_parse_request` never read one: the request succeeded, the model was
+  simply never told any tools existed, and it answered confidently that it had no
+  such capability. A fluent HTTP 200 with the entire tool-use loop missing, and no
+  error anywhere to notice it by.
+- The PII path rebuilt the request field-by-field, so any field added later was
+  dropped — which is exactly how `tools` went missing. It now uses
+  `dataclasses.replace`, so a caller's tools survive a request that happens to
+  contain PII (an intermittent failure far harder to find than a total one).
+- Smart routing read the *last* message as "the prompt", so mid-tool-loop rounds
+  classified a tool result and could be sent to a different model than the round
+  that chose the tool. It now walks back to the last real user text.
+- The semantic cache key omitted `tools`/`tool_choice`: the same prompt sent with
+  a tool list can return a tool call and sent without one returns prose, so a
+  cached tool-free reply could be served to a request that needed a tool call.
+- Request validation rejected an assistant turn with `tool_calls` and no
+  `content`, which is the normal shape of a tool call — it broke every tool loop
+  at round two.
+- Gemini rejects unknown JSON Schema keys (`additionalProperties`, `$schema`,
+  `title`, `default`) rather than ignoring them, so a schema written for OpenAI
+  400'd the whole request. Schemas are now filtered recursively.
+
 ## [0.1.0] - 2026-06-22
 
 ### Added

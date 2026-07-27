@@ -3,6 +3,12 @@
 import logging
 
 from src.gateway.adapters.base import ProviderAdapter
+from src.gateway.adapters.gemini_tools import (
+    gemini_parts_to_tool_calls,
+    openai_msg_to_gemini,
+    openai_tool_choice_to_gemini,
+    openai_tools_to_gemini,
+)
 from src.gateway.models import (
     ChatCompletionRequest,
     ChatCompletionResponse,
@@ -47,11 +53,9 @@ class VertexAIAdapter(ProviderAdapter):
                 if system_text is None:
                     system_text = msg.get("content", "")
                 continue
-            vertex_role = "model" if role == "assistant" else "user"
-            contents.append({
-                "role": vertex_role,
-                "parts": [{"text": msg.get("content", "")}],
-            })
+            entry = openai_msg_to_gemini(msg)
+            if entry is not None:
+                contents.append(entry)
 
         payload: dict = {
             "contents": contents,
@@ -62,6 +66,12 @@ class VertexAIAdapter(ProviderAdapter):
             payload["systemInstruction"] = {
                 "parts": [{"text": system_text}],
             }
+
+        if request.tools:
+            payload["tools"] = openai_tools_to_gemini(request.tools)
+            tool_config = openai_tool_choice_to_gemini(request.tool_choice)
+            if tool_config is not None:
+                payload["toolConfig"] = tool_config
 
         gen_config: dict = {}
         if request.temperature is not None:
@@ -88,17 +98,29 @@ class VertexAIAdapter(ProviderAdapter):
         candidates = provider_response.get("candidates", [])
         combined_text = ""
         finish_reason = "stop"
+        tool_calls: list[dict] = []
         if candidates:
             first = candidates[0]
             parts = first.get("content", {}).get("parts", [])
-            text_parts = [p.get("text", "") for p in parts]
+            text_parts = [p.get("text", "") for p in parts if "text" in p]
             combined_text = "".join(text_parts)
             finish_reason = first.get("finishReason", "stop")
+            tool_calls = gemini_parts_to_tool_calls(parts)
+
+        message: dict = {"role": "assistant", "content": combined_text}
+        if tool_calls:
+            message["tool_calls"] = tool_calls
+            if not combined_text:
+                message["content"] = None
+            # Gemini returns finishReason STOP even when calling a function; the
+            # functionCall part is the only signal. Give callers the value their
+            # tool loop actually branches on.
+            finish_reason = "tool_calls"
 
         choices = [
             {
                 "index": 0,
-                "message": {"role": "assistant", "content": combined_text},
+                "message": message,
                 "finish_reason": finish_reason,
             }
         ]

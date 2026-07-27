@@ -45,7 +45,12 @@ class CacheManager:
         """Generate deterministic cache key from request parameters.
 
         Uses SHA-256 hash of (model, messages, temperature, max_tokens,
-        top_p, stop, project_id) serialized as sorted JSON.
+        top_p, stop, tools, tool_choice, project_id) serialized as sorted JSON.
+
+        ``tools``/``tool_choice`` are part of the key because they change the
+        answer: the same prompt sent with a tool list can return a tool call and
+        sent without one returns prose. Omitting them would serve a cached
+        tool-free reply to a request that needed a tool call.
         """
         key_data = {
             "model": request.model,
@@ -54,6 +59,8 @@ class CacheManager:
             "max_tokens": request.max_tokens,
             "top_p": request.top_p,
             "stop": request.stop,
+            "tools": request.tools,
+            "tool_choice": request.tool_choice,
             "project_id": project_id,
         }
         canonical = json.dumps(key_data, sort_keys=True, separators=(",", ":"))
