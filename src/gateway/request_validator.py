@@ -43,7 +43,10 @@ class RequestValidator:
                     message=f"Message at index {idx} is missing required field 'role'.",
                     severity="error",
                 ))
-            if "content" not in msg:
+            # An assistant turn that only calls tools carries no content — that's
+            # the shape OpenAI itself returns (content:null + tool_calls). Demanding
+            # content here would reject every second message of a valid tool loop.
+            if "content" not in msg and not msg.get("tool_calls"):
                 errors.append(ValidationError(
                     field=f"messages[{idx}].content",
                     message=f"Message at index {idx} is missing required field 'content'.",
@@ -79,8 +82,13 @@ class RequestValidator:
         # 4. Check token limit if configured
         model_config = self.model_registry.models.get(request.model)
         if model_config and model_config.max_context_tokens is not None:
+            # str() the content: a tool-calling turn has content=None and a
+            # multimodal one has a list of blocks, either of which makes
+            # str.join raise TypeError. This is an estimate, so an approximate
+            # length for a non-string block beats failing the request.
             prompt_text = " ".join(
-                msg.get("content", "") for msg in request.messages
+                c if isinstance(c := msg.get("content") or "", str) else str(c)
+                for msg in request.messages
             )
             try:
                 encoding = tiktoken.get_encoding("cl100k_base")
