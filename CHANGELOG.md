@@ -22,6 +22,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     type/description/required triples) and top-level `tool_results`.
 - 60 tests in `tests/unit/adapters/test_tool_translation.py` covering each dialect,
   the tool-loop round trip, the cache key, and request validation.
+- Documentation: tool-calling walkthrough in `README.md`, the per-dialect
+  translation table and cross-cutting gotchas in
+  `docs/internal/axonllm-architecture-and-features.md` §4, and PRD §6.10 (FR-T1…T7)
+  with the tool-call request/response shapes in §9.1. PRD OQ7 ("should we support
+  tool use?") is resolved — implemented as per-provider translation rather than
+  pass-through, since only OpenAI-style providers accept OpenAI's shape.
 
 ### Fixed
 - **Tool specs were silently dropped.** `ChatCompletionRequest` had no `tools`

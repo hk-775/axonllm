@@ -194,6 +194,7 @@ Stakeholders who need visibility into LLM spend and assurance that usage complie
 | FR-A3 | **Dual execution paths** | Bedrock requests use boto3 native SDK (invoke_model for Anthropic models, converse API for others). All non-Bedrock providers use async HTTP with session pooling. |
 | FR-A4 | **Request/response normalization** | All provider-specific payloads are translated to/from a unified OpenAI-compatible format (ChatCompletionRequest/Response). Provider differences (field names, message formats, system prompt handling) are abstracted. |
 | FR-A5 | **Streaming translation** | Each adapter translates provider-specific SSE events into a unified StreamChunk format. Providers that don't support native streaming receive simulated streaming (word-level chunking of complete responses). |
+| FR-A6 | **Tool-call translation** | Each adapter translates OpenAI-shaped `tools`/`tool_choice` into its provider's dialect and translates the model's tool call back into `tool_calls` — see 6.10. |
 
 ### 6.3 Cost Tracking and Budget Management
 
@@ -228,7 +229,7 @@ Stakeholders who need visibility into LLM spend and assurance that usage complie
 | ID | Requirement | Details |
 |----|-------------|---------|
 | FR-CA1 | **Response caching** | Per-project configurable response cache. Semantically identical requests within the TTL (default 300s) are served from cache with zero additional provider cost. |
-| FR-CA2 | **Deterministic cache keys** | Cache keys are SHA-256 hashes of: model, messages, temperature, max_tokens, top_p, stop, and project_id. Ensures identical requests produce identical keys regardless of field order. |
+| FR-CA2 | **Deterministic cache keys** | Cache keys are SHA-256 hashes of: model, messages, temperature, max_tokens, top_p, stop, tools, tool_choice, and project_id. Ensures identical requests produce identical keys regardless of field order. The tool list is part of the key because the same prompt sent with tools can return a tool call and sent without them returns prose — a shared key would serve a cached tool-free reply to a request that needs a call. |
 | FR-CA3 | **Provider-level prompt caching** | When enabled per project, system prompts are annotated with `cache_control: ephemeral` blocks for Anthropic/Bedrock providers, reducing cost and latency on repeated system prompts. |
 
 ### 6.7 Rate Limiting
@@ -242,7 +243,7 @@ Stakeholders who need visibility into LLM spend and assurance that usage complie
 
 | ID | Requirement | Details |
 |----|-------------|---------|
-| FR-V1 | **Structural validation** | Messages must be dicts with `role` and `content` fields. Roles must be one of: system, user, assistant, tool. |
+| FR-V1 | **Structural validation** | Messages must be dicts with `role` and `content` fields. Roles must be one of: system, user, assistant, tool. An assistant turn carrying `tool_calls` may omit `content` — that is the normal shape of a tool call. |
 | FR-V2 | **Model validation** | Requested model must exist in the model registry. Unknown models return HTTP 404. |
 | FR-V3 | **Token limit validation** | Estimated prompt token count (via tiktoken) is checked against the model's `max_context_tokens` when configured. |
 
@@ -258,7 +259,19 @@ Stakeholders who need visibility into LLM spend and assurance that usage complie
 | FR-AD6 | **Policy management** | Create and view Cedar authorization policies with ENFORCE/LOG_ONLY modes. |
 | FR-AD7 | **Provider health** | Real-time per-provider health status (healthy/unhealthy). |
 
-### 6.10 Persistence
+### 6.10 Tool Calling (Function Calling)
+
+| ID | Requirement | Details |
+|----|-------------|---------|
+| FR-T1 | **Unified tool definition** | Callers send OpenAI-shaped `tools` and `tool_choice`. One definition works across every provider; no per-provider tool schema is required of the caller. |
+| FR-T2 | **Bidirectional dialect translation** | Each adapter translates the tool spec on the way out and the model's tool call back into OpenAI `tool_calls` on the way in. Five dialects: OpenAI-style (`tools[].function.parameters` / `tool_calls[]` / `role:"tool"`), Anthropic-style (`input_schema` / `tool_use` / `tool_result`), Bedrock Converse (`toolConfig..toolSpec` / `toolUse` / `toolResult`), Gemini (`functionDeclarations` / `functionCall` / `functionResponse`), Cohere (`parameter_definitions` / top-level `tool_results`). |
+| FR-T3 | **Normalized completion signal** | A tool call always surfaces as `finish_reason: "tool_calls"` regardless of the provider's own signal (Anthropic/Bedrock `stop_reason: "tool_use"`; Gemini leaves `finishReason` at `STOP` and signals only via the part itself). |
+| FR-T4 | **Arguments encoding** | OpenAI carries tool arguments as a JSON string, every other dialect as an object; the value is re-encoded at each boundary. Malformed model output yields `{}` rather than failing the request, so the tool reports the bad call. |
+| FR-T5 | **Schema compatibility** | Gemini rejects unknown JSON Schema keys (`additionalProperties`, `$schema`, `title`, `default`) rather than ignoring them, so schemas are filtered recursively before dispatch. |
+| FR-T6 | **Unsupported-parameter reporting** | Where a provider has no equivalent for a requested parameter (e.g. Cohere v1 chat has no `tool_choice`), the response carries a warning rather than dropping the instruction silently. |
+| FR-T7 | **Multi-round tool loops** | A full loop is supported: tool spec → tool call → tool result → final answer. Governance applies to every round (cost, quota, audit, guardrails), and smart routing classifies the last real user text rather than the intervening tool result, so all rounds of one loop route consistently. |
+
+### 6.11 Persistence
 
 | ID | Requirement | Details |
 |----|-------------|---------|
@@ -443,9 +456,27 @@ Dataclass Configurations (runtime)
   "max_tokens": 1024,
   "top_p": 1.0,
   "stop": ["\n\n"],
-  "stream": false
+  "stream": false,
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "db_query",
+        "description": "Run a read-only SQL query",
+        "parameters": {
+          "type": "object",
+          "properties": {"sql": {"type": "string"}},
+          "required": ["sql"]
+        }
+      }
+    }
+  ],
+  "tool_choice": "auto"
 }
 ```
+
+`tools` and `tool_choice` are optional and OpenAI-shaped; the target provider's
+dialect is AxonLLM's concern, not the caller's (§6.10).
 
 #### POST /api/chat — Response
 
@@ -471,6 +502,42 @@ Dataclass Configurations (runtime)
   "provider": "bedrock"
 }
 ```
+
+#### POST /api/chat — Response (tool call)
+
+When the model calls a tool, the assistant message carries `tool_calls` and
+`finish_reason` is `tool_calls` — normalized across providers regardless of the
+signal the provider itself used:
+
+```json
+{
+  "id": "chatcmpl-abc123",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": null,
+        "tool_calls": [
+          {
+            "id": "toolu_01A",
+            "type": "function",
+            "function": {"name": "db_query", "arguments": "{\"sql\": \"SELECT COUNT(*) FROM orders\"}"}
+          }
+        ]
+      },
+      "finish_reason": "tool_calls"
+    }
+  ],
+  "usage": {"prompt_tokens": 574, "completion_tokens": 59, "total_tokens": 633},
+  "model": "claude-opus",
+  "provider": "bedrock"
+}
+```
+
+The caller runs the tool and sends the result back as a `role: "tool"` message to
+continue the loop. `arguments` is a JSON **string** (OpenAI's convention), not an
+object.
 
 #### POST /api/chat/stream — SSE Response
 
@@ -798,6 +865,7 @@ All events are emitted as structured JSON with the following event types:
 - [x] Sliding window rate limiting
 - [x] Response caching with TTL
 - [x] Provider-level prompt caching (Anthropic/Bedrock)
+- [x] Tool calling (function calling) with per-provider dialect translation
 - [x] Admin dashboard with real-time analytics
 - [x] Chat, Playground, and Routing Explorer web interfaces
 - [x] DynamoDB persistence layer
@@ -844,7 +912,7 @@ All events are emitted as structured JSON with the following event types:
 | OQ4 | How should AxonLLM handle provider pricing changes? | Pricing YAML is manual. Automated pricing feeds from providers could reduce drift risk. |
 | OQ5 | Should the admin console support RBAC? | Currently all admin API operations are available to any authenticated user. Role-based access (admin, viewer, project-scoped) would improve security posture. |
 | OQ6 | What is the migration path for teams currently using provider SDKs directly? | OpenAI SDK compatibility minimizes migration effort. Documentation and tooling for gradual adoption should be prioritized. |
-| OQ7 | Should AxonLLM support tool use / function calling pass-through? | Current implementation handles chat completions. Tool use is increasingly common and would require adapter extensions. |
+| OQ7 | ~~Should AxonLLM support tool use / function calling pass-through?~~ **Resolved: yes, shipped.** | Implemented as bidirectional per-provider translation rather than pass-through (§6.10) — pass-through alone is not possible, since only OpenAI-style providers accept OpenAI's shape. Remaining question: whether to advertise per-model tool support in the registry so smart routing can avoid models that lack it. |
 
 ---
 
