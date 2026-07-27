@@ -3,8 +3,22 @@
 Both providers use system as a separate field, content blocks for responses,
 and stop_sequences instead of stop. Subclasses override only provider-specific
 response field names and streaming nuances.
+
+Tool calling is translated in both directions here, because the two dialects
+disagree on shape rather than on capability:
+
+    OpenAI                                  Anthropic
+    tools[].function.{name,parameters}      tools[].{name,input_schema}
+    assistant.tool_calls[]                  assistant content [{type:tool_use}]
+    role:"tool" message                     user content [{type:tool_result}]
+    finish_reason:"tool_calls"              stop_reason:"tool_use"
+
+The gateway's unified format is OpenAI's, so every one of those has to be
+converted on the way out and converted back on the way in. Handling only the
+request half would leave the model's tool call unreadable to the caller.
 """
 
+import json
 from datetime import datetime, timezone
 
 from src.gateway.adapters.base import ProviderAdapter
@@ -55,7 +69,7 @@ class AnthropicStyleAdapter(ProviderAdapter):
                 if system_text is None:
                     system_text = msg.get("content", "")
             else:
-                messages.append(msg)
+                messages.append(_openai_msg_to_anthropic(msg))
 
         max_tokens = (
             request.max_tokens
@@ -97,6 +111,11 @@ class AnthropicStyleAdapter(ProviderAdapter):
             payload["top_p"] = request.top_p
         if request.stop is not None:
             payload["stop_sequences"] = request.stop
+        if request.tools:
+            payload["tools"] = [_openai_tool_to_anthropic(t) for t in request.tools]
+            tc = _openai_tool_choice_to_anthropic(request.tool_choice)
+            if tc is not None:
+                payload["tool_choice"] = tc
         if request.stream:
             payload["stream"] = True
 
@@ -114,11 +133,43 @@ class AnthropicStyleAdapter(ProviderAdapter):
         ]
         combined_text = "".join(text_parts)
 
+        tool_calls = [
+            {
+                "id": block.get("id", f"call_{i}"),
+                "type": "function",
+                "function": {
+                    "name": block.get("name", ""),
+                    # OpenAI carries arguments as a JSON *string*; Anthropic sends
+                    # a parsed object. Callers json.loads() this field, so it has
+                    # to be re-encoded or they choke on a dict.
+                    "arguments": json.dumps(block.get("input", {})),
+                },
+            }
+            for i, block in enumerate(content_blocks)
+            if block.get("type") == "tool_use"
+        ]
+
+        message: dict = {"role": "assistant", "content": combined_text}
+        if tool_calls:
+            message["tool_calls"] = tool_calls
+            # OpenAI sends content=null (not "") alongside tool_calls. Only in
+            # that case — a plain response with no text keeps "" so nothing
+            # downstream that assumes a str changes behavior.
+            if not combined_text:
+                message["content"] = None
+
+        finish_reason = provider_response.get("stop_reason", "stop")
+        # A caller driving a tool loop branches on finish_reason; "tool_use"
+        # means nothing to an OpenAI-shaped client, so map it to the name it
+        # does know. Without this the loop ends and the tool is never run.
+        if finish_reason == "tool_use" or (tool_calls and finish_reason in (None, "stop")):
+            finish_reason = "tool_calls"
+
         choices = [
             {
                 "index": 0,
-                "message": {"role": "assistant", "content": combined_text},
-                "finish_reason": provider_response.get("stop_reason", "stop"),
+                "message": message,
+                "finish_reason": finish_reason,
             }
         ]
 
@@ -182,3 +233,108 @@ class AnthropicStyleAdapter(ProviderAdapter):
             status=HealthStatus.HEALTHY,
             last_check=datetime.now(timezone.utc),
         )
+
+
+# --- OpenAI ⇄ Anthropic tool translation ------------------------------------
+
+
+def _openai_tool_to_anthropic(tool: dict) -> dict:
+    """Convert one OpenAI tool spec to Anthropic's shape.
+
+    Accepts the nested OpenAI form and a bare Anthropic-shaped dict alike: the
+    gateway's own callers are not all OpenAI-native, and rejecting a tool that
+    is already correct would be a needless failure.
+    """
+    fn = tool.get("function") if isinstance(tool.get("function"), dict) else None
+    if fn is None:
+        # Already Anthropic-shaped (or close enough) — normalize the schema key.
+        return {
+            "name": tool.get("name", ""),
+            "description": tool.get("description", ""),
+            "input_schema": tool.get("input_schema") or tool.get("parameters")
+                            or {"type": "object", "properties": {}},
+        }
+    return {
+        "name": fn.get("name", ""),
+        "description": fn.get("description", ""),
+        # Anthropic requires input_schema; a tool declared with no parameters
+        # still needs the empty object or the API rejects the whole request.
+        "input_schema": fn.get("parameters") or {"type": "object", "properties": {}},
+    }
+
+
+def _openai_tool_choice_to_anthropic(choice: str | dict | None) -> dict | None:
+    """Map OpenAI's tool_choice onto Anthropic's.
+
+    OpenAI: "auto" | "none" | "required" | {"type":"function","function":{"name":…}}
+    Anthropic: {"type":"auto"} | {"type":"any"} | {"type":"tool","name":…}
+
+    "none" has no Anthropic equivalent — it means "tools exist but don't call
+    one", which Anthropic expresses by omitting tools entirely. Returning None
+    leaves tool_choice unset (Anthropic defaults to auto) rather than sending a
+    value the API would reject.
+    """
+    if choice is None or choice == "none":
+        return None
+    if choice == "auto":
+        return {"type": "auto"}
+    if choice in ("required", "any"):
+        return {"type": "any"}
+    if isinstance(choice, dict):
+        name = (choice.get("function") or {}).get("name") or choice.get("name")
+        if name:
+            return {"type": "tool", "name": name}
+    return None
+
+
+def _openai_msg_to_anthropic(msg: dict) -> dict:
+    """Convert one OpenAI-shaped message to Anthropic's content-block form.
+
+    Only tool-carrying messages need rewriting; everything else is returned
+    unchanged so ordinary traffic takes no new code path.
+    """
+    role = msg.get("role")
+
+    # role:"tool" → a user message holding a tool_result block.
+    if role == "tool":
+        content = msg.get("content")
+        return {
+            "role": "user",
+            "content": [{
+                "type": "tool_result",
+                "tool_use_id": msg.get("tool_call_id", ""),
+                "content": content if isinstance(content, str) else json.dumps(content),
+            }],
+        }
+
+    # An assistant turn that called tools → text blocks + tool_use blocks.
+    tool_calls = msg.get("tool_calls")
+    if role == "assistant" and tool_calls:
+        blocks: list[dict] = []
+        text = msg.get("content")
+        if isinstance(text, str) and text:
+            blocks.append({"type": "text", "text": text})
+        elif isinstance(text, list):
+            blocks.extend(text)
+        for tc in tool_calls:
+            fn = tc.get("function") or {}
+            raw_args = fn.get("arguments", tc.get("arguments", {}))
+            # OpenAI sends arguments as a JSON string; Anthropic wants an object.
+            # A model can emit malformed JSON here, and that must not take down
+            # the request — send {} and let the tool report the bad call.
+            if isinstance(raw_args, str):
+                try:
+                    args = json.loads(raw_args) if raw_args.strip() else {}
+                except (ValueError, TypeError):
+                    args = {}
+            else:
+                args = raw_args or {}
+            blocks.append({
+                "type": "tool_use",
+                "id": tc.get("id", ""),
+                "name": fn.get("name", tc.get("name", "")),
+                "input": args,
+            })
+        return {"role": "assistant", "content": blocks}
+
+    return msg

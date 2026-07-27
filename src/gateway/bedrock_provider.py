@@ -33,6 +33,65 @@ def _is_anthropic_model(model_id: str) -> bool:
     return any(model_id.startswith(p) or f".{p}" in model_id for p in _ANTHROPIC_PREFIXES)
 
 
+def _converse_tool_choice(choice) -> dict | None:
+    """Map OpenAI's tool_choice onto the Converse API's toolChoice.
+
+    Converse: {"auto":{}} | {"any":{}} | {"tool":{"name":…}}. "none" has no
+    equivalent (it means "don't call a tool"), so it's left unset rather than
+    sent as something the API rejects.
+    """
+    if choice is None or choice == "none":
+        return None
+    if choice == "auto":
+        return {"auto": {}}
+    if choice in ("required", "any"):
+        return {"any": {}}
+    if isinstance(choice, dict):
+        name = (choice.get("function") or {}).get("name") or choice.get("name")
+        if name:
+            return {"tool": {"name": name}}
+    return None
+
+
+def _converse_message(role: str, msg: dict, content) -> dict:
+    """Build one Converse message, translating tool traffic into its block shape.
+
+    Converse uses toolUse/toolResult content blocks rather than OpenAI's
+    tool_calls field and role:"tool" message, so both have to be reshaped —
+    otherwise the model never sees that it called a tool, or what came back.
+    """
+    if role == "tool":
+        raw = content if isinstance(content, str) else json.dumps(content)
+        return {"role": "user", "content": [{"toolResult": {
+            "toolUseId": msg.get("tool_call_id", ""),
+            "content": [{"text": raw}],
+        }}]}
+
+    tool_calls = msg.get("tool_calls")
+    if role == "assistant" and tool_calls:
+        blocks: list[dict] = []
+        if isinstance(content, str) and content:
+            blocks.append({"text": content})
+        for tc in tool_calls:
+            fn = tc.get("function") or {}
+            raw_args = fn.get("arguments", tc.get("arguments", {}))
+            if isinstance(raw_args, str):
+                try:
+                    args = json.loads(raw_args) if raw_args.strip() else {}
+                except (ValueError, TypeError):
+                    args = {}
+            else:
+                args = raw_args or {}
+            blocks.append({"toolUse": {
+                "toolUseId": tc.get("id", ""),
+                "name": fn.get("name", tc.get("name", "")),
+                "input": args,
+            }})
+        return {"role": "assistant", "content": blocks}
+
+    return {"role": role, "content": [{"text": content if isinstance(content, str) else str(content)}]}
+
+
 def create_bedrock_provider_fn(
     region: str = "us-east-1",
 ) -> Callable[[ChatCompletionRequest], Callable[[ProviderModelMapping], Awaitable[ChatCompletionResponse]]]:
@@ -110,7 +169,7 @@ async def _invoke_converse(
         if role == "system":
             system_parts.append({"text": content})
         else:
-            messages.append({"role": role, "content": [{"text": content}]})
+            messages.append(_converse_message(role, msg, content))
 
     if request.system:
         system_parts.insert(0, {"text": request.system})
@@ -124,6 +183,23 @@ async def _invoke_converse(
         if prompt_caching_enabled and _is_anthropic_model(mapping.model_id) and system_parts:
             system_parts[-1]["cache_control"] = {"type": "ephemeral"}
         kwargs["system"] = system_parts
+
+    if request.tools:
+        kwargs["toolConfig"] = {
+            "tools": [
+                {"toolSpec": {
+                    "name": (t.get("function") or t).get("name", ""),
+                    "description": (t.get("function") or t).get("description", ""),
+                    "inputSchema": {"json": (t.get("function") or {}).get("parameters")
+                                            or t.get("input_schema")
+                                            or {"type": "object", "properties": {}}},
+                }}
+                for t in request.tools
+            ]
+        }
+        tc = _converse_tool_choice(request.tool_choice)
+        if tc is not None:
+            kwargs["toolConfig"]["toolChoice"] = tc
 
     inference_config: dict = {}
     if request.max_tokens is not None:
@@ -146,7 +222,29 @@ async def _invoke_converse(
     output = response.get("output", {})
     message = output.get("message", {})
     content_blocks = message.get("content", [])
-    text = "".join(b.get("text", "") for b in content_blocks)
+    text = "".join(b.get("text", "") for b in content_blocks if "text" in b)
+
+    tool_calls = [
+        {
+            "id": tu.get("toolUseId", f"call_{i}"),
+            "type": "function",
+            "function": {"name": tu.get("name", ""),
+                         "arguments": json.dumps(tu.get("input", {}))},
+        }
+        for i, b in enumerate(content_blocks)
+        if (tu := b.get("toolUse"))
+    ]
+
+    out_message: dict = {"role": "assistant", "content": text}
+    if tool_calls:
+        out_message["tool_calls"] = tool_calls
+        if not text:
+            out_message["content"] = None
+
+    finish_reason = response.get("stopReason", "stop")
+    # Converse says "tool_use"; OpenAI-shaped callers branch on "tool_calls".
+    if finish_reason == "tool_use" or (tool_calls and finish_reason in (None, "stop", "end_turn")):
+        finish_reason = "tool_calls"
 
     usage_data = response.get("usage", {})
     prompt_tokens = usage_data.get("inputTokens", 0)
@@ -156,8 +254,8 @@ async def _invoke_converse(
         id=response.get("ResponseMetadata", {}).get("RequestId", "bedrock-response"),
         choices=[{
             "index": 0,
-            "message": {"role": "assistant", "content": text},
-            "finish_reason": response.get("stopReason", "stop"),
+            "message": out_message,
+            "finish_reason": finish_reason,
         }],
         usage=TokenUsage(
             prompt_tokens=prompt_tokens,
