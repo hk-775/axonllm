@@ -28,6 +28,9 @@ from dataclasses import dataclass, field
 
 from src.gateway.model_registry import ModelRegistry
 from src.gateway.models import TokenPricing
+from .page_style import (
+    BASE_STYLE, BORDER, FAVICON, TEXT_DIM, TEXT_HEADING, ribbon,
+)
 
 
 def _family(model_id: str) -> str:
@@ -240,38 +243,13 @@ def build_yaml_skeleton(report: PricingDriftReport) -> str:
 # Page rendering
 # ---------------------------------------------------------------------------
 
-_STYLE = (
-    "body{margin:0;background:#f8f9fa;font-family:-apple-system,BlinkMacSystemFont,"
-    "'Segoe UI',sans-serif;color:#16191f}"
-    ".toolbar{background:#232F3E;padding:10px 20px;display:flex;align-items:center;gap:12px}"
-    ".toolbar a{color:#fff;text-decoration:none;font-size:13px;padding:6px 14px;"
-    "border-radius:4px;background:#FF9900;font-weight:600}"
-    ".toolbar a:hover{background:#EC7211}"
-    ".toolbar span{color:#fff;font-size:15px;font-weight:700;flex:1}"
-    ".wrap{max-width:1000px;margin:0 auto;padding:24px 20px 60px}"
-    ".banner{border-radius:8px;padding:18px 20px;margin-bottom:24px}"
-    ".banner.warn{background:#fff8e6;border:1px solid #f0c36d;border-left:5px solid #ff9900}"
-    ".banner.ok{background:#f0faf3;border:1px solid #86d3a0;border-left:5px solid #1d8102}"
-    ".banner h1{margin:0 0 8px;font-size:19px}"
-    ".banner p{margin:6px 0;font-size:14px;line-height:1.55}"
-    ".stats{display:flex;gap:12px;flex-wrap:wrap;margin:0 0 24px}"
-    ".stat{background:#fff;border:1px solid #e3e6eb;border-radius:8px;padding:12px 18px;min-width:120px}"
-    ".stat b{display:block;font-size:22px;line-height:1.2}"
-    ".stat small{color:#5f6b7a;font-size:12px}"
-    "h2{font-size:16px;margin:28px 0 6px}"
-    "h2 .count{color:#5f6b7a;font-weight:400}"
-    ".hint{color:#5f6b7a;font-size:13px;line-height:1.55;margin:0 0 12px}"
-    "table{width:100%;border-collapse:collapse;background:#fff;border:1px solid #e3e6eb;"
-    "border-radius:8px;overflow:hidden;font-size:13px}"
-    "th{text-align:left;background:#f2f3f5;padding:9px 12px;font-size:12px;"
-    "text-transform:uppercase;letter-spacing:.04em;color:#5f6b7a}"
-    "td{padding:8px 12px;border-top:1px solid #eff1f3;vertical-align:top}"
-    "code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;"
-    "background:#f2f3f5;padding:1px 5px;border-radius:3px}"
-    ".fix{color:#0972d3}"
-    "pre{background:#16191f;color:#e9ebed;padding:16px;border-radius:8px;overflow:auto;"
-    "font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;line-height:1.6}"
-    ".file{font-size:13px;color:#5f6b7a;margin:0 0 10px}"
+_STYLE = BASE_STYLE + (
+    # Only what this page adds to the shared sheet: a dark code block for the
+    # YAML to paste, and the pricing-file caption.
+    f"pre{{background:{TEXT_HEADING};color:{BORDER};padding:16px;border-radius:12px;"
+    "overflow:auto;font-family:'SF Mono','Fira Code',ui-monospace,monospace;"
+    "font-size:12px;line-height:1.6}"
+    f".file{{font-size:13px;color:{TEXT_DIM};margin:0 0 10px}}"
 )
 
 
@@ -284,9 +262,10 @@ def render_drift_page(report: PricingDriftReport, pricing_path: str) -> str:
     parts = [
         '<!DOCTYPE html><html><head><meta charset="utf-8">',
         "<title>AxonLLM — Pricing Coverage</title>",
+        FAVICON,
         f"<style>{_STYLE}</style></head><body>",
-        '<div class="toolbar"><span>Pricing Coverage</span>',
-        '<a href="/admin/dashboard">&larr; Dashboard</a></div>',
+        ribbon("Pricing Coverage",
+               ("/admin/production-checklist", "Readiness")),
         '<div class="wrap">',
     ]
 

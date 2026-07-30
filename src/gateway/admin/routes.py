@@ -36,6 +36,12 @@ from src.gateway.model_registry import ModelRegistry
 from src.gateway.models import GuardrailRule, Project, UsageFilters
 from src.gateway.provider_config import ProviderConfig
 from src.gateway.semantic_efficiency import SemanticEfficiencyEngine
+from .page_style import (
+    BASE_STYLE,
+    FAVICON as PAGE_FAVICON,
+    SURFACE as PAGE_SURFACE,
+    ribbon as page_ribbon,
+)
 
 if TYPE_CHECKING:
     from src.gateway.persistence import DynamoPersistence
@@ -1473,22 +1479,18 @@ class AdminAPI:
         svg_content = svg_path.read_text(encoding="utf-8")
         html = (
             '<!DOCTYPE html><html><head><meta charset="utf-8">'
-            "<title>AxonLLM Architecture</title>"
-            "<style>"
-            "body{margin:0;background:#f8f9fa;display:flex;flex-direction:column;min-height:100vh}"
-            ".toolbar{background:#232F3E;padding:10px 20px;display:flex;align-items:center;gap:12px}"
-            ".toolbar a{color:#fff;text-decoration:none;font-family:sans-serif;font-size:13px;"
-            "padding:6px 14px;border-radius:4px;background:#FF9900;font-weight:600}"
-            ".toolbar a:hover{background:#EC7211}"
-            ".toolbar span{color:#fff;font-family:sans-serif;font-size:15px;font-weight:700;flex:1}"
-            ".diagram{flex:1;display:flex;align-items:center;justify-content:center;padding:20px;overflow:auto}"
-            ".diagram svg{max-width:100%;height:auto;border-radius:8px;"
-            "box-shadow:0 4px 24px rgba(0,0,0,0.1)}"
+            "<title>AxonLLM Architecture</title>" + PAGE_FAVICON
+            + "<style>" + BASE_STYLE +
+            # The viewer centers one diagram in the viewport, so it overrides the
+            # shared sheet's document flow rather than adding to it.
+            "body{display:flex;flex-direction:column;min-height:100vh}"
+            ".diagram{flex:1;display:flex;align-items:center;justify-content:center;"
+            "padding:24px;overflow:auto}"
+            ".diagram svg{max-width:100%;height:auto;border-radius:16px;"
+            f"background:{PAGE_SURFACE};box-shadow:0 0 0 1px rgba(214,211,209,0.3),"
+            "0 8px 24px rgba(0,0,0,0.06)}"
             "</style></head><body>"
-            '<div class="toolbar">'
-            "<span>AxonLLM Architecture</span>"
-            '<a href="/admin/dashboard">&larr; Dashboard</a>'
-            "</div>"
+            + page_ribbon("Architecture") +
             '<div class="diagram">' + svg_content + "</div>"
             "</body></html>"
         )
