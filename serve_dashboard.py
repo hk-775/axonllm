@@ -11,6 +11,7 @@ import uvicorn
 
 from src.gateway.bootstrap import build_starlette_app
 from src.gateway.config_loader import load_app_config
+from src.gateway.dev_env import load_dev_env_file
 from src.gateway.health_check_task import HealthCheckTask
 from src.gateway.health_tracker import ProviderHealthTracker
 from src.gateway.model_registry import ModelRegistry
@@ -18,6 +19,13 @@ from src.gateway.model_registry import ModelRegistry
 
 def build_app() -> tuple:
     """Build the Starlette app and return (app, app_config)."""
+    # Read the local .env before the demo-data default below is applied: the
+    # loader's gate is whether the operator set AXON_LOAD_DEMO_DATA themselves,
+    # and this same entrypoint is the Dockerfile CMD. Applying the default first
+    # would make the file load in production containers too. It never overwrites
+    # an existing variable, so platform-injected secrets always win.
+    load_dev_env_file()
+
     # Default to loading demo data when running the dev server directly
     if "AXON_LOAD_DEMO_DATA" not in os.environ:
         os.environ["AXON_LOAD_DEMO_DATA"] = "true"

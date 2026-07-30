@@ -108,6 +108,31 @@ The dev server (`serve_dashboard.py`) runs in `LOG_ONLY` mode, so local requests
 work **without** an API key. Any non-dev deployment defaults to `ENFORCE` (see
 [Environment Variables](#environment-variables)) and requires one.
 
+#### Provider keys for a demo
+
+Put your provider keys in a `.env` file in the project root and they are picked
+up automatically — but **only** when you set `AXON_LOAD_DEMO_DATA=true`
+explicitly, as the command above does:
+
+```bash
+# .env (gitignored)
+OPENAI_API_KEY=sk-...
+ANTHROPIC_API_KEY=sk-ant-...
+```
+
+This is a demo convenience, not a production config mechanism. In a real deploy
+secrets come from the platform (ECS task definition, Secrets Manager, App Runner
+env), and a file that shadowed those would be near-impossible to debug. Two rules
+keep that from happening:
+
+- Without an explicit `AXON_LOAD_DEMO_DATA=true`, the file is never read — and
+  the container `CMD` doesn't set it.
+- **An existing environment variable always wins.** The file only fills in names
+  that aren't already set, so injected secrets are never overridden.
+
+Startup logs the variable *names* it loaded, never their values. Set
+`AXON_DEV_ENV_FILE` to read a different path.
+
 ### Get an API key
 
 Under `ENFORCE`, every request needs an `axon_` key. Mint the first one from the
@@ -332,7 +357,8 @@ Request → Auth (OIDC/API Key) → Quota Enforcement (policy hierarchy)
 | `ANTHROPIC_API_KEY` | — | Anthropic API key |
 | `OPENAI_API_KEY` | — | OpenAI API key |
 | `AWS_DEFAULT_REGION` | `us-east-1` | AWS region for Bedrock |
-| `AXON_LOAD_DEMO_DATA` | `false` | Load demo projects/users on startup |
+| `AXON_LOAD_DEMO_DATA` | `false` | Load demo projects/users on startup; also enables reading provider keys from `.env` |
+| `AXON_DEV_ENV_FILE` | `.env` | Path to the demo env file (only read when `AXON_LOAD_DEMO_DATA=true`) |
 | `LLM_ROUTER_DYNAMODB_ENABLED` | `false` | Enable DynamoDB persistence |
 | `AXON_DYNAMODB_TABLE` | `axonllm-state` | DynamoDB table name (must match the provisioned table) |
 | `AXON_SERVER_PORT` | `8000` | Server port |

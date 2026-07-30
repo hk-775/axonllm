@@ -46,6 +46,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Together, Fireworks, AI21) expose Chat Completions only, and routing a
   `-pro`-looking id there would 404 a request that otherwise worked.
 
+- **Provider keys can come from a `.env` file in demo mode.** `provider_loader`
+  reads API keys from `os.environ` and nothing populated it from a file, so a
+  `.env` in the project root was never consulted and every direct-API provider
+  was silently skipped — while the gateway still answered through Bedrock, which
+  authenticates via AWS credentials on a separate path. The failure therefore
+  looked like "OpenAI is broken" rather than "no keys were loaded". Reading the
+  file is gated on an explicit `AXON_LOAD_DEMO_DATA=true` (the container `CMD`
+  does not set it), and an existing environment variable always wins, so
+  platform-injected secrets are never shadowed. Startup logs the variable names
+  loaded, never their values.
+
 ### Fixed
 - **`gpt-5.5-pro` was configured to route over Chat Completions**, where it can
   only ever 400 — the model was unusable from the day it was added. Fixed by
