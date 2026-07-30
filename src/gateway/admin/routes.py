@@ -1518,6 +1518,17 @@ class AdminAPI:
         Vendored locally so the dashboard works in air-gapped / offline
         deployments — no runtime dependency on unpkg.com. Path is confined to
         the static dir to prevent traversal.
+
+        Also serves static/tour/ — the guided demo's narration JSON and MP3s.
+        They sit under the dashboard's own static dir, next to the index.html
+        they belong to, rather than in site/: the tour drives this SPA and is
+        useless without it, and site/ is the marketing site, uploaded to a
+        separate S3 bucket and absent entirely from some deployments (see
+        ``test_a_missing_site_dir_404s_rather_than_raising``).
+
+        Serves byte ranges for the same measured reason as ``site_asset``: a
+        browser that cannot range-request audio reports it as unseekable, and
+        the tour's scrub-to-scene would move the bar without moving the sound.
         """
         from starlette.responses import PlainTextResponse, Response
 
@@ -1539,11 +1550,28 @@ class AdminAPI:
             ".woff2": "font/woff2",
             ".woff": "font/woff",
             ".html": "text/html",
+            # The guided tour's narration. Without the mp3 type a browser gets
+            # application/octet-stream and declines to play it; without the json
+            # type the fetch of the script still works but nothing else here
+            # would tell you the omission was deliberate.
+            ".mp3": "audio/mpeg",
+            ".json": "application/json",
         }.get(suffix, "application/octet-stream")
+
+        body = target.read_bytes()
+        headers = {
+            "Cache-Control": "public, max-age=3600",
+            "Accept-Ranges": "bytes",
+        }
+        start, end = _parse_byte_range(request.headers.get("range"), len(body))
+        if start is None:
+            return Response(body, media_type=media_type, headers=headers)
+        headers["Content-Range"] = f"bytes {start}-{end}/{len(body)}"
         return Response(
-            target.read_bytes(),
+            body[start : end + 1],
+            status_code=206,
             media_type=media_type,
-            headers={"Cache-Control": "public, max-age=3600"},
+            headers=headers,
         )
 
     async def architecture(self, request: Request) -> HTMLResponse:

@@ -98,6 +98,11 @@
       padding: 0.25rem 0.7rem; border-radius: 999px;
       text-decoration: none; white-space: nowrap;
       transition: background 0.15s, border-color 0.15s, color 0.15s;
+      /* Two elements wear this class: the architecture link (an <a>) and the
+         guided-demo control (a <button>, because it does something on this page
+         rather than going somewhere). A button inherits neither the page font
+         nor a pointer, so both are set here instead of at one call site. */
+      font-family: inherit; cursor: pointer;
     }
     .topbar-pill:hover, .topbar-pill:focus-visible {
       background: #7c3aed; border-color: #7c3aed; color: #fff;
@@ -369,7 +374,7 @@
 <body>
   <div id="root"></div>
   <script type="text/babel">
-    const { useState, useEffect, useCallback } = React;
+    const { useState, useEffect, useCallback, useRef } = React;
 
     /* ── API key (for ENFORCE mode) ──
        The gateway defaults to ENFORCE, so admin calls need a Bearer token.
@@ -2245,9 +2250,12 @@
     /* ================================================================== */
     /*  API Keys Page                                                       */
     /* ================================================================== */
-    function ApiKeysPage() {
+    /* initialProjectId lets a caller land on this page with a project already
+       selected. The guided tour uses it: this page lists nothing until a project
+       is named, so a scene about API keys would otherwise narrate an empty form. */
+    function ApiKeysPage({ initialProjectId }) {
       const [keys, setKeys] = useState([]);
-      const [projectId, setProjectId] = useState('');
+      const [projectId, setProjectId] = useState(initialProjectId || '');
       const [showForm, setShowForm] = useState(false);
       const [newKey, setNewKey] = useState(null);
       const [error, setError] = useState(null);
@@ -2824,6 +2832,198 @@
     }
 
     /* ================================================================== */
+    /*  Guided Tour                                                        */
+    /* ================================================================== */
+
+    /* A narrated walkthrough of the dashboard: ten scenes, each one a view of
+       the shell plus a Polly track explaining it. The script and the audio come
+       from static/tour/, fetched once when the tour starts rather than bundled
+       here, so editing the narration is editing JSON and re-running
+       scripts/build_narration_audio.sh -- no change to this file.
+
+       Scene order and the view each scene talks about live in that JSON too
+       (the `view` field is a key of the App switch below). A scene and the page
+       it describes therefore cannot drift apart, which is the failure mode of
+       every demo script kept in a separate document.
+
+       Advance is driven by the audio element's own timeupdate/ended events, not
+       by a setInterval over a declared duration. The durations in the JSON are
+       measured by ffprobe at synthesis time and are honest, but a timer racing
+       an audio element still diverges -- buffering, a background tab throttling
+       timers, or the user seeking all break it. Reading currentTime means the
+       bar cannot disagree with the voice. */
+    function GuidedTour({ onNavigate, onEnd }) {
+      const [scenes, setScenes] = useState(null);
+      const [loadError, setLoadError] = useState(null);
+      const [i, setI] = useState(0);
+      const [elapsed, setElapsed] = useState(0);
+      const [paused, setPaused] = useState(false);
+      /* Autoplay is permitted here because the tour only ever starts from a
+         click, but a browser can still refuse (an audio-blocking policy, a
+         muted device profile). Surfaced rather than swallowed: without it the
+         tour looks broken -- slides advancing in silence with no explanation. */
+      const [audioBlocked, setAudioBlocked] = useState(false);
+      const audioRef = useRef(null);
+
+      useEffect(() => {
+        fetch('/admin/static/tour/tour-narration.json')
+          .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+          .then(d => setScenes(d.tracks || []))
+          .catch(e => setLoadError(e && e.message ? e.message : 'unknown error'));
+      }, []);
+
+      const scene = scenes && scenes[i];
+      const total = scenes ? scenes.length : 0;
+
+      /* Navigate the shell to this scene's page. Separate from the audio effect
+         so that seeking within a scene does not re-navigate.
+
+         `project` is optional and only some pages read it: the API-keys page
+         lists nothing until a project is named, so the scene about keys names
+         one rather than narrating an empty form. */
+      useEffect(() => {
+        if (scene) onNavigate(scene.view, scene.project ? { projectId: scene.project } : {});
+      }, [scene && scene.view, scene && scene.project, onNavigate]);
+
+      /* One Audio per scene, torn down on scene change so two tracks can never
+         overlap -- the bug you get from reusing one element and racing a load
+         against a play. */
+      useEffect(() => {
+        if (!scene) return;
+        const audio = new Audio('/admin/static/tour/' + scene.id + '.mp3');
+        audioRef.current = audio;
+        setElapsed(0);
+        setPaused(false);
+
+        const onTime = () => setElapsed(audio.currentTime);
+        const onEnded = () => {
+          if (i < total - 1) setI(i + 1);
+          else onEnd();
+        };
+        audio.addEventListener('timeupdate', onTime);
+        audio.addEventListener('ended', onEnded);
+        audio.play().then(() => setAudioBlocked(false)).catch(() => setAudioBlocked(true));
+
+        return () => {
+          audio.removeEventListener('timeupdate', onTime);
+          audio.removeEventListener('ended', onEnded);
+          audio.pause();
+          audioRef.current = null;
+        };
+      }, [scene && scene.id, i, total, onEnd]);
+
+      const togglePause = () => {
+        const a = audioRef.current;
+        if (!a) return;
+        if (a.paused) { a.play().catch(() => {}); setPaused(false); }
+        else { a.pause(); setPaused(true); }
+      };
+
+      if (loadError) {
+        /* The narration is missing or unreadable. Say so and offer the way out
+           rather than sitting on a blank bar: a checkout without the MP3s
+           synthesized is the likely cause, and the message names the fix. */
+        return (
+          <div style={tourShellStyle}>
+            <div style={{ ...tourCardStyle, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '1rem' }}>
+              <span style={{ fontSize: '13px' }}>
+                Narration unavailable ({loadError}). Run <code style={{ background: '#f5f5f4', padding: '0 4px', borderRadius: '3px' }}>scripts/build_narration_audio.sh tour</code> to synthesize it.
+              </span>
+              <button onClick={onEnd} style={tourBtnStyle(false)}>Close</button>
+            </div>
+          </div>
+        );
+      }
+      if (!scene) return null;
+
+      /* Prefer the element's real duration; fall back to the measured value in
+         the JSON until the metadata has loaded, so the bar has a scale from the
+         first frame instead of jumping once loadedmetadata fires. */
+      const a = audioRef.current;
+      const dur = (a && isFinite(a.duration) && a.duration > 0) ? a.duration : (scene.duration || 1);
+      const pct = Math.min(100, (elapsed / dur) * 100);
+      const actColor = scene.act.indexOf('ACT 1') === 0 ? '#7c3aed'
+                     : scene.act.indexOf('ACT 2') === 0 ? '#2563eb'
+                     : '#16a34a';
+
+      return (
+        <div style={tourShellStyle}>
+          <div style={{ height: '3px', background: '#e7e5e4', borderRadius: '3px 3px 0 0', overflow: 'hidden' }}>
+            <div style={{ height: '100%', width: pct + '%', background: actColor, transition: 'width 200ms linear' }} />
+          </div>
+          <div style={tourCardStyle}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
+              <div style={{ display: 'flex', gap: '0.6rem', alignItems: 'center' }}>
+                <span style={{ fontSize: '10px', fontWeight: 700, letterSpacing: '0.05em', color: actColor, background: actColor + '18', padding: '2px 8px', borderRadius: '4px' }}>
+                  {scene.act}
+                </span>
+                <span style={{ fontSize: '11px', color: '#a8a29e' }}>Scene {i + 1} of {total}</span>
+                {audioBlocked && (
+                  <span style={{ fontSize: '11px', color: '#d97706' }}>
+                    audio blocked by the browser — press Play
+                  </span>
+                )}
+              </div>
+              <button onClick={onEnd} style={{ background: 'none', border: 'none', color: '#a8a29e', cursor: 'pointer', fontSize: '12px' }}>
+                ✕ End tour
+              </button>
+            </div>
+
+            <div style={{ fontSize: '15px', fontWeight: 700, color: '#0c0a09', marginBottom: '0.35rem' }}>{scene.title}</div>
+            <div style={{ fontSize: '13px', lineHeight: 1.55, color: '#57534e', maxHeight: '5.6rem', overflowY: 'auto', marginBottom: '0.5rem' }}>
+              {scene.text}
+            </div>
+            {scene.callout && (
+              <div style={{ fontSize: '12px', color: actColor, borderLeft: '2px solid ' + actColor, paddingLeft: '0.6rem', marginBottom: '0.7rem' }}>
+                {scene.callout}
+              </div>
+            )}
+
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div style={{ display: 'flex', gap: '5px' }}>
+                {scenes.map((s, n) => (
+                  <button key={s.id} onClick={() => setI(n)} title={s.title}
+                    aria-label={'Scene ' + (n + 1) + ': ' + s.title}
+                    style={{ width: '8px', height: '8px', padding: 0, borderRadius: '50%', border: 'none', cursor: 'pointer',
+                             background: n === i ? actColor : n < i ? '#d6d3d1' : '#f5f5f4' }} />
+                ))}
+              </div>
+              <div style={{ display: 'flex', gap: '0.4rem', alignItems: 'center' }}>
+                <span style={{ fontSize: '11px', color: '#a8a29e', fontVariantNumeric: 'tabular-nums' }}>
+                  {Math.floor(elapsed)}s / {Math.round(dur)}s
+                </span>
+                <button onClick={() => setI(Math.max(0, i - 1))} disabled={i === 0} style={tourBtnStyle(false, i === 0)}>← Prev</button>
+                <button onClick={togglePause} style={{ ...tourBtnStyle(false), minWidth: '68px' }}>{paused ? '▶ Play' : '⏸ Pause'}</button>
+                <button onClick={() => { if (i < total - 1) setI(i + 1); else onEnd(); }} style={tourBtnStyle(true)}>
+                  {i === total - 1 ? '✓ Finish' : 'Next →'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    /* Pinned bottom-centre and above the sidebar's stacking context, offset by
+       the sidebar so it centres on the content rather than the viewport. */
+    const tourShellStyle = {
+      position: 'fixed', bottom: '1.25rem', left: 'calc(var(--sidebar-w) + (100vw - var(--sidebar-w)) / 2)',
+      transform: 'translateX(-50%)', width: 'min(760px, calc(100vw - var(--sidebar-w) - 3rem))', zIndex: 500,
+    };
+    const tourCardStyle = {
+      background: 'rgba(255,255,255,0.97)', backdropFilter: 'blur(12px)',
+      border: '1.5px solid #e7e5e4', borderTop: 'none', borderRadius: '0 0 16px 16px',
+      padding: '0.85rem 1.1rem', boxShadow: '0 12px 32px rgba(12,10,9,0.13)',
+    };
+    const tourBtnStyle = (primary, disabled) => ({
+      background: disabled ? '#f5f5f4' : primary ? '#7c3aed' : '#fff',
+      color: disabled ? '#d6d3d1' : primary ? '#fff' : '#57534e',
+      border: primary ? 'none' : '1px solid #d6d3d1',
+      padding: '0.3rem 0.7rem', borderRadius: '8px', fontSize: '12px', fontWeight: 600,
+      fontFamily: 'inherit', cursor: disabled ? 'default' : 'pointer',
+    });
+
+    /* ================================================================== */
     /*  App Shell                                                          */
     /* ================================================================== */
     function App() {
@@ -2831,6 +3031,7 @@
       const [selectedProject, setSelectedProject] = useState(null);
       const [editProjectId, setEditProjectId] = useState(null);
       const [selectedUser, setSelectedUser] = useState(null);
+      const [tourActive, setTourActive] = useState(false);
 
       const navigate = (v, opts = {}) => {
         setView(v);
@@ -2838,6 +3039,12 @@
         setEditProjectId(opts.editProjectId || null);
         setSelectedUser(opts.userId || null);
       };
+
+      /* Passed to GuidedTour, which calls it from an effect on every scene
+         change. Memoised on nothing: an unstable identity would re-run that
+         effect on each render of the shell and re-navigate mid-scene. */
+      const tourNavigate = useCallback((v, opts) => navigate(v, opts || {}), []);
+      const endTour = useCallback(() => setTourActive(false), []);
 
       let content;
       switch (view) {
@@ -2852,7 +3059,7 @@
         case 'models': content = <ModelsPage />; break;
         case 'policies': content = <PoliciesPage />; break;
         case 'policy-hierarchy': content = <PolicyHierarchyPage />; break;
-        case 'api-keys': content = <ApiKeysPage />; break;
+        case 'api-keys': content = <ApiKeysPage key={selectedProject || ''} initialProjectId={selectedProject} />; break;
         case 'security': content = <SecurityPage />; break;
         case 'webhooks': content = <WebhooksPage />; break;
         case 'quotas': content = <QuotasPage />; break;
@@ -2950,6 +3157,19 @@
                 <div className="topbar-status"><div className="dot"></div>AxonLLM — The neural control plane for enterprise LLMs</div>
               </div>
               <div className="topbar-right">
+                {/* Hidden while the tour runs: its own End button is the way
+                    out, and a second control that restarts from scene one is a
+                    trap next to a Pause. */}
+                {!tourActive && (
+                  <button className="topbar-pill" onClick={() => setTourActive(true)}
+                          title="A narrated walkthrough of the dashboard — ten scenes, about six minutes">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
+                         strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                      <polygon points="6 4 20 12 6 20 6 4"></polygon>
+                    </svg>
+                    Guided Demo
+                  </button>
+                )}
                 {/* Absolute, not relative: the dashboard is served from
                     /admin/dashboard, so "architecture.html" would resolve to
                     /admin/architecture.html and 404. Leading slash hits the
@@ -2976,6 +3196,10 @@
               {content}
             </main>
           </div>
+          {/* Outside <main> so it is not replaced when the tour navigates the
+              view it is narrating. Fixed-position, so its position in the tree
+              only decides what it survives. */}
+          {tourActive && <GuidedTour onNavigate={tourNavigate} onEnd={endTour} />}
         </div>
       );
     }

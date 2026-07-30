@@ -1094,6 +1094,113 @@ class TestLandingPage:
         assert set(re.findall(r"url\(#([^)]+)\)", html)) <= set(ids)
 
 
+class TestGuidedTour:
+    """The dashboard's narrated walkthrough: static/tour/ plus its player.
+
+    The narration is data, not code — a JSON script and one Polly MP3 per
+    scene, served out of static/ and fetched by the SPA at runtime. That split
+    is what these cover: the assets have to be reachable and correctly typed,
+    and the script has to keep agreeing with the shell it drives.
+    """
+
+    @pytest.fixture
+    def tour(self):
+        """The narration script, read from the file the dashboard fetches."""
+        import json
+        import pathlib
+
+        from src.gateway.admin import routes as routes_mod
+
+        path = routes_mod._STATIC_DIR / "tour" / "tour-narration.json"
+        return json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
+
+    def test_the_narration_script_is_served_as_json(self, client):
+        r = client.get("/admin/static/tour/tour-narration.json")
+        assert r.status_code == 200
+        assert "application/json" in r.headers["content-type"]
+        assert len(r.json()["tracks"]) > 0
+
+    def test_every_scene_has_its_audio(self, client, tour):
+        """The player builds the URL from the scene id, so a rename that misses
+        the MP3 leaves a scene that advances in silence."""
+        for track in tour["tracks"]:
+            r = client.get(f"/admin/static/tour/{track['id']}.mp3")
+            assert r.status_code == 200, f"{track['id']}.mp3 missing"
+            assert r.headers["content-type"] == "audio/mpeg"
+            assert len(r.content) > 1000, f"{track['id']}.mp3 is suspiciously small"
+
+    def test_audio_is_not_served_as_octet_stream(self, client, tour):
+        """The regression this guards: before .mp3 was in the media-type map the
+        default was application/octet-stream, which a browser declines to play.
+        Every asset still resolved with a 200, so nothing else would catch it."""
+        r = client.get(f"/admin/static/tour/{tour['tracks'][0]['id']}.mp3")
+        assert "octet-stream" not in r.headers["content-type"]
+
+    def test_audio_is_range_requestable(self, client, tour):
+        """Without ranges a browser reports the audio as unseekable, so the
+        tour's scene dots would move the progress bar and not the sound."""
+        name = f"/admin/static/tour/{tour['tracks'][0]['id']}.mp3"
+        full = client.get(name)
+        assert full.headers["accept-ranges"] == "bytes"
+
+        part = client.get(name, headers={"Range": "bytes=10-109"})
+        assert part.status_code == 206
+        assert part.headers["content-range"] == f"bytes 10-109/{len(full.content)}"
+        assert part.content == full.content[10:110]
+
+    def test_every_scene_names_a_view_the_shell_can_render(self, client, tour):
+        """The coupling that makes this tour maintainable, asserted.
+
+        Each scene's ``view`` is passed to the shell's navigate(), which is a
+        switch over view keys. A typo or a renamed page would send the tour to
+        the default view and narrate the wrong page — silently, since the
+        default case renders Overview rather than failing.
+        """
+        import re
+
+        html = client.get("/admin/dashboard").text
+        views = set(re.findall(r"case '([a-z-]+)': content =", html))
+        assert views, "could not find the view switch — this test needs updating"
+        for track in tour["tracks"]:
+            assert track["view"] in views, (
+                f"scene {track['id']} narrates view {track['view']!r}, "
+                f"which the shell does not render"
+            )
+
+    def test_scene_durations_are_measured(self, tour):
+        """build_narration_audio.sh writes ffprobe's reading back into the JSON.
+        A scene with no duration means the audio was never synthesized for it, and
+        the player's progress bar would have no scale until metadata loaded."""
+        for track in tour["tracks"]:
+            assert track.get("duration", 0) > 0, f"{track['id']} has no measured duration"
+
+    def test_scenes_carry_display_text_not_only_ssml(self, tour):
+        """The card shows ``text``; Polly speaks ``ssml``. A scene with only the
+        latter would render its <break> tags into the caption."""
+        for track in tour["tracks"]:
+            assert track["text"].strip()
+            assert "<" not in track["text"], f"{track['id']} caption contains markup"
+            assert track["ssml"].startswith("<speak>")
+
+    def test_the_dashboard_offers_the_tour(self, client):
+        r = client.get("/admin/dashboard")
+        assert "Guided Demo" in r.text
+        assert "function GuidedTour" in r.text
+
+    def test_the_player_fetches_the_script_at_the_served_path(self, client):
+        """The fetch URL is a string in the SPA and the route is in Python; only
+        an assertion over both keeps them together."""
+        html = client.get("/admin/dashboard").text
+        assert "/admin/static/tour/tour-narration.json" in html
+        assert client.get("/admin/static/tour/tour-narration.json").status_code == 200
+
+    def test_tour_assets_are_still_confined_to_the_static_dir(self, client):
+        """static/tour/ added a second level under static/, so the traversal
+        check is worth re-asserting from inside it."""
+        assert client.get("/admin/static/tour/../../../config/providers.yaml").status_code == 404
+        assert client.get("/admin/static/tour/..%2f..%2f..%2fconfig%2fproviders.yaml").status_code == 404
+
+
 class TestArchitecturePage:
     """GET /architecture.html — the interactive architecture page.
 
