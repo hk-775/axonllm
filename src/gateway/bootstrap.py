@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from starlette.applications import Starlette
@@ -69,6 +69,7 @@ from src.gateway.model_registry import ModelRegistry
 from src.gateway.models import PolicyNode, Project, RateLimitConfig, UsageRecord
 from src.gateway.multi_provider_factory import MultiProviderFactory
 from src.gateway.persistence import DynamoPersistence
+from src.gateway.provider_config import ProviderConfig
 from src.gateway.provider_loader import load_provider_configs
 from src.gateway.rate_limiter import SlidingWindowRateLimiter
 from src.gateway.request_validator import RequestValidator
@@ -118,6 +119,10 @@ class GatewayComponents:
     health_monitor: SpokeHealthMonitor | None = None
     efficiency_analyzer: EfficiencyAnalyzer | None = None
     semantic_engine: SemanticEfficiencyEngine | None = None
+    # Providers whose credentials loaded. load_provider_configs drops the rest,
+    # so this is also the set the readiness checklist can distinguish
+    # "configured" from "in models.yaml but unusable".
+    provider_configs: dict[str, ProviderConfig] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -366,6 +371,7 @@ def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComp
         health_monitor=health_monitor,
         efficiency_analyzer=efficiency_analyzer,
         semantic_engine=semantic_engine,
+        provider_configs=provider_configs,
     )
 
 
@@ -394,6 +400,10 @@ def build_starlette_app(app_config: AppConfig | None = None) -> Starlette:
         efficiency_analyzer=comp.efficiency_analyzer,
         semantic_engine=comp.semantic_engine,
         pricing_path=app_config.pricing_config_path,
+        # For the production-readiness checklist: the settings this process booted
+        # with, and the providers whose credentials actually loaded.
+        app_config=app_config,
+        provider_configs=comp.provider_configs,
     )
 
     # Key, policy, audit, webhook, region, and quota admin APIs
