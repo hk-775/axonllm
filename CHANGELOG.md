@@ -65,8 +65,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   not move, and budget blocks and quota alerts under-count rather than erring
   safe — while smart routing, having no rate to read, scores the model on the
   average of the known prices. Neither path raises, which is why this is a page
-  rather than a log line: on the current config **33 of 48 provider mappings have
-  no price at all**, across seven providers with no section in the file. The page
+  rather than a log line: when the page was written **33 of 48 provider mappings
+  had no price at all**, across seven providers with no section in the file (see
+  the entry below for what filling those in found). The page
   lists every unpriced mapping, every pricing entry no model reads (usually the
   other half of a renamed model id), and a paste-ready YAML fragment for the
   gaps — with rates left at `0.0`, since a guessed price bills silently where a
@@ -82,7 +83,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   container `CMD`, so a piped or containerized run prints the banner and nothing
   else; `AXON_NO_BROWSER=true` suppresses it locally too.
 
+- **Real published rates for 20 of the 33 unpriced mappings** — coverage 31% →
+  73%, and five providers that had no section in `config/pricing.yaml` at all
+  (`ai21`, `bedrock-mantle`, `google_ai`, `groq`, plus new entries under
+  `openai`, `anthropic` and `bedrock`) now bill at a real rate instead of $0.00.
+  Every figure is from the provider's own price list, cited by URL and fetch date
+  in the file header: OpenAI, Anthropic and Google AI pricing pages, `groq.com`,
+  `ai21.com`, and the AWS Price List API for Bedrock and Bedrock-Mantle.
+  Three judgement calls are documented inline rather than buried:
+  - **Regional vs global Bedrock endpoints.** Claude 4.5 and later carry a 10%
+    premium on regional endpoints, and the `us.` prefix in `models.yaml` *is* a
+    regional inference profile — so those entries take the regional rate
+    ($1.10/$5.50 per MTok for Haiku 4.5, not the $1.00/$5.00 global figure).
+  - **Mantle SKUs are priced from the Bedrock rate.** Of the 66 model/direction
+    pairs where us-east-1 lists both a `…-mantle-…-standard` SKU and a plain
+    on-demand one, all 66 agree to the cent — checked rather than assumed, since
+    that equivalence is what licenses six of the new entries.
+  - **Sub-threshold context tiers.** Where a provider charges more above a
+    context length (`gemini-3.1-pro-preview` doubles above 200k, `gpt-5.5-pro`
+    above 272k), the lower rate is used and the premium noted. `CostTracker`
+    prices a request from token counts alone and has no context tier to switch
+    on, so encoding the higher rate would overcharge every ordinary request.
+
+  **13 mappings are left deliberately unpriced**, because the provider publishes
+  no rate for the id being sent — these are stale *model ids* rather than missing
+  prices, and the fix belongs in `models.yaml`:
+  `together` (`deepseek-ai/DeepSeek-R1`, and the `Llama-3.3-70B-Instruct-Turbo`
+  and `Qwen2.5-72B-Instruct-Turbo` ids — the page now lists DeepSeek V4 Pro,
+  a base "Llama 3.3 70B" and Qwen3.x, with no Turbo tier priced separately),
+  `xai` (`grok-3`, `grok-3-mini`; the list covers only grok-4.x), `fireworks`
+  (no per-model serverless table at all), `google_ai`
+  (`gemini-3-pro-preview`, replaced by 3.1), and the five `bedrock-mantle`
+  `openai.gpt-5.x` ids (three appear only in GovCloud at premium rates, two in no
+  region). Filling these with a near-miss id's rate would bill confidently wrong
+  for a model that may not even resolve, and would clear the drift page's warning
+  while making the underlying problem invisible. Leaving them listed keeps both
+  visible.
+
 ### Fixed
+- **Claude Opus 4.8 was billed at 3× the published rate.** The `anthropic`
+  entry read `0.015/0.075` per 1K tokens — the retired Opus 4.1 rate — while
+  Anthropic prices Opus 4.5 and later at $5/$25 per MTok, a third of the earlier
+  generation. So every Opus 4.8 request overcharged: a 1M-in/100K-out call
+  recorded $22.50 against a real cost of $7.50. This is the *opposite* failure to
+  an unpriced model and invisible for the same reason — nothing cross-checks a
+  rate that parses, and the drift page can only report a price that is missing,
+  not one that is wrong. Budget blocks and quota alerts fired early against
+  inflated spend, which reads as a working system rather than a broken one.
 - **Smart routing ignored cost entirely — `cost_quality_tradeoff` was inert.**
   `_get_model_cost` read pricing off the model registry, which is populated only
   from an inline `pricing:` block in `models.yaml` — and there are none (0 of 48
@@ -95,8 +142,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   intent, with no error to notice it by. Routing now resolves pricing from the
   same provider/model_id table `CostTracker` bills from, so the cost used to
   choose a model and the cost actually charged cannot disagree.
-- A missing price is now treated as **unknown rather than free**. With 33 of 48
-  provider entries unpriced, scoring absent pricing as 0.0 would make an
+- A missing price is now treated as **unknown rather than free**. With most
+  provider entries unpriced at the time, scoring absent pricing as 0.0 would make an
   unpriced model the cheapest possible candidate — it would win for being
   *unmeasured*, not for being cheap. On the `general` panel that hands selection
   to `claude-haiku` (benchmark 78) over `claude-sonnet` (90). Unpriced

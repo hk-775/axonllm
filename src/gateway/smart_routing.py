@@ -300,8 +300,9 @@ class SmartRoutingStrategy(RoutingStrategyBase):
         Returns ``None`` — not 0.0 — when no provider has pricing. The
         distinction matters: 0.0 means "free" and would make an unpriced model
         the cheapest possible candidate, so a model would win for being
-        *unmeasured* rather than for being cheap. With 33 of 48 provider entries
-        currently unpriced that is not a hypothetical; scoring the general task
+        *unmeasured* rather than for being cheap. That is not a hypothetical:
+        13 of the 48 provider entries in the shipped config are unpriced because
+        the provider publishes no rate for the id, and scoring the general task
         type that way hands it to claude-haiku (benchmark 78) over
         claude-sonnet (90).
 
