@@ -233,6 +233,7 @@ class TestSiteAssetsAreAnonymous:
         app = Starlette(
             routes=[
                 Route("/{path}", echo_endpoint),
+                Route("/{directory}/{path}", echo_endpoint),
                 Route("/admin/projects", echo_endpoint),
             ]
         )
@@ -241,7 +242,16 @@ class TestSiteAssetsAreAnonymous:
 
     @pytest.mark.parametrize(
         "path",
-        ["/architecture.html", "/architecture-pipeline.svg", "/architecture.drawio"],
+        [
+            "/architecture.html",
+            "/architecture-pipeline.svg",
+            "/architecture.drawio",
+            # The narrated walkthrough. An <audio> src that 401s fails the same
+            # invisible way the SVGs would: the page renders, the play button
+            # appears, and nothing comes out of it.
+            "/narration/architecture-narration.json",
+            "/narration/pipeline.mp3",
+        ],
     )
     def test_the_pages_and_their_assets_need_no_token(self, path):
         r = self._app().get(path)
@@ -260,25 +270,35 @@ class TestSiteAssetsAreAnonymous:
     @pytest.mark.parametrize(
         "path",
         [
-            "/config.yaml",          # not a suffix the site serves
-            "/infra/stack.py",       # nested, and not a served suffix
-            "/deep/page.html",       # right suffix, wrong depth
+            "/config.yaml",              # not a suffix the site serves
+            "/infra/stack.py",           # nested, and not a served suffix
+            "/deep/page.html",           # right suffix, wrong directory
+            "/infra/cdk.json",           # served suffix, but not a public dir
+            "/narration/deep/x.mp3",     # inside the public dir, too deep
         ],
     )
     def test_paths_outside_the_shape_still_require_auth(self, path):
         assert self._app().get(path).status_code == 401
 
     def test_the_shape_tracks_what_the_handler_serves(self):
-        """One source of truth for "which suffixes are public".
+        """One source of truth for "which paths are public".
 
-        The middleware reads SITE_ASSET_TYPES rather than repeating the list, so
-        adding a suffix to the handler cannot leave it publicly routable but
-        401-ing. This asserts the coupling is real, not incidental.
+        The middleware calls the handler's own ``_is_servable_site_path`` rather
+        than repeating the rule, so adding a suffix or a directory to the
+        handler cannot leave it publicly routable but 401-ing. This asserts the
+        coupling is real, not incidental.
         """
-        from src.gateway.admin.routes import SITE_ASSET_TYPES
+        from src.gateway.admin.routes import SITE_ASSET_DIRS, SITE_ASSET_TYPES
         from src.gateway.middleware.auth import _is_site_asset
 
         for suffix in SITE_ASSET_TYPES:
             assert _is_site_asset("/page" + suffix), suffix
+            for directory in SITE_ASSET_DIRS:
+                assert _is_site_asset(f"/{directory}/page{suffix}"), (
+                    f"{directory}/*{suffix}"
+                )
         assert not _is_site_asset("/page.py")
         assert not _is_site_asset("/page.yaml")
+        # Not a path at all — the middleware is handed request.url.path, but a
+        # relative string must not fall through to a public verdict.
+        assert not _is_site_asset("page.html")
