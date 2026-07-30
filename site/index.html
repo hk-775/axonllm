@@ -1,0 +1,987 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AxonLLM — The Neural Control Plane for Enterprise LLMs</title>
+    <meta name="description" content="One API, any provider. AxonLLM routes each prompt to the right model, enforces budgets and guardrails, and gives you one audit trail across 13 providers.">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg: #0a0a0f;
+            --surface: #12121a;
+            --border: #1e1e2e;
+            --text: #e4e4e7;
+            --text-dim: #71717a;
+            /* Purple matches --awsui-color-primary in the admin dashboard, so the
+               landing page and the product it links to read as one thing. */
+            --accent: #7c3aed;
+            --accent-bright: #a78bfa;
+            --accent-glow: rgba(124, 58, 237, 0.18);
+            --green: #22c55e;
+            --red: #ef4444;
+            --blue: #3b82f6;
+            --amber: #f59e0b;
+            --radius: 12px;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            line-height: 1.6;
+            overflow-x: hidden;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 0 24px;
+        }
+
+        nav {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            z-index: 100;
+            padding: 16px 0;
+            background: rgba(10, 10, 15, 0.8);
+            backdrop-filter: blur(20px);
+            border-bottom: 1px solid var(--border);
+        }
+
+        nav .container {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .logo {
+            font-size: 1.25rem;
+            font-weight: 800;
+            color: var(--accent-bright);
+            text-decoration: none;
+            letter-spacing: -0.5px;
+        }
+
+        .logo span { color: var(--text); }
+
+        .nav-links {
+            display: flex;
+            gap: 32px;
+            list-style: none;
+        }
+
+        .nav-links a {
+            color: var(--text-dim);
+            text-decoration: none;
+            font-size: 0.9rem;
+            font-weight: 500;
+            transition: color 0.2s;
+        }
+
+        .nav-links a:hover { color: var(--text); }
+
+        .nav-cta {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 18px;
+            background: var(--accent);
+            color: #fff;
+            border-radius: 8px;
+            text-decoration: none;
+            font-size: 0.85rem;
+            font-weight: 600;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+
+        .nav-cta:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 4px 20px var(--accent-glow);
+        }
+
+        .hero {
+            padding: 160px 0 100px;
+            text-align: center;
+            position: relative;
+        }
+
+        .hero::before {
+            content: '';
+            position: absolute;
+            top: 80px;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 600px;
+            height: 600px;
+            background: radial-gradient(circle, var(--accent-glow) 0%, transparent 70%);
+            pointer-events: none;
+        }
+
+        .badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 14px;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 100px;
+            font-size: 0.8rem;
+            font-weight: 500;
+            color: var(--text-dim);
+            margin-bottom: 24px;
+        }
+
+        .badge-dot {
+            width: 6px;
+            height: 6px;
+            background: var(--green);
+            border-radius: 50%;
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.4; }
+        }
+
+        h1 {
+            font-size: clamp(3rem, 7vw, 4.5rem);
+            font-weight: 800;
+            letter-spacing: -2px;
+            line-height: 1.1;
+            margin-bottom: 24px;
+            position: relative;
+        }
+
+        h1 .highlight {
+            background: linear-gradient(135deg, var(--accent-bright), #c4b5fd);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .hero-sub {
+            font-size: 1.25rem;
+            color: var(--text-dim);
+            max-width: 660px;
+            margin: 0 auto 48px;
+            line-height: 1.7;
+        }
+
+        .hero-actions {
+            display: flex;
+            gap: 16px;
+            justify-content: center;
+            flex-wrap: wrap;
+        }
+
+        .btn-primary {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 14px 28px;
+            background: var(--accent);
+            color: #fff;
+            border-radius: 10px;
+            text-decoration: none;
+            font-size: 1rem;
+            font-weight: 600;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 30px var(--accent-glow);
+        }
+
+        .btn-secondary {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 14px 28px;
+            background: var(--surface);
+            color: var(--text);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            text-decoration: none;
+            font-size: 1rem;
+            font-weight: 500;
+            transition: border-color 0.2s, background 0.2s;
+        }
+
+        .btn-secondary:hover {
+            border-color: var(--text-dim);
+            background: #1a1a24;
+        }
+
+        .install-bar {
+            margin-top: 48px;
+            display: flex;
+            justify-content: center;
+        }
+
+        .install-cmd {
+            display: inline-flex;
+            align-items: center;
+            gap: 12px;
+            padding: 12px 20px;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.9rem;
+            color: var(--text-dim);
+            cursor: pointer;
+            transition: border-color 0.2s;
+        }
+
+        .install-cmd:hover { border-color: var(--accent); }
+        .install-cmd code { color: var(--text); }
+        .install-cmd .copy-icon { opacity: 0.5; transition: opacity 0.2s; }
+        .install-cmd:hover .copy-icon { opacity: 1; }
+
+        .stats {
+            padding: 0 0 40px;
+        }
+
+        .stat-row {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 24px;
+            padding: 32px;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+        }
+
+        .stat {
+            text-align: center;
+        }
+
+        .stat-num {
+            font-size: 2rem;
+            font-weight: 800;
+            color: var(--accent-bright);
+            letter-spacing: -1px;
+        }
+
+        .stat-label {
+            font-size: 0.8rem;
+            color: var(--text-dim);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            font-weight: 500;
+        }
+
+        .pipeline {
+            padding: 80px 0;
+        }
+
+        .pipeline-visual {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 40px;
+            overflow-x: auto;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.8rem;
+            line-height: 1.8;
+            color: var(--text-dim);
+        }
+
+        .pipeline-visual .allow { color: var(--green); }
+        .pipeline-visual .block { color: var(--red); }
+        .pipeline-visual .warn { color: var(--amber); }
+        .pipeline-visual .pick { color: var(--accent-bright); }
+        .pipeline-visual .label { color: var(--text); }
+
+        .features {
+            padding: 80px 0;
+        }
+
+        .section-label {
+            font-size: 0.8rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            color: var(--accent-bright);
+            margin-bottom: 12px;
+        }
+
+        .section-title {
+            font-size: 2.5rem;
+            font-weight: 800;
+            letter-spacing: -1.5px;
+            margin-bottom: 16px;
+        }
+
+        .section-desc {
+            color: var(--text-dim);
+            font-size: 1.1rem;
+            max-width: 640px;
+            margin-bottom: 60px;
+        }
+
+        .feature-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+            gap: 24px;
+        }
+
+        .feature-card {
+            padding: 32px;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            transition: border-color 0.3s, transform 0.3s;
+        }
+
+        .feature-card:hover {
+            border-color: var(--accent);
+            transform: translateY(-4px);
+        }
+
+        .feature-icon {
+            width: 40px;
+            height: 40px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: var(--accent-glow);
+            border-radius: 10px;
+            margin-bottom: 16px;
+            font-size: 1.2rem;
+        }
+
+        .feature-card h3 {
+            font-size: 1.1rem;
+            font-weight: 700;
+            margin-bottom: 8px;
+        }
+
+        .feature-card p {
+            color: var(--text-dim);
+            font-size: 0.9rem;
+            line-height: 1.6;
+        }
+
+        .code-section {
+            padding: 80px 0;
+        }
+
+        .code-block {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            overflow: hidden;
+        }
+
+        .code-header {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 12px 20px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .code-dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+        }
+
+        .code-dot.red { background: #ff5f57; }
+        .code-dot.yellow { background: #febc2e; }
+        .code-dot.green { background: #28c840; }
+
+        .code-header span {
+            margin-left: 12px;
+            font-size: 0.8rem;
+            color: var(--text-dim);
+            font-family: 'JetBrains Mono', monospace;
+        }
+
+        .code-body {
+            padding: 24px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.85rem;
+            line-height: 1.8;
+            overflow-x: auto;
+        }
+
+        .code-body .kw { color: #c678dd; }
+        .code-body .fn { color: #61afef; }
+        .code-body .str { color: #98c379; }
+        .code-body .cm { color: #5c6370; }
+        .code-body .num { color: #d19a66; }
+        .code-body .var { color: #e5c07b; }
+
+        .providers {
+            padding: 80px 0;
+            text-align: center;
+        }
+
+        .provider-logos {
+            display: flex;
+            justify-content: center;
+            gap: 32px;
+            flex-wrap: wrap;
+            margin-top: 48px;
+        }
+
+        .provider-item {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 8px;
+            opacity: 0.6;
+            transition: opacity 0.3s;
+        }
+
+        .provider-item:hover { opacity: 1; }
+
+        .provider-icon {
+            width: 56px;
+            height: 56px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 14px;
+            font-size: 1.1rem;
+            font-weight: 700;
+        }
+
+        .provider-item span {
+            font-size: 0.75rem;
+            color: var(--text-dim);
+            font-weight: 500;
+        }
+
+        .tiers {
+            padding: 80px 0;
+        }
+
+        .tier-cards {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 24px;
+        }
+
+        .tier-card {
+            padding: 32px;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+        }
+
+        .tier-card.single { border-top: 3px solid var(--blue); }
+        .tier-card.smart { border-top: 3px solid var(--accent); }
+        .tier-card.ensemble { border-top: 3px solid var(--green); }
+
+        .tier-mode {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.85rem;
+            margin-bottom: 12px;
+        }
+
+        .tier-card.single .tier-mode { color: var(--blue); }
+        .tier-card.smart .tier-mode { color: var(--accent-bright); }
+        .tier-card.ensemble .tier-mode { color: var(--green); }
+
+        .tier-name {
+            font-size: 1.15rem;
+            font-weight: 700;
+            margin-bottom: 12px;
+        }
+
+        .tier-desc {
+            font-size: 0.9rem;
+            color: var(--text-dim);
+            line-height: 1.7;
+        }
+
+        .tier-cost {
+            margin-top: 16px;
+            padding-top: 16px;
+            border-top: 1px solid var(--border);
+            font-size: 0.8rem;
+            color: var(--text-dim);
+        }
+
+        .tier-cost strong { color: var(--text); }
+
+        .silent {
+            padding: 80px 0;
+        }
+
+        .silent-table {
+            width: 100%;
+            border-collapse: collapse;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            overflow: hidden;
+            font-size: 0.9rem;
+        }
+
+        .silent-table th {
+            text-align: left;
+            padding: 16px 20px;
+            border-bottom: 1px solid var(--border);
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            color: var(--text-dim);
+            font-weight: 600;
+        }
+
+        .silent-table td {
+            padding: 16px 20px;
+            border-bottom: 1px solid var(--border);
+            color: var(--text-dim);
+            line-height: 1.6;
+        }
+
+        .silent-table tr:last-child td { border-bottom: none; }
+
+        .silent-table td:first-child {
+            color: var(--text);
+            font-weight: 500;
+            white-space: nowrap;
+        }
+
+        .silent-table code {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.85em;
+            color: var(--accent-bright);
+        }
+
+        .cta-section {
+            padding: 100px 0;
+            text-align: center;
+        }
+
+        .cta-box {
+            background: linear-gradient(135deg, rgba(124, 58, 237, 0.1), rgba(59, 130, 246, 0.05));
+            border: 1px solid var(--border);
+            border-radius: 20px;
+            padding: 80px 40px;
+        }
+
+        .cta-box h2 {
+            font-size: 2.5rem;
+            font-weight: 800;
+            letter-spacing: -1px;
+            margin-bottom: 16px;
+        }
+
+        .cta-box p {
+            color: var(--text-dim);
+            font-size: 1.1rem;
+            margin-bottom: 40px;
+        }
+
+        footer {
+            padding: 40px 0;
+            border-top: 1px solid var(--border);
+            text-align: center;
+        }
+
+        footer p {
+            color: var(--text-dim);
+            font-size: 0.85rem;
+        }
+
+        footer a {
+            color: var(--text-dim);
+            text-decoration: none;
+            transition: color 0.2s;
+        }
+
+        footer a:hover { color: var(--text); }
+
+        @media (max-width: 768px) {
+            .nav-links { display: none; }
+            .tier-cards { grid-template-columns: 1fr; }
+            .feature-grid { grid-template-columns: 1fr; }
+            .stat-row { grid-template-columns: repeat(2, 1fr); gap: 32px 16px; }
+            .pipeline-visual { font-size: 0.65rem; padding: 20px; }
+            .cta-box { padding: 48px 24px; }
+            .silent-table { font-size: 0.8rem; }
+            .silent-table th, .silent-table td { padding: 12px 14px; }
+        }
+    </style>
+</head>
+<body>
+
+<nav>
+    <div class="container">
+        <a href="/" class="logo">Axon<span>LLM</span></a>
+        <ul class="nav-links">
+            <li><a href="#how-it-works">How It Works</a></li>
+            <li><a href="#features">Features</a></li>
+            <li><a href="#routing">Routing</a></li>
+            <li><a href="#providers">Providers</a></li>
+            <li><a href="#silent">Silent Failures</a></li>
+        </ul>
+        <div style="display:flex;gap:10px;align-items:center;">
+            <a href="https://github.com/axonllm/axonllm#readme" class="nav-cta" style="background:var(--surface);color:var(--text);border:1px solid var(--border);">
+                Docs
+            </a>
+            <a href="https://github.com/axonllm/axonllm" class="nav-cta">
+                <svg width="16" height="16" fill="currentColor" viewBox="0 0 16 16"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+                GitHub
+            </a>
+        </div>
+    </div>
+</nav>
+
+<section class="hero">
+    <div class="container">
+        <div class="badge">
+            <span class="badge-dot"></span>
+            Open Source &middot; MIT-0 &middot; Python 3.11+
+        </div>
+        <h1>One API.<br>Every model. <span class="highlight">Full control.</span></h1>
+        <p class="hero-sub">
+            AxonLLM is the neural control plane for enterprise LLMs. Point your existing OpenAI SDK at it and get intent-aware routing across 13 providers, hierarchy-driven budgets that block before you overspend, and one audit trail for all of it.
+        </p>
+        <div class="hero-actions">
+            <a href="https://github.com/axonllm/axonllm#quick-start" class="btn-primary">
+                Get Started
+                <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+            </a>
+            <a href="https://github.com/axonllm/axonllm" class="btn-secondary">
+                View on GitHub
+            </a>
+        </div>
+        <div class="install-bar">
+            <div class="install-cmd" onclick="navigator.clipboard.writeText('docker compose up')">
+                $ <code>git clone … &amp;&amp; docker compose up</code>
+                <svg class="copy-icon" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
+            </div>
+        </div>
+    </div>
+</section>
+
+<section class="stats">
+    <div class="container">
+        <div class="stat-row">
+            <div class="stat">
+                <div class="stat-num">13</div>
+                <div class="stat-label">Provider adapters</div>
+            </div>
+            <div class="stat">
+                <div class="stat-num">46</div>
+                <div class="stat-label">Models routed</div>
+            </div>
+            <div class="stat">
+                <div class="stat-num">5</div>
+                <div class="stat-label">Routing strategies</div>
+            </div>
+            <div class="stat">
+                <div class="stat-num">1,548</div>
+                <div class="stat-label">Tests passing</div>
+            </div>
+        </div>
+    </div>
+</section>
+
+<section class="pipeline" id="how-it-works">
+    <div class="container">
+        <p class="section-label">How It Works</p>
+        <h2 class="section-title">Fifteen steps, one request</h2>
+        <p class="section-desc">Every call runs the same pipeline. Guardrails and quotas are checked <em>before</em> a provider is billed, not after.</p>
+        <div class="pipeline-visual">
+<pre>
+<span class="label">Client</span>                      <span class="label">AxonLLM</span>                              <span class="label">Providers</span>
+
+  POST /v1/chat/completions
+       |
+       |------> <span class="label">Validate</span> --> <span class="label">Injection Scan</span> --> <span class="label">PII Redact</span>
+       |                              |                  |
+       |                        score: 12          [EMAIL_1]
+       |                              |
+       |                        <span class="label">Quota Hierarchy</span>
+       |                        +-----------------------------------------+
+       |                        |  org --> business unit --> project --> env |
+       |                        |  rpm, budget, max_tokens, allowed models  |
+       |                        +-----------------------------------------+
+       |                              |
+       |                     <span class="allow">within budget</span>
+       |                              |
+       |                        <span class="label">Classifier</span> --> task: <span class="pick">math</span>  (conf 1.00)
+       |                              |
+       |                        <span class="label">Router</span>
+       |                        +-----------------------------------------+
+       |                        |  benchmark score  x  cost  =  ranking   |
+       |                        |  70% quality / 30% cost, configurable   |
+       |                        +-----------------------------------------+
+       |                              |
+       |                     picked: <span class="pick">claude-sonnet</span> via bedrock
+       |                              |                                  |
+       |                              +----------------------------------> completion
+       |                                                                 |
+       |                        <span class="label">PII Re-inject</span> <---------------------------+
+       |                              |
+       |                        <span class="label">Cost + Audit</span>  (SHA-256 hash chain)
+       |                              |
+       +<-----------------------------+  200 OK  +  usage  +  routing trace
+
+  On provider failure: fall back down the chain. Mid-stream, no switch —
+  the client already has bytes, so the error surfaces honestly instead.
+</pre>
+        </div>
+    </div>
+</section>
+
+<section class="features" id="features">
+    <div class="container">
+        <p class="section-label">Capabilities</p>
+        <h2 class="section-title">A gateway, not a proxy</h2>
+        <p class="section-desc">Forwarding requests is the easy part. The value is in everything that happens around the forward.</p>
+
+        <div class="feature-grid">
+            <div class="feature-card">
+                <div class="feature-icon">&#9889;</div>
+                <h3>Smart Routing</h3>
+                <p>A classifier reads the prompt's intent — math, coding, reasoning, summarization, creative writing — and ranks candidates by benchmark score against cost. An unpriced model scores as <em>unknown</em>, not free, so it can't win for being unmeasured.</p>
+            </div>
+            <div class="feature-card">
+                <div class="feature-icon">&#127917;</div>
+                <h3>Ensemble Mode</h3>
+                <p>Scatter one prompt across a panel of models, gather the survivors, and have a judge model synthesize the answer. Configurable quorum, cost ceiling, and best-single fallback when the panel comes up short.</p>
+            </div>
+            <div class="feature-card">
+                <div class="feature-icon">&#128273;</div>
+                <h3>Tool Calling, Translated</h3>
+                <p>Write one OpenAI-shaped tool definition. Each adapter translates it into its provider's own dialect — Anthropic <code>input_schema</code>, Bedrock <code>toolSpec</code>, Gemini <code>functionDeclarations</code>, Cohere <code>parameter_definitions</code> — and translates the call back.</p>
+            </div>
+            <div class="feature-card">
+                <div class="feature-icon">&#128176;</div>
+                <h3>Budgets That Block</h3>
+                <p>Policy hierarchy from org down to environment, where a child can only tighten what it inherits. Rate limits, spend caps, token ceilings and model allow-lists all resolve from the same tree — and stop a request before it bills.</p>
+            </div>
+            <div class="feature-card">
+                <div class="feature-icon">&#128737;</div>
+                <h3>Guardrails Both Ways</h3>
+                <p>PII is redacted before the model sees the prompt and re-injected into the response — including across streaming chunk boundaries, where the placeholder can split in half. Prompt injection is scored on the way in.</p>
+            </div>
+            <div class="feature-card">
+                <div class="feature-icon">&#128220;</div>
+                <h3>Tamper-Evident Audit</h3>
+                <p>Every request lands in a SHA-256 hash chain with DynamoDB persistence, so a deleted or edited record breaks the chain visibly instead of quietly.</p>
+            </div>
+            <div class="feature-card">
+                <div class="feature-icon">&#127760;</div>
+                <h3>Multi-Region Failover</h3>
+                <p>Hub-and-spoke across regions: single, active-passive, or active-active with weighted distribution. Strict data-residency mode filters spokes by zone so in-region data stays in region.</p>
+            </div>
+            <div class="feature-card">
+                <div class="feature-icon">&#128100;</div>
+                <h3>Enterprise Identity</h3>
+                <p>ALB OIDC, bearer tokens, and scoped API keys. SAML 2.0 SSO with pure-Python assertion verification — no <code>xmlsec1</code> to install. SCIM 2.0 for IdP-driven joiner/mover/leaver.</p>
+            </div>
+            <div class="feature-card">
+                <div class="feature-icon">&#128202;</div>
+                <h3>Efficiency Analytics</h3>
+                <p>Per-user profiles from real usage: typical vs. optimal model, prompt-quality scoring, and where tokens are being wasted on over-provisioned models or bloated conversation history.</p>
+            </div>
+        </div>
+    </div>
+</section>
+
+<section class="code-section">
+    <div class="container">
+        <p class="section-label">Quick Start</p>
+        <h2 class="section-title">Change one line</h2>
+        <p class="section-desc">AxonLLM speaks the OpenAI wire format at <code>/v1</code>. Existing code moves over by changing <code>base_url</code> — no reshaping requests, no new SDK. Routing, quotas, guardrails and cost attribution all still apply.</p>
+
+        <div class="code-block">
+            <div class="code-header">
+                <div class="code-dot red"></div>
+                <div class="code-dot yellow"></div>
+                <div class="code-dot green"></div>
+                <span>main.py</span>
+            </div>
+            <div class="code-body">
+<pre><span class="kw">from</span> <span class="fn">openai</span> <span class="kw">import</span> OpenAI
+
+client = OpenAI(
+    base_url=<span class="str">"http://localhost:8000/v1"</span>,   <span class="cm"># AxonLLM, not api.openai.com</span>
+    api_key=<span class="str">"axon_your_key_here"</span>,          <span class="cm"># an AxonLLM key</span>
+)
+
+<span class="cm"># Any model in the registry — the gateway picks the provider</span>
+resp = client.chat.completions.create(
+    model=<span class="str">"claude-sonnet"</span>,
+    messages=[{<span class="str">"role"</span>: <span class="str">"user"</span>, <span class="str">"content"</span>: <span class="str">"Explain CRDTs"</span>}],
+)
+
+<span class="cm"># Or let the classifier choose the model for you</span>
+resp = client.chat.completions.create(
+    model=<span class="str">""</span>,                              <span class="cm"># empty = smart routing</span>
+    messages=[{<span class="str">"role"</span>: <span class="str">"user"</span>, <span class="str">"content"</span>: <span class="str">"what is 4!"</span>}],
+)
+
+<span class="cm"># Or ask a panel and have a judge synthesize the answer</span>
+resp = client.chat.completions.create(
+    model=<span class="str">"ensemble:quality"</span>,
+    messages=[{<span class="str">"role"</span>: <span class="str">"user"</span>, <span class="str">"content"</span>: <span class="str">"Explain CRDTs"</span>}],
+)
+</pre>
+            </div>
+        </div>
+    </div>
+</section>
+
+<section class="tiers" id="routing">
+    <div class="container">
+        <p class="section-label">Routing Modes</p>
+        <h2 class="section-title">Pick a model, or don't</h2>
+        <p class="section-desc">The same endpoint serves all three. The <code>model</code> field decides which one you get.</p>
+
+        <div class="tier-cards">
+            <div class="tier-card single">
+                <div class="tier-mode">model: "claude-sonnet"</div>
+                <div class="tier-name">Direct</div>
+                <p class="tier-desc">You name the model; AxonLLM picks the provider and falls back down the chain on failure. Round-robin, weighted, least-latency or cost-optimized distribution across the providers that serve it — 49 provider mappings across 46 models.</p>
+                <div class="tier-cost"><strong>1&times;</strong> the cost of one call</div>
+            </div>
+            <div class="tier-card smart">
+                <div class="tier-mode">model: ""</div>
+                <div class="tier-name">Smart</div>
+                <p class="tier-desc">The classifier reads intent and the router ranks candidates on benchmark score blended with real price — resolved from the same table that bills you, so the cost used to choose can't disagree with the cost charged.</p>
+                <div class="tier-cost"><strong>1&times;</strong> plus sub-millisecond classification</div>
+            </div>
+            <div class="tier-card ensemble">
+                <div class="tier-mode">model: "ensemble:quality"</div>
+                <div class="tier-name">Ensemble</div>
+                <p class="tier-desc">A panel answers in parallel, a judge synthesizes. Quorum decides how many must survive; a cost ceiling caps the blast radius; <code>best-single</code> fallback returns the strongest answer rather than an error.</p>
+                <div class="tier-cost"><strong>N+1&times;</strong> — panel size plus the judge</div>
+            </div>
+        </div>
+    </div>
+</section>
+
+<section class="providers" id="providers">
+    <div class="container">
+        <p class="section-label">Providers</p>
+        <h2 class="section-title">Thirteen adapters, one wire format</h2>
+        <p class="section-desc" style="margin: 0 auto 0;">Each provider gets a real translation layer, not a lowest-common-denominator passthrough. Bedrock and Bedrock Mantle authenticate through AWS credentials, so they work with no API key at all.</p>
+
+        <div class="provider-logos">
+            <div class="provider-item"><div class="provider-icon">BR</div><span>Bedrock</span></div>
+            <div class="provider-item"><div class="provider-icon">MT</div><span>Mantle</span></div>
+            <div class="provider-item"><div class="provider-icon">A</div><span>Anthropic</span></div>
+            <div class="provider-item"><div class="provider-icon">O</div><span>OpenAI</span></div>
+            <div class="provider-item"><div class="provider-icon">AZ</div><span>Azure</span></div>
+            <div class="provider-item"><div class="provider-icon">V</div><span>Vertex AI</span></div>
+            <div class="provider-item"><div class="provider-icon">G</div><span>Google AI</span></div>
+            <div class="provider-item"><div class="provider-icon">C</div><span>Cohere</span></div>
+            <div class="provider-item"><div class="provider-icon">21</div><span>AI21</span></div>
+            <div class="provider-item"><div class="provider-icon">F</div><span>Fireworks</span></div>
+            <div class="provider-item"><div class="provider-icon">GQ</div><span>Groq</span></div>
+            <div class="provider-item"><div class="provider-icon">T</div><span>Together</span></div>
+            <div class="provider-item"><div class="provider-icon">X</div><span>xAI</span></div>
+        </div>
+    </div>
+</section>
+
+<section class="silent" id="silent">
+    <div class="container">
+        <p class="section-label">Readiness</p>
+        <h2 class="section-title">The failures that don't raise</h2>
+        <p class="section-desc">The dangerous misconfigurations aren't the ones that 500. They're the ones that serve traffic happily while being wrong. AxonLLM ships a checklist for the class of bug that leaves no error in any log.</p>
+
+        <table class="silent-table">
+            <thead>
+                <tr>
+                    <th>What's wrong</th>
+                    <th>What you see</th>
+                    <th>Why nobody notices</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>Model has no price</td>
+                    <td>Requests succeed. Spend reads <code>$0.00</code>.</td>
+                    <td>A budget cap on a free-looking model can never trigger. The dashboard renders a number; it's just the wrong one.</td>
+                </tr>
+                <tr>
+                    <td>Provider retired a model id</td>
+                    <td>An undocumented alias answers <code>200</code>.</td>
+                    <td>You're billed for a different model than you asked for — and aliases appear on no price list, so it bills $0.00 too.</td>
+                </tr>
+                <tr>
+                    <td>Credentials missing</td>
+                    <td>Startup is clean.</td>
+                    <td>Uncredentialled providers are dropped without raising. Invisible until a request happens to route there.</td>
+                </tr>
+                <tr>
+                    <td><code>AXON_AUTH_MODE=LOG_ONLY</code></td>
+                    <td>Every request is served.</td>
+                    <td>The log records a denial that never happened, so the audit trail reads like the control is working.</td>
+                </tr>
+                <tr>
+                    <td>Demo data loaded</td>
+                    <td>A populated dashboard.</td>
+                    <td>Fabricated spend in a real deployment, because the container's default seeds it.</td>
+                </tr>
+                <tr>
+                    <td>Persistence unreachable</td>
+                    <td>Requests succeed normally.</td>
+                    <td>DynamoDB writes are swallowed by design — a provider call shouldn't 500 over a Dynamo hiccup — so billing records vanish silently.</td>
+                </tr>
+            </tbody>
+        </table>
+        <p class="section-desc" style="margin-top: 32px; margin-bottom: 0;">A check that <em>couldn't run</em> reports UNKNOWN, never PASS — collapsing those is exactly how an expired credential renders as a green checklist. And nothing here is enforced: no check can refuse a boot or reject a request, because a readiness page that can take down a deployment is one nobody enables.</p>
+    </div>
+</section>
+
+<section class="cta-section">
+    <div class="container">
+        <div class="cta-box">
+            <h2>Put a control plane in front of it</h2>
+            <p>Open source under MIT-0. One <code>docker compose up</code> to a working gateway.</p>
+            <div class="hero-actions">
+                <a href="https://github.com/axonllm/axonllm#quick-start" class="btn-primary">
+                    Get Started
+                    <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+                </a>
+                <a href="https://github.com/axonllm/axonllm#readme" class="btn-secondary">
+                    Read the Docs
+                </a>
+            </div>
+        </div>
+    </div>
+</section>
+
+<footer>
+    <div class="container">
+        <p>AxonLLM is open source under the MIT-0 License &middot; <a href="https://github.com/axonllm/axonllm">GitHub</a> &middot; <a href="https://github.com/axonllm/axonllm/blob/main/CHANGELOG.md">Changelog</a></p>
+    </div>
+</footer>
+
+<script>
+document.querySelectorAll('.install-cmd').forEach(el => {
+    el.addEventListener('click', () => {
+        const code = el.querySelector('code');
+        const orig = code.textContent;
+        code.textContent = 'Copied!';
+        setTimeout(() => { code.textContent = orig; }, 1500);
+    });
+});
+</script>
+
+</body>
+</html>
