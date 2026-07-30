@@ -37,10 +37,24 @@ class RoutingStrategyBase(ABC):
 
 
 class RoundRobinStrategy(RoutingStrategyBase):
-    """Cycles through healthy providers sequentially."""
+    """Cycles through healthy providers sequentially.
+
+    A single instance is shared across every model (see ``Router._strategies``),
+    so the cursor is tracked per provider set rather than globally. Otherwise
+    two models routing round-robin would advance the same counter and each would
+    skip providers instead of cycling through its own mappings in order.
+    """
 
     def __init__(self) -> None:
-        self._index = 0
+        self._indices: dict[str, int] = {}
+
+    def _provider_key(self, providers: list[ProviderModelMapping]) -> str:
+        """Stable key for a provider set, independent of mapping order.
+
+        Includes ``model_id`` so two models fronted by the same providers still
+        get independent cursors.
+        """
+        return ",".join(sorted(f"{p.provider}:{p.model_id}" for p in providers))
 
     def select(
         self,
@@ -50,8 +64,10 @@ class RoundRobinStrategy(RoutingStrategyBase):
         healthy = self._healthy_providers(providers, health_tracker)
         if not healthy:
             raise NoHealthyProviderError("No healthy providers available")
-        selected = healthy[self._index % len(healthy)]
-        self._index += 1
+        key = self._provider_key(providers)
+        index = self._indices.get(key, 0)
+        selected = healthy[index % len(healthy)]
+        self._indices[key] = index + 1
         return selected
 
 

@@ -96,6 +96,54 @@ class TestRoundRobin:
         strategy = RoundRobinStrategy()
         assert strategy.select(single, health_tracker).provider == "openai"
 
+    def test_models_cycle_independently(self, providers, health_tracker):
+        """One shared instance serves every model, so cursors must not collide."""
+        other = [
+            ProviderModelMapping(provider="groq", model_id="llama-3"),
+            ProviderModelMapping(provider="together", model_id="mixtral"),
+        ]
+        strategy = RoundRobinStrategy()
+
+        # Interleave two models; each must walk its own mappings in order.
+        first = [strategy.select(providers, health_tracker) for _ in range(3)]
+        second = []
+        for _ in range(2):
+            strategy.select(other, health_tracker)
+        for i in range(3):
+            first.append(strategy.select(providers, health_tracker))
+            second.append(strategy.select(other, health_tracker))
+
+        assert first == [providers[i % 3] for i in range(6)]
+        assert second == [other[(2 + i) % 2] for i in range(3)]
+
+    def test_same_providers_different_models_are_independent(self, health_tracker):
+        """Two models fronted by the same providers get separate cursors."""
+        model_a = [
+            ProviderModelMapping(provider="openai", model_id="gpt-4"),
+            ProviderModelMapping(provider="anthropic", model_id="claude-3"),
+        ]
+        model_b = [
+            ProviderModelMapping(provider="openai", model_id="gpt-4o-mini"),
+            ProviderModelMapping(provider="anthropic", model_id="claude-3-haiku"),
+        ]
+        strategy = RoundRobinStrategy()
+
+        assert strategy.select(model_a, health_tracker).provider == "openai"
+        assert strategy.select(model_b, health_tracker).provider == "openai"
+        assert strategy.select(model_a, health_tracker).provider == "anthropic"
+        assert strategy.select(model_b, health_tracker).provider == "anthropic"
+
+    def test_key_is_order_independent(self, health_tracker):
+        """Mapping order from config must not fork the cursor."""
+        forward = [
+            ProviderModelMapping(provider="openai", model_id="gpt-4"),
+            ProviderModelMapping(provider="anthropic", model_id="claude-3"),
+        ]
+        strategy = RoundRobinStrategy()
+        strategy.select(forward, health_tracker)
+        # Same set, reversed: should resume the existing cursor, not restart it.
+        assert strategy.select(list(reversed(forward)), health_tracker).provider == "openai"
+
 
 # --- WeightedStrategy ---
 
