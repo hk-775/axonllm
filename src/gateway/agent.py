@@ -117,6 +117,34 @@ def _error_response(status_code: int, error_type: str, message: str, code: str |
     return d
 
 
+def extract_last_user_prompt(messages: list[dict] | None) -> str:
+    """The last real user text in a conversation, or ``""`` if there is none.
+
+    In a tool loop the final message is a tool result, and mid-loop assistant
+    turns have ``content=None`` — classifying either as "the prompt" would route
+    later rounds of one conversation to a different model than the round that
+    chose the tool. Walk back to the last genuine user text instead, and keep it a
+    ``str`` so the classifier cannot crash on a list or ``None``.
+
+    Shared by smart routing, ensemble routing and usage-record classification, so
+    all three agree on what "the prompt" means for a given request.
+    """
+    for message in reversed(messages or []):
+        if not isinstance(message, dict) or message.get("role") != "user":
+            continue
+        content = message.get("content")
+        if isinstance(content, str) and content:
+            return content
+        if isinstance(content, list):
+            text = " ".join(
+                block.get("text", "") for block in content
+                if isinstance(block, dict) and block.get("type") == "text"
+            ).strip()
+            if text:
+                return text
+    return ""
+
+
 # ---------------------------------------------------------------------------
 # GatewayAgent — orchestration class
 # ---------------------------------------------------------------------------
@@ -458,27 +486,7 @@ class GatewayAgent:
             effective_allowed = self._compute_effective_allowed_models(project, req_ctx.user_id)
 
             # Extract prompt from last user message (shared by smart + ensemble).
-            # In a tool loop the final message is a tool result, and mid-loop
-            # assistant turns have content=None — classifying either as "the
-            # prompt" would route later rounds of one conversation to a different
-            # model than the round that chose the tool. Walk back to the last real
-            # user text instead, and keep it a str so the classifier can't crash.
-            prompt = ""
-            for last_msg in reversed(request.messages or []):
-                if not isinstance(last_msg, dict) or last_msg.get("role") != "user":
-                    continue
-                content = last_msg.get("content")
-                if isinstance(content, str) and content:
-                    prompt = content
-                    break
-                if isinstance(content, list):
-                    text = " ".join(
-                        b.get("text", "") for b in content
-                        if isinstance(b, dict) and b.get("type") == "text"
-                    ).strip()
-                    if text:
-                        prompt = text
-                        break
+            prompt = extract_last_user_prompt(request.messages)
 
             # Check if smart routing / ensemble routing should be used
             smart_routing_decision = None
@@ -755,6 +763,7 @@ class GatewayAgent:
                 cache_creation_tokens=response.usage.cache_creation_tokens,
                 latency_ms=_latency_ms,
                 status="success",
+                task_type=self._classify_for_usage(prompt, smart_routing_decision),
             )
             await self.cost_tracker.record_usage(usage_record)
 
@@ -891,6 +900,13 @@ class GatewayAgent:
             yield {"data": "[DONE]"}
             return
 
+        # Classified once here, not in _finalize_stream: this is the only scope
+        # holding the smart decision, and both of that method's call sites (the
+        # buffered fallback and the relay's finally) must stamp the same value.
+        task_type = self._classify_for_usage(
+            extract_last_user_prompt(request.messages), smart_routing_decision
+        )
+
         chain = self._resolve_stream_chain(request.model, preferred_provider)
 
         # --- Open the stream, falling back across providers pre-first-byte ---
@@ -963,7 +979,8 @@ class GatewayAgent:
                 request_start=request_start, resolved_policy=resolved_policy,
                 pii_mapping=pii_mapping, provider=response.provider,
                 model=request.model, response_model=response.model,
-                text="", usage=response.usage, status="success")
+                text="", usage=response.usage, status="success",
+                task_type=task_type)
             return
 
         # --- Relay chunks; accumulate text + usage for end-of-stream accounting ---
@@ -1019,6 +1036,7 @@ class GatewayAgent:
                 pii_mapping=pii_mapping, provider=chosen.provider,
                 model=request.model, response_model=response_model,
                 text="".join(accumulated), usage=final_usage, status=stream_status,
+                task_type=task_type,
             )
             yield {"data": "[DONE]"}
 
@@ -1047,6 +1065,7 @@ class GatewayAgent:
     async def _finalize_stream(
         self, *, request, req_ctx, request_id, request_start, resolved_policy,
         pii_mapping, provider, model, response_model, text, usage, status,
+        task_type: str = "",
     ) -> None:
         """End-of-stream accounting: usage, cost, audit, trace, OTLP, quota.
 
@@ -1097,6 +1116,9 @@ class GatewayAgent:
             cached_tokens=usage.cached_tokens,
             cache_creation_tokens=usage.cache_creation_tokens,
             latency_ms=latency_ms, status=status, routing_strategy="stream",
+            # Passed in from _stream_true, which is the only scope that knows
+            # whether smart routing already classified this request.
+            task_type=task_type,
         )
         await self.cost_tracker.record_usage(usage_record)
 
@@ -1295,6 +1317,39 @@ class GatewayAgent:
         if not request.model or request.model.strip() == "":
             return True
         return False
+
+    def _classify_for_usage(self, prompt: str, smart_routing_decision: Any = None) -> str:
+        """Task type to stamp on a :class:`UsageRecord`, or ``""`` if unavailable.
+
+        Reuses the smart-routing decision's classification when there is one — the
+        classifier already ran for that request, and re-running it could disagree
+        with the model that was actually selected.
+
+        Falls back to classifying the prompt directly, because most requests never
+        go through smart routing: without this, per-user task aggregates would
+        describe only the auto-select minority and silently omit everyone else.
+        The cost is ~0.13 ms on a typical prompt, against a network round trip.
+
+        Never raises. This runs after the response is in hand, so a classifier
+        failure must not turn a served request into an error — an empty string
+        loses one record's worth of reporting detail, which is the cheaper failure.
+        """
+        if smart_routing_decision is not None:
+            task_type = getattr(smart_routing_decision, "task_type", "")
+            if task_type:
+                return str(task_type)
+
+        if not prompt:
+            return ""
+        strategy = getattr(self.router, "_smart_strategy", None)
+        classifier = getattr(strategy, "classifier", None) if strategy else None
+        if classifier is None:
+            return ""
+        try:
+            return str(classifier.classify(prompt).task_type)
+        except Exception:
+            logger.debug("Task classification failed for usage record", exc_info=True)
+            return ""
 
     def _is_ensemble_request(
         self, request: ChatCompletionRequest, context: dict

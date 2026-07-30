@@ -329,7 +329,7 @@ class SemanticEfficiencyEngine:
 
         profile = UserEfficiencyProfile(
             user_id=user_id,
-            dominant_task_type="general",
+            dominant_task_type=self._dominant_task_type(records),
             avg_complexity=avg_complexity,
             typical_model=typical_model,
             optimal_model=optimal_model,
@@ -520,6 +520,29 @@ class SemanticEfficiencyEngine:
     # ------------------------------------------------------------------
     # Internal — user pattern detection
     # ------------------------------------------------------------------
+
+    def _dominant_task_type(self, records: list[UsageRecord]) -> str:
+        """The most common classified task type across ``records``.
+
+        Records with an empty ``task_type`` are skipped rather than bucketed:
+        "" means the request was never classified (written before the field
+        existed, or routed by a path that does not classify), and counting it
+        as a task type would be inventing a result. When nothing is classified
+        the answer is ``"unknown"`` — the same value the no-records path
+        returns, so callers cannot tell "no data" from "no classification",
+        which is correct: in both cases there is nothing to report.
+
+        Ties go to the first task type seen, matching how ``typical_model`` is
+        picked in :meth:`build_user_profile`.
+        """
+        counts: dict[str, int] = defaultdict(int)
+        for r in records:
+            task_type = getattr(r, "task_type", "")
+            if task_type:
+                counts[task_type] += 1
+        if not counts:
+            return "unknown"
+        return max(counts, key=lambda t: counts[t])
 
     def _detect_user_patterns(self, records: list[UsageRecord]) -> list[str]:
         patterns: list[str] = []

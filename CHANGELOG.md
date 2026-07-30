@@ -233,6 +233,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   makes a third identical value look inevitable rather than assumed.
 
 ### Fixed
+- **Every user's `dominant_task_type` reported `general`, because the field was a
+  hardcoded literal.** `UserEfficiencyProfile.dominant_task_type` was the string
+  `"general"`, never derived from anything: a user who sent nothing but math
+  questions looked identical to one who sent nothing but code. The literal was
+  only the visible half. `UsageRecord` had no `task_type` field at all, so the
+  classification — which *did* run correctly per request, and did drive routing —
+  was discarded immediately after use. By profile-build time there was nothing
+  left to aggregate, and the constant was standing in for data that had never
+  been persisted. The tell was that the *empty*-records path returned `"unknown"`
+  while the populated path returned `"general"`: a user with 500 requests looked
+  *less* classified than a user with none.
+
+  `UsageRecord` now carries `task_type`, stamped at both construction sites (the
+  blocking path and the streaming path's end-of-stream accounting) from the smart
+  routing decision when there is one and from the classifier otherwise — the
+  fallback matters because most requests never go through smart routing, and
+  without it the aggregate would describe only the auto-select minority while
+  appearing to cover everyone. Classification is wrapped so it can never fail a
+  request that has already been served.
+
+  Throughout, `""` (not classified) is kept distinct from `"general"` (classified
+  as general). Rows written before the field existed deserialize to `""`, and the
+  mode counts only classified records, falling back to `"unknown"`. Collapsing the
+  two would recreate the original bug for historical data — the population most
+  likely to be affected by it — which is why it is pinned by tests on both the
+  persistence round trip and the aggregate.
 - **`mantle_adapter`'s advertised model list, four of six ids of which were not
   served.** Found by pointing the new availability check at Mantle.
   `anthropic.claude-sonnet-4-6`, `anthropic.claude-opus-4-6-v1` and
