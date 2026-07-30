@@ -127,10 +127,11 @@ def test_create_admin_routes_returns_routes(admin_api):
     """Verify create_admin_routes returns a list of Route objects."""
     routes = create_admin_routes(admin_api)
     assert isinstance(routes, list)
-    assert len(routes) == 31
+    assert len(routes) == 32
 
     paths = [r.path for r in routes]
     assert "/admin/dashboard" in paths
+    assert "/admin/pricing-drift" in paths
     assert "/admin/overview" in paths
     assert "/admin/projects" in paths
     assert "/admin/projects/{id}" in paths

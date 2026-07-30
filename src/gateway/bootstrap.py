@@ -393,6 +393,7 @@ def build_starlette_app(app_config: AppConfig | None = None) -> Starlette:
         catalog=comp.catalog,
         efficiency_analyzer=comp.efficiency_analyzer,
         semantic_engine=comp.semantic_engine,
+        pricing_path=app_config.pricing_config_path,
     )
 
     # Key, policy, audit, webhook, region, and quota admin APIs

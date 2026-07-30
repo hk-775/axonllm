@@ -26,6 +26,7 @@ from starlette.routing import Route
 _STATIC_DIR = pathlib.Path(__file__).resolve().parent / "static"
 _PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent.parent.parent
 
+from src.gateway.admin.pricing_drift import audit_pricing, render_drift_page
 from src.gateway.cost_tracker import CostTracker
 from src.gateway.efficiency_analyzer import EfficiencyAnalyzer
 from src.gateway.health_tracker import ProviderHealthTracker
@@ -109,6 +110,7 @@ class AdminAPI:
         catalog: dict | None = None,
         efficiency_analyzer: EfficiencyAnalyzer | None = None,
         semantic_engine: SemanticEfficiencyEngine | None = None,
+        pricing_path: str = "config/pricing.yaml",
     ) -> None:
         self.cost_tracker = cost_tracker
         self.health_tracker = health_tracker
@@ -121,6 +123,9 @@ class AdminAPI:
         self._catalog = catalog if catalog is not None else PROVIDER_MODEL_CATALOG
         self._efficiency_analyzer = efficiency_analyzer
         self._semantic_engine = semantic_engine
+        # Shown on the pricing-coverage page so the operator knows which file to
+        # edit; the table itself comes from the cost tracker, already loaded.
+        self._pricing_path = pricing_path
 
     # ------------------------------------------------------------------
     # GET /admin/overview
@@ -1473,6 +1478,16 @@ class AdminAPI:
         )
         return HTMLResponse(html)
 
+    async def pricing_drift(self, request: Request) -> HTMLResponse:
+        """Report provider mappings with no price, and prices nothing uses.
+
+        Rendered fresh on each request from the live registry and the pricing
+        table the cost tracker bills from, so editing pricing.yaml and reloading
+        shows the new coverage without a restart.
+        """
+        report = audit_pricing(self.model_registry, self.cost_tracker.pricing_config)
+        return HTMLResponse(render_drift_page(report, self._pricing_path))
+
 
 # ------------------------------------------------------------------
 # Helper
@@ -1500,6 +1515,7 @@ def create_admin_routes(admin_api: AdminAPI) -> list[Route]:
         Route("/admin/dashboard", admin_api.dashboard, methods=["GET"]),
         Route("/admin/static/{path:path}", admin_api.static_asset, methods=["GET"]),
         Route("/admin/architecture", admin_api.architecture, methods=["GET"]),
+        Route("/admin/pricing-drift", admin_api.pricing_drift, methods=["GET"]),
         Route("/admin/overview", admin_api.overview, methods=["GET"]),
         Route("/admin/projects", admin_api.list_projects, methods=["GET"]),
         Route("/admin/projects", admin_api.create_project, methods=["POST"]),

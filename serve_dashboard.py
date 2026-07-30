@@ -6,11 +6,15 @@ Then open: http://localhost:8000/admin/dashboard
 
 import asyncio
 import os
+import sys
+import threading
+import webbrowser
 
 import uvicorn
 
+from src.gateway.admin.pricing_drift import audit_pricing, format_startup_notice
 from src.gateway.bootstrap import build_starlette_app
-from src.gateway.config_loader import load_app_config
+from src.gateway.config_loader import load_app_config, load_pricing_config
 from src.gateway.dev_env import load_dev_env_file
 from src.gateway.health_check_task import HealthCheckTask
 from src.gateway.health_tracker import ProviderHealthTracker
@@ -67,6 +71,49 @@ if __name__ == "__main__":
 
     asyncio.run(health_task.start())
 
-    print(f"\n  Dashboard: http://localhost:{app_config.server_port}/admin/dashboard")
-    print(f"  Chat:      http://localhost:{app_config.server_port}/chat\n")
+    base = f"http://localhost:{app_config.server_port}"
+    print(f"\n  Dashboard: {base}/admin/dashboard")
+    print(f"  Chat:      {base}/chat")
+
+    # --- Pricing coverage ---
+    # Reuse the registry already loaded above rather than building a second one.
+    drift = audit_pricing(registry, load_pricing_config(app_config.pricing_config_path))
+    drift_url = f"{base}/admin/pricing-drift"
+    print(f"  Pricing:   {drift_url}\n")
+
+    notice = format_startup_notice(drift, drift_url)
+    if notice:
+        print(notice + "\n")
+        # Open the page rather than only printing about it — an unpriced model
+        # bills at $0.00 silently, and a line in the startup scroll is exactly
+        # the kind of warning that gets missed.
+        #
+        # Two guards, because this same file is the Dockerfile CMD: an explicit
+        # AXON_NO_BROWSER, and a tty check. A container or CI runner has no
+        # terminal and nobody watching a browser, and while webbrowser.open
+        # merely fails there, asking is pointless.
+        opt_out = os.environ.get("AXON_NO_BROWSER", "").lower() in ("1", "true", "yes")
+        if not opt_out and sys.stdout.isatty():
+            # uvicorn.run blocks, so the open has to be deferred to a timer: the
+            # server is not accepting connections yet at this point. daemon, so
+            # a Ctrl-C in the first second and a half exits immediately rather
+            # than waiting on the timer.
+            def _open() -> None:
+                try:
+                    webbrowser.open(drift_url)
+                except Exception:  # pragma: no cover - platform dependent
+                    pass
+
+            timer = threading.Timer(1.5, _open)
+            timer.daemon = True
+            timer.start()
+    elif drift.total_mappings:
+        print(f"  ✓ All {drift.total_mappings} provider mappings are priced.\n")
+
+    # Flush before handing off to uvicorn, which reconfigures logging and can
+    # otherwise interleave its own output through the banner above. The gap is
+    # only ever reported, never fatal: the gateway routes correctly either way,
+    # and a dev server that refused to start over a missing price would be worse
+    # than one that bills at zero.
+    sys.stdout.flush()
     uvicorn.run(app, host=app_config.server_host, port=app_config.server_port)
