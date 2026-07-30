@@ -160,3 +160,97 @@ class TestListKeys:
         keys = asyncio.run(service.list_keys("proj-1"))
         assert len(keys) == 1
         assert keys[0].project_id == "proj-1"
+
+
+class TestPersistenceDisabledFallback:
+    """Key lifecycle must work when persistence is off (local dev / demo mode).
+
+    Every DynamoPersistence write is a no-op and every read returns empty when
+    disabled, so without an in-memory fallback a key could be issued but never
+    listed, validated, revoked, or rotated -- which left the dashboard's API
+    Keys page permanently empty in demo mode.
+    """
+
+    @pytest.fixture
+    def disabled_service(self):
+        persistence = FakePersistence()
+        persistence._enabled = False
+        # Mirror the real disabled persistence: writes drop, reads come back empty.
+        persistence.save_api_key = _noop_async
+        persistence.update_api_key = _noop_async
+        persistence.get_api_key = _none_async
+        persistence.get_api_key_by_hash = _none_async
+        persistence.list_api_keys_for_project = _empty_list_async
+        return APIKeyService(persistence=persistence)
+
+    def test_issued_key_is_listed(self, disabled_service):
+        asyncio.run(
+            disabled_service.issue_key("proj-1", "K1", ["chat:invoke"], "admin")
+        )
+        keys = asyncio.run(disabled_service.list_keys("proj-1"))
+        assert len(keys) == 1
+        assert keys[0].name == "K1"
+
+    def test_list_is_scoped_to_project(self, disabled_service):
+        asyncio.run(disabled_service.issue_key("proj-1", "K1", ["chat:invoke"], "admin"))
+        asyncio.run(disabled_service.issue_key("proj-2", "K2", ["chat:invoke"], "admin"))
+        assert len(asyncio.run(disabled_service.list_keys("proj-1"))) == 1
+        assert len(asyncio.run(disabled_service.list_keys("proj-2"))) == 1
+
+    def test_validate_works_past_cache_expiry(self, disabled_service):
+        """The hot cache would mask a broken fallback, so expire it first."""
+        _key, raw = asyncio.run(
+            disabled_service.issue_key("proj-1", "K1", ["chat:invoke"], "admin")
+        )
+        disabled_service.invalidate_cache()
+        result = asyncio.run(disabled_service.validate_key(raw))
+        assert result is not None
+        assert result.name == "K1"
+
+    def test_revoke_marks_key_revoked_in_listing(self, disabled_service):
+        key, _raw = asyncio.run(
+            disabled_service.issue_key("proj-1", "K1", ["chat:invoke"], "admin")
+        )
+        assert asyncio.run(disabled_service.revoke_key(key.key_id)) is True
+        listed = asyncio.run(disabled_service.list_keys("proj-1"))
+        assert [k.revoked for k in listed] == [True]
+
+    def test_revoked_key_fails_validation(self, disabled_service):
+        key, raw = asyncio.run(
+            disabled_service.issue_key("proj-1", "K1", ["chat:invoke"], "admin")
+        )
+        asyncio.run(disabled_service.revoke_key(key.key_id))
+        assert asyncio.run(disabled_service.validate_key(raw)) is None
+
+    def test_revoke_unknown_key_returns_false(self, disabled_service):
+        assert asyncio.run(disabled_service.revoke_key("axk_nope")) is False
+
+    def test_rotate_replaces_key(self, disabled_service):
+        key, old_raw = asyncio.run(
+            disabled_service.issue_key("proj-1", "K1", ["chat:invoke"], "admin")
+        )
+        rotated = asyncio.run(disabled_service.rotate_key(key.key_id, "admin"))
+        assert rotated is not None
+        new_key, new_raw = rotated
+        assert new_key.key_id != key.key_id
+        assert asyncio.run(disabled_service.validate_key(old_raw)) is None
+        assert asyncio.run(disabled_service.validate_key(new_raw)) is not None
+
+    def test_enabled_persistence_does_not_use_memory_store(self):
+        """Guard against the fallback shadowing DynamoDB when it is available."""
+        service = APIKeyService(persistence=FakePersistence())
+        asyncio.run(service.issue_key("proj-1", "K1", ["chat:invoke"], "admin"))
+        assert service._memory_store == {}
+        assert len(asyncio.run(service.list_keys("proj-1"))) == 1
+
+
+async def _noop_async(*_args, **_kwargs) -> None:
+    return None
+
+
+async def _none_async(*_args, **_kwargs):
+    return None
+
+
+async def _empty_list_async(*_args, **_kwargs) -> list:
+    return []

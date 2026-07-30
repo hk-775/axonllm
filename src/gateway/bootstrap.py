@@ -10,7 +10,7 @@ import asyncio
 import contextlib
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from starlette.applications import Starlette
 from starlette.requests import Request
@@ -43,8 +43,12 @@ from src.gateway.quota_enforcer import QuotaEnforcer
 from src.gateway.middleware.security import SecurityMiddleware
 from src.gateway.observability.otlp_exporter import OTLPSpanExporter
 from src.gateway.observability.trace_forwarder import TraceForwarder
-from src.gateway.security.audit_trail import AuditTrail
-from src.gateway.security.event_dispatcher import EventDispatcher
+from src.gateway.security.audit_trail import AuditEventType, AuditTrail
+from src.gateway.security.event_dispatcher import (
+    DestinationType,
+    EventDestination,
+    EventDispatcher,
+)
 from src.gateway.security.injection_detector import PromptInjectionDetector
 from src.gateway.security.pii_redactor import PIIRedactor
 from src.gateway.cache_manager import CacheManager
@@ -242,6 +246,7 @@ def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComp
         projects, user_configs, policies = _apply_seed_data(
             seed, cost_tracker, health_tracker, all_model_names,
             quota_enforcer, policy_resolver,
+            audit_trail, api_key_service, event_dispatcher,
         )
 
     # --- DynamoDB persisted state (merges on top of seed data) ---
@@ -505,6 +510,9 @@ def _apply_seed_data(
     all_model_names: list[str],
     quota_enforcer: QuotaEnforcer,
     policy_resolver: PolicyHierarchyResolver,
+    audit_trail: AuditTrail,
+    api_key_service: APIKeyService,
+    event_dispatcher: EventDispatcher,
 ) -> tuple[dict[str, Project], dict[str, dict], list[dict]]:
     """Apply demo seed data to components. Returns (projects, user_configs, policies)."""
     projects: dict[str, Project] = {}
@@ -582,6 +590,70 @@ def _apply_seed_data(
             up["provider"],
             cooldown_seconds=up.get("cooldown_seconds", 600),
         )
+
+    # API keys. Issued through the real service so the dashboard sees genuine
+    # hashed records; the raw key is discarded because nothing can display it
+    # after issuance anyway.
+    async def _seed_api_keys():
+        for k in seed.api_keys:
+            expires_at = None
+            expires_in_days = k.get("expires_in_days")
+            if expires_in_days is not None:
+                expires_at = datetime.now(timezone.utc) + timedelta(days=expires_in_days)
+            record, _raw = await api_key_service.issue_key(
+                project_id=k["project_id"],
+                name=k.get("name", "Unnamed key"),
+                scopes=k.get("scopes", ["chat:invoke"]),
+                created_by=k.get("created_by", "admin"),
+                expires_at=expires_at,
+            )
+            if k.get("revoked"):
+                await api_key_service.revoke_key(record.key_id)
+
+    if seed.api_keys:
+        asyncio.run(_seed_api_keys())
+
+    # Audit events. Recorded through AuditTrail.record so each entry gets a real
+    # hash-chain link -- the Audit Log page verifies chain integrity, and
+    # hand-built records would fail that check.
+    async def _seed_audit_events():
+        for ev in seed.audit_events:
+            try:
+                event_type = AuditEventType(ev["event_type"])
+            except (KeyError, ValueError):
+                logger.warning(
+                    "Demo seed: skipping audit event with invalid event_type %r",
+                    ev.get("event_type"),
+                )
+                continue
+            await audit_trail.record(
+                event_type=event_type,
+                user_id=ev.get("user_id", "unknown"),
+                project_id=ev.get("project_id", "unknown"),
+                request_id=ev.get("request_id", "req-demo"),
+                data=ev.get("data", {}),
+            )
+
+    if seed.audit_events:
+        asyncio.run(_seed_audit_events())
+
+    # Webhook destinations
+    for wd in seed.webhook_destinations:
+        try:
+            dest_type = DestinationType(wd.get("type", "webhook"))
+        except ValueError:
+            logger.warning(
+                "Demo seed: skipping webhook destination %r with invalid type %r",
+                wd.get("name"), wd.get("type"),
+            )
+            continue
+        event_dispatcher.add_destination(EventDestination(
+            name=wd["name"],
+            destination_type=dest_type,
+            config=wd.get("config", {}),
+            event_filter=wd.get("event_filter"),
+            enabled=wd.get("enabled", True),
+        ))
 
     return projects, user_configs, seed.policies
 

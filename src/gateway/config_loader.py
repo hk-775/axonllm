@@ -33,6 +33,9 @@ class DemoSeedData:
     usage_seeds: list[dict] = field(default_factory=list)
     policies: list[dict] = field(default_factory=list)
     unhealthy_providers: list[dict] = field(default_factory=list)
+    audit_events: list[dict] = field(default_factory=list)
+    api_keys: list[dict] = field(default_factory=list)
+    webhook_destinations: list[dict] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -171,6 +174,9 @@ def load_demo_seed_config(path: str) -> DemoSeedData:
         usage_seeds=raw.get("usage_seeds", []),
         policies=raw.get("policies", []),
         unhealthy_providers=raw.get("unhealthy_providers", []),
+        audit_events=raw.get("audit_events", []),
+        api_keys=raw.get("api_keys", []),
+        webhook_destinations=raw.get("webhook_destinations", []),
     )
 
 
@@ -264,6 +270,12 @@ def serialize_demo_seed_config(seed_data: DemoSeedData) -> dict:
         result["policies"] = seed_data.policies
     if seed_data.unhealthy_providers:
         result["unhealthy_providers"] = seed_data.unhealthy_providers
+    if seed_data.audit_events:
+        result["audit_events"] = seed_data.audit_events
+    if seed_data.api_keys:
+        result["api_keys"] = seed_data.api_keys
+    if seed_data.webhook_destinations:
+        result["webhook_destinations"] = seed_data.webhook_destinations
     return result
 
 
