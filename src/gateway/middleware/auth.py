@@ -37,22 +37,26 @@ PUBLIC_PATHS = frozenset({
 
 
 def _is_site_asset(path: str) -> bool:
-    """True for the marketing site's sibling pages and their assets.
+    """True for the marketing site's pages and the assets they fetch.
 
     The landing page at "/" is public, and its nav links to architecture.html,
-    which in turn fetches three SVGs. Gating those behind auth would serve the
-    pitch to anonymous readers and then 401 the page it links to.
+    which in turn fetches three SVGs plus the narration audio and its transcript
+    from site/narration/. Gating those behind auth would serve the pitch to
+    anonymous readers and then 401 the page it links to.
 
-    Matched by shape rather than by name so a new page added to site/ is public
-    on arrival: one path segment, and a suffix ``site_asset`` will actually
-    serve. Both conditions are the route handler's own — a path this admits but
-    the handler rejects just 404s, so widening this cannot expose a file.
+    Delegates the decision to ``_is_servable_site_path``, the same predicate the
+    route handler applies, so "publicly routable" and "anonymous" cannot drift
+    into a page that renders 200 with a 401 on the audio it plays. A path this
+    admits but the handler rejects just 404s, so the coupling can only ever be
+    too narrow, never too permissive.
     """
-    from src.gateway.admin.routes import SITE_ASSET_TYPES
+    from pathlib import PurePosixPath
 
-    if path.count("/") != 1 or not path.startswith("/"):
+    from src.gateway.admin.routes import _is_servable_site_path
+
+    if not path.startswith("/"):
         return False
-    return any(path.lower().endswith(suffix) for suffix in SITE_ASSET_TYPES)
+    return _is_servable_site_path(PurePosixPath(path.lstrip("/")))
 
 
 class PolicyService(Protocol):
