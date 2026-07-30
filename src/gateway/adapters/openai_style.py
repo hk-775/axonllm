@@ -8,6 +8,12 @@ import re
 from datetime import datetime, timezone
 
 from src.gateway.adapters.base import ProviderAdapter
+from src.gateway.adapters.openai_responses import (
+    build_responses_payload,
+    is_responses_only_model,
+    translate_responses_reply,
+    translate_responses_stream_event,
+)
 from src.gateway.models import (
     ChatCompletionRequest,
     ChatCompletionResponse,
@@ -39,9 +45,27 @@ class OpenAIStyleAdapter(ProviderAdapter):
     PROVIDER_NAME: str = ""
     _MODELS: list[ModelInfo] = []
 
+    # Only OpenAI itself serves /v1/responses. The other subclasses of this base
+    # (Azure, xAI, Groq, Together, Fireworks, AI21) are OpenAI-*compatible* and
+    # expose Chat Completions only, so routing a "-pro"-looking model id there
+    # would 404 a request that would otherwise have worked.
+    _SUPPORTS_RESPONSES_API = False
+
+    @classmethod
+    def _prefers_responses_api(cls, model_id: str) -> bool:
+        return cls._SUPPORTS_RESPONSES_API and is_responses_only_model(model_id)
+
     async def translate_request(
         self, request: ChatCompletionRequest, *, prompt_caching_enabled: bool = False
     ) -> dict:
+        # The "-pro" tier is served only by /v1/responses and answers 400 on Chat
+        # Completions, so it needs a different payload shape as well as a
+        # different URL (see openai_responses and _openai_url). Keyed on
+        # request.model here; http_client overwrites payload["model"] with the
+        # mapping's id afterwards, and both are the same provider model id.
+        if self._prefers_responses_api(request.model):
+            return build_responses_payload(request, request.model)
+
         messages = list(request.messages)
 
         if request.system:
@@ -83,6 +107,12 @@ class OpenAIStyleAdapter(ProviderAdapter):
         return payload
 
     def translate_response(self, provider_response: dict) -> ChatCompletionResponse:
+        # Detected from the payload rather than the model id, which this method
+        # never receives. A Responses reply is unambiguous: object="response"
+        # with a top-level output list, where Chat Completions has choices.
+        if self._is_responses_payload(provider_response):
+            return translate_responses_reply(provider_response, self.PROVIDER_NAME)
+
         usage_data = provider_response.get("usage", {})
         prompt_tokens = usage_data.get("prompt_tokens", 0)
         completion_tokens = usage_data.get("completion_tokens", 0)
@@ -99,7 +129,29 @@ class OpenAIStyleAdapter(ProviderAdapter):
             provider=self.PROVIDER_NAME,
         )
 
+    @staticmethod
+    def _is_responses_payload(payload: dict) -> bool:
+        """True for a Responses API reply, false for Chat Completions.
+
+        ``object: "response"`` is the reliable marker; the ``output``/no-``choices``
+        check is a belt-and-braces fallback in case the field is absent, since
+        mistaking one shape for the other silently empties the response.
+        """
+        if payload.get("object") == "response":
+            return True
+        return "output" in payload and "choices" not in payload
+
     def translate_stream_chunk(self, chunk: dict) -> StreamChunk:
+        # Responses API SSE events are typed ("response.output_text.delta", …)
+        # rather than being chunk objects with choices. An event that carries
+        # nothing a client needs translates to None, which execute_streaming
+        # skips — so this returns an empty non-final chunk only as a last resort.
+        if isinstance(chunk.get("type"), str) and chunk["type"].startswith("response."):
+            translated = translate_responses_stream_event(chunk)
+            if translated is not None:
+                return translated
+            return StreamChunk(id="", choices=[], model="", is_final=False)
+
         choices = chunk.get("choices", [])
         is_final = bool(choices and choices[-1].get("finish_reason") is not None)
 

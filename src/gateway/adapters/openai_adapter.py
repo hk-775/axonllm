@@ -18,3 +18,6 @@ class OpenAIAdapter(OpenAIStyleAdapter):
 
     PROVIDER_NAME = PROVIDER_NAME
     _MODELS = _OPENAI_MODELS
+    # Genuine OpenAI serves /v1/responses, which the "-pro" tier requires. The
+    # OpenAI-compatible providers sharing this base do not.
+    _SUPPORTS_RESPONSES_API = True

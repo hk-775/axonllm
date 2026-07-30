@@ -43,8 +43,10 @@ models:
     model_id: openai.gpt-5.5
     weight: 1.0
     fallback_order: 0
+# Served only by OpenAI's /v1/responses; Chat Completions answers 400 "This is
+# not a chat model". The openai adapter routes the -pro tier there automatically.
 - name: gpt-5.5-pro
-  description: GPT-5.5 Pro
+  description: GPT-5.5 Pro (Responses API)
   routing_strategy: round-robin
   providers:
   - provider: openai

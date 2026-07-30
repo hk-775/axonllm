@@ -366,6 +366,19 @@ models:
         fallback_order: 1
 ```
 
+OpenAI's `-pro` tier (`gpt-5.5-pro`, `gpt-5-pro`) is served only by the Responses
+API, and answers 400 `This is not a chat model` on Chat Completions. Configure it
+like any other model — the `openai` adapter recognizes the tier and switches
+endpoint and payload shape itself. Two consequences worth knowing:
+
+- **`temperature` and `top_p` are dropped**, not forwarded. These models reject
+  them with a 400 rather than ignoring them, so a request carrying either would
+  fail outright.
+- **Only `provider: openai` gets this.** The OpenAI-compatible providers (xAI,
+  Groq, Together, Fireworks, AI21, Azure) have no `/v1/responses` route, so a
+  `-pro`-suffixed `model_id` there stays on Chat Completions and will fail if the
+  provider does not genuinely serve it.
+
 ### Ensemble Presets
 
 Define ensemble presets in `config/ensemble.yaml`:
@@ -400,7 +413,7 @@ pip install -e ".[dev]"
 pytest tests/ -x -q
 ```
 
-980 tests including unit, integration, end-to-end, and Hypothesis property-based tests.
+1360 tests including unit, integration, end-to-end, and Hypothesis property-based tests.
 
 ## Deployment
 

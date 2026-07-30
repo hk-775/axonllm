@@ -29,7 +29,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tool use?") is resolved — implemented as per-provider translation rather than
   pass-through, since only OpenAI-style providers accept OpenAI's shape.
 
+- **OpenAI Responses API support, for models that reject Chat Completions.**
+  The `-pro` tier (`gpt-5.5-pro`, `gpt-5-pro`) is served only by `/v1/responses`;
+  on `/v1/chat/completions` OpenAI answers 400 `This is not a chat model and thus
+  not supported in the v1/chat/completions endpoint`. The openai adapter now
+  detects the tier and switches both the URL and the payload shape: `input` items
+  instead of `messages`, `max_output_tokens` instead of `max_tokens`, flat tool
+  specs, and tool traffic as top-level `function_call` / `function_call_output`
+  items. Sampling parameters are dropped rather than forwarded — these models
+  reject `temperature`/`top_p` with a 400 instead of ignoring them, so passing a
+  caller's default through would fail every request and trip the circuit breaker.
+  Streaming works too: `response.output_item.done` carries the finished
+  `function_call` whole, so unlike the hand-built translators this needs no
+  cross-chunk accumulation. Restricted to genuine OpenAI — the OpenAI-*compatible*
+  providers sharing the same adapter base and URL builder (Azure, xAI, Groq,
+  Together, Fireworks, AI21) expose Chat Completions only, and routing a
+  `-pro`-looking id there would 404 a request that otherwise worked.
+
 ### Fixed
+- **`gpt-5.5-pro` was configured to route over Chat Completions**, where it can
+  only ever 400 — the model was unusable from the day it was added. Fixed by
+  implementing the Responses API path above rather than deleting the config entry,
+  since `-pro` is a class of models and the next one added would fail the same way.
 - **Tool specs were silently dropped.** `ChatCompletionRequest` had no `tools`
   field, so `_parse_request` never read one: the request succeeded, the model was
   simply never told any tools existed, and it answered confidently that it had no

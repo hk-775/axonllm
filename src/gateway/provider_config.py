@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from src.gateway.adapters.openai_responses import is_responses_only_model
 from src.gateway.models import ProviderModelMapping
 from src.gateway.router import ProviderError
 
@@ -130,6 +131,13 @@ def get_auth_headers(config: ProviderConfig) -> dict[str, str]:
 
 
 def _openai_url(config: ProviderConfig, mapping: ProviderModelMapping) -> str:
+    # The "-pro" tier (gpt-5.5-pro, gpt-5-pro) is served only by /v1/responses and
+    # answers 400 "This is not a chat model" on Chat Completions. Only genuine
+    # OpenAI has that route — this builder is shared with xAI, Groq, Together,
+    # Fireworks and AI21, which are OpenAI-compatible but Chat Completions only,
+    # so a "-pro"-looking id there must stay on the standard path.
+    if config.provider_name == "openai" and is_responses_only_model(mapping.model_id):
+        return f"{config.base_url}/v1/responses"
     return f"{config.base_url}/v1/chat/completions"
 
 
