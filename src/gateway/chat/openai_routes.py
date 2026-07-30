@@ -54,6 +54,65 @@ def _error(status_code: int, message: str, err_type: str = "invalid_request_erro
     )
 
 
+# OpenAI defines exactly four finish_reason values, and typed SDK clients
+# deserialize the field into an enum — an unrecognized string is a validation
+# error, not a curiosity. The adapters pass their provider's own stop reason
+# through (Anthropic "end_turn", Gemini "MAX_TOKENS", Cohere "COMPLETE", …), so
+# this boundary is where it has to become one of the four. Normalizing here
+# rather than in each adapter keeps the internal API honest about what the
+# provider actually said, while the OpenAI-compatible surface stays in spec.
+_FINISH_REASONS = {
+    # Anthropic / Bedrock Converse
+    "end_turn": "stop",
+    "stop_sequence": "stop",
+    "tool_use": "tool_calls",
+    "max_tokens": "length",
+    "content_filtered": "content_filter",
+    "guardrail_intervened": "content_filter",
+    # Gemini (Google AI / Vertex) — uppercase
+    "STOP": "stop",
+    "MAX_TOKENS": "length",
+    "SAFETY": "content_filter",
+    "RECITATION": "content_filter",
+    "BLOCKLIST": "content_filter",
+    "PROHIBITED_CONTENT": "content_filter",
+    "SPII": "content_filter",
+    # Cohere
+    "COMPLETE": "stop",
+    "MAX_TOKENS_REACHED": "length",
+    "ERROR_TOXIC": "content_filter",
+    # Mantle's /openai/v1/responses route reports lifecycle status rather than a
+    # stop reason (see mantle_provider). "incomplete" there most often means the
+    # token cap was hit.
+    "completed": "stop",
+    "incomplete": "length",
+}
+
+_VALID_FINISH_REASONS = {"stop", "length", "tool_calls", "content_filter"}
+
+
+def _finish_reason(raw: Any, has_tool_calls: bool) -> str:
+    """Map a provider stop reason onto OpenAI's four legal values.
+
+    ``has_tool_calls`` wins over everything: a response carrying tool calls is
+    a tool call regardless of what the provider labeled the stop, and a client
+    that reads anything else here ends its tool loop without running the tool.
+    """
+    if has_tool_calls:
+        return "tool_calls"
+    if not isinstance(raw, str) or not raw:
+        return "stop"
+    if raw in _VALID_FINISH_REASONS:
+        return raw
+    mapped = _FINISH_REASONS.get(raw)
+    if mapped:
+        return mapped
+    # Unknown reason: "stop" is the safe default — it ends the turn cleanly
+    # rather than making a client retry or reject the response outright.
+    logger.debug("unmapped finish_reason %r from provider; reporting 'stop'", raw)
+    return "stop"
+
+
 class OpenAICompatAPI:
     """OpenAI-compatible route handlers backed by the internal ClientAgent."""
 
@@ -85,20 +144,29 @@ class OpenAICompatAPI:
         temperature = body.get("temperature")
         max_tokens = body.get("max_tokens")
         stream = bool(body.get("stream", False))
+        # The pipeline translates tools per-provider, but this route never read
+        # them off the body — so an OpenAI SDK client got a fluent 200 in which
+        # the model states it has no such tool, with no error to notice it by.
+        # The one failure mode worse than a 400.
+        tools = body.get("tools")
+        tool_choice = body.get("tool_choice")
         user_id, project_id = _identity(request)
 
         if stream:
             return await self._stream(model, messages, temperature, max_tokens,
-                                      user_id, project_id, smart_routing)
+                                      user_id, project_id, smart_routing,
+                                      tools, tool_choice)
         return await self._complete(model, messages, temperature, max_tokens,
-                                    user_id, project_id, smart_routing)
+                                    user_id, project_id, smart_routing,
+                                    tools, tool_choice)
 
     async def _complete(self, model, messages, temperature, max_tokens, user_id,
-                        project_id, smart_routing=False):
+                        project_id, smart_routing=False, tools=None, tool_choice=None):
         try:
             resp = await self.client_agent.chat(
                 model, messages, temperature=temperature, max_tokens=max_tokens,
                 user_id=user_id, project_id=project_id, smart_routing=smart_routing,
+                tools=tools, tool_choice=tool_choice,
             )
         except Exception:
             logger.exception("chat completion failed")
@@ -111,6 +179,21 @@ class OpenAICompatAPI:
             return _error(resp.get("status_code", 500), msg, err_type="server_error")
 
         usage = resp.get("usage", {}) or {}
+        tool_calls = resp.get("tool_calls")
+        message: dict[str, Any] = {
+            "role": "assistant",
+            # "" not None when there are no tool_calls: a plain response has
+            # always sent a string here and clients rely on it.
+            "content": resp.get("content") if tool_calls else (resp.get("content") or ""),
+        }
+        if tool_calls:
+            message["tool_calls"] = tool_calls
+
+        # Was hardcoded "stop", which is what an OpenAI client reads as "the turn
+        # is over" — so even once tool_calls were forwarded, a tool loop would
+        # stop before running the tool.
+        finish_reason = _finish_reason(resp.get("finish_reason"), bool(tool_calls))
+
         completion = {
             "id": f"chatcmpl-{uuid.uuid4().hex}",
             "object": "chat.completion",
@@ -119,8 +202,8 @@ class OpenAICompatAPI:
             "choices": [
                 {
                     "index": 0,
-                    "message": {"role": "assistant", "content": resp.get("content", "")},
-                    "finish_reason": "stop",
+                    "message": message,
+                    "finish_reason": finish_reason,
                 }
             ],
             "usage": {
@@ -136,7 +219,7 @@ class OpenAICompatAPI:
         return JSONResponse(completion)
 
     async def _stream(self, model, messages, temperature, max_tokens, user_id,
-                      project_id, smart_routing=False):
+                      project_id, smart_routing=False, tools=None, tool_choice=None):
         completion_id = f"chatcmpl-{uuid.uuid4().hex}"
         created = int(time.time())
 
@@ -144,6 +227,7 @@ class OpenAICompatAPI:
             chunks = self.client_agent.chat_stream(
                 model, messages, temperature=temperature, max_tokens=max_tokens,
                 user_id=user_id, project_id=project_id, smart_routing=smart_routing,
+                tools=tools, tool_choice=tool_choice,
             )
         except Exception:
             logger.exception("stream setup failed")
@@ -152,6 +236,8 @@ class OpenAICompatAPI:
         async def event_generator():
             resolved_model = model
             first = True
+            observed_finish: str | None = None
+            saw_tool_call = False
             try:
                 async for chunk in chunks:
                     if "_rate_limit_headers" in chunk:
@@ -166,6 +252,16 @@ class OpenAICompatAPI:
                         break
                     resolved_model = chunk.get("model") or resolved_model
                     delta: dict[str, Any] = {"content": chunk.get("content", "")}
+                    if chunk.get("tool_calls"):
+                        delta["tool_calls"] = chunk["tool_calls"]
+                        saw_tool_call = True
+                        # A tool-call delta carries no text. OpenAI sends
+                        # content: null there, and clients accumulating
+                        # `content or ""` would otherwise see "" and treat the
+                        # turn as plain prose.
+                        delta["content"] = chunk.get("content") or None
+                    if chunk.get("finish_reason"):
+                        observed_finish = chunk["finish_reason"]
                     if first:
                         delta["role"] = "assistant"
                         first = False
@@ -177,13 +273,18 @@ class OpenAICompatAPI:
                         "choices": [{"index": 0, "delta": delta, "finish_reason": None}],
                     }
                     yield f"data: {json.dumps(payload)}\n\n"
-                # Final chunk with finish_reason, then the [DONE] sentinel
+                # Final chunk with finish_reason, then the [DONE] sentinel.
+                # Carry the provider's reason when it gave one: a client driving
+                # a tool loop branches on this, and a hardcoded "stop" ends the
+                # loop before the tool ever runs.
                 final = {
                     "id": completion_id,
                     "object": "chat.completion.chunk",
                     "created": created,
                     "model": resolved_model,
-                    "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                    "choices": [{"index": 0, "delta": {},
+                                 "finish_reason": _finish_reason(observed_finish,
+                                                                 saw_tool_call)}],
                 }
                 yield f"data: {json.dumps(final)}\n\n"
                 yield "data: [DONE]\n\n"

@@ -39,11 +39,14 @@ class ClientAgent:
         project_id: str | None = None,
         provider: str | None = None,
         smart_routing: bool = False,
+        tools: list[dict] | None = None,
+        tool_choice: str | dict | None = None,
     ) -> dict:
         """Non-streaming chat completion. Returns simplified response dict."""
         request_data = self._build_request_data(
             model, messages, stream=False,
             temperature=temperature, max_tokens=max_tokens,
+            tools=tools, tool_choice=tool_choice,
         )
         context = self._build_context(
             user_id=user_id, project_id=project_id, provider=provider, smart_routing=smart_routing,
@@ -62,13 +65,24 @@ class ClientAgent:
                 result["_rate_limit_headers"] = rate_limit_headers
             return result
 
+        choice = response["choices"][0]
+        message = choice.get("message", {})
         result = {
             "id": response["id"],
             "model": response["model"],
             "provider": response["provider"],
-            "content": response["choices"][0]["message"]["content"],
+            "content": message.get("content"),
             "usage": response["usage"],
         }
+        # A tool call carries no text, so summarizing the response as `content`
+        # alone loses it entirely — the caller gets a fluent 200 and never learns
+        # a tool was requested. finish_reason travels with it because that is
+        # what a tool loop branches on; defaulting it to "stop" downstream ends
+        # the loop before the tool ever runs.
+        if message.get("tool_calls"):
+            result["tool_calls"] = message["tool_calls"]
+        if choice.get("finish_reason") is not None:
+            result["finish_reason"] = choice["finish_reason"]
         # Include smart_routing metadata if present
         if "smart_routing" in response:
             result["smart_routing"] = response["smart_routing"]
@@ -92,11 +106,20 @@ class ClientAgent:
         project_id: str | None = None,
         provider: str | None = None,
         smart_routing: bool = False,
+        tools: list[dict] | None = None,
+        tool_choice: str | dict | None = None,
     ) -> AsyncIterator[dict]:
-        """Streaming chat completion. Yields chunk dicts."""
+        """Streaming chat completion. Yields chunk dicts.
+
+        Tools are forwarded on the request, but only providers whose stream
+        translation preserves the raw ``choices`` (OpenAI-style) surface
+        ``tool_calls`` deltas back — the hand-built translators emit text-only
+        deltas, so a tool call there arrives only in the buffered fallback.
+        """
         request_data = self._build_request_data(
             model, messages, stream=True,
             temperature=temperature, max_tokens=max_tokens,
+            tools=tools, tool_choice=tool_choice,
         )
         context = self._build_context(
             user_id=user_id, project_id=project_id, provider=provider,
@@ -139,17 +162,32 @@ class ClientAgent:
 
             # Normal content chunk
             content = ""
+            delta: dict = {}
+            finish_reason = None
             choices = data.get("choices", [])
             if choices:
-                delta = choices[0].get("delta", {})
-                content = delta.get("content", "")
+                delta = choices[0].get("delta", {}) or {}
+                # `.get("content", "")` returns None on a tool-call delta, where
+                # OpenAI sends content: null — the default never applies.
+                content = delta.get("content") or ""
+                finish_reason = choices[0].get("finish_reason")
 
-            yield {
+            out: dict[str, Any] = {
                 "id": data.get("id", ""),
                 "model": data.get("model", ""),
                 "content": content,
                 "is_final": data.get("is_final", False),
             }
+            # A streamed tool call arrives as delta.tool_calls with empty
+            # content, so a chunk summarized by `content` alone is
+            # indistinguishable from silence — the caller sees an empty stream
+            # and no tool.
+            if delta.get("tool_calls"):
+                out["tool_calls"] = delta["tool_calls"]
+            if finish_reason is not None:
+                out["finish_reason"] = finish_reason
+
+            yield out
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -162,6 +200,8 @@ class ClientAgent:
         stream: bool,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        tools: list[dict] | None = None,
+        tool_choice: str | dict | None = None,
     ) -> dict:
         request_data: dict[str, Any] = {
             "model": model,
@@ -172,6 +212,12 @@ class ClientAgent:
             request_data["temperature"] = temperature
         if max_tokens is not None:
             request_data["max_tokens"] = max_tokens
+        # Truthiness, not `is not None`: an empty tools list is not the same
+        # request as no tools, and some providers reject `tools: []` outright.
+        if tools:
+            request_data["tools"] = tools
+            if tool_choice is not None:
+                request_data["tool_choice"] = tool_choice
         return request_data
 
     def _build_context(
