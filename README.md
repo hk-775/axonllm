@@ -14,7 +14,8 @@ cd axonllm
 cp config/providers.yaml.example config/providers.yaml
 # Add at least one API key (or just use Bedrock with AWS credentials)
 docker compose up
-# Open http://localhost:8000/admin/dashboard
+# Open http://localhost:8000 — the landing page, with the dashboard one click away
+# (or go straight to http://localhost:8000/admin/dashboard)
 ```
 
 ## Why AxonLLM?
@@ -104,7 +105,8 @@ cp config/providers.yaml.example config/providers.yaml
 AXON_LOAD_DEMO_DATA=true python serve_dashboard.py
 ```
 
-Open http://localhost:8000/admin/dashboard.
+Open http://localhost:8000 for the landing page, or
+http://localhost:8000/admin/dashboard to go straight to the dashboard.
 
 The dev server (`serve_dashboard.py`) runs in `LOG_ONLY` mode, so local requests
 work **without** an API key. Any non-dev deployment defaults to `ENFORCE` (see

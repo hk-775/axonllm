@@ -5,29 +5,67 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>AxonLLM — The Neural Control Plane for Enterprise LLMs</title>
     <meta name="description" content="One API, any provider. AxonLLM routes each prompt to the right model, enforces budgets and guardrails, and gives you one audit trail across 13 providers.">
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%237c3aed'/%3E%3Cpath d='M8 22L16 10L24 22' stroke='white' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round' fill='none'/%3E%3Ccircle cx='16' cy='10' r='2.5' fill='white'/%3E%3C/svg%3E">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
     <style>
         :root {
-            --bg: #0a0a0f;
-            --surface: #12121a;
-            --border: #1e1e2e;
-            --text: #e4e4e7;
-            --text-dim: #71717a;
-            /* Purple matches --awsui-color-primary in the admin dashboard, so the
-               landing page and the product it links to read as one thing. */
+            /* Exact palette of the Ostiari Control Plane (the light UI on :9000),
+               taken from control-plane/frontend/src/index.css and resolved to hex
+               from its Tailwind v3 build. Stone rather than gray for the
+               neutrals: it is warm-tinted, which is what keeps a white-ish page
+               from reading as clinical.
+
+               Not the Ostiari *landing page* palette — that one is #0a0a0f dark. */
+            --bg: #fafaf9;          /* stone-50  — body */
+            --surface: #ffffff;     /* white     — cards */
+            --border: #e7e5e4;      /* stone-200 */
+            --border-soft: #f5f5f4; /* stone-100 — inner dividers */
+            --text: #1c1917;        /* stone-900 */
+            --text-mid: #57534e;    /* stone-600 — body copy */
+            --text-dim: #78716c;    /* stone-500 — the app's most-used color */
+            /* violet-600. Also AxonLLM's own --awsui-color-primary, so this
+               single value satisfies both "match Ostiari" and "match the
+               dashboard this page links to". */
             --accent: #7c3aed;
-            --accent-bright: #a78bfa;
-            --accent-glow: rgba(124, 58, 237, 0.18);
-            --green: #22c55e;
-            --red: #ef4444;
-            --blue: #3b82f6;
-            --amber: #f59e0b;
-            --radius: 12px;
+            --accent-hover: #6d28d9; /* violet-700 */
+            --accent-soft: #f5f3ff;  /* violet-50  — tinted fills */
+            --accent-ring: #ede9fe;  /* violet-100 — focus ring */
+            --accent-glow: rgba(139, 92, 246, 0.12); /* the .stat-card hover glow */
+            /* -700 rather than the app's -600: these are used at 0.65-0.85rem
+               (pipeline diagram, tier labels), which is body text, and -600
+               only clears the 3.0 large-text bar on white. */
+            --green: #047857;       /* emerald-700 */
+            --green-soft: #ecfdf5;  /* emerald-50 */
+            --red: #be123c;         /* rose-700 */
+            --red-soft: #fff1f2;    /* rose-50 */
+            --amber: #b45309;       /* amber-700 */
+            --amber-soft: #fffbeb;  /* amber-50 */
+            --blue: #0369a1;        /* sky-700 */
+            --blue-soft: #f0f9ff;   /* sky-50 */
+            /* The app uses rounded-2xl (16px) on cards, not the 12px the dark
+               landing page used. */
+            --radius: 16px;
         }
 
         * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        /* The page is all links and buttons on near-white surfaces, where the
+           browser default focus ring is close to invisible. :focus-visible
+           rather than :focus so a mouse click doesn't leave a ring behind. */
+        a:focus-visible,
+        button:focus-visible {
+            /* The app's focus idiom is a violet border plus a violet-100 ring.
+               Its border color (violet-400) measures 2.61 against stone-50,
+               under the 3.0 WCAG 1.4.11 wants for a focus indicator, so the
+               visible ring is violet-600 (5.46) and violet-100 stays as the
+               soft halo it is there. */
+            outline: 2px solid var(--accent);
+            outline-offset: 2px;
+            box-shadow: 0 0 0 5px var(--accent-ring);
+            border-radius: 6px;
+        }
 
         body {
             font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
@@ -50,7 +88,7 @@
             right: 0;
             z-index: 100;
             padding: 16px 0;
-            background: rgba(10, 10, 15, 0.8);
+            background: rgba(250, 250, 249, 0.8);
             backdrop-filter: blur(20px);
             border-bottom: 1px solid var(--border);
         }
@@ -62,14 +100,19 @@
         }
 
         .logo {
+            display: inline-flex;
+            align-items: center;
+            gap: 10px;
             font-size: 1.25rem;
             font-weight: 800;
-            color: var(--accent-bright);
+            color: var(--accent);
             text-decoration: none;
             letter-spacing: -0.5px;
         }
 
-        .logo span { color: var(--text); }
+        /* "Axon" violet, "LLM" stone-900 — the split the dashboard uses. */
+        .logo-text { color: var(--accent); }
+        .logo-text span { color: var(--text); }
 
         .nav-links {
             display: flex;
@@ -102,8 +145,8 @@
         }
 
         .nav-cta:hover {
-            transform: translateY(-1px);
-            box-shadow: 0 4px 20px var(--accent-glow);
+            background: var(--accent-hover);
+            box-shadow: 0 4px 12px rgba(124, 58, 237, 0.2);
         }
 
         .hero {
@@ -122,6 +165,84 @@
             height: 600px;
             background: radial-gradient(circle, var(--accent-glow) 0%, transparent 70%);
             pointer-events: none;
+        }
+
+        /* The hero lockup: mark, wordmark, tagline — the composition Ostiari's
+           control-plane landing leads with (its public/logo.svg puts a 48-unit
+           mark beside a 26-unit wordmark over a letter-spaced 7.5-unit
+           tagline). Same arrangement and proportions, AxonLLM's own mark and
+           violet rather than Ostiari's doorway and indigo.
+
+           Built from HTML rather than as one <svg> the way Ostiari's is: SVG
+           <text> would not pick up the Inter webfont the rest of the page
+           loads, so the wordmark would silently fall back to system-ui and
+           look like a different logo. This way it also stays selectable and
+           scales with the surrounding type. */
+        /* A column, not a row: the mark and wordmark form the top line and the
+           tagline sits under both, so its width underlines the whole lockup
+           instead of jutting past a 7-character wordmark.
+
+           flex rather than inline-flex. As inline-flex this shared a line with
+           the .badge pill that follows it, which put the badge next to the
+           tagline. */
+        .hero-lockup {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 7px;
+            margin-bottom: 32px;
+            position: relative;
+        }
+
+        .hero-lockup-row {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+        }
+
+        .hero-lockup svg {
+            /* 52px against a 2.6rem wordmark, the proportion Ostiari's logo.svg
+               uses: a 28-unit mark beside a 26-unit wordmark. */
+            width: 52px;
+            height: 52px;
+            flex-shrink: 0;
+        }
+
+        .hero-wordmark {
+            /* The wordmark leads the lockup, so it has to outweigh the tagline
+               clearly -- at 2rem the tracked-out tagline was actually wider than
+               this row, which put the visual weight at the bottom.
+
+               Still well under the 4.5rem h1 (58%), so the headline stays the
+               page's primary line. */
+            font-size: 2.6rem;
+            font-weight: 800;
+            letter-spacing: -1.3px;
+            line-height: 1;
+            color: var(--accent);
+        }
+
+        /* The same "Axon" violet / "LLM" stone-900 split as the nav and the
+           dashboard sidebar. */
+        .hero-wordmark span { color: var(--text); }
+
+        .hero-tagline {
+            /* 0.29x the wordmark and tracked to ~94% of the row width above it:
+               both numbers taken from Ostiari's logo.svg, where a 7.5-unit
+               tagline sits under a 26-unit wordmark. Sized so it underlines the
+               lockup rather than outgrowing it. */
+            font-size: 0.76rem;
+            /* 600 in stone-500. At 700 in stone-600 it was heavier than the body
+               copy beneath it, which inverts the hierarchy — a caption
+               outweighing the sentence it captions. stone-500 measures 4.59 on
+               stone-50, still over the 4.5 AA bar for text this size. */
+            font-weight: 600;
+            color: var(--text-dim);
+            letter-spacing: 0.24em;
+            text-transform: uppercase;
+            /* The tracking on the last letter is real trailing space, which
+               pushes an otherwise centered line visibly left. */
+            text-indent: 0.24em;
         }
 
         .badge {
@@ -161,7 +282,7 @@
         }
 
         h1 .highlight {
-            background: linear-gradient(135deg, var(--accent-bright), #c4b5fd);
+            background: linear-gradient(135deg, var(--accent), #a855f7);
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
             background-clip: text;
@@ -169,7 +290,7 @@
 
         .hero-sub {
             font-size: 1.25rem;
-            color: var(--text-dim);
+            color: var(--text-mid);
             max-width: 660px;
             margin: 0 auto 48px;
             line-height: 1.7;
@@ -197,8 +318,8 @@
         }
 
         .btn-primary:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 8px 30px var(--accent-glow);
+            background: var(--accent-hover);
+            box-shadow: 0 8px 20px rgba(124, 58, 237, 0.22);
         }
 
         .btn-secondary {
@@ -207,8 +328,9 @@
             gap: 8px;
             padding: 14px 28px;
             background: var(--surface);
-            color: var(--text);
+            color: var(--text-mid);
             border: 1px solid var(--border);
+            box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
             border-radius: 10px;
             text-decoration: none;
             font-size: 1rem;
@@ -217,8 +339,8 @@
         }
 
         .btn-secondary:hover {
-            border-color: var(--text-dim);
-            background: #1a1a24;
+            border-color: var(--border);
+            background: var(--border-soft);
         }
 
         .install-bar {
@@ -234,6 +356,7 @@
             padding: 12px 20px;
             background: var(--surface);
             border: 1px solid var(--border);
+            box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
             border-radius: 10px;
             font-family: 'JetBrains Mono', monospace;
             font-size: 0.9rem;
@@ -257,8 +380,9 @@
             gap: 24px;
             padding: 32px;
             background: var(--surface);
-            border: 1px solid var(--border);
+            border: 1px solid rgba(214, 211, 209, 0.6);
             border-radius: var(--radius);
+            box-shadow: 0 0 0 1px rgba(214, 211, 209, 0.3), 0 1px 3px rgba(0, 0, 0, 0.04);
         }
 
         .stat {
@@ -268,7 +392,7 @@
         .stat-num {
             font-size: 2rem;
             font-weight: 800;
-            color: var(--accent-bright);
+            color: var(--accent);
             letter-spacing: -1px;
         }
 
@@ -286,7 +410,8 @@
 
         .pipeline-visual {
             background: var(--surface);
-            border: 1px solid var(--border);
+            border: 1px solid rgba(214, 211, 209, 0.6);
+            box-shadow: 0 0 0 1px rgba(214, 211, 209, 0.3), 0 1px 3px rgba(0, 0, 0, 0.04);
             border-radius: var(--radius);
             padding: 40px;
             overflow-x: auto;
@@ -299,7 +424,7 @@
         .pipeline-visual .allow { color: var(--green); }
         .pipeline-visual .block { color: var(--red); }
         .pipeline-visual .warn { color: var(--amber); }
-        .pipeline-visual .pick { color: var(--accent-bright); }
+        .pipeline-visual .pick { color: var(--accent); }
         .pipeline-visual .label { color: var(--text); }
 
         .features {
@@ -311,7 +436,7 @@
             font-weight: 600;
             text-transform: uppercase;
             letter-spacing: 2px;
-            color: var(--accent-bright);
+            color: var(--accent);
             margin-bottom: 12px;
         }
 
@@ -323,7 +448,7 @@
         }
 
         .section-desc {
-            color: var(--text-dim);
+            color: var(--text-mid);
             font-size: 1.1rem;
             max-width: 640px;
             margin-bottom: 60px;
@@ -338,13 +463,16 @@
         .feature-card {
             padding: 32px;
             background: var(--surface);
-            border: 1px solid var(--border);
+            border: 1px solid rgba(214, 211, 209, 0.6);
             border-radius: var(--radius);
-            transition: border-color 0.3s, transform 0.3s;
+            box-shadow: 0 0 0 1px rgba(214, 211, 209, 0.3), 0 1px 3px rgba(0, 0, 0, 0.04);
+            transition: box-shadow 0.3s, border-color 0.3s, transform 0.3s;
         }
 
+        /* Lifted from .stat-card:hover in the control plane's index.css. */
         .feature-card:hover {
-            border-color: var(--accent);
+            border-color: rgba(139, 92, 246, 0.3);
+            box-shadow: 0 0 20px var(--accent-glow), 0 0 0 1px rgba(139, 92, 246, 0.2), 0 8px 24px rgba(0, 0, 0, 0.06);
             transform: translateY(-4px);
         }
 
@@ -354,8 +482,8 @@
             display: flex;
             align-items: center;
             justify-content: center;
-            background: var(--accent-glow);
-            border-radius: 10px;
+            background: var(--accent-soft);
+            border-radius: 12px;
             margin-bottom: 16px;
             font-size: 1.2rem;
         }
@@ -367,7 +495,7 @@
         }
 
         .feature-card p {
-            color: var(--text-dim);
+            color: var(--text-mid);
             font-size: 0.9rem;
             line-height: 1.6;
         }
@@ -378,7 +506,8 @@
 
         .code-block {
             background: var(--surface);
-            border: 1px solid var(--border);
+            border: 1px solid rgba(214, 211, 209, 0.6);
+            box-shadow: 0 0 0 1px rgba(214, 211, 209, 0.3), 0 1px 3px rgba(0, 0, 0, 0.04);
             border-radius: var(--radius);
             overflow: hidden;
         }
@@ -388,7 +517,7 @@
             align-items: center;
             gap: 8px;
             padding: 12px 20px;
-            border-bottom: 1px solid var(--border);
+            border-bottom: 1px solid var(--border-soft);
         }
 
         .code-dot {
@@ -416,12 +545,12 @@
             overflow-x: auto;
         }
 
-        .code-body .kw { color: #c678dd; }
-        .code-body .fn { color: #61afef; }
-        .code-body .str { color: #98c379; }
-        .code-body .cm { color: #5c6370; }
-        .code-body .num { color: #d19a66; }
-        .code-body .var { color: #e5c07b; }
+        .code-body .kw { color: #7c3aed; }
+        .code-body .fn { color: #0369a1; }
+        .code-body .str { color: #047857; }
+        .code-body .cm { color: #78716c; }
+        .code-body .num { color: #c2410c; }
+        .code-body .var { color: #b45309; }
 
         .providers {
             padding: 80px 0;
@@ -456,6 +585,7 @@
             background: var(--surface);
             border: 1px solid var(--border);
             border-radius: 14px;
+            box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
             font-size: 1.1rem;
             font-weight: 700;
         }
@@ -479,7 +609,8 @@
         .tier-card {
             padding: 32px;
             background: var(--surface);
-            border: 1px solid var(--border);
+            border: 1px solid rgba(214, 211, 209, 0.6);
+            box-shadow: 0 0 0 1px rgba(214, 211, 209, 0.3), 0 1px 3px rgba(0, 0, 0, 0.04);
             border-radius: var(--radius);
         }
 
@@ -494,7 +625,7 @@
         }
 
         .tier-card.single .tier-mode { color: var(--blue); }
-        .tier-card.smart .tier-mode { color: var(--accent-bright); }
+        .tier-card.smart .tier-mode { color: var(--accent); }
         .tier-card.ensemble .tier-mode { color: var(--green); }
 
         .tier-name {
@@ -505,14 +636,14 @@
 
         .tier-desc {
             font-size: 0.9rem;
-            color: var(--text-dim);
+            color: var(--text-mid);
             line-height: 1.7;
         }
 
         .tier-cost {
             margin-top: 16px;
             padding-top: 16px;
-            border-top: 1px solid var(--border);
+            border-top: 1px solid var(--border-soft);
             font-size: 0.8rem;
             color: var(--text-dim);
         }
@@ -527,7 +658,8 @@
             width: 100%;
             border-collapse: collapse;
             background: var(--surface);
-            border: 1px solid var(--border);
+            border: 1px solid rgba(214, 211, 209, 0.6);
+            box-shadow: 0 0 0 1px rgba(214, 211, 209, 0.3), 0 1px 3px rgba(0, 0, 0, 0.04);
             border-radius: var(--radius);
             overflow: hidden;
             font-size: 0.9rem;
@@ -537,6 +669,7 @@
             text-align: left;
             padding: 16px 20px;
             border-bottom: 1px solid var(--border);
+            background: var(--border-soft);
             font-size: 0.75rem;
             text-transform: uppercase;
             letter-spacing: 1px;
@@ -546,8 +679,8 @@
 
         .silent-table td {
             padding: 16px 20px;
-            border-bottom: 1px solid var(--border);
-            color: var(--text-dim);
+            border-bottom: 1px solid var(--border-soft);
+            color: var(--text-mid);
             line-height: 1.6;
         }
 
@@ -562,8 +695,26 @@
         .silent-table code {
             font-family: 'JetBrains Mono', monospace;
             font-size: 0.85em;
-            color: var(--accent-bright);
+            color: var(--accent);
         }
+
+        /* The control plane's .badge-* classes: a soft tint with the matching
+           -700 text. Used on the middle column because that column is the
+           deceptively healthy signal — the reason each row is dangerous is that
+           it looks like this rather than like an error. */
+        .signal {
+            display: inline-flex;
+            align-items: center;
+            border-radius: 8px;
+            padding: 2px 8px;
+            font-size: 0.8rem;
+            font-weight: 500;
+            font-family: 'JetBrains Mono', monospace;
+        }
+
+        .signal-ok { background: var(--green-soft); color: var(--green); }
+        .signal-warn { background: var(--amber-soft); color: var(--amber); }
+        .signal-bad { background: var(--red-soft); color: var(--red); }
 
         .cta-section {
             padding: 100px 0;
@@ -571,9 +722,9 @@
         }
 
         .cta-box {
-            background: linear-gradient(135deg, rgba(124, 58, 237, 0.1), rgba(59, 130, 246, 0.05));
-            border: 1px solid var(--border);
-            border-radius: 20px;
+            background: linear-gradient(135deg, var(--accent-soft), var(--blue-soft));
+            border: 1px solid rgba(214, 211, 209, 0.6);
+            border-radius: 24px;
             padding: 80px 40px;
         }
 
@@ -585,7 +736,7 @@
         }
 
         .cta-box p {
-            color: var(--text-dim);
+            color: var(--text-mid);
             font-size: 1.1rem;
             margin-bottom: 40px;
         }
@@ -611,6 +762,12 @@
 
         @media (max-width: 768px) {
             .nav-links { display: none; }
+            /* Scaled as a set, so the tagline keeps matching the top line's
+               width rather than overrunning it on a narrow viewport. */
+            .hero-lockup-row { gap: 11px; }
+            .hero-lockup svg { width: 38px; height: 38px; }
+            .hero-wordmark { font-size: 1.9rem; letter-spacing: -0.9px; }
+            .hero-tagline { font-size: 0.56rem; letter-spacing: 0.22em; text-indent: 0.22em; }
             .tier-cards { grid-template-columns: 1fr; }
             .feature-grid { grid-template-columns: 1fr; }
             .stat-row { grid-template-columns: repeat(2, 1fr); gap: 32px 16px; }
@@ -625,7 +782,21 @@
 
 <nav>
     <div class="container">
-        <a href="/" class="logo">Axon<span>LLM</span></a>
+        <!-- The actual AxonLLM mark, lifted from the admin dashboard's
+             sidebar-logo so the page and the product share one identity rather
+             than the page inventing a wordmark. -->
+        <a href="/" class="logo">
+            <svg width="30" height="30" viewBox="0 0 32 32" fill="none" aria-hidden="true">
+                <rect width="32" height="32" rx="8" fill="url(#axon-grad)"/>
+                <path d="M8 22L16 10L24 22" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+                <circle cx="16" cy="10" r="2.5" fill="white"/>
+                <circle cx="8" cy="22" r="2" fill="white" opacity="0.7"/>
+                <circle cx="24" cy="22" r="2" fill="white" opacity="0.7"/>
+                <line x1="12" y1="16" x2="20" y2="16" stroke="white" stroke-width="1.5" opacity="0.5"/>
+                <defs><linearGradient id="axon-grad" x1="0" y1="0" x2="32" y2="32"><stop stop-color="#8b5cf6"/><stop offset="1" stop-color="#6d28d9"/></linearGradient></defs>
+            </svg>
+            <span class="logo-text">Axon<span>LLM</span></span>
+        </a>
         <ul class="nav-links">
             <li><a href="#how-it-works">How It Works</a></li>
             <li><a href="#features">Features</a></li>
@@ -634,10 +805,14 @@
             <li><a href="#silent">Silent Failures</a></li>
         </ul>
         <div style="display:flex;gap:10px;align-items:center;">
-            <a href="https://github.com/axonllm/axonllm#readme" class="nav-cta" style="background:var(--surface);color:var(--text);border:1px solid var(--border);">
+            <a href="https://github.com/aws-samples/sample-axonllm#readme" class="nav-cta" style="background:var(--surface);color:var(--text);border:1px solid var(--border);">
                 Docs
             </a>
-            <a href="https://github.com/axonllm/axonllm" class="nav-cta">
+            <a href="/admin/dashboard" class="nav-cta">
+                <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/></svg>
+                Dashboard
+            </a>
+            <a href="https://github.com/aws-samples/sample-axonllm" class="nav-cta" style="background:var(--surface);color:var(--text);border:1px solid var(--border);">
                 <svg width="16" height="16" fill="currentColor" viewBox="0 0 16 16"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
                 GitHub
             </a>
@@ -647,6 +822,25 @@
 
 <section class="hero">
     <div class="container">
+        <!-- The lockup the nav only hints at, at 30px. Its gradient id is
+             axon-grad-hero, not axon-grad: two <defs> sharing an id in one
+             document is a collision, and the browser resolves both fills to
+             whichever came first. -->
+        <div class="hero-lockup">
+            <div class="hero-lockup-row">
+                <svg viewBox="0 0 32 32" fill="none" aria-hidden="true">
+                    <rect width="32" height="32" rx="8" fill="url(#axon-grad-hero)"/>
+                    <path d="M8 22L16 10L24 22" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+                    <circle cx="16" cy="10" r="2.5" fill="white"/>
+                    <circle cx="8" cy="22" r="2" fill="white" opacity="0.7"/>
+                    <circle cx="24" cy="22" r="2" fill="white" opacity="0.7"/>
+                    <line x1="12" y1="16" x2="20" y2="16" stroke="white" stroke-width="1.5" opacity="0.5"/>
+                    <defs><linearGradient id="axon-grad-hero" x1="0" y1="0" x2="32" y2="32"><stop stop-color="#8b5cf6"/><stop offset="1" stop-color="#6d28d9"/></linearGradient></defs>
+                </svg>
+                <span class="hero-wordmark">Axon<span>LLM</span></span>
+            </div>
+            <span class="hero-tagline">The Neural Control Plane</span>
+        </div>
         <div class="badge">
             <span class="badge-dot"></span>
             Open Source &middot; MIT-0 &middot; Python 3.11+
@@ -656,12 +850,12 @@
             AxonLLM is the neural control plane for enterprise LLMs. Point your existing OpenAI SDK at it and get intent-aware routing across 13 providers, hierarchy-driven budgets that block before you overspend, and one audit trail for all of it.
         </p>
         <div class="hero-actions">
-            <a href="https://github.com/axonllm/axonllm#quick-start" class="btn-primary">
-                Get Started
+            <a href="/admin/dashboard" class="btn-primary">
+                Open the Dashboard
                 <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
             </a>
-            <a href="https://github.com/axonllm/axonllm" class="btn-secondary">
-                View on GitHub
+            <a href="https://github.com/aws-samples/sample-axonllm#quick-start" class="btn-secondary">
+                Get Started
             </a>
         </div>
         <div class="install-bar">
@@ -914,37 +1108,37 @@ resp = client.chat.completions.create(
             <tbody>
                 <tr>
                     <td>Model has no price</td>
-                    <td>Requests succeed. Spend reads <code>$0.00</code>.</td>
+                    <td><span class="signal signal-ok">$0.00 spend</span> Requests succeed.</td>
                     <td>A budget cap on a free-looking model can never trigger. The dashboard renders a number; it's just the wrong one.</td>
                 </tr>
                 <tr>
                     <td>Provider retired a model id</td>
-                    <td>An undocumented alias answers <code>200</code>.</td>
+                    <td><span class="signal signal-ok">200 OK</span> An undocumented alias answers.</td>
                     <td>You're billed for a different model than you asked for — and aliases appear on no price list, so it bills $0.00 too.</td>
                 </tr>
                 <tr>
                     <td>Credentials missing</td>
-                    <td>Startup is clean.</td>
+                    <td><span class="signal signal-ok">clean boot</span> No warning logged.</td>
                     <td>Uncredentialled providers are dropped without raising. Invisible until a request happens to route there.</td>
                 </tr>
                 <tr>
                     <td><code>AXON_AUTH_MODE=LOG_ONLY</code></td>
-                    <td>Every request is served.</td>
+                    <td><span class="signal signal-ok">200 OK</span> Every request is served.</td>
                     <td>The log records a denial that never happened, so the audit trail reads like the control is working.</td>
                 </tr>
                 <tr>
                     <td>Demo data loaded</td>
-                    <td>A populated dashboard.</td>
+                    <td><span class="signal signal-ok">healthy metrics</span> A populated dashboard.</td>
                     <td>Fabricated spend in a real deployment, because the container's default seeds it.</td>
                 </tr>
                 <tr>
                     <td>Persistence unreachable</td>
-                    <td>Requests succeed normally.</td>
+                    <td><span class="signal signal-ok">200 OK</span> Requests succeed normally.</td>
                     <td>DynamoDB writes are swallowed by design — a provider call shouldn't 500 over a Dynamo hiccup — so billing records vanish silently.</td>
                 </tr>
             </tbody>
         </table>
-        <p class="section-desc" style="margin-top: 32px; margin-bottom: 0;">A check that <em>couldn't run</em> reports UNKNOWN, never PASS — collapsing those is exactly how an expired credential renders as a green checklist. And nothing here is enforced: no check can refuse a boot or reject a request, because a readiness page that can take down a deployment is one nobody enables.</p>
+        <p class="section-desc" style="margin-top: 32px; margin-bottom: 0;">A check that <em>couldn't run</em> reports <span class="signal signal-warn">UNKNOWN</span>, never <span class="signal signal-ok">PASS</span> — collapsing those is exactly how an expired credential renders as a green checklist. And nothing here is enforced: no check can refuse a boot or reject a request, because a readiness page that can take down a deployment is one nobody enables.</p>
     </div>
 </section>
 
@@ -954,12 +1148,12 @@ resp = client.chat.completions.create(
             <h2>Put a control plane in front of it</h2>
             <p>Open source under MIT-0. One <code>docker compose up</code> to a working gateway.</p>
             <div class="hero-actions">
-                <a href="https://github.com/axonllm/axonllm#quick-start" class="btn-primary">
-                    Get Started
+                <a href="/admin/dashboard" class="btn-primary">
+                    Open the Dashboard
                     <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
                 </a>
-                <a href="https://github.com/axonllm/axonllm#readme" class="btn-secondary">
-                    Read the Docs
+                <a href="https://github.com/aws-samples/sample-axonllm#quick-start" class="btn-secondary">
+                    Get Started
                 </a>
             </div>
         </div>
@@ -968,7 +1162,7 @@ resp = client.chat.completions.create(
 
 <footer>
     <div class="container">
-        <p>AxonLLM is open source under the MIT-0 License &middot; <a href="https://github.com/axonllm/axonllm">GitHub</a> &middot; <a href="https://github.com/axonllm/axonllm/blob/main/CHANGELOG.md">Changelog</a></p>
+        <p>AxonLLM is open source under the MIT-0 License &middot; <a href="https://github.com/aws-samples/sample-axonllm">GitHub</a> &middot; <a href="https://github.com/aws-samples/sample-axonllm/blob/main/CHANGELOG.md">Changelog</a></p>
     </div>
 </footer>
 

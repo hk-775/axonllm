@@ -49,6 +49,10 @@ from src.gateway.config import AppConfig
 from src.gateway.model_registry import ModelRegistry
 from src.gateway.models import TokenPricing
 from src.gateway.provider_config import ProviderConfig
+from .page_style import (
+    EMBED_STYLE, FAVICON, ribbon,
+    BASE_STYLE, BORDER, ERR, INFO, OK, SURFACE, TEXT_DIM, TEXT_HEADING, UNKNOWN, WARN,
+)
 
 
 class Status(str, Enum):
@@ -598,47 +602,32 @@ async def run_checklist(
 # Page rendering
 # ---------------------------------------------------------------------------
 
-_STYLE = (
-    "body{margin:0;background:#f8f9fa;font-family:-apple-system,BlinkMacSystemFont,"
-    "'Segoe UI',sans-serif;color:#16191f}"
-    ".toolbar{background:#232F3E;padding:10px 20px;display:flex;align-items:center;gap:12px}"
-    ".toolbar a{color:#fff;text-decoration:none;font-size:13px;padding:6px 14px;"
-    "border-radius:4px;background:#FF9900;font-weight:600}"
-    ".toolbar a:hover{background:#EC7211}"
-    ".toolbar span{color:#fff;font-size:15px;font-weight:700;flex:1}"
-    ".wrap{max-width:1000px;margin:0 auto;padding:24px 20px 60px}"
-    ".banner{border-radius:8px;padding:18px 20px;margin-bottom:20px}"
-    ".banner.fail{background:#fdf3f1;border:1px solid #eaa192;border-left:5px solid #d13212}"
-    ".banner.warn{background:#fff8e6;border:1px solid #f0c36d;border-left:5px solid #ff9900}"
-    ".banner.ok{background:#f0faf3;border:1px solid #86d3a0;border-left:5px solid #1d8102}"
-    ".banner h1{margin:0 0 8px;font-size:19px}"
-    ".banner p{margin:6px 0;font-size:14px;line-height:1.55}"
-    ".stats{display:flex;gap:12px;flex-wrap:wrap;margin:0 0 22px}"
-    ".stat{background:#fff;border:1px solid #e3e6eb;border-radius:8px;padding:12px 18px;min-width:104px}"
-    ".stat b{display:block;font-size:22px;line-height:1.2}"
-    ".stat small{color:#5f6b7a;font-size:12px}"
-    ".check{background:#fff;border:1px solid #e3e6eb;border-radius:8px;padding:14px 18px;"
-    "margin-bottom:10px;border-left:5px solid #e3e6eb}"
-    ".check.fail{border-left-color:#d13212}"
-    ".check.warn{border-left-color:#ff9900}"
-    ".check.pass{border-left-color:#1d8102}"
-    ".check.unknown{border-left-color:#8d99a8}"
-    ".check h3{margin:0 0 4px;font-size:15px;display:flex;align-items:center;gap:9px}"
-    ".pill{font-size:10px;font-weight:700;letter-spacing:.07em;padding:2px 7px;border-radius:3px;"
-    "text-transform:uppercase;color:#fff;flex-shrink:0}"
-    ".pill.fail{background:#d13212}.pill.warn{background:#ff9900}"
-    ".pill.pass{background:#1d8102}.pill.unknown{background:#8d99a8}"
+_STYLE = BASE_STYLE + (
+    # Per-check cards and status pills — the only thing this page adds.
+    f".check{{background:{SURFACE};border:1px solid {BORDER};border-radius:16px;"
+    f"padding:14px 18px;margin-bottom:10px;border-left:5px solid {BORDER};"
+    "box-shadow:0 0 0 1px rgba(214,211,209,0.3),0 1px 3px rgba(0,0,0,0.04)}"
+    f".check.fail{{border-left-color:{ERR}}}"
+    f".check.warn{{border-left-color:{WARN}}}"
+    f".check.pass{{border-left-color:{OK}}}"
+    # UNKNOWN is stone, not a status hue: a check that could not run has no
+    # result, and coloring it like one is how an expired credential reads as a
+    # green checklist.
+    f".check.unknown{{border-left-color:{UNKNOWN}}}"
+    f".check h3{{margin:0 0 4px;font-size:15px;display:flex;align-items:center;"
+    f"gap:9px;color:{TEXT_HEADING}}}"
+    ".pill{font-size:10px;font-weight:700;letter-spacing:.07em;padding:3px 8px;"
+    f"border-radius:6px;text-transform:uppercase;color:{SURFACE};flex-shrink:0}}"
+    f".pill.fail{{background:{ERR}}}.pill.warn{{background:{WARN}}}"
+    f".pill.pass{{background:{OK}}}.pill.unknown{{background:{UNKNOWN}}}"
     ".check p{margin:5px 0;font-size:13px;line-height:1.55}"
-    ".check .why{color:#414d5c}"
-    ".check .fix{color:#0972d3}"
-    "table{width:100%;border-collapse:collapse;margin:10px 0 2px;font-size:12px}"
-    "th{text-align:left;background:#f2f3f5;padding:6px 10px;font-size:11px;"
-    "text-transform:uppercase;letter-spacing:.04em;color:#5f6b7a}"
-    "td{padding:5px 10px;border-top:1px solid #eff1f3;vertical-align:top}"
-    "code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;"
-    "background:#f2f3f5;padding:1px 5px;border-radius:3px}"
-    ".note{color:#5f6b7a;font-size:12px;line-height:1.6;margin:20px 0 0;"
-    "border-top:1px solid #e3e6eb;padding-top:14px}"
+    f".check .why{{color:{TEXT_DIM}}}"
+    f".check .fix{{color:{INFO}}}"
+    "table{margin:10px 0 2px;font-size:12px}"
+    "th{padding:6px 10px;font-size:11px}"
+    "td{padding:5px 10px}"
+    f".note{{color:{TEXT_DIM};font-size:12px;line-height:1.6;margin:20px 0 0;"
+    f"border-top:1px solid {BORDER};padding-top:14px}}"
 )
 
 _PILL = {
@@ -653,17 +642,24 @@ def _esc(value: object) -> str:
     return html.escape(str(value))
 
 
-def render_checklist_page(report: ChecklistReport) -> str:
-    """Render the checklist as a self-contained HTML page."""
+def render_checklist_page(report: ChecklistReport, *, embed: bool = False) -> str:
+    """Render the checklist as a self-contained HTML page.
+
+    With ``embed``, drop the ribbon and the page framing: the dashboard shell
+    supplies both, and two stacked toolbars is the tell that a page was bolted
+    on rather than built in.
+    """
     parts = [
         '<!DOCTYPE html><html><head><meta charset="utf-8">',
         "<title>AxonLLM — Production Readiness</title>",
-        f"<style>{_STYLE}</style></head><body>",
-        '<div class="toolbar"><span>Production Readiness</span>',
-        '<a href="/admin/pricing-drift">Pricing detail</a>',
-        '<a href="/admin/dashboard">&larr; Dashboard</a></div>',
-        '<div class="wrap">',
+        FAVICON,
+        f"<style>{_STYLE}{EMBED_STYLE if embed else ''}</style></head><body>",
     ]
+    if not embed:
+        parts.append(
+            ribbon("Production Readiness", ("/admin/pricing-drift", "Pricing detail"))
+        )
+    parts.append('<div class="wrap">')
 
     if report.did_not_run:
         # Demo mode. Say why there is nothing here, rather than showing an empty

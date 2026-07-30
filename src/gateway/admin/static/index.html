@@ -4,6 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>AxonLLM</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%237c3aed'/%3E%3Cpath d='M8 22L16 10L24 22' stroke='white' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round' fill='none'/%3E%3Ccircle cx='16' cy='10' r='2.5' fill='white'/%3E%3C/svg%3E">
   <!-- Vendored locally (no unpkg/CDN) so the dashboard works air-gapped. Served by /admin/static. -->
   <script src="/admin/static/vendor/react.production.min.js"></script>
   <script src="/admin/static/vendor/react-dom.production.min.js"></script>
@@ -2754,6 +2755,43 @@
     }
 
     /* ================================================================== */
+    /*  Report Pages (Architecture / Pricing / Readiness)                  */
+    /* ================================================================== */
+
+    /* These three are rendered server-side by page_style.py rather than as
+       React components, because they are also standalone URLs an operator opens
+       from an alert with the gateway in a bad state -- when the dashboard's own
+       API calls may be exactly what is failing.
+
+       They used to be plain sidebar links, which navigated the browser away and
+       took the shell with it: the sidebar vanished and the only way back was
+       the ribbon. Framed here instead, so they behave like Configuration --
+       sidebar stays, the main pane swaps.
+
+       An iframe rather than injecting the HTML: those pages set global body,
+       table, th, td and code rules, which would restyle every table in the
+       dashboard. ?embed=1 drops their ribbon and page framing, since this
+       shell already supplies both. */
+    function ReportFrame({ src, title, subtitle }) {
+      return (
+        <div>
+          <div className="page-header">
+            <h1>{title}</h1><p>{subtitle}</p>
+          </div>
+          <iframe
+            src={src + '?embed=1'}
+            title={title}
+            /* The report pages vary from one banner to a long table, and a
+               fixed height would either clip the long ones or leave the short
+               ones floating in whitespace. Sized to the pane and scrolled
+               internally, matching SandboxPage. */
+            style={{ width: '100%', height: 'calc(100vh - 150px)', border: '1.5px solid #e7e5e4', borderRadius: '16px', background: '#fff' }}
+          />
+        </div>
+      );
+    }
+
+    /* ================================================================== */
     /*  App Shell                                                          */
     /* ================================================================== */
     function App() {
@@ -2790,6 +2828,9 @@
         case 'configuration': content = <ConfigurationPage />; break;
         case 'health': content = <HealthPage />; break;
         case 'sandbox': content = <SandboxPage />; break;
+        case 'architecture': content = <ReportFrame src="/admin/architecture" title="Architecture" subtitle="How a request moves through the gateway" />; break;
+        case 'pricing-drift': content = <ReportFrame src="/admin/pricing-drift" title="Pricing Coverage" subtitle="Provider mappings with no price, and prices nothing uses" />; break;
+        case 'production-checklist': content = <ReportFrame src="/admin/production-checklist" title="Production Readiness" subtitle="States this deployment runs in without complaint" />; break;
         default: content = <OverviewPage />;
       }
 
@@ -2818,9 +2859,11 @@
         { label: 'System', items: [
           { key: 'health', icon: '💚', label: 'Health' },
           { key: 'configuration', icon: '⚙', label: 'Configuration' },
-          { key: 'architecture', icon: '🗺', label: 'Architecture', href: '/admin/architecture' },
-          { key: 'pricing-drift', icon: '💲', label: 'Pricing', href: '/admin/pricing-drift' },
-          { key: 'production-checklist', icon: '✅', label: 'Readiness', href: '/admin/production-checklist' },
+          /* No href: these render in the main pane like every other item, so
+             the sidebar survives the click and stays highlighted. */
+          { key: 'architecture', icon: '🗺', label: 'Architecture' },
+          { key: 'pricing-drift', icon: '💲', label: 'Pricing' },
+          { key: 'production-checklist', icon: '✅', label: 'Readiness' },
         ]},
       ];
 
@@ -2849,8 +2892,12 @@
               {navSections.map(section => (
                 <div key={section.label} className="sidebar-section">
                   <div className="sidebar-section-label">{section.label}</div>
+                  {/* Every item navigates in-shell. The `item.href ?
+                      window.location.href = ...` escape hatch this used to have
+                      was the whole bug -- it left the sidebar behind -- and is
+                      gone rather than left for the next item to rediscover. */}
                   {section.items.map(item => (
-                    <button key={item.key} className={`nav-item ${isActive(item) ? 'active' : ''}`} onClick={() => item.href ? (window.location.href = item.href) : navigate(item.key)}>
+                    <button key={item.key} className={`nav-item ${isActive(item) ? 'active' : ''}`} onClick={() => navigate(item.key)}>
                       <span className="nav-icon">{item.icon}</span>
                       {item.label}
                     </button>

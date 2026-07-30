@@ -36,6 +36,13 @@ from src.gateway.model_registry import ModelRegistry
 from src.gateway.models import GuardrailRule, Project, UsageFilters
 from src.gateway.provider_config import ProviderConfig
 from src.gateway.semantic_efficiency import SemanticEfficiencyEngine
+from .page_style import (
+    BASE_STYLE,
+    EMBED_STYLE as PAGE_EMBED_STYLE,
+    FAVICON as PAGE_FAVICON,
+    SURFACE as PAGE_SURFACE,
+    ribbon as page_ribbon,
+)
 
 if TYPE_CHECKING:
     from src.gateway.persistence import DynamoPersistence
@@ -1470,29 +1477,52 @@ class AdminAPI:
         if not svg_path.exists():
             return HTMLResponse("<h1>Architecture diagram not found</h1>", status_code=404)
 
+        embed = _is_embedded(request)
         svg_content = svg_path.read_text(encoding="utf-8")
         html = (
             '<!DOCTYPE html><html><head><meta charset="utf-8">'
-            "<title>AxonLLM Architecture</title>"
-            "<style>"
-            "body{margin:0;background:#f8f9fa;display:flex;flex-direction:column;min-height:100vh}"
-            ".toolbar{background:#232F3E;padding:10px 20px;display:flex;align-items:center;gap:12px}"
-            ".toolbar a{color:#fff;text-decoration:none;font-family:sans-serif;font-size:13px;"
-            "padding:6px 14px;border-radius:4px;background:#FF9900;font-weight:600}"
-            ".toolbar a:hover{background:#EC7211}"
-            ".toolbar span{color:#fff;font-family:sans-serif;font-size:15px;font-weight:700;flex:1}"
-            ".diagram{flex:1;display:flex;align-items:center;justify-content:center;padding:20px;overflow:auto}"
-            ".diagram svg{max-width:100%;height:auto;border-radius:8px;"
-            "box-shadow:0 4px 24px rgba(0,0,0,0.1)}"
-            "</style></head><body>"
-            '<div class="toolbar">'
-            "<span>AxonLLM Architecture</span>"
-            '<a href="/admin/dashboard">&larr; Dashboard</a>'
-            "</div>"
+            "<title>AxonLLM Architecture</title>" + PAGE_FAVICON
+            + "<style>" + BASE_STYLE +
+            # The viewer centers one diagram in the viewport, so it overrides the
+            # shared sheet's document flow rather than adding to it.
+            "body{display:flex;flex-direction:column;min-height:100vh}"
+            ".diagram{flex:1;display:flex;align-items:center;justify-content:center;"
+            "padding:24px;overflow:auto}"
+            ".diagram svg{max-width:100%;height:auto;border-radius:16px;"
+            f"background:{PAGE_SURFACE};box-shadow:0 0 0 1px rgba(214,211,209,0.3),"
+            "0 8px 24px rgba(0,0,0,0.06)}"
+            # Embedded, the shell owns the viewport: 100vh here would size the
+            # diagram to the window while the frame around it is shorter, and
+            # the padding is already the .main pane's.
+            + (PAGE_EMBED_STYLE + "body{min-height:0}.diagram{padding:0}"
+               if embed else "")
+            + "</style></head><body>"
+            + ("" if embed else page_ribbon("Architecture")) +
             '<div class="diagram">' + svg_content + "</div>"
             "</body></html>"
         )
         return HTMLResponse(html)
+
+    async def landing_page(self, request: Request) -> HTMLResponse:
+        """Serve the marketing landing page at the gateway root.
+
+        Read from disk per request rather than cached, matching `dashboard` and
+        `architecture` — editing site/index.html and reloading shows the change
+        without a restart, which is the whole point of a single-file page.
+
+        site/ is outside the installed package and is not in package-data, so a
+        pip-installed gateway will not have it. That is why this 404s with an
+        explanation instead of raising: a missing landing page must not make the
+        root path a 500 on an otherwise healthy deployment.
+        """
+        index_path = _PROJECT_ROOT / "site" / "index.html"
+        if not index_path.exists():
+            return HTMLResponse(
+                "<h1>AxonLLM</h1><p>Landing page not found. The gateway is "
+                'running — see <a href="/admin/dashboard">the dashboard</a>.</p>',
+                status_code=404,
+            )
+        return HTMLResponse(index_path.read_text(encoding="utf-8"))
 
     async def pricing_drift(self, request: Request) -> HTMLResponse:
         """Report provider mappings with no price, and prices nothing uses.
@@ -1502,7 +1532,11 @@ class AdminAPI:
         shows the new coverage without a restart.
         """
         report = audit_pricing(self.model_registry, self.cost_tracker.pricing_config)
-        return HTMLResponse(render_drift_page(report, self._pricing_path))
+        return HTMLResponse(
+            render_drift_page(
+                report, self._pricing_path, embed=_is_embedded(request)
+            )
+        )
 
     async def production_checklist(self, request: Request) -> HTMLResponse:
         """Report whether this deployment is ready to carry real traffic.
@@ -1523,7 +1557,9 @@ class AdminAPI:
             provider_configs=self._provider_configs,
             persistence=self._persistence,
         )
-        return HTMLResponse(render_checklist_page(report))
+        return HTMLResponse(
+            render_checklist_page(report, embed=_is_embedded(request))
+        )
 
 
 # ------------------------------------------------------------------
@@ -1541,6 +1577,20 @@ def _parse_datetime(value: str | None) -> datetime | None:
         return None
 
 
+def _is_embedded(request: Request) -> bool:
+    """Whether this page is being rendered inside the dashboard shell.
+
+    An explicit ``?embed=1`` rather than sniffing ``Sec-Fetch-Dest: iframe``:
+    the dashboard controls the URL it frames, while the header is not sent by
+    every browser and would silently strip the ribbon from anyone else's
+    legitimate embed -- leaving them a page with no way back.
+
+    Default false, so the standalone URLs an operator has bookmarked or been
+    sent in an alert keep their full chrome.
+    """
+    return request.query_params.get("embed") == "1"
+
+
 # ------------------------------------------------------------------
 # Route factory
 # ------------------------------------------------------------------
@@ -1549,6 +1599,7 @@ def _parse_datetime(value: str | None) -> datetime | None:
 def create_admin_routes(admin_api: AdminAPI) -> list[Route]:
     """Return Starlette Route objects for the admin API."""
     return [
+        Route("/", admin_api.landing_page, methods=["GET"]),
         Route("/admin/dashboard", admin_api.dashboard, methods=["GET"]),
         Route("/admin/static/{path:path}", admin_api.static_asset, methods=["GET"]),
         Route("/admin/architecture", admin_api.architecture, methods=["GET"]),
