@@ -233,6 +233,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   makes a third identical value look inevitable rather than assumed.
 
 ### Fixed
+- **Four `UsageRecord` fields never survived a DynamoDB round trip, and one of
+  them came back claiming success.** `serialize_usage_record` wrote 14 of the
+  dataclass's 18 fields; `cache_creation_tokens`, `latency_ms`, `status` and
+  `routing_strategy` were silently absent. Every record restored from DynamoDB
+  therefore carried the dataclass default for all four rather than what actually
+  happened, which is the same shape as the `dominant_task_type` bug below: the
+  field reads as present, nothing raises, and the value is a constant no request
+  produced.
+
+  `status` is the one that mattered, because its default is `"success"`. A table
+  containing failed requests restored as a set asserting every request had
+  succeeded — any error rate computed over restored records read 0%. That is
+  worse than missing data: it is confidently wrong in the direction that looks
+  healthy. `cache_creation_tokens` is the same story one layer down, since cache
+  creation is billed at its own rate and a restored record priced it as ordinary
+  prompt tokens.
+
+  All four are now written and read back. The deserializer defaults an *absent*
+  field to `""` / `0` rather than to the dataclass default, so a row written
+  before this change reports "unknown" instead of asserting a plausible
+  measurement — the same rule `task_type` already followed, where `""` (not
+  classified) must never be read as `"general"` (classified as general).
+  `latency_ms` is cast with an explicit `float()` because
+  `_convert_decimals_to_native` narrows a whole-valued `Decimal` to `int`, so a
+  latency landing exactly on `1234.0` would otherwise come back typed `int` for
+  that row alone.
+
+  The regression test that matters here is derived from
+  `UsageRecord.__dataclass_fields__` rather than a hand-written list of names:
+  the next field added to the dataclass now fails until it round-trips. Nothing
+  connected the field list to the serializer before, which is precisely how four
+  additions drifted out without anyone noticing.
 - **Every user's `dominant_task_type` reported `general`, because the field was a
   hardcoded literal.** `UserEfficiencyProfile.dominant_task_type` was the string
   `"general"`, never derived from anything: a user who sent nothing but math
