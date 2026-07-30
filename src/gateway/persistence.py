@@ -184,6 +184,7 @@ class DynamoPersistence:
             "cached_tokens": record.cached_tokens,
             "image_tokens": record.image_tokens,
             "reasoning_tokens": record.reasoning_tokens,
+            "task_type": record.task_type,
         }
 
     @staticmethod
@@ -203,6 +204,10 @@ class DynamoPersistence:
             cached_tokens=int(item.get("cached_tokens", 0)),
             image_tokens=int(item.get("image_tokens", 0)),
             reasoning_tokens=int(item.get("reasoning_tokens", 0)),
+            # Absent on every row written before this field existed. Defaulting to
+            # "" rather than "general" is the whole point: an unclassified record
+            # must not be counted as a classification result.
+            task_type=str(item.get("task_type", "")),
         )
 
     # --- Project serialization ---

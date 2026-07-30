@@ -28,7 +28,11 @@ def _make_record(
     cost: float = 0.01,
     cached_tokens: int = 0,
     timestamp: datetime | None = None,
+    task_type: str = "",
 ) -> UsageRecord:
+    # task_type defaults to "" — the same value a record written before the field
+    # existed deserializes to — so every pre-existing test here exercises the
+    # unclassified path unless it opts in.
     return UsageRecord(
         request_id=f"req-{id(object())}",
         project_id=project_id,
@@ -41,6 +45,7 @@ def _make_record(
         cost=cost,
         timestamp=timestamp or datetime.utcnow(),
         cached_tokens=cached_tokens,
+        task_type=task_type,
     )
 
 
@@ -227,6 +232,72 @@ class TestUserProfile:
         cached = engine.get_user_profile("alice")
         assert cached is not None
         assert cached.user_id == "alice"
+
+
+class TestDominantTaskType:
+    """``dominant_task_type`` was a hardcoded "general" until it was derived here.
+
+    The regression these tests exist to prevent is not a crash — it is the field
+    quietly reporting a constant again, which reads as a plausible answer.
+    """
+
+    def test_reports_the_most_common_task_type(self):
+        records = (
+            [_make_record(user_id="alice", task_type="math") for _ in range(7)]
+            + [_make_record(user_id="alice", task_type="coding") for _ in range(3)]
+        )
+        engine = _build_engine(records)
+
+        assert engine.build_user_profile("alice").dominant_task_type == "math"
+
+    def test_a_math_only_user_does_not_report_general(self):
+        """The literal's most visible symptom: everyone looked like "general"."""
+        records = [_make_record(user_id="alice", task_type="math") for _ in range(5)]
+        engine = _build_engine(records)
+
+        profile = engine.build_user_profile("alice")
+        assert profile.dominant_task_type == "math"
+        assert profile.dominant_task_type != "general"
+
+    def test_general_is_reported_when_it_is_the_real_answer(self):
+        """"general" must stay reachable — it is a task type, not just a default."""
+        records = [_make_record(user_id="alice", task_type="general") for _ in range(4)]
+        engine = _build_engine(records)
+
+        assert engine.build_user_profile("alice").dominant_task_type == "general"
+
+    def test_unclassified_records_report_unknown_not_general(self):
+        """Rows written before ``task_type`` existed deserialize to "".
+
+        Bucketing those as "general" would recreate the original bug for exactly
+        the population most likely to hit it: historical data.
+        """
+        records = [_make_record(user_id="alice") for _ in range(10)]
+        engine = _build_engine(records)
+
+        assert engine.build_user_profile("alice").dominant_task_type == "unknown"
+
+    def test_unclassified_records_do_not_outvote_classified_ones(self):
+        """The mode is over *classified* records only.
+
+        With 9 unclassified rows and 1 math row, counting "" as a bucket would
+        make "" the winner and the profile would report an empty task type.
+        """
+        records = [_make_record(user_id="alice") for _ in range(9)]
+        records.append(_make_record(user_id="alice", task_type="math"))
+        engine = _build_engine(records)
+
+        assert engine.build_user_profile("alice").dominant_task_type == "math"
+
+    def test_other_users_records_are_not_counted(self):
+        records = (
+            [_make_record(user_id="alice", task_type="math") for _ in range(2)]
+            + [_make_record(user_id="bob", task_type="coding") for _ in range(20)]
+        )
+        engine = _build_engine(records)
+
+        assert engine.build_user_profile("alice").dominant_task_type == "math"
+        assert engine.build_user_profile("bob").dominant_task_type == "coding"
 
 
 # ---------------------------------------------------------------------------

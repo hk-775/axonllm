@@ -244,6 +244,12 @@ class UsageRecord:
     latency_ms: float = 0.0
     status: str = "success"
     routing_strategy: str = ""
+    # Task type from the prompt classifier ("math", "coding", ...). Empty string
+    # means "not classified", which is NOT the same as the classifier having
+    # returned "general" — records written before this field existed, and records
+    # from paths that never classify, carry "" so aggregates can exclude them
+    # instead of counting them as a real result. See UserEfficiencyProfile.
+    task_type: str = ""
 
 
 @dataclass
