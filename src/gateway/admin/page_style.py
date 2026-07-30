@@ -125,6 +125,23 @@ BASE_STYLE = (
 )
 
 
+# Appended when a page is rendered inside the dashboard shell (?embed=1).
+#
+# The shell supplies the chrome the standalone page supplies itself: the sidebar
+# navigates, the topbar carries the brand, and the React page header carries the
+# title. So the ribbon is suppressed by the caller and this strips the framing
+# the wrap adds -- the dashboard's .main is already padded, and a centered
+# 1000px column inside an already-centered pane reads as a misaligned card.
+#
+# Transparent rather than BG so the page inherits whatever the shell's
+# background is, instead of painting its own identical-today copy of it.
+EMBED_STYLE = (
+    "body{background:transparent}"
+    ".wrap{max-width:none;margin:0;padding:0}"
+    # First-child margin would push the content away from its own page header.
+    ".wrap>:first-child{margin-top:0}"
+)
+
 # The AxonLLM mark, from the dashboard's sidebar-logo. Inlined rather than
 # fetched from /admin/static so these pages render standalone -- the pricing and
 # readiness pages are the ones an operator opens when something is already

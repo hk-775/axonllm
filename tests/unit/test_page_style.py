@@ -13,6 +13,7 @@ silently looking like a different product.
 
 from __future__ import annotations
 
+import functools
 import re
 import xml.etree.ElementTree as ET
 
@@ -66,7 +67,7 @@ def _body(html: str) -> str:
     return re.sub(r"<style>.*?</style>", "", html, flags=re.S)
 
 
-def _drift_page() -> str:
+def _drift_page(*, embed: bool = False) -> str:
     report = PricingDriftReport(
         total_mappings=49, priced_mappings=41,
         unpriced=[
@@ -81,10 +82,10 @@ def _drift_page() -> str:
         providers_missing_section=["groq"],
         models_fully_unpriced=["llama-3"],
     )
-    return render_drift_page(report, "config/pricing.yaml")
+    return render_drift_page(report, "config/pricing.yaml", embed=embed)
 
 
-def _checklist_page() -> str:
+def _checklist_page(*, embed: bool = False) -> str:
     """One check per status, so every .check.* and .pill.* rule renders.
 
     The live page in demo mode emits none of them — it returns a
@@ -104,11 +105,18 @@ def _checklist_page() -> str:
                     summary="Could not be checked.", detail="", fix="", rows=[]),
     ]
     return render_checklist_page(
-        ChecklistReport(checks=checks, did_not_run=None, availability=None)
+        ChecklistReport(checks=checks, did_not_run=None, availability=None),
+        embed=embed,
     )
 
 
 PAGES = [("pricing-drift", _drift_page), ("production-checklist", _checklist_page)]
+
+# The same two pages framed in the dashboard shell. Same fixtures, so a content
+# assertion that holds standalone is being made against identical input.
+EMBEDDED = [
+    (name, functools.partial(render, embed=True)) for name, render in PAGES
+]
 
 
 class TestPalette:
@@ -277,6 +285,58 @@ class TestRibbon:
         """The brand block already says AxonLLM; repeating it wastes the slot."""
         html = ribbon("Pricing Coverage")
         assert '<span class="title">Pricing Coverage</span>' in html
+
+
+class TestEmbedMode:
+    """?embed=1 — the same pages rendered inside the dashboard shell.
+
+    These were plain sidebar links that navigated the browser away, so clicking
+    Architecture, Pricing or Readiness took the sidebar with it and the only way
+    back was the ribbon. Framed in the main pane instead, they behave like every
+    other nav item — which means suppressing the chrome the shell already has.
+    """
+
+    @pytest.mark.parametrize("name,render", EMBEDDED, ids=[p[0] for p in EMBEDDED])
+    def test_the_ribbon_is_suppressed(self, name, render):
+        """The shell's sidebar and topbar already carry the brand and the nav.
+
+        Two stacked toolbars is the tell that a page was framed rather than
+        built in.
+        """
+        assert '<div class="toolbar">' not in _body(render())
+
+    @pytest.mark.parametrize("name,render", EMBEDDED, ids=[p[0] for p in EMBEDDED])
+    def test_the_page_framing_is_reset(self, name, render):
+        """A centered 1000px column inside an already-centered, already-padded
+        pane reads as a misaligned card.
+
+        Asserted as the CSS the page must actually contain, not as
+        ``EMBED_STYLE in styles`` — that compares the constant to itself and so
+        holds for any value, including an empty one.
+        """
+        styles = _styles(render())
+        assert ".wrap{max-width:none;margin:0;padding:0}" in styles
+        assert "body{background:transparent}" in styles
+
+    @pytest.mark.parametrize("name,render", PAGES, ids=[p[0] for p in PAGES])
+    def test_standalone_still_has_its_chrome(self, name, render):
+        """The default. An operator who opens one of these from an alert, or
+        from a bookmark, must still get a way back."""
+        html = render()
+        assert '<div class="toolbar">' in _body(html)
+        assert ".wrap{max-width:none" not in _styles(html)
+        # The wrap keeps its own centering and padding.
+        assert ".wrap{max-width:1000px" in _styles(html)
+
+    @pytest.mark.parametrize("name,render", EMBEDDED, ids=[p[0] for p in EMBEDDED])
+    def test_embedding_only_removes_chrome_not_content(self, name, render):
+        """The report itself must be identical either way.
+
+        Embedding is a presentation change; a page that quietly dropped a
+        failing check when framed would hide exactly what it exists to show.
+        """
+        assert '<div class="wrap">' in _body(render())
+        assert "</body></html>" in render()
 
 
 class TestNoUnstyledClasses:

@@ -840,3 +840,126 @@ class TestLandingPage:
             assert r.status_code == 404
             # Still points somewhere useful — the gateway is up, after all.
             assert "/admin/dashboard" in r.text
+
+    def test_the_hero_leads_with_the_logo_lockup(self, client):
+        """Mark, wordmark and tagline, above the headline.
+
+        The mark used to appear only at 30px in the nav, so the page opened with
+        text and nothing identified the product visually.
+        """
+        html = client.get("/").text
+        assert 'class="hero-lockup"' in html
+        assert 'class="hero-wordmark"' in html
+        assert 'class="hero-tagline"' in html
+        # Above the headline, or it is not a lockup, it is a footnote.
+        assert html.index("hero-lockup") < html.index("<h1>")
+
+    def test_the_lockup_is_a_column_so_the_badge_clears_it(self, client):
+        """The lockup must be `flex`, not `inline-flex`.
+
+        As inline-flex it shared a line with the `.badge` pill that follows it,
+        so the badge rendered beside the tagline instead of below the lockup.
+        """
+        import re
+
+        html = client.get("/").text
+        rule = re.search(r"\.hero-lockup \{([^}]*)\}", html).group(1)
+        assert re.search(r"display:\s*flex\b", rule)
+        assert "inline-flex" not in rule
+        assert re.search(r"flex-direction:\s*column", rule)
+
+    def test_the_wordmark_leads_the_lockup(self, client):
+        """The wordmark is the brand; the tagline captions it.
+
+        Both bounds matter and each was gotten wrong once. Too large and it
+        competes with the h1 for the page's primary line; too small and the
+        tracked-out tagline is physically wider than the wordmark row above it,
+        which puts the lockup's visual weight at the bottom.
+
+        The ratio is Ostiari's own logo.svg: a 7.5-unit tagline under a 26-unit
+        wordmark, i.e. the tagline is ~0.29x the wordmark's size.
+        """
+        import re
+
+        html = client.get("/").text
+        word = float(re.search(
+            r"\.hero-wordmark \{[^}]*font-size:\s*([\d.]+)rem", html
+        ).group(1))
+        tag = float(re.search(
+            r"\.hero-tagline \{[^}]*font-size:\s*([\d.]+)rem", html
+        ).group(1))
+        h1_max = float(re.search(
+            r"h1 \{[^}]*font-size:\s*clamp\([^,]+,[^,]+,\s*([\d.]+)rem\)", html
+        ).group(1))
+
+        assert word < h1_max, f"wordmark {word}rem competes with the h1 at {h1_max}rem"
+        # Comfortably the larger of the two lines, not marginally so.
+        assert word >= 3 * tag, f"wordmark {word}rem vs tagline {tag}rem"
+        assert 0.25 <= tag / word <= 0.33, f"tagline/wordmark is {tag / word:.2f}"
+
+    def test_the_tagline_fits_within_the_lockup_row(self, client):
+        """The failure both earlier attempts had, in opposite directions.
+
+        The tagline is 24 characters of tracked-out uppercase under a
+        7-character wordmark, so its rendered width is set by the tracking, not
+        by the font size — and it is easy to land far wider or far narrower than
+        the mark-plus-wordmark row above it. Either way the lockup stops reading
+        as one block.
+
+        Widths are estimated from Inter's measured advance ratios rather than
+        laid out, so the bound is loose: this catches "obviously wrong", which is
+        what shipped twice, not sub-pixel drift.
+        """
+        import re
+
+        html = client.get("/").text
+
+        def num(pattern: str) -> float:
+            return float(re.search(pattern, html).group(1))
+
+        mark = num(r"\.hero-lockup svg \{[^}]*width:\s*(\d+)px")
+        gap = num(r"\.hero-lockup-row \{[^}]*gap:\s*(\d+)px")
+        word_rem = num(r"\.hero-wordmark \{[^}]*font-size:\s*([\d.]+)rem")
+        tag_rem = num(r"\.hero-tagline \{[^}]*font-size:\s*([\d.]+)rem")
+        track = num(r"\.hero-tagline \{[^}]*letter-spacing:\s*([\d.]+)em")
+
+        # "AxonLLM" in Inter 800 advances ~3.67x its font size; the tagline
+        # ~15.63x at 0.18em tracking, moving by one em per character beyond that.
+        row = mark + gap + word_rem * 16 * 3.67
+        tag_px = tag_rem * 16 * (15.63 - len("The Neural Control Plane") * (0.18 - track))
+
+        ratio = tag_px / row
+        assert 0.80 <= ratio <= 1.02, (
+            f"tagline is {ratio:.0%} of the lockup row "
+            f"({tag_px:.0f}px vs {row:.0f}px) — Ostiari's logo.svg sits at 94%"
+        )
+
+    def test_the_tagline_does_not_outweigh_the_body_copy(self, client):
+        """A caption heavier than the sentence it captions inverts the hierarchy.
+
+        The tagline is the smallest text in the hero, so it must not also be the
+        boldest thing under the wordmark.
+        """
+        import re
+
+        html = client.get("/").text
+        tag = re.search(r"\.hero-tagline \{([^}]*)\}", html).group(1)
+        weight = int(re.search(r"font-weight:\s*(\d+)", tag).group(1))
+        assert weight <= 600, f"tagline at {weight} competes with the body copy"
+        # stone-500, whose 4.59 on stone-50 still clears the 4.5 AA bar.
+        assert "var(--text-dim)" in tag
+
+    def test_the_two_marks_do_not_share_a_gradient_id(self, client):
+        """Both the nav and the hero inline the mark, each with its own <defs>.
+
+        Two <linearGradient> elements sharing an id in one document is a
+        collision the browser resolves silently: both fills take whichever came
+        first, so one mark renders in the wrong gradient and nothing errors.
+        """
+        import re
+
+        html = client.get("/").text
+        ids = re.findall(r'<linearGradient id="([^"]+)"', html)
+        assert len(ids) == len(set(ids)), f"duplicate gradient ids: {ids}"
+        # Every url(#...) reference resolves to a gradient that exists.
+        assert set(re.findall(r"url\(#([^)]+)\)", html)) <= set(ids)

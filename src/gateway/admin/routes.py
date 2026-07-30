@@ -38,6 +38,7 @@ from src.gateway.provider_config import ProviderConfig
 from src.gateway.semantic_efficiency import SemanticEfficiencyEngine
 from .page_style import (
     BASE_STYLE,
+    EMBED_STYLE as PAGE_EMBED_STYLE,
     FAVICON as PAGE_FAVICON,
     SURFACE as PAGE_SURFACE,
     ribbon as page_ribbon,
@@ -1476,6 +1477,7 @@ class AdminAPI:
         if not svg_path.exists():
             return HTMLResponse("<h1>Architecture diagram not found</h1>", status_code=404)
 
+        embed = _is_embedded(request)
         svg_content = svg_path.read_text(encoding="utf-8")
         html = (
             '<!DOCTYPE html><html><head><meta charset="utf-8">'
@@ -1489,8 +1491,13 @@ class AdminAPI:
             ".diagram svg{max-width:100%;height:auto;border-radius:16px;"
             f"background:{PAGE_SURFACE};box-shadow:0 0 0 1px rgba(214,211,209,0.3),"
             "0 8px 24px rgba(0,0,0,0.06)}"
-            "</style></head><body>"
-            + page_ribbon("Architecture") +
+            # Embedded, the shell owns the viewport: 100vh here would size the
+            # diagram to the window while the frame around it is shorter, and
+            # the padding is already the .main pane's.
+            + (PAGE_EMBED_STYLE + "body{min-height:0}.diagram{padding:0}"
+               if embed else "")
+            + "</style></head><body>"
+            + ("" if embed else page_ribbon("Architecture")) +
             '<div class="diagram">' + svg_content + "</div>"
             "</body></html>"
         )
@@ -1525,7 +1532,11 @@ class AdminAPI:
         shows the new coverage without a restart.
         """
         report = audit_pricing(self.model_registry, self.cost_tracker.pricing_config)
-        return HTMLResponse(render_drift_page(report, self._pricing_path))
+        return HTMLResponse(
+            render_drift_page(
+                report, self._pricing_path, embed=_is_embedded(request)
+            )
+        )
 
     async def production_checklist(self, request: Request) -> HTMLResponse:
         """Report whether this deployment is ready to carry real traffic.
@@ -1546,7 +1557,9 @@ class AdminAPI:
             provider_configs=self._provider_configs,
             persistence=self._persistence,
         )
-        return HTMLResponse(render_checklist_page(report))
+        return HTMLResponse(
+            render_checklist_page(report, embed=_is_embedded(request))
+        )
 
 
 # ------------------------------------------------------------------
@@ -1562,6 +1575,20 @@ def _parse_datetime(value: str | None) -> datetime | None:
         return datetime.fromisoformat(value)
     except (ValueError, TypeError):
         return None
+
+
+def _is_embedded(request: Request) -> bool:
+    """Whether this page is being rendered inside the dashboard shell.
+
+    An explicit ``?embed=1`` rather than sniffing ``Sec-Fetch-Dest: iframe``:
+    the dashboard controls the URL it frames, while the header is not sent by
+    every browser and would silently strip the ribbon from anyone else's
+    legitimate embed -- leaving them a page with no way back.
+
+    Default false, so the standalone URLs an operator has bookmarked or been
+    sent in an alert keep their full chrome.
+    """
+    return request.query_params.get("embed") == "1"
 
 
 # ------------------------------------------------------------------

@@ -50,7 +50,7 @@ from src.gateway.model_registry import ModelRegistry
 from src.gateway.models import TokenPricing
 from src.gateway.provider_config import ProviderConfig
 from .page_style import (
-    FAVICON, ribbon,
+    EMBED_STYLE, FAVICON, ribbon,
     BASE_STYLE, BORDER, ERR, INFO, OK, SURFACE, TEXT_DIM, TEXT_HEADING, UNKNOWN, WARN,
 )
 
@@ -642,17 +642,24 @@ def _esc(value: object) -> str:
     return html.escape(str(value))
 
 
-def render_checklist_page(report: ChecklistReport) -> str:
-    """Render the checklist as a self-contained HTML page."""
+def render_checklist_page(report: ChecklistReport, *, embed: bool = False) -> str:
+    """Render the checklist as a self-contained HTML page.
+
+    With ``embed``, drop the ribbon and the page framing: the dashboard shell
+    supplies both, and two stacked toolbars is the tell that a page was bolted
+    on rather than built in.
+    """
     parts = [
         '<!DOCTYPE html><html><head><meta charset="utf-8">',
         "<title>AxonLLM — Production Readiness</title>",
         FAVICON,
-        f"<style>{_STYLE}</style></head><body>",
-        ribbon("Production Readiness",
-               ("/admin/pricing-drift", "Pricing detail")),
-        '<div class="wrap">',
+        f"<style>{_STYLE}{EMBED_STYLE if embed else ''}</style></head><body>",
     ]
+    if not embed:
+        parts.append(
+            ribbon("Production Readiness", ("/admin/pricing-drift", "Pricing detail"))
+        )
+    parts.append('<div class="wrap">')
 
     if report.did_not_run:
         # Demo mode. Say why there is nothing here, rather than showing an empty

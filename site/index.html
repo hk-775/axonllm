@@ -167,6 +167,84 @@
             pointer-events: none;
         }
 
+        /* The hero lockup: mark, wordmark, tagline — the composition Ostiari's
+           control-plane landing leads with (its public/logo.svg puts a 48-unit
+           mark beside a 26-unit wordmark over a letter-spaced 7.5-unit
+           tagline). Same arrangement and proportions, AxonLLM's own mark and
+           violet rather than Ostiari's doorway and indigo.
+
+           Built from HTML rather than as one <svg> the way Ostiari's is: SVG
+           <text> would not pick up the Inter webfont the rest of the page
+           loads, so the wordmark would silently fall back to system-ui and
+           look like a different logo. This way it also stays selectable and
+           scales with the surrounding type. */
+        /* A column, not a row: the mark and wordmark form the top line and the
+           tagline sits under both, so its width underlines the whole lockup
+           instead of jutting past a 7-character wordmark.
+
+           flex rather than inline-flex. As inline-flex this shared a line with
+           the .badge pill that follows it, which put the badge next to the
+           tagline. */
+        .hero-lockup {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 7px;
+            margin-bottom: 32px;
+            position: relative;
+        }
+
+        .hero-lockup-row {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+        }
+
+        .hero-lockup svg {
+            /* 52px against a 2.6rem wordmark, the proportion Ostiari's logo.svg
+               uses: a 28-unit mark beside a 26-unit wordmark. */
+            width: 52px;
+            height: 52px;
+            flex-shrink: 0;
+        }
+
+        .hero-wordmark {
+            /* The wordmark leads the lockup, so it has to outweigh the tagline
+               clearly -- at 2rem the tracked-out tagline was actually wider than
+               this row, which put the visual weight at the bottom.
+
+               Still well under the 4.5rem h1 (58%), so the headline stays the
+               page's primary line. */
+            font-size: 2.6rem;
+            font-weight: 800;
+            letter-spacing: -1.3px;
+            line-height: 1;
+            color: var(--accent);
+        }
+
+        /* The same "Axon" violet / "LLM" stone-900 split as the nav and the
+           dashboard sidebar. */
+        .hero-wordmark span { color: var(--text); }
+
+        .hero-tagline {
+            /* 0.29x the wordmark and tracked to ~94% of the row width above it:
+               both numbers taken from Ostiari's logo.svg, where a 7.5-unit
+               tagline sits under a 26-unit wordmark. Sized so it underlines the
+               lockup rather than outgrowing it. */
+            font-size: 0.76rem;
+            /* 600 in stone-500. At 700 in stone-600 it was heavier than the body
+               copy beneath it, which inverts the hierarchy — a caption
+               outweighing the sentence it captions. stone-500 measures 4.59 on
+               stone-50, still over the 4.5 AA bar for text this size. */
+            font-weight: 600;
+            color: var(--text-dim);
+            letter-spacing: 0.24em;
+            text-transform: uppercase;
+            /* The tracking on the last letter is real trailing space, which
+               pushes an otherwise centered line visibly left. */
+            text-indent: 0.24em;
+        }
+
         .badge {
             display: inline-flex;
             align-items: center;
@@ -684,6 +762,12 @@
 
         @media (max-width: 768px) {
             .nav-links { display: none; }
+            /* Scaled as a set, so the tagline keeps matching the top line's
+               width rather than overrunning it on a narrow viewport. */
+            .hero-lockup-row { gap: 11px; }
+            .hero-lockup svg { width: 38px; height: 38px; }
+            .hero-wordmark { font-size: 1.9rem; letter-spacing: -0.9px; }
+            .hero-tagline { font-size: 0.56rem; letter-spacing: 0.22em; text-indent: 0.22em; }
             .tier-cards { grid-template-columns: 1fr; }
             .feature-grid { grid-template-columns: 1fr; }
             .stat-row { grid-template-columns: repeat(2, 1fr); gap: 32px 16px; }
@@ -738,6 +822,25 @@
 
 <section class="hero">
     <div class="container">
+        <!-- The lockup the nav only hints at, at 30px. Its gradient id is
+             axon-grad-hero, not axon-grad: two <defs> sharing an id in one
+             document is a collision, and the browser resolves both fills to
+             whichever came first. -->
+        <div class="hero-lockup">
+            <div class="hero-lockup-row">
+                <svg viewBox="0 0 32 32" fill="none" aria-hidden="true">
+                    <rect width="32" height="32" rx="8" fill="url(#axon-grad-hero)"/>
+                    <path d="M8 22L16 10L24 22" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+                    <circle cx="16" cy="10" r="2.5" fill="white"/>
+                    <circle cx="8" cy="22" r="2" fill="white" opacity="0.7"/>
+                    <circle cx="24" cy="22" r="2" fill="white" opacity="0.7"/>
+                    <line x1="12" y1="16" x2="20" y2="16" stroke="white" stroke-width="1.5" opacity="0.5"/>
+                    <defs><linearGradient id="axon-grad-hero" x1="0" y1="0" x2="32" y2="32"><stop stop-color="#8b5cf6"/><stop offset="1" stop-color="#6d28d9"/></linearGradient></defs>
+                </svg>
+                <span class="hero-wordmark">Axon<span>LLM</span></span>
+            </div>
+            <span class="hero-tagline">The Neural Control Plane</span>
+        </div>
         <div class="badge">
             <span class="badge-dot"></span>
             Open Source &middot; MIT-0 &middot; Python 3.11+

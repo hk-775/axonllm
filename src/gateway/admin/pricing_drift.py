@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from src.gateway.model_registry import ModelRegistry
 from src.gateway.models import TokenPricing
 from .page_style import (
-    BASE_STYLE, BORDER, FAVICON, TEXT_DIM, TEXT_HEADING, ribbon,
+    BASE_STYLE, BORDER, EMBED_STYLE, FAVICON, TEXT_DIM, TEXT_HEADING, ribbon,
 )
 
 
@@ -257,17 +257,26 @@ def _esc(value: object) -> str:
     return html.escape(str(value))
 
 
-def render_drift_page(report: PricingDriftReport, pricing_path: str) -> str:
-    """Render the drift report as a self-contained HTML page."""
+def render_drift_page(
+    report: PricingDriftReport, pricing_path: str, *, embed: bool = False
+) -> str:
+    """Render the drift report as a self-contained HTML page.
+
+    With ``embed``, drop the ribbon and the page framing: the dashboard shell
+    supplies both, and two stacked toolbars is the tell that a page was bolted
+    on rather than built in.
+    """
     parts = [
         '<!DOCTYPE html><html><head><meta charset="utf-8">',
         "<title>AxonLLM — Pricing Coverage</title>",
         FAVICON,
-        f"<style>{_STYLE}</style></head><body>",
-        ribbon("Pricing Coverage",
-               ("/admin/production-checklist", "Readiness")),
-        '<div class="wrap">',
+        f"<style>{_STYLE}{EMBED_STYLE if embed else ''}</style></head><body>",
     ]
+    if not embed:
+        parts.append(
+            ribbon("Pricing Coverage", ("/admin/production-checklist", "Readiness"))
+        )
+    parts.append('<div class="wrap">')
 
     unpriced_n = len(report.unpriced)
     if not report.has_billing_gap:
