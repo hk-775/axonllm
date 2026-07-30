@@ -746,7 +746,13 @@ class GatewayAgent:
                 cached_tokens=response.usage.cached_tokens,
                 cache_creation_tokens=response.usage.cache_creation_tokens,
             )
-            request_id = response.id
+            # Keep the gateway's own request_id (generated at step 2.8). It used
+            # to be replaced with response.id here, but provider ids aren't
+            # guaranteed unique per call — the three Bedrock Mantle routes fall
+            # back to a constant "mantle-response" when the upstream omits one.
+            # Trace/span ids hash from request_id and usage rows de-dupe by it,
+            # so a repeated value collapses many calls into one span and one
+            # usage row. The provider's id is kept alongside for correlation.
             _latency_ms = (time.perf_counter() - _request_start) * 1000
             usage_record = UsageRecord(
                 request_id=request_id,
@@ -764,6 +770,7 @@ class GatewayAgent:
                 latency_ms=_latency_ms,
                 status="success",
                 task_type=self._classify_for_usage(prompt, smart_routing_decision),
+                provider_request_id=response.id or "",
             )
             await self.cost_tracker.record_usage(usage_record)
 
@@ -980,7 +987,7 @@ class GatewayAgent:
                 pii_mapping=pii_mapping, provider=response.provider,
                 model=request.model, response_model=response.model,
                 text="", usage=response.usage, status="success",
-                task_type=task_type)
+                task_type=task_type, provider_request_id=response.id or "")
             return
 
         # --- Relay chunks; accumulate text + usage for end-of-stream accounting ---
@@ -1065,7 +1072,7 @@ class GatewayAgent:
     async def _finalize_stream(
         self, *, request, req_ctx, request_id, request_start, resolved_policy,
         pii_mapping, provider, model, response_model, text, usage, status,
-        task_type: str = "",
+        task_type: str = "", provider_request_id: str = "",
     ) -> None:
         """End-of-stream accounting: usage, cost, audit, trace, OTLP, quota.
 
@@ -1119,6 +1126,7 @@ class GatewayAgent:
             # Passed in from _stream_true, which is the only scope that knows
             # whether smart routing already classified this request.
             task_type=task_type,
+            provider_request_id=provider_request_id,
         )
         await self.cost_tracker.record_usage(usage_record)
 

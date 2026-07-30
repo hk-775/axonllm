@@ -227,6 +227,10 @@ class ProviderHealth:
 class UsageRecord:
     """A single usage record for a completed request."""
 
+    # Gateway-generated and unique per request (``req_<uuid>``). Trace/span ids
+    # are derived from it and usage rows are de-duped by it, so it must never be
+    # replaced with a provider-supplied id: those are not guaranteed unique, and
+    # some providers return a constant placeholder for every call.
     request_id: str
     project_id: str
     user_id: str
@@ -250,6 +254,10 @@ class UsageRecord:
     # from paths that never classify, carry "" so aggregates can exclude them
     # instead of counting them as a real result. See UserEfficiencyProfile.
     task_type: str = ""
+    # The provider's own id for the upstream call, kept for correlating a trace
+    # with provider-side logs. Informational only — never used as a key, since
+    # it may be absent, repeated, or a fixed placeholder.
+    provider_request_id: str = ""
 
 
 @dataclass

@@ -60,6 +60,7 @@ def _make_record(**overrides) -> UsageRecord:
         status="error",
         routing_strategy="cost-optimized",
         task_type="math",
+        provider_request_id="chatcmpl-upstream-1",
     )
     base.update(overrides)
     return UsageRecord(**base)
