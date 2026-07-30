@@ -24,6 +24,7 @@ from src.gateway.admin.model_availability import (
 from src.gateway.admin.pricing_drift import audit_pricing
 from src.gateway.admin.production_checklist import (
     Status,
+    check_api_keys,
     check_auth_mode,
     check_demo_data,
     check_model_ids,
@@ -418,6 +419,132 @@ class TestPersistenceCheck:
         assert result.status is Status.UNKNOWN
 
 
+class _FakeKeys:
+    """Stands in for APIKeyService, whose scopes do not gate the data plane."""
+
+    def __init__(self, keys=None, raises=False):
+        self._keys = keys or []
+        self._raises = raises
+
+    async def list_keys(self, project_id: str) -> list:
+        if self._raises:
+            raise RuntimeError("boom")
+        return [k for k in self._keys if k.project_id == project_id]
+
+
+def _key(project_id="proj-a", name="k", scopes=("chat:invoke",),
+         expires_at=None, revoked=False):
+    from src.gateway.models import APIKey
+
+    return APIKey(
+        key_id=f"axk_{name}",
+        key_hash="h" * 64,
+        project_id=project_id,
+        name=name,
+        scopes=list(scopes),
+        created_by="tester",
+        expires_at=expires_at,
+        revoked=revoked,
+    )
+
+
+class TestApiKeyCheck:
+    @pytest.mark.asyncio
+    async def test_no_keys_passes(self):
+        result = await check_api_keys(_FakeKeys(), ["proj-a"])
+        assert result.status is Status.PASS
+
+    @pytest.mark.asyncio
+    async def test_revoked_keys_do_not_count_as_live(self):
+        result = await check_api_keys(
+            _FakeKeys([_key(revoked=True)]), ["proj-a"]
+        )
+        assert result.status is Status.PASS
+
+    @pytest.mark.asyncio
+    async def test_live_key_warns_about_scopes(self):
+        """A scoped key still warns: scopes do not restrict /v1/*.
+
+        Verified against a live ENFORCE gateway — a key scoped 'models:read',
+        and a key with no scopes at all, both invoke /v1/chat/completions.
+        """
+        result = await check_api_keys(
+            _FakeKeys([_key(scopes=("models:read",))]), ["proj-a"]
+        )
+
+        assert result.status is Status.WARN
+        assert "not enforced on /v1/*" in result.detail
+        assert "allowed_models" in result.detail
+
+    @pytest.mark.asyncio
+    async def test_non_expiring_key_is_counted(self):
+        from datetime import datetime, timedelta, timezone
+
+        result = await check_api_keys(
+            _FakeKeys([
+                _key(name="forever"),
+                _key(name="bounded",
+                     expires_at=datetime.now(timezone.utc) + timedelta(days=30)),
+            ]),
+            ["proj-a"],
+        )
+
+        assert result.status is Status.WARN
+        assert "1 without an expiry" in result.summary
+        assert "never expire" in result.detail
+
+    @pytest.mark.asyncio
+    async def test_all_keys_bounded_omits_the_expiry_sentence(self):
+        """The detail must not claim non-expiring keys when there are none."""
+        from datetime import datetime, timedelta, timezone
+
+        result = await check_api_keys(
+            _FakeKeys([
+                _key(expires_at=datetime.now(timezone.utc) + timedelta(days=30))
+            ]),
+            ["proj-a"],
+        )
+
+        assert result.status is Status.WARN  # scopes still warn
+        assert "never expire" not in result.detail
+        assert "0 without an expiry" in result.summary
+
+    @pytest.mark.asyncio
+    async def test_rows_show_scopes_and_expiry(self):
+        result = await check_api_keys(
+            _FakeKeys([_key(name="ci", scopes=())]), ["proj-a"]
+        )
+
+        assert result.rows
+        label, value = result.rows[0]
+        assert "ci" in label
+        # An empty scope list must read as "none", not as an empty string that
+        # looks like the field was not collected.
+        assert "scopes=none" in value
+        assert "expires=never" in value
+
+    @pytest.mark.asyncio
+    async def test_keys_across_multiple_projects_are_all_listed(self):
+        result = await check_api_keys(
+            _FakeKeys([_key(project_id="proj-a"), _key(project_id="proj-b", name="k2")]),
+            ["proj-a", "proj-b"],
+        )
+        assert "2 live keys" in result.summary
+
+    @pytest.mark.asyncio
+    async def test_missing_service_is_unknown_not_pass(self):
+        """Unverified is not clean — the same rule Status.UNKNOWN exists for."""
+        result = await check_api_keys(None, ["proj-a"])
+
+        assert result.status is Status.UNKNOWN
+        assert result.status is not Status.PASS
+
+    @pytest.mark.asyncio
+    async def test_listing_failure_is_unknown_not_pass(self):
+        result = await check_api_keys(_FakeKeys(raises=True), ["proj-a"])
+        assert result.status is Status.UNKNOWN
+
+
 # ── Runner ───────────────────────────────────────────────────────────
 
 
@@ -435,6 +562,7 @@ class TestRunner:
             pricing_config={"openai": {"gpt-4": TokenPricing(0.03, 0.06)}},
             provider_configs={"openai": _config("openai")},
             persistence=_FakePersistence(),
+            api_key_service=_FakeKeys(),
             environ={"AXON_LOAD_DEMO_DATA": "false"},
         )
 
@@ -455,6 +583,7 @@ class TestRunner:
             pricing_config={"openai": {"gpt-4": TokenPricing(0.03, 0.06)}},
             provider_configs={"openai": _config("openai")},
             persistence=_FakePersistence(),
+            api_key_service=_FakeKeys(),
             environ={"AXON_LOAD_DEMO_DATA": "false", "AXON_CHECK_MODEL_AVAILABILITY": "false"},
         )
 
@@ -585,6 +714,7 @@ class TestPageRendering:
             pricing_config={"openai": {"gpt-4": TokenPricing(0.03, 0.06)}},
             provider_configs={"openai": _config("openai")},
             persistence=_FakePersistence(),
+            api_key_service=_FakeKeys(),
             environ={"AXON_LOAD_DEMO_DATA": "false"},
         )
         defaults.update(kwargs)

@@ -134,6 +134,7 @@ class AdminAPI:
         pricing_path: str = "config/pricing.yaml",
         app_config: AppConfig | None = None,
         provider_configs: dict[str, ProviderConfig] | None = None,
+        api_key_service: object | None = None,
     ) -> None:
         self.cost_tracker = cost_tracker
         self.health_tracker = health_tracker
@@ -160,6 +161,10 @@ class AdminAPI:
         # Providers with credentials actually loaded. load_provider_configs drops
         # the rest, so this doubles as the credential check's input.
         self._provider_configs: dict[str, ProviderConfig] = provider_configs or {}
+        # Read-only, and only by the production checklist, to report the scopes
+        # and expiry of issued keys. Optional: when absent that check reports
+        # UNKNOWN rather than passing, since unverified is not the same as clean.
+        self._api_key_service = api_key_service
 
     # ------------------------------------------------------------------
     # GET /admin/overview
@@ -1607,6 +1612,8 @@ class AdminAPI:
             pricing_config=self.cost_tracker.pricing_config,
             provider_configs=self._provider_configs,
             persistence=self._persistence,
+            api_key_service=self._api_key_service,
+            project_ids=list(self.projects),
         )
         return HTMLResponse(
             render_checklist_page(report, embed=_is_embedded(request))
