@@ -189,35 +189,49 @@
             display: flex;
             flex-direction: column;
             align-items: center;
-            gap: 7px;
-            margin-bottom: 32px;
+            gap: 10px;
+            margin-bottom: 40px;
             position: relative;
         }
 
         .hero-lockup-row {
             display: flex;
             align-items: center;
-            gap: 15px;
+            gap: 21px;
         }
 
         .hero-lockup svg {
-            /* 52px against a 2.6rem wordmark, the proportion Ostiari's logo.svg
+            /* 64px against a 3.7rem wordmark, the proportion Ostiari's logo.svg
                uses: a 28-unit mark beside a 26-unit wordmark. */
-            width: 52px;
-            height: 52px;
+            width: 64px;
+            height: 64px;
             flex-shrink: 0;
         }
 
         .hero-wordmark {
-            /* The wordmark leads the lockup, so it has to outweigh the tagline
-               clearly -- at 2rem the tracked-out tagline was actually wider than
-               this row, which put the visual weight at the bottom.
+            /* The largest thing on the page -- 1.7x the h1 below it.
 
-               Still well under the 4.5rem h1 (58%), so the headline stays the
-               page's primary line. */
-            font-size: 2.6rem;
+               Two earlier passes tuned this against the tagline and left it at
+               58% of a 4.5rem headline, which is the actual problem: the lockup
+               led by position while the headline led by size, so the page had
+               two competing primary elements and neither read as the hero.
+               One of them has to win outright, and on a product page it is the
+               brand.
+
+               A fixed size rather than a clamp: the tagline's width has to keep
+               tracking this line's width (see .hero-tagline), and two clamps on
+               different scales drift apart between breakpoints. Scaled as a set
+               at 768px instead. */
+            font-size: 3.7rem;
             font-weight: 800;
-            letter-spacing: -1.3px;
+            /* -0.031em, the same optical tightness as the old -1.3px at 2.6rem,
+               scaled up rather than kept at a fixed px: tracking that reads as
+               tight at 42px reads as collapsed at 59px.
+
+               3.7rem and not larger because the tagline is pinned to 0.28x of
+               it, and past this the tagline reaches the 1.25rem body copy below
+               and stops being the hero's smallest text. */
+            letter-spacing: -1.8px;
             line-height: 1;
             color: var(--accent);
         }
@@ -230,8 +244,19 @@
             /* 0.29x the wordmark and tracked to ~94% of the row width above it:
                both numbers taken from Ostiari's logo.svg, where a 7.5-unit
                tagline sits under a 26-unit wordmark. Sized so it underlines the
-               lockup rather than outgrowing it. */
-            font-size: 0.76rem;
+               lockup rather than outgrowing it.
+
+               Both numbers move with the wordmark. The tracking is what sets
+               this line's width -- 24 tracked-out characters, so an em of
+               letter-spacing is worth 24px of width and the font size is worth
+               only ~16 -- which is why it is retuned rather than inherited
+               whenever the row above changes size.
+
+               0.98rem is solved from a headless-Chrome measurement of the real
+               laid-out widths, not from estimated advances: at 1.04rem this line
+               measured 350px under a 349px row, i.e. 100%, where estimating put
+               it at 94%. */
+            font-size: 0.98rem;
             /* 600 in stone-500. At 700 in stone-600 it was heavier than the body
                copy beneath it, which inverts the hierarchy — a caption
                outweighing the sentence it captions. stone-500 measures 4.59 on
@@ -273,10 +298,22 @@
         }
 
         h1 {
-            font-size: clamp(3rem, 7vw, 4.5rem);
+            /* Second line in the hierarchy, not the first. At 4.5rem this was
+               1.7x the wordmark, so the brand lockup led by position while the
+               headline led by size -- the page had two heroes. Capped at 73% of
+               the wordmark, which is a large enough step that the eye lands on
+               the lockup first and reads this as its subhead.
+
+               Stepped at the same breakpoint as the lockup, not a clamp. A
+               fluid headline measured against a fixed wordmark is the mechanism
+               that produced the inversion in the first place: the two scales
+               drift apart between breakpoints, so a ratio that holds at 1440px
+               silently crosses over at 800px. */
+            font-size: 2.7rem;
             font-weight: 800;
-            letter-spacing: -2px;
-            line-height: 1.1;
+            /* -0.028em, the ratio the old -2px was at 4.5rem. */
+            letter-spacing: -1.2px;
+            line-height: 1.15;
             margin-bottom: 24px;
             position: relative;
         }
@@ -763,11 +800,19 @@
         @media (max-width: 768px) {
             .nav-links { display: none; }
             /* Scaled as a set, so the tagline keeps matching the top line's
-               width rather than overrunning it on a narrow viewport. */
-            .hero-lockup-row { gap: 11px; }
-            .hero-lockup svg { width: 38px; height: 38px; }
-            .hero-wordmark { font-size: 1.9rem; letter-spacing: -0.9px; }
-            .hero-tagline { font-size: 0.56rem; letter-spacing: 0.22em; text-indent: 0.22em; }
+               width rather than overrunning it on a narrow viewport, and the
+               headline keeps yielding to the wordmark. Same four ratios as
+               desktop: mark 1.08x the wordmark px, gap 0.36x, tagline 0.28x,
+               h1 0.73x. */
+            .hero-lockup { gap: 7px; margin-bottom: 28px; }
+            .hero-lockup-row { gap: 14px; }
+            .hero-lockup svg { width: 43px; height: 43px; }
+            .hero-wordmark { font-size: 2.5rem; letter-spacing: -1.2px; }
+            .hero-tagline { font-size: 0.66rem; letter-spacing: 0.24em; text-indent: 0.24em; }
+            /* The h1 lost its clamp, so the narrow-viewport size is set here.
+               1.8rem keeps the 0.73x step under a 2.5rem wordmark. */
+            h1 { font-size: 1.8rem; letter-spacing: -0.8px; }
+            .hero-sub { font-size: 1.05rem; }
             .tier-cards { grid-template-columns: 1fr; }
             .feature-grid { grid-template-columns: 1fr; }
             .stat-row { grid-template-columns: repeat(2, 1fr); gap: 32px 16px; }
