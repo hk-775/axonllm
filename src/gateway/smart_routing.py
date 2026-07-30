@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import datetime, timezone
+from typing import Any
 
 from src.gateway.cost_tracker import CostTracker
 from src.gateway.feedback_tracker import FeedbackTracker
@@ -15,6 +16,7 @@ from src.gateway.models import (
     FeedbackRecord,
     ProviderModelMapping,
     SmartRoutingDecision,
+    TokenPricing,
 )
 from src.gateway.routing import NoHealthyProviderError, RoutingStrategyBase
 from src.gateway.task_classifier import TaskClassifier
@@ -45,6 +47,7 @@ class SmartRoutingStrategy(RoutingStrategyBase):
         confidence_threshold: float = 0.3,
         cost_quality_tradeoff: float = 0.3,
         default_model: str = "claude-sonnet",
+        pricing_config: dict[str, dict[str, TokenPricing]] | None = None,
     ) -> None:
         self.classifier = classifier
         self.leaderboard = leaderboard
@@ -55,6 +58,12 @@ class SmartRoutingStrategy(RoutingStrategyBase):
         self.confidence_threshold = confidence_threshold
         self.cost_quality_tradeoff = cost_quality_tradeoff
         self.default_model = default_model
+        # Falls back to the tracker's own table when not passed explicitly, so a
+        # caller that already wired pricing into CostTracker gets cost-aware
+        # scoring without a second argument.
+        if pricing_config is None:
+            pricing_config = getattr(cost_tracker, "pricing_config", None) or {}
+        self.pricing_config = pricing_config
 
     def select(
         self,
@@ -97,7 +106,7 @@ class SmartRoutingStrategy(RoutingStrategyBase):
         task_type = classification.task_type
         confidence = classification.confidence
 
-        candidates_considered: list[dict] = []
+        candidates_considered: list[dict[str, Any]] = []
 
         # Step 2: Check confidence threshold
         if confidence < self.confidence_threshold:
@@ -130,11 +139,17 @@ class SmartRoutingStrategy(RoutingStrategyBase):
             await self._record_feedback(decision)
             return decision
 
-        # Build candidate list from rankings
-        candidates = []
+        # Build candidate list from rankings. These entries are heterogeneous by
+        # design (model name, scores, filter reason, flags), so they are typed
+        # Any rather than inferred — storing an optional cost otherwise widens
+        # the value type to object and every later read of a score fails.
+        candidates: list[dict[str, Any]] = []
         for model_score in rankings:
             model_name = model_score.model_name
-            entry = {"model": model_name, "benchmark_score": model_score.score}
+            entry: dict[str, Any] = {
+                "model": model_name,
+                "benchmark_score": model_score.score,
+            }
 
             # Step 4: Filter by allowed_models
             if allowed_models is not None and model_name not in allowed_models:
@@ -193,26 +208,39 @@ class SmartRoutingStrategy(RoutingStrategyBase):
                 "No candidate models remain after filtering"
             )
 
-        # Compute cost per token for each candidate
+        # Compute cost per token for each candidate. None means "not priced".
         for candidate in candidates:
             model_name = candidate["model"]
             model_config = self.model_registry.models[model_name]
-            cost = self._get_model_cost(model_config)
-            candidate["cost_per_token"] = cost
+            candidate["cost_per_token"] = self._get_model_cost(model_config)
 
         max_benchmark = max(c["benchmark_score"] for c in candidates)
-        max_cost = max(c["cost_per_token"] for c in candidates) if candidates else 1.0
-        # Avoid division by zero if all costs are 0
+        known_costs = [
+            c["cost_per_token"] for c in candidates if c["cost_per_token"] is not None
+        ]
+        # Normalize against the priced candidates only — including unpriced ones
+        # as 0.0 would deflate every other model's normalized cost.
+        max_cost = max(known_costs) if known_costs else 0.0
+        # Avoid division by zero when nothing is priced, or everything is free.
         if max_cost == 0:
             max_cost = 1.0
 
+        # An unpriced candidate is scored at the mean of the known costs rather
+        # than as free, so a missing price neither rewards nor penalizes a model.
+        # Without this the cheapest-looking candidate is whichever one nobody
+        # entered a price for.
+        fallback_cost = sum(known_costs) / len(known_costs) if known_costs else 0.0
+
         for candidate in candidates:
+            cost = candidate["cost_per_token"]
             candidate["composite_score"] = self._compute_composite_score(
                 candidate["benchmark_score"],
-                candidate["cost_per_token"],
+                fallback_cost if cost is None else cost,
                 max_benchmark,
                 max_cost,
             )
+            if cost is None:
+                candidate["cost_estimated"] = True
 
         # Step 9: Select top candidate
         best = max(candidates, key=lambda c: c["composite_score"])
@@ -253,16 +281,42 @@ class SmartRoutingStrategy(RoutingStrategyBase):
         norm_cost = cost_per_token / max_cost if max_cost > 0 else 0.0
         return (1 - self.cost_quality_tradeoff) * norm_benchmark + self.cost_quality_tradeoff * (1 - norm_cost)
 
-    def _get_model_cost(self, model_config) -> float:
-        """Get average cost per token for a model across its providers."""
+    def _resolve_pricing(self, mapping: ProviderModelMapping) -> TokenPricing | None:
+        """Find pricing for one provider mapping, or None if it is unknown.
+
+        An inline ``pricing:`` block in models.yaml wins, since it is the more
+        specific declaration. Otherwise this looks the mapping up in the shared
+        pricing table, which is keyed by provider and *provider-side* model id —
+        the same lookup CostTracker performs when billing the request, so the
+        cost used for routing and the cost actually charged cannot disagree.
+        """
+        if mapping.pricing is not None:
+            return mapping.pricing
+        return self.pricing_config.get(mapping.provider, {}).get(mapping.model_id)
+
+    def _get_model_cost(self, model_config) -> float | None:
+        """Average cost per token across a model's providers.
+
+        Returns ``None`` — not 0.0 — when no provider has pricing. The
+        distinction matters: 0.0 means "free" and would make an unpriced model
+        the cheapest possible candidate, so a model would win for being
+        *unmeasured* rather than for being cheap. With 33 of 48 provider entries
+        currently unpriced that is not a hypothetical; scoring the general task
+        type that way hands it to claude-haiku (benchmark 78) over
+        claude-sonnet (90).
+
+        Providers that do have pricing are averaged and the unpriced ones are
+        skipped, matching the previous behaviour for partially-priced models.
+        """
         costs = []
         for provider in model_config.providers:
-            if provider.pricing is not None:
-                avg = (provider.pricing.prompt_token_cost + provider.pricing.completion_token_cost) / 2
+            pricing = self._resolve_pricing(provider)
+            if pricing is not None:
+                avg = (pricing.prompt_token_cost + pricing.completion_token_cost) / 2
                 costs.append(avg)
         if costs:
             return sum(costs) / len(costs)
-        return 0.0
+        return None
 
     async def _record_feedback(self, decision: SmartRoutingDecision) -> None:
         """Record a feedback entry for the routing decision."""
