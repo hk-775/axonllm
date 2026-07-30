@@ -204,7 +204,7 @@ API key, not the request body. Supported: `model`, `messages`, `temperature`,
 Define tools once in OpenAI's shape. Each adapter translates them into its
 provider's dialect on the way out and translates the model's call back into
 `tool_calls` on the way in, so the same loop works whether the request lands on
-Bedrock, Anthropic, Gemini, or Cohere.
+Bedrock, Bedrock Mantle, Anthropic, Gemini, or Cohere.
 
 ```python
 tools = [{
@@ -247,6 +247,10 @@ Notes that matter in practice:
   picks by task, not by tool support, so pin a model when a call requires them.
 - Cohere's v1 chat has no `tool_choice` equivalent — a non-`auto` value comes back
   as a response warning rather than being silently ignored.
+- **Bedrock Mantle serves three APIs**, chosen by model, and each has its own tool
+  dialect — including one where the tool spec is *flat* (`name` beside `type`, no
+  `function` wrapper). AxonLLM picks the route and the dialect for you, so the loop
+  above is unchanged; it matters only if you read the provider's raw payloads.
 
 ## Web Interfaces
 

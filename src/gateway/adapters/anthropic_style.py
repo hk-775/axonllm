@@ -69,7 +69,7 @@ class AnthropicStyleAdapter(ProviderAdapter):
                 if system_text is None:
                     system_text = msg.get("content", "")
             else:
-                messages.append(_openai_msg_to_anthropic(msg))
+                messages.append(openai_msg_to_anthropic(msg))
 
         max_tokens = (
             request.max_tokens
@@ -112,8 +112,8 @@ class AnthropicStyleAdapter(ProviderAdapter):
         if request.stop is not None:
             payload["stop_sequences"] = request.stop
         if request.tools:
-            payload["tools"] = [_openai_tool_to_anthropic(t) for t in request.tools]
-            tc = _openai_tool_choice_to_anthropic(request.tool_choice)
+            payload["tools"] = [openai_tool_to_anthropic(t) for t in request.tools]
+            tc = openai_tool_choice_to_anthropic(request.tool_choice)
             if tc is not None:
                 payload["tool_choice"] = tc
         if request.stream:
@@ -236,9 +236,18 @@ class AnthropicStyleAdapter(ProviderAdapter):
 
 
 # --- OpenAI ⇄ Anthropic tool translation ------------------------------------
+#
+# Public rather than module-private because ``mantle_provider`` needs the same
+# three conversions: Bedrock Mantle exposes a real ``/anthropic/v1/messages``
+# route but hand-builds its payload instead of going through this adapter, so it
+# speaks the identical dialect. Re-implementing it there would mean two copies of
+# one wire format free to drift apart — and the details that are easy to get
+# wrong (arguments arriving as a JSON string, malformed arguments that must not
+# fail the request, tools declared with no parameters) are exactly the ones a
+# second copy would miss.
 
 
-def _openai_tool_to_anthropic(tool: dict) -> dict:
+def openai_tool_to_anthropic(tool: dict) -> dict:
     """Convert one OpenAI tool spec to Anthropic's shape.
 
     Accepts the nested OpenAI form and a bare Anthropic-shaped dict alike: the
@@ -263,7 +272,7 @@ def _openai_tool_to_anthropic(tool: dict) -> dict:
     }
 
 
-def _openai_tool_choice_to_anthropic(choice: str | dict | None) -> dict | None:
+def openai_tool_choice_to_anthropic(choice: str | dict | None) -> dict | None:
     """Map OpenAI's tool_choice onto Anthropic's.
 
     OpenAI: "auto" | "none" | "required" | {"type":"function","function":{"name":…}}
@@ -287,7 +296,7 @@ def _openai_tool_choice_to_anthropic(choice: str | dict | None) -> dict | None:
     return None
 
 
-def _openai_msg_to_anthropic(msg: dict) -> dict:
+def openai_msg_to_anthropic(msg: dict) -> dict:
     """Convert one OpenAI-shaped message to Anthropic's content-block form.
 
     Only tool-carrying messages need rewriting; everything else is returned
