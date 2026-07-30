@@ -29,6 +29,16 @@ class APIKeyService:
     def __init__(self, persistence: DynamoPersistence) -> None:
         self._persistence = persistence
         self._cache: dict[str, tuple[APIKey, float]] = {}
+        # Fallback store used only when persistence is disabled (local dev and
+        # demo mode). Without it every DynamoPersistence write is a no-op and
+        # every read returns empty, so a key could be issued but never listed,
+        # revoked, or rotated. When persistence is enabled this stays empty and
+        # DynamoDB remains the single source of truth.
+        self._memory_store: dict[str, APIKey] = {}
+
+    @property
+    def _in_memory(self) -> bool:
+        return not self._persistence.enabled
 
     @staticmethod
     def generate_raw_key() -> str:
@@ -63,6 +73,8 @@ class APIKeyService:
         )
 
         await self._persistence.save_api_key(key)
+        if self._in_memory:
+            self._memory_store[key_id] = key
         self._cache[key_hash] = (key, time.time())
         return key, raw_key
 
@@ -84,7 +96,12 @@ class APIKeyService:
             else:
                 del self._cache[key_hash]
 
-        key = await self._persistence.get_api_key_by_hash(key_hash)
+        if self._in_memory:
+            key = next(
+                (k for k in self._memory_store.values() if k.key_hash == key_hash), None
+            )
+        else:
+            key = await self._persistence.get_api_key_by_hash(key_hash)
         if key is None:
             return None
 
@@ -100,7 +117,7 @@ class APIKeyService:
 
     async def revoke_key(self, key_id: str) -> bool:
         """Revoke a key by ID. Returns True if found and revoked."""
-        key = await self._persistence.get_api_key(key_id)
+        key = await self._get_key(key_id)
         if key is None:
             return False
 
@@ -119,7 +136,7 @@ class APIKeyService:
         self, key_id: str, rotated_by: str
     ) -> tuple[APIKey, str] | None:
         """Revoke old key and issue a new one with the same project/scopes."""
-        old_key = await self._persistence.get_api_key(key_id)
+        old_key = await self._get_key(key_id)
         if old_key is None:
             return None
 
@@ -135,4 +152,12 @@ class APIKeyService:
 
     async def list_keys(self, project_id: str) -> list[APIKey]:
         """List all keys for a project (excludes raw key values)."""
+        if self._in_memory:
+            return [k for k in self._memory_store.values() if k.project_id == project_id]
         return await self._persistence.list_api_keys_for_project(project_id)
+
+    async def _get_key(self, key_id: str) -> APIKey | None:
+        """Fetch a key by ID from whichever store is authoritative."""
+        if self._in_memory:
+            return self._memory_store.get(key_id)
+        return await self._persistence.get_api_key(key_id)

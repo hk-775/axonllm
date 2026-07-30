@@ -176,3 +176,133 @@ policies:
 unhealthy_providers:
   - provider: azure_openai
     cooldown_seconds: 600
+
+# --- API Keys page -----------------------------------------------------------
+# Issued through APIKeyService at startup, so these are real hashed records.
+# The raw key is generated and discarded -- the dashboard only ever shows the
+# prefix and metadata, so there is nothing to hardcode here.
+api_keys:
+  - project_id: proj-alpha
+    name: alpha-prod-gateway
+    scopes: [chat:invoke, models:read]
+    created_by: user-alice
+    expires_in_days: 90
+  - project_id: proj-alpha
+    name: alpha-ci-pipeline
+    scopes: [chat:invoke]
+    created_by: user-bob
+    expires_in_days: 30
+  - project_id: proj-alpha
+    name: alpha-legacy-key
+    scopes: [chat:invoke]
+    created_by: user-alice
+    revoked: true
+  - project_id: proj-beta
+    name: beta-eval-harness
+    scopes: [chat:invoke, models:read]
+    created_by: user-carol
+    expires_in_days: 14
+
+# --- Audit Log page ----------------------------------------------------------
+# Recorded via AuditTrail.record so each entry gets a real hash-chain link and
+# the page's integrity check passes. Order matters: entries chain in sequence.
+# Covers the event types the page filters on, including the security-relevant
+# ones (injection, PII, policy deny, auth failure) so those views aren't empty.
+audit_events:
+  - event_type: auth_success
+    user_id: user-alice
+    project_id: proj-alpha
+    request_id: req-demo-0001
+    data: {method: api_key, key_name: alpha-prod-gateway}
+  - event_type: llm_request
+    user_id: user-alice
+    project_id: proj-alpha
+    request_id: req-demo-0002
+    data: {model: claude-sonnet-5, provider: anthropic, message_count: 3}
+  - event_type: pii_redaction
+    user_id: user-alice
+    project_id: proj-alpha
+    request_id: req-demo-0002
+    data: {redacted_types: [EMAIL, PHONE], count: 2}
+  - event_type: llm_response
+    user_id: user-alice
+    project_id: proj-alpha
+    request_id: req-demo-0002
+    data: {model: claude-sonnet-5, provider: anthropic, completion_tokens: 210}
+  - event_type: injection_detected
+    user_id: user-bob
+    project_id: proj-alpha
+    request_id: req-demo-0003
+    data:
+      threat_level: medium
+      patterns: [ignore_previous_instructions]
+      blocked: false
+  - event_type: injection_blocked
+    user_id: user-bob
+    project_id: proj-alpha
+    request_id: req-demo-0004
+    data:
+      threat_level: high
+      patterns: [system_prompt_exfiltration, role_override]
+      blocked: true
+  - event_type: policy_deny
+    user_id: user-bob
+    project_id: proj-alpha
+    request_id: req-demo-0005
+    data: {policy: restrict-gpt4, reason: principal.role != senior, model: gpt-4o}
+  - event_type: auth_failure
+    user_id: unknown
+    project_id: proj-beta
+    request_id: req-demo-0006
+    data: {method: api_key, reason: key_expired}
+  - event_type: key_issued
+    user_id: user-carol
+    project_id: proj-beta
+    request_id: req-demo-0007
+    data: {key_name: beta-eval-harness, scopes: [chat:invoke, models:read]}
+  - event_type: key_rotated
+    user_id: user-alice
+    project_id: proj-alpha
+    request_id: req-demo-0008
+    data: {key_name: alpha-ci-pipeline}
+  - event_type: key_revoked
+    user_id: user-alice
+    project_id: proj-alpha
+    request_id: req-demo-0009
+    data: {key_name: alpha-legacy-key, reason: superseded}
+  - event_type: llm_request
+    user_id: user-carol
+    project_id: proj-beta
+    request_id: req-demo-0010
+    data: {model: nova-lite, provider: bedrock, message_count: 1}
+
+# --- Webhooks page -----------------------------------------------------------
+# Registered destinations only; nothing is dispatched at startup, so the stats
+# counters stay at zero until a real event fires. Config values are
+# non-routable placeholders by design -- see the note in README.
+webhook_destinations:
+  - name: security-alerts-slack
+    type: webhook
+    config:
+      url: https://hooks.example.invalid/services/DEMO/SECURITY/ALERTS
+      timeout_seconds: 5
+    event_filter: [injection_blocked, policy_deny, auth_failure]
+    enabled: true
+  - name: audit-archive-cloudwatch
+    type: cloudwatch
+    config:
+      log_group: /axonllm/demo/audit
+      region: us-east-1
+    enabled: true
+  - name: budget-alerts-sns
+    type: sns
+    config:
+      topic_arn: arn:aws:sns:us-east-1:000000000000:axonllm-demo-budget-alerts
+      region: us-east-1
+    event_filter: [budget_exceeded]
+    enabled: true
+  - name: legacy-pagerduty
+    type: webhook
+    config:
+      url: https://events.example.invalid/v2/enqueue
+    enabled: false
