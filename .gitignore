@@ -43,9 +43,42 @@ APIKeys.docx
 #
 # .gitignore does nothing for files git already tracks: if one of these shows up
 # staged, untrack it with `git rm --cached` rather than only adding a pattern.
+#
+# Patterns are matched against the real filenames these docs get written under,
+# which are title-cased with spaces — not the kebab-case a pattern author reaches
+# for by reflex. `launch-materials*` matched nothing: the actual file was
+# "docs/AxonLLM Launch Materials.md", wrong case AND the words are mid-name, so an
+# anchored lowercase prefix failed twice over. Both spellings are listed below
+# because git only folds case when core.ignorecase is set (true on macOS, false on
+# a Linux CI checkout), so relying on the filesystem to be forgiving is not
+# portable. Leading `*` for the same reason: these names are prefixed by product.
+#
+# Each doc is therefore listed in BOTH spellings — spaces and hyphens — because the
+# same content lands under either depending on how it was exported. Every file of
+# this kind currently in the tree is a .docx caught by `*.docx` above, so these
+# name rules look redundant today; they are not. The failure mode is the Markdown
+# export, which is how "AxonLLM Launch Materials.md" reached the tree in the first
+# place.
 docs/internal/
+.versions/
 PRFAQ*
-launch-materials*
+PR_FAQ*
+*Launch Materials*
+*Launch-Materials*
+*launch-materials*
+*Competitive*
+*competitive*
+*Battle Card*
+*Battle-Card*
+*battle-card*
+*Market Analysis*
+*Market-Analysis*
+*Positioning*
+*positioning*
+# Exec/leadership briefing docs ("Intro to <person> — AxonLLM.md"). Broad on
+# purpose, but note it also swallows a *public* doc named "Intro to ..." — if you
+# add a getting-started page, name it "Getting Started" or negate it with `!`.
+Intro to *
 *Investment Business Case*
 *Funding Plan*
 
