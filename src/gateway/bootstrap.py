@@ -22,7 +22,12 @@ from src.gateway.admin.key_routes import KeyManagementAPI, create_key_routes
 from src.gateway.admin.policy_routes import PolicyHierarchyAPI, create_policy_hierarchy_routes
 from src.gateway.admin.quota_routes import QuotaAPI, create_quota_routes
 from src.gateway.admin.region_routes import RegionAPI, create_region_routes
-from src.gateway.admin.routes import AdminAPI, PROVIDER_MODEL_CATALOG, create_admin_routes
+from src.gateway.admin.routes import (
+    AdminAPI,
+    PROVIDER_MODEL_CATALOG,
+    create_admin_routes,
+    create_site_routes,
+)
 from src.gateway.admin.webhook_routes import WebhookAPI, create_webhook_routes
 from src.gateway.agent import GatewayAgent
 from src.gateway.auth.api_key_service import APIKeyService
@@ -447,6 +452,9 @@ def build_starlette_app(app_config: AppConfig | None = None) -> Starlette:
         + create_saml_routes(saml_api)
         + create_chat_routes(chat_api)
         + create_openai_routes(openai_api)
+        # Last: this one is a bare "/{path}" serving site/, and Starlette matches
+        # in order, so anything after it would be unreachable.
+        + create_site_routes(admin_api)
     )
 
     # Lifespan: run the spoke health monitor in the background for real

@@ -1066,3 +1066,138 @@ class TestLandingPage:
         assert len(ids) == len(set(ids)), f"duplicate gradient ids: {ids}"
         # Every url(#...) reference resolves to a gradient that exists.
         assert set(re.findall(r"url\(#([^)]+)\)", html)) <= set(ids)
+
+
+class TestArchitecturePage:
+    """GET /architecture.html — the interactive architecture page.
+
+    The page lives in site/ next to index.html and is served two ways: from the
+    S3 bucket on the deployed site, and from this gateway at the same relative
+    path so a self-hosted deployment gets the same nav. Both need the assets it
+    fetches to be reachable, which is what most of these cover.
+    """
+
+    @pytest.fixture
+    def site_client(self, admin_api):
+        """A client with the site catch-all mounted, as build_app assembles it."""
+        from src.gateway.admin.routes import create_site_routes
+
+        app = Starlette(routes=create_admin_routes(admin_api) + create_site_routes(admin_api))
+        return TestClient(app, raise_server_exceptions=False)
+
+    def test_the_page_is_served(self, site_client):
+        r = site_client.get("/architecture.html")
+        assert r.status_code == 200
+        assert "text/html" in r.headers["content-type"]
+        assert "Architecture" in r.text
+
+    def test_the_landing_page_links_to_it(self, client):
+        """An unlinked page is one nobody finds.
+
+        The link is relative for the same reason the dashboard links are: it has
+        to resolve against the bucket on S3 and against this gateway when
+        self-hosted, with no host hardcoded either way.
+        """
+        html = client.get("/").text
+        assert 'href="architecture.html"' in html
+        assert "axonllm.com/architecture" not in html
+
+    def test_every_svg_the_page_fetches_is_served(self, site_client):
+        """The panels lazy-fetch by data-src, so a rename fails at runtime only.
+
+        Nothing builds site/ — CDK uploads it verbatim — so a diagram exported
+        under a new name and not committed would leave a blank tab with a
+        console 404 and no other symptom.
+        """
+        import re
+
+        html = site_client.get("/architecture.html").text
+        srcs = re.findall(r'data-src="([^"]+)"', html)
+        assert len(srcs) == 3, f"expected three diagram panels, found {srcs}"
+        for src in srcs:
+            r = site_client.get("/" + src)
+            assert r.status_code == 200, f"{src} is referenced but not served"
+            assert r.headers["content-type"] == "image/svg+xml"
+            assert "<svg" in r.text
+
+    def test_the_download_link_resolves(self, site_client):
+        """The editable original, offered next to the diagram."""
+        html = site_client.get("/architecture.html").text
+        assert 'href="architecture.drawio"' in html
+        r = site_client.get("/architecture.drawio")
+        assert r.status_code == 200
+        assert "<mxfile" in r.text
+
+    def test_the_three_svgs_are_distinct_pages(self, site_client):
+        """A -p off-by-one exports the same page three times.
+
+        drawio's -p is 1-based and -p 0 silently means page 1, so the obvious
+        0,1,2 loop yields two identical files. Identical bytes here means the
+        export was wrong, and every tab would show the same diagram.
+        """
+        import re
+
+        html = site_client.get("/architecture.html").text
+        bodies = [site_client.get("/" + s).text for s in re.findall(r'data-src="([^"]+)"', html)]
+        assert len({hash(b) for b in bodies}) == 3, "two panels serve the same SVG"
+
+    def test_the_step_numbers_match_the_source(self, site_client):
+        """The prose claims these are the source's own numbers.
+
+        agent.py numbers its pipeline with fractional inserts (2.5, 9.5, 11.6)
+        added after the original sixteen. The page states it keeps that
+        numbering, so a step renumbered or dropped here makes the page lie about
+        the code — which is the one thing an architecture page cannot do.
+        """
+        import pathlib
+        import re
+
+        html = site_client.get("/architecture.html").text
+        steps = re.findall(r'<li data-step="([^"]+)"', html)
+        assert steps, "the flow list carries no step numbers"
+
+        agent_src = (
+            pathlib.Path(__file__).resolve().parents[2] / "src" / "gateway" / "agent.py"
+        ).read_text(encoding="utf-8")
+        source_steps = set(re.findall(r"^\s+# (\d+(?:\.\d+)?)\. ", agent_src, re.M))
+
+        # Ranges on the page ("4–5") collapse two adjacent source steps into one
+        # row, so split them back out before comparing.
+        page_steps = {n for s in steps for n in s.split("–")}
+        assert page_steps <= source_steps, (
+            f"page lists steps absent from agent.py: {sorted(page_steps - source_steps)}"
+        )
+        assert source_steps <= page_steps, (
+            f"agent.py has steps the page omits: {sorted(source_steps - page_steps)}"
+        )
+
+    def test_the_step_badges_are_not_a_css_counter(self, site_client):
+        """A counter would renumber 1..18 and contradict the prose above it."""
+        html = site_client.get("/architecture.html").text
+        assert "content: attr(data-step)" in html
+        assert "counter(step)" not in html
+
+    def test_the_site_route_does_not_expose_the_cdk_app(self, site_client):
+        """site/infra/ holds the deploy config, not public assets."""
+        for path in ("/infra", "/infra/stack.py", "/infra/app.py"):
+            assert site_client.get(path).status_code == 404, f"{path} is readable"
+
+    def test_the_site_route_rejects_traversal(self, site_client):
+        """The path param is attacker-controlled; confine it to site/."""
+        for path in ("/..%2fconfig%2fmodels.yaml", "/....//pyproject.toml"):
+            r = site_client.get(path)
+            assert r.status_code == 404, f"{path} escaped site/ ({r.status_code})"
+
+    def test_the_site_route_does_not_shadow_the_app_pages(self, admin_api):
+        """"/{path}" is a bare segment — order decides whether /chat survives.
+
+        build_app appends the site routes last for exactly this reason. If they
+        were ever merged into create_admin_routes, /chat, /playground and
+        /routing would resolve here and 404 instead of rendering.
+        """
+        from src.gateway.admin.routes import create_site_routes
+
+        site_paths = {r.path for r in create_site_routes(admin_api)}
+        assert site_paths == {"/{path}"}, site_paths
+        admin_paths = {r.path for r in create_admin_routes(admin_api)}
+        assert "/{path}" not in admin_paths

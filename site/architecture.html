@@ -1,0 +1,939 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AxonLLM — Architecture</title>
+    <meta name="description" content="How AxonLLM is built: the AWS infrastructure it deploys onto, the 16-step request pipeline every prompt passes through, and the component graph behind it.">
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%237c3aed'/%3E%3Cpath d='M8 22L16 10L24 22' stroke='white' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round' fill='none'/%3E%3Ccircle cx='16' cy='10' r='2.5' fill='white'/%3E%3C/svg%3E">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            /* Same tokens as index.html — see the comment there for why stone
+               neutrals and violet-600. Kept as a copy rather than a shared
+               stylesheet because the site is two flat files served from S3 with
+               no build step; a third request for ~2KB of CSS costs more than the
+               duplication does. */
+            --bg: #fafaf9;
+            --surface: #ffffff;
+            --border: #e7e5e4;
+            --border-soft: #f5f5f4;
+            --text: #1c1917;
+            --text-mid: #57534e;
+            --text-dim: #78716c;
+            --accent: #7c3aed;
+            --accent-hover: #6d28d9;
+            --accent-soft: #f5f3ff;
+            --accent-ring: #ede9fe;
+            --accent-glow: rgba(139, 92, 246, 0.12);
+            --green: #047857;
+            --green-soft: #ecfdf5;
+            --red: #be123c;
+            --red-soft: #fff1f2;
+            --amber: #b45309;
+            --amber-soft: #fffbeb;
+            --blue: #0369a1;
+            --blue-soft: #f0f9ff;
+            --radius: 16px;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        a:focus-visible,
+        button:focus-visible {
+            outline: 2px solid var(--accent);
+            outline-offset: 2px;
+            box-shadow: 0 0 0 5px var(--accent-ring);
+            border-radius: 6px;
+        }
+
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            line-height: 1.6;
+            overflow-x: hidden;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 0 24px;
+        }
+
+        /* The diagrams are 1491-1563px wide. At the 1200px container they read
+           as thumbnails, so the viewer gets its own wider container and the
+           prose keeps the narrow one. */
+        .container-wide {
+            max-width: 1600px;
+            margin: 0 auto;
+            padding: 0 24px;
+        }
+
+        nav {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            z-index: 100;
+            padding: 16px 0;
+            background: rgba(250, 250, 249, 0.8);
+            backdrop-filter: blur(20px);
+            border-bottom: 1px solid var(--border);
+        }
+
+        nav .container {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .logo {
+            display: inline-flex;
+            align-items: center;
+            gap: 10px;
+            font-size: 1.25rem;
+            font-weight: 800;
+            color: var(--accent);
+            text-decoration: none;
+            letter-spacing: -0.5px;
+        }
+
+        .logo svg { width: 30px; height: 30px; flex-shrink: 0; }
+        .logo-text { color: var(--accent); }
+        .logo-text span { color: var(--text); }
+
+        .nav-links {
+            display: flex;
+            gap: 32px;
+            list-style: none;
+        }
+
+        .nav-links a {
+            color: var(--text-dim);
+            text-decoration: none;
+            font-size: 0.9rem;
+            font-weight: 500;
+            transition: color 0.2s;
+        }
+
+        .nav-links a:hover { color: var(--text); }
+        .nav-links a.active { color: var(--accent); }
+
+        .nav-cta {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 18px;
+            background: var(--accent);
+            color: #fff;
+            border-radius: 8px;
+            text-decoration: none;
+            font-size: 0.85rem;
+            font-weight: 600;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+
+        .nav-cta:hover {
+            background: var(--accent-hover);
+            box-shadow: 0 4px 12px rgba(124, 58, 237, 0.2);
+        }
+
+        .page { padding: 120px 0 40px; }
+
+        .page h1 {
+            font-size: 2.5rem;
+            font-weight: 800;
+            letter-spacing: -1.5px;
+            margin-bottom: 8px;
+        }
+
+        .page .subtitle {
+            color: var(--text-mid);
+            font-size: 1.1rem;
+            max-width: 720px;
+            margin-bottom: 28px;
+        }
+
+        .page-actions { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 8px; }
+
+        .ghost-link {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 10px 20px;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            color: var(--text);
+            text-decoration: none;
+            font-size: 0.85rem;
+            font-weight: 500;
+            transition: border-color 0.2s, box-shadow 0.2s;
+        }
+
+        .ghost-link:hover {
+            border-color: var(--accent);
+            box-shadow: 0 2px 8px var(--accent-glow);
+        }
+
+        /* --- Diagram viewer ------------------------------------------------ */
+
+        .viewer { padding: 24px 0 64px; }
+
+        .tabs {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+            margin-bottom: 16px;
+        }
+
+        /* Tabs are <button>, not <a href="#...">: the panel swap is the whole
+           interaction, and an anchor would also scroll the page and push a
+           history entry for it. */
+        .tab {
+            appearance: none;
+            font: inherit;
+            font-size: 0.9rem;
+            font-weight: 600;
+            display: inline-flex;
+            align-items: center;
+            gap: 10px;
+            padding: 10px 18px;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            color: var(--text-mid);
+            cursor: pointer;
+            transition: color 0.2s, border-color 0.2s, background 0.2s;
+        }
+
+        .tab:hover { color: var(--text); border-color: var(--text-dim); }
+
+        .tab[aria-selected="true"] {
+            background: var(--accent-soft);
+            border-color: var(--accent);
+            color: var(--accent);
+        }
+
+        .tab-num {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            background: var(--border-soft);
+            font-size: 0.7rem;
+            font-weight: 700;
+            color: var(--text-dim);
+        }
+
+        .tab[aria-selected="true"] .tab-num { background: var(--accent-ring); color: var(--accent); }
+
+        .stage {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            box-shadow: 0 1px 2px rgba(0,0,0,0.04), 0 8px 24px rgba(0,0,0,0.04);
+            overflow: hidden;
+        }
+
+        .stage-bar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 16px;
+            padding: 14px 20px;
+            border-bottom: 1px solid var(--border-soft);
+            flex-wrap: wrap;
+        }
+
+        .stage-caption { font-size: 0.85rem; color: var(--text-dim); }
+        .stage-caption strong { color: var(--text); font-weight: 600; }
+        .stage-caption code {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.78rem;
+            color: var(--accent);
+            background: var(--accent-soft);
+            padding: 2px 6px;
+            border-radius: 4px;
+        }
+
+        .zoom-controls { display: flex; align-items: center; gap: 6px; }
+
+        .zoom-btn {
+            appearance: none;
+            font: inherit;
+            width: 32px;
+            height: 32px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            color: var(--text-mid);
+            cursor: pointer;
+            transition: border-color 0.2s, color 0.2s;
+        }
+
+        .zoom-btn:hover { border-color: var(--accent); color: var(--accent); }
+        .zoom-btn[disabled] { opacity: 0.4; cursor: default; }
+        .zoom-btn[disabled]:hover { border-color: var(--border); color: var(--text-mid); }
+
+        .zoom-level {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.75rem;
+            color: var(--text-dim);
+            min-width: 48px;
+            text-align: center;
+        }
+
+        /* Shown only where the diagram cannot fit at a readable size — see the
+           narrow-viewport block. A 1500px diagram on a phone is a pan-and-zoom
+           surface, and saying so beats leaving it to be discovered. */
+        .canvas-hint {
+            display: none;
+            padding: 10px 20px;
+            border-bottom: 1px solid var(--border-soft);
+            background: var(--accent-soft);
+            color: var(--accent);
+            font-size: 0.78rem;
+            font-weight: 500;
+        }
+
+        /* Scroll container. grab/grabbing cursor advertises the drag; the JS
+           adds .is-panning while a pointer is down. */
+        .canvas {
+            overflow: auto;
+            background:
+                linear-gradient(var(--border-soft) 1px, transparent 1px) 0 0 / 24px 24px,
+                linear-gradient(90deg, var(--border-soft) 1px, transparent 1px) 0 0 / 24px 24px,
+                var(--surface);
+            cursor: grab;
+            max-height: 78vh;
+        }
+
+        .canvas.is-panning { cursor: grabbing; }
+
+        .panel { display: none; padding: 24px; }
+        .panel.is-active { display: block; }
+
+        /* transform-origin top-left so zooming grows down-and-right into the
+           scroll area instead of pulling the diagram off the top-left edge. */
+        .panel svg {
+            display: block;
+            height: auto;
+            transform-origin: 0 0;
+            transition: width 0.15s ease-out;
+        }
+
+        /* --- Prose sections ------------------------------------------------ */
+
+        .arch-section { padding: 0 0 56px; }
+
+        .section-label {
+            font-size: 0.8rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            color: var(--accent);
+            margin-bottom: 12px;
+        }
+
+        .arch-section h2 {
+            font-size: 1.75rem;
+            font-weight: 800;
+            letter-spacing: -1px;
+            margin-bottom: 12px;
+        }
+
+        .arch-section > .container > p,
+        .arch-section > .container > .lede {
+            color: var(--text-mid);
+            font-size: 1rem;
+            max-width: 760px;
+            line-height: 1.7;
+            margin-bottom: 24px;
+        }
+
+        /* Step numbers come from data-step, not a CSS counter: the source skips
+           and fractionally numbers its steps (2.5, 9.5, 11.6), and a counter
+           would silently renumber them 1..17 while the prose claims these are
+           the source's own numbers. */
+        .flow-list { list-style: none; max-width: 820px; }
+
+        .flow-list li {
+            position: relative;
+            /* Clears the fixed 60px badge with a 14px gutter. The badge is a
+               fixed width rather than min-width + padding so the widest label
+               ("13–14") can't grow past this indent and sit under the text. */
+            padding-left: 74px;
+            margin-bottom: 14px;
+            color: var(--text-mid);
+            font-size: 0.92rem;
+        }
+
+        .flow-list li::before {
+            content: attr(data-step);
+            position: absolute;
+            left: 0;
+            top: 1px;
+            width: 60px;
+            height: 26px;
+            background: var(--accent-soft);
+            border: 1px solid var(--accent-ring);
+            border-radius: 13px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.72rem;
+            font-weight: 500;
+            color: var(--accent);
+        }
+
+        .flow-list strong { color: var(--text); font-weight: 600; }
+
+        .flow-list code {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.8rem;
+            color: var(--text-dim);
+        }
+
+        .component-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+        }
+
+        .component-card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 24px;
+            transition: border-color 0.2s, box-shadow 0.2s, transform 0.2s;
+        }
+
+        .component-card:hover {
+            border-color: var(--accent);
+            box-shadow: 0 8px 24px var(--accent-glow);
+            transform: translateY(-2px);
+        }
+
+        .component-card h3 {
+            font-size: 1rem;
+            font-weight: 700;
+            margin-bottom: 8px;
+            color: var(--accent);
+        }
+
+        .component-card p {
+            color: var(--text-mid);
+            font-size: 0.875rem;
+            line-height: 1.65;
+        }
+
+        .component-card code {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.78rem;
+            color: var(--text-dim);
+        }
+
+        footer {
+            padding: 40px 0;
+            border-top: 1px solid var(--border);
+            text-align: center;
+        }
+
+        footer p { color: var(--text-dim); font-size: 0.85rem; }
+        footer a { color: var(--text-dim); text-decoration: none; transition: color 0.2s; }
+        footer a:hover { color: var(--text); }
+
+        @media (max-width: 768px) {
+            .nav-links { display: none; }
+            .page { padding: 100px 0 32px; }
+            .page h1 { font-size: 1.9rem; letter-spacing: -1px; }
+            .canvas { max-height: 60vh; }
+            .stage-caption { display: none; }
+            .canvas-hint { display: block; }
+
+            /* The nav is logo + two CTAs and overflowed by 12px at 390px, which
+               is enough to make the whole document scroll sideways. The label
+               text is what costs the width, so the icons carry the meaning and
+               aria-label carries it for screen readers. */
+            .nav-cta { padding: 8px 12px; gap: 0; }
+            .nav-cta .cta-label { display: none; }
+            .nav-cta svg { width: 17px; height: 17px; }
+
+            /* At 390px, fit-to-width lands a 1500px diagram at 40% — too small
+               to read. Better to start it at a legible scale and let it be
+               panned, which is what the hint above the canvas says to do. */
+            .panel { padding: 12px; }
+        }
+
+        /* Pan-and-zoom is a pointer affordance. Without it the diagram is a
+           fixed-width image in a scroll box, which still works — so the
+           fallback is the download link, not a broken page. */
+        @media (prefers-reduced-motion: reduce) {
+            .panel svg { transition: none; }
+            .component-card { transition: none; }
+            .component-card:hover { transform: none; }
+        }
+    </style>
+</head>
+<body>
+
+<nav>
+    <div class="container">
+        <a href="/" class="logo">
+            <svg viewBox="0 0 32 32" fill="none" aria-hidden="true">
+                <rect width="32" height="32" rx="8" fill="url(#axon-grad)"/>
+                <path d="M8 22L16 10L24 22" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+                <circle cx="16" cy="10" r="2.5" fill="white"/>
+                <circle cx="8" cy="22" r="2" fill="white" opacity="0.7"/>
+                <circle cx="24" cy="22" r="2" fill="white" opacity="0.5"/>
+                <line x1="12" y1="16" x2="20" y2="16" stroke="white" stroke-width="1.5" opacity="0.5"/>
+                <defs><linearGradient id="axon-grad" x1="0" y1="0" x2="32" y2="32"><stop stop-color="#8b5cf6"/><stop offset="1" stop-color="#6d28d9"/></linearGradient></defs>
+            </svg>
+            <span class="logo-text">Axon<span>LLM</span></span>
+        </a>
+        <ul class="nav-links">
+            <li><a href="/#how-it-works">How It Works</a></li>
+            <li><a href="/#features">Features</a></li>
+            <li><a href="/#routing">Routing</a></li>
+            <li><a href="/#providers">Providers</a></li>
+            <li><a href="architecture.html" class="active" aria-current="page">Architecture</a></li>
+        </ul>
+        <div style="display:flex;gap:10px;align-items:center;">
+            <a href="/admin/dashboard" class="nav-cta" aria-label="Open the dashboard">
+                <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/></svg>
+                <span class="cta-label">Dashboard</span>
+            </a>
+            <a href="https://github.com/aws-samples/sample-axonllm" class="nav-cta" aria-label="View the source on GitHub" style="background:var(--surface);color:var(--text);border:1px solid var(--border);">
+                <svg width="16" height="16" fill="currentColor" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+                <span class="cta-label">GitHub</span>
+            </a>
+        </div>
+    </div>
+</nav>
+
+<section class="page">
+    <div class="container">
+        <p class="section-label">Architecture</p>
+        <h1>How AxonLLM is built</h1>
+        <p class="subtitle">
+            Three views of the same system: the AWS infrastructure it deploys onto, the
+            16-step pipeline every request passes through, and the component graph behind
+            it. All three are generated from the source, so they describe what the code
+            does rather than what it was meant to do.
+        </p>
+        <div class="page-actions">
+            <a href="architecture.drawio" download class="ghost-link">
+                <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
+                Download .drawio (all three pages)
+            </a>
+            <a href="/admin/architecture" class="ghost-link">
+                <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/></svg>
+                Same diagram inside the dashboard
+            </a>
+        </div>
+    </div>
+</section>
+
+<section class="viewer">
+    <div class="container-wide">
+        <div class="tabs" role="tablist" aria-label="Architecture views">
+            <button class="tab" role="tab" id="tab-infrastructure"
+                    aria-controls="panel-infrastructure" aria-selected="true">
+                <span class="tab-num">1</span> Infrastructure
+            </button>
+            <button class="tab" role="tab" id="tab-pipeline"
+                    aria-controls="panel-pipeline" aria-selected="false" tabindex="-1">
+                <span class="tab-num">2</span> Request Pipeline
+            </button>
+            <button class="tab" role="tab" id="tab-components"
+                    aria-controls="panel-components" aria-selected="false" tabindex="-1">
+                <span class="tab-num">3</span> Components
+            </button>
+        </div>
+
+        <div class="stage">
+            <div class="stage-bar">
+                <p class="stage-caption" id="stage-caption">
+                    <strong>Infrastructure</strong> — CloudFront &rarr; ALB &rarr; ECS Fargate &rarr; DynamoDB, from <code>infra/stack.py</code>
+                </p>
+                <div class="zoom-controls">
+                    <button class="zoom-btn" id="zoom-out" title="Zoom out" aria-label="Zoom out">
+                        <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14"/></svg>
+                    </button>
+                    <span class="zoom-level" id="zoom-level" aria-live="polite">100%</span>
+                    <button class="zoom-btn" id="zoom-in" title="Zoom in" aria-label="Zoom in">
+                        <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+                    </button>
+                    <button class="zoom-btn" id="zoom-fit" title="Fit to width" aria-label="Fit to width">
+                        <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8V5a1 1 0 011-1h3M20 8V5a1 1 0 00-1-1h-3M4 16v3a1 1 0 001 1h3M20 16v3a1 1 0 01-1 1h-3"/></svg>
+                    </button>
+                </div>
+            </div>
+
+            <p class="canvas-hint">Drag to pan &middot; use &minus; and + to zoom</p>
+
+            <div class="canvas" id="canvas">
+                <!-- The SVGs are fetched rather than inlined: three of them is
+                     ~200KB, and only one is ever visible. -->
+                <div class="panel is-active" role="tabpanel" id="panel-infrastructure"
+                     aria-labelledby="tab-infrastructure"
+                     data-src="architecture-infrastructure.svg" tabindex="0"></div>
+                <div class="panel" role="tabpanel" id="panel-pipeline"
+                     aria-labelledby="tab-pipeline"
+                     data-src="architecture-pipeline.svg" tabindex="0" hidden></div>
+                <div class="panel" role="tabpanel" id="panel-components"
+                     aria-labelledby="tab-components"
+                     data-src="architecture-components.svg" tabindex="0" hidden></div>
+            </div>
+        </div>
+    </div>
+</section>
+
+<section class="arch-section" id="request-flow">
+    <div class="container">
+        <p class="section-label">Request Pipeline</p>
+        <h2>What happens to a request</h2>
+        <p class="lede">
+            Every call to <code>/v1/chat/completions</code> runs the same ordered pipeline in
+            <code>GatewayAgent.handle_chat_completion</code>. The numbering below is the
+            numbering in the source — fractional steps are the ones added after the
+            original sixteen, kept in place rather than renumbered so the code and the
+            diagram stay readable together.
+        </p>
+        <ol class="flow-list">
+            <li data-step="1–2"><strong>Parse the request and extract context</strong> — project, user, and model resolved from the token or API key</li>
+            <li data-step="2.5"><strong>Validate</strong> — skipped for smart and ensemble routing, where the model is not yet chosen</li>
+            <li data-step="2.7"><strong>Enforce quotas and cap <code>max_tokens</code></strong> — the policy hierarchy resolves org &rarr; business unit &rarr; project &rarr; env</li>
+            <li data-step="2.8"><strong>Detect prompt injection</strong> — NFKD normalization and homoglyph-resistant patterns; audited and dispatched even when allowed</li>
+            <li data-step="2.9"><strong>Redact PII</strong> — replaced with tokens, and the mapping held for step 11.5</li>
+            <li data-step="3"><strong>Rate limit</strong> — sliding window per project and user</li>
+            <li data-step="4–5"><strong>Check model access</strong> — project allow-list intersected with the user's</li>
+            <li data-step="6–7"><strong>Check budgets</strong> — project and user, tightest limit wins</li>
+            <li data-step="8"><strong>Apply request guardrails</strong></li>
+            <li data-step="9"><strong>Look up the cache</strong> — a hit returns here and never reaches a provider</li>
+            <li data-step="9.5"><strong>Route by region</strong> — hub to spoke, honouring data-residency zones; skipped in single-region deploys</li>
+            <li data-step="10"><strong>Route and execute</strong> — direct with a fallback chain, smart (classify &rarr; leaderboard &rarr; cost/quality), or ensemble (panel &rarr; quorum &rarr; synthesis)</li>
+            <li data-step="11"><strong>Apply response guardrails</strong></li>
+            <li data-step="11.5"><strong>Re-inject PII</strong> — the original values restored into the response, per chunk when streaming</li>
+            <li data-step="11.6"><strong>Append to the audit trail</strong> — SHA-256 hash chain, head reloaded on restart</li>
+            <li data-step="12"><strong>Track cost and spend</strong> — priced from the pricing table and charged against the project and user quota</li>
+            <li data-step="13–14"><strong>Budget status and session storage</strong> — recorded after the response is complete</li>
+            <li data-step="15–16"><strong>Stream or return</strong> — SSE opened straight from the provider, or JSON</li>
+        </ol>
+    </div>
+</section>
+
+<section class="arch-section" id="aws-services">
+    <div class="container">
+        <p class="section-label">Infrastructure</p>
+        <h2>AWS services it deploys onto</h2>
+        <p>
+            One CDK stack in <code>infra/stack.py</code>. Nothing in the request path is
+            serverless-cold: the gateway runs as a long-lived Fargate service because
+            provider connections and the pricing table are worth keeping warm.
+        </p>
+        <div class="component-grid">
+            <div class="component-card">
+                <h3>Amazon CloudFront</h3>
+                <p>Fronts both the landing page and the gateway with an <code>ALL_VIEWER</code> origin request policy, so <code>Authorization</code> headers survive to the origin.</p>
+            </div>
+            <div class="component-card">
+                <h3>Application Load Balancer</h3>
+                <p>Terminates in front of the ECS service on port 8000 and health-checks <code>/health</code>. Also validates the ALB-issued JWT when OIDC is enabled.</p>
+            </div>
+            <div class="component-card">
+                <h3>ECS Fargate</h3>
+                <p>Two tasks at 1024 CPU / 2048 MiB, auto-scaling to ten on CPU and request-count targets. Container Insights v2 enabled.</p>
+            </div>
+            <div class="component-card">
+                <h3>Amazon DynamoDB</h3>
+                <p>One on-demand table, single-table PK/SK design: usage records, projects, API keys, the audit chain, policy nodes, and SCIM users share it.</p>
+            </div>
+            <div class="component-card">
+                <h3>AWS Secrets Manager</h3>
+                <p>Holds provider API keys, granted read-only to the task role. Keys are never in the image, the task definition, or an environment variable.</p>
+            </div>
+            <div class="component-card">
+                <h3>Amazon Bedrock</h3>
+                <p>Reached with SigV4 from the task role — no key to store. Both the Converse API and Mantle's OpenAI-compatible surface.</p>
+            </div>
+            <div class="component-card">
+                <h3>CloudWatch Logs</h3>
+                <p>Log group prefixed <code>axonllm</code> with 30-day retention. Spans go to an OTLP collector instead when <code>OTEL_EXPORTER_OTLP_ENDPOINT</code> is set.</p>
+            </div>
+            <div class="component-card">
+                <h3>Amazon ECR</h3>
+                <p>Image built and pushed by CDK as a <code>DockerImageAsset</code>, so a deploy is one command with no separate build step.</p>
+            </div>
+        </div>
+    </div>
+</section>
+
+<section class="arch-section" id="components">
+    <div class="container">
+        <p class="section-label">Components</p>
+        <h2>What's inside the gateway</h2>
+        <p>
+            Wired in one place — <code>build_gateway_components()</code> in
+            <code>src/gateway/bootstrap.py</code>. Every component takes its
+            collaborators as constructor arguments, which is what makes the
+            persistence layer optional rather than assumed.
+        </p>
+        <div class="component-grid">
+            <div class="component-card">
+                <h3>GatewayAgent</h3>
+                <p>The orchestrator. Owns the 16-step pipeline, model listing, health checks, and the true-streaming generators.</p>
+            </div>
+            <div class="component-card">
+                <h3>Router</h3>
+                <p>Provider fallback chain with exponential backoff, plus the entry points for smart and ensemble routing.</p>
+            </div>
+            <div class="component-card">
+                <h3>SmartRoutingStrategy</h3>
+                <p>Classifies the task, consults the model leaderboard, and picks on a cost/quality tradeoff read from the live pricing table.</p>
+            </div>
+            <div class="component-card">
+                <h3>EnsembleStrategy</h3>
+                <p>Dispatches a panel, takes a quorum, ranks the answers, and synthesizes. Budget is pre-checked at (N+1)&times;cost before any of it runs.</p>
+            </div>
+            <div class="component-card">
+                <h3>RegionRouter + SpokeHealthMonitor</h3>
+                <p>Hub-and-spoke topology with data-residency zones, active-passive and active-active weighted failover, and a background health task.</p>
+            </div>
+            <div class="component-card">
+                <h3>MultiProviderFactory</h3>
+                <p>Thirteen adapters behind one interface — boto3 for Bedrock and Mantle, an HTTP client for the rest — with a per-region client cache.</p>
+            </div>
+            <div class="component-card">
+                <h3>PolicyHierarchyResolver</h3>
+                <p>Resolves inherited limits: budget and rate take the minimum, allowed models intersect, PII types union, and PII redaction cannot be switched off downstream.</p>
+            </div>
+            <div class="component-card">
+                <h3>QuotaEnforcer + CostTracker</h3>
+                <p>Rate, token, and spend limits with budget-threshold alerts, priced per request against the pricing table.</p>
+            </div>
+            <div class="component-card">
+                <h3>PIIRedactor</h3>
+                <p>Redact &rarr; tokenize &rarr; re-inject, with a split-token buffer so a redaction spanning two stream chunks still matches.</p>
+            </div>
+            <div class="component-card">
+                <h3>AuditTrail</h3>
+                <p>SHA-256 hash chain over every recorded event, verifiable end to end, with the chain head reloaded on restart so a redeploy doesn't fork it.</p>
+            </div>
+            <div class="component-card">
+                <h3>EventDispatcher</h3>
+                <p>Fans security and budget events out to webhook, SNS, and CloudWatch destinations with per-destination event filters.</p>
+            </div>
+            <div class="component-card">
+                <h3>DynamoPersistence</h3>
+                <p>Optional by design. Disabled, the gateway runs fully in memory — which is what makes local development and the demo dashboard work with no AWS account.</p>
+            </div>
+        </div>
+    </div>
+</section>
+
+<footer>
+    <div class="container">
+        <p>AxonLLM is open source under the MIT-0 License &middot; <a href="https://github.com/aws-samples/sample-axonllm">GitHub</a> &middot; <a href="https://github.com/aws-samples/sample-axonllm/blob/main/CHANGELOG.md">Changelog</a></p>
+    </div>
+</footer>
+
+<script>
+(function () {
+    'use strict';
+
+    var canvas = document.getElementById('canvas');
+    var tabs = Array.prototype.slice.call(document.querySelectorAll('.tab'));
+    var panels = Array.prototype.slice.call(document.querySelectorAll('.panel'));
+    var zoomLevel = document.getElementById('zoom-level');
+    var zoomIn = document.getElementById('zoom-in');
+    var zoomOut = document.getElementById('zoom-out');
+    var zoomFit = document.getElementById('zoom-fit');
+    var caption = document.getElementById('stage-caption');
+
+    var CAPTIONS = {
+        'panel-infrastructure': '<strong>Infrastructure</strong> — CloudFront &rarr; ALB &rarr; ECS Fargate &rarr; DynamoDB, from <code>infra/stack.py</code>',
+        'panel-pipeline': '<strong>Request Pipeline</strong> — step numbering follows <code>src/gateway/agent.py</code>',
+        'panel-components': '<strong>Components</strong> — the graph as wired by <code>build_gateway_components()</code>'
+    };
+
+    var MIN = 0.4, MAX = 3, STEP = 1.25;
+
+    // Zoom is per-panel: switching tabs and coming back should not silently
+    // reset a diagram you had zoomed into.
+    var zoom = {};
+    // Natural width in px, read once from the SVG's own width attribute. Needed
+    // because the fit calculation and every zoom set width explicitly, which
+    // destroys the attribute we would otherwise measure against.
+    var natural = {};
+
+    function activePanel() {
+        for (var i = 0; i < panels.length; i++) {
+            if (panels[i].classList.contains('is-active')) return panels[i];
+        }
+        return panels[0];
+    }
+
+    function applyZoom(panel) {
+        var svg = panel.querySelector('svg');
+        if (!svg || !natural[panel.id]) return;
+        var z = zoom[panel.id] || 1;
+        svg.style.width = (natural[panel.id] * z) + 'px';
+        zoomLevel.textContent = Math.round(z * 100) + '%';
+        zoomOut.disabled = z <= MIN + 1e-9;
+        zoomIn.disabled = z >= MAX - 1e-9;
+    }
+
+    function setZoom(panel, z) {
+        zoom[panel.id] = Math.min(MAX, Math.max(MIN, z));
+        applyZoom(panel);
+    }
+
+    // Below this the type inside the diagram stops being readable, so fit()
+    // refuses to go there and the canvas scrolls instead. 0.55 is where the
+    // 9-10px labels in the export land around 5px.
+    var READABLE_FLOOR = 0.55;
+
+    function fit(panel) {
+        if (!natural[panel.id]) return;
+        // Padding is 24px a side at desktop and 12px narrow; measure it rather
+        // than hardcoding, so the two media queries can't disagree with this.
+        var pad = 2 * parseFloat(getComputedStyle(panel).paddingLeft || 0);
+        var scale = (canvas.clientWidth - pad) / natural[panel.id];
+        // Never scale past 1: an upscaled SVG is sharp, but a 1500px diagram
+        // blown up to 1900px just wastes the space it gains.
+        setZoom(panel, Math.max(READABLE_FLOOR, Math.min(1, scale)));
+    }
+
+    function load(panel) {
+        if (panel.dataset.loaded) { applyZoom(panel); return; }
+        panel.dataset.loaded = 'pending';
+        fetch(panel.dataset.src)
+            .then(function (r) {
+                if (!r.ok) throw new Error(r.status + ' ' + r.statusText);
+                return r.text();
+            })
+            .then(function (svgText) {
+                panel.innerHTML = svgText;
+                var svg = panel.querySelector('svg');
+                if (!svg) throw new Error('no <svg> in ' + panel.dataset.src);
+                // The export sets width/height in px and a matching viewBox.
+                // Drop height so the aspect ratio follows the width we set.
+                natural[panel.id] = parseFloat(svg.getAttribute('width')) || 1400;
+                svg.removeAttribute('height');
+                svg.setAttribute('role', 'img');
+                panel.dataset.loaded = 'done';
+                if (zoom[panel.id]) { applyZoom(panel); } else { fit(panel); }
+            })
+            .catch(function (err) {
+                panel.dataset.loaded = '';
+                panel.innerHTML = '<p style="color:var(--text-dim);font-size:0.9rem;padding:24px 0">'
+                    + 'Could not load this diagram (' + String(err.message).replace(/[<>&]/g, '')
+                    + '). The <a href="architecture.drawio" download>.drawio file</a> has all three pages.</p>';
+            });
+    }
+
+    function select(tab) {
+        tabs.forEach(function (t) {
+            var on = t === tab;
+            t.setAttribute('aria-selected', on ? 'true' : 'false');
+            t.tabIndex = on ? 0 : -1;
+        });
+        panels.forEach(function (p) {
+            var on = p.id === tab.getAttribute('aria-controls');
+            p.classList.toggle('is-active', on);
+            p.hidden = !on;
+            if (on) {
+                caption.innerHTML = CAPTIONS[p.id] || '';
+                canvas.scrollLeft = 0;
+                canvas.scrollTop = 0;
+                load(p);
+            }
+        });
+    }
+
+    tabs.forEach(function (tab) {
+        tab.addEventListener('click', function () { select(tab); });
+    });
+
+    // Left/Right moves between tabs, which is what the tablist role promises.
+    document.querySelector('.tabs').addEventListener('keydown', function (e) {
+        var i = tabs.indexOf(document.activeElement);
+        if (i === -1) return;
+        var next = e.key === 'ArrowRight' ? i + 1 : e.key === 'ArrowLeft' ? i - 1 : -1;
+        if (next === -1) return;
+        e.preventDefault();
+        var target = tabs[(next + tabs.length) % tabs.length];
+        target.focus();
+        select(target);
+    });
+
+    zoomIn.addEventListener('click', function () {
+        var p = activePanel();
+        setZoom(p, (zoom[p.id] || 1) * STEP);
+    });
+    zoomOut.addEventListener('click', function () {
+        var p = activePanel();
+        setZoom(p, (zoom[p.id] || 1) / STEP);
+    });
+    zoomFit.addEventListener('click', function () { fit(activePanel()); });
+
+    // Drag to pan. Pointer events rather than mouse events so a trackpad drag
+    // and a touch drag take the same path; touch-action stays default so
+    // two-finger scrolling still works on the canvas.
+    var panning = false, startX = 0, startY = 0, startL = 0, startT = 0;
+
+    canvas.addEventListener('pointerdown', function (e) {
+        if (e.button !== 0) return;
+        panning = true;
+        startX = e.clientX; startY = e.clientY;
+        startL = canvas.scrollLeft; startT = canvas.scrollTop;
+        canvas.classList.add('is-panning');
+    });
+
+    canvas.addEventListener('pointermove', function (e) {
+        if (!panning) return;
+        canvas.scrollLeft = startL - (e.clientX - startX);
+        canvas.scrollTop = startT - (e.clientY - startY);
+    });
+
+    function endPan() {
+        panning = false;
+        canvas.classList.remove('is-panning');
+    }
+    canvas.addEventListener('pointerup', endPan);
+    canvas.addEventListener('pointercancel', endPan);
+    canvas.addEventListener('pointerleave', endPan);
+
+    // Refit only the panels the user has not zoomed themselves — an explicit
+    // zoom shouldn't be undone by a window resize.
+    var resizeTimer;
+    window.addEventListener('resize', function () {
+        clearTimeout(resizeTimer);
+        resizeTimer = setTimeout(function () {
+            var p = activePanel();
+            if (p.dataset.loaded === 'done' && !p.dataset.userZoomed) fit(p);
+        }, 150);
+    });
+
+    [zoomIn, zoomOut].forEach(function (btn) {
+        btn.addEventListener('click', function () { activePanel().dataset.userZoomed = '1'; });
+    });
+    zoomFit.addEventListener('click', function () { delete activePanel().dataset.userZoomed; });
+
+    load(panels[0]);
+})();
+</script>
+
+</body>
+</html>
