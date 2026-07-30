@@ -516,10 +516,17 @@ Three things worth knowing before you rely on it:
   a demo and teaches operators to ignore the page, so the page explains itself
   instead and makes no outbound calls.
 
-Providers with no catalogue endpoint (Bedrock and Vertex AI authenticate through
-IAM and use deployment-path ids, not bearer tokens and bare model names) are
-counted as *unchecked by name* rather than quietly omitted, so a partial check
-never reads as full coverage.
+Coverage spans three authentication styles, not just bearer tokens: API-key
+providers over HTTP, **Bedrock** through boto3, and **Bedrock Mantle** through a
+SigV4-signed `GET /v1/models`. Bedrock reads two catalogues rather than one —
+`models.yaml` pins cross-region inference profiles (`us.anthropic.…`) for most of
+its mappings, and `list_foundation_models` does not return those, so checking it
+alone would report the majority of working Bedrock mappings as retired.
+
+Vertex AI and Azure OpenAI stay unchecked, because their model ids are deployment
+and publisher paths where listing proves nothing about whether a mapping
+resolves. Anything unchecked is counted as *unchecked by name* rather than
+quietly omitted, so a partial check never reads as full coverage.
 
 ### Ensemble Presets
 

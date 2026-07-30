@@ -29,6 +29,13 @@ inferred instead: an id absent from the provider's own list is reported as
 *unlisted*, which is the observable half of both the retired and the aliased
 case, and the page says so rather than guessing which.
 
+Coverage spans three authentication styles: bearer-token HTTP endpoints
+(:data:`_LIST_PATHS`), Bedrock via boto3, and Bedrock Mantle via SigV4-signed
+HTTP (:data:`_AWS_FETCHERS`). Bedrock reads two catalogues rather than one,
+because most of its mappings pin cross-region inference profiles that
+``list_foundation_models`` does not return — see :func:`_list_bedrock_ids`.
+``vertex_ai`` and ``azure_openai`` stay unchecked and are reported as such.
+
 The check needs real credentials and reports on the real routing table, so
 :func:`should_run` gates it off in demo mode. A demo has no keys to check with,
 and rendering "0 problems found" from 0 successful checks reads as a clean bill
@@ -47,17 +54,18 @@ from src.gateway.provider_config import ProviderConfig, get_auth_headers
 
 logger = logging.getLogger(__name__)
 
-# Providers whose catalogue is reachable over HTTP with the credentials the
+# Providers whose catalogue is reachable over HTTP with a bearer token the
 # gateway already holds, mapped to the path that lists it.
 #
-# Deliberately not exhaustive. ``bedrock`` and ``bedrock-mantle`` are absent
-# because their catalogue comes from boto3 and IAM rather than a bearer token,
-# and a half-working AWS branch here would report "unknown" for the providers
-# carrying most production traffic — worse than declining to check them.
-# ``vertex_ai`` and ``azure_openai`` are absent because their model ids are
+# ``bedrock`` and ``bedrock-mantle`` are checked too, but not from here: they
+# authenticate through the AWS credential chain rather than a bearer token, so
+# they have their own fetchers (:func:`_fetch_bedrock_ids`,
+# :func:`_fetch_mantle_ids`) and appear in :data:`_AWS_FETCHERS`.
+#
+# ``vertex_ai`` and ``azure_openai`` remain unchecked: their model ids are
 # deployment and publisher paths, so listing proves nothing about whether a
-# mapping resolves. Everything left out is named on the page as unchecked, so
-# the coverage claim stays honest.
+# mapping resolves. Both are named on the page as unchecked, so the coverage
+# claim stays honest.
 _LIST_PATHS: dict[str, str] = {
     "openai": "/v1/models",
     "anthropic": "/v1/models",
@@ -310,11 +318,184 @@ async def _fetch_ids(
     return ids, None
 
 
+def _list_bedrock_ids(region: str) -> list[str]:
+    """Blocking half of the Bedrock catalogue read. Runs in a worker thread.
+
+    Reads **both** catalogues, and the second one is not optional.
+    ``list_foundation_models`` returns only base ids, while models.yaml pins
+    cross-region inference profiles (``us.anthropic.claude-opus-4-6-v1``) for
+    most Bedrock mappings — 10 of 14 in the current registry. Checking
+    foundation models alone would report every one of those as retired: a wall
+    of confident false findings about the provider carrying the most production
+    traffic, which is worse than not checking at all.
+    """
+    import boto3
+
+    client = boto3.client("bedrock", region_name=region)
+    ids: list[str] = [
+        summary["modelId"]
+        for summary in client.list_foundation_models().get("modelSummaries", [])
+        if summary.get("modelId")
+    ]
+
+    # A caller may hold bedrock:ListFoundationModels without
+    # bedrock:ListInferenceProfiles. Losing the profiles would turn every
+    # profile mapping into a false finding, so an empty result here is treated
+    # as a failed read rather than an empty catalogue — _fetch_ids's caller
+    # reports the whole provider as unreadable instead.
+    paginator = client.get_paginator("list_inference_profiles")
+    profile_ids = [
+        summary["inferenceProfileId"]
+        for page in paginator.paginate()
+        for summary in page.get("inferenceProfileSummaries", [])
+        if summary.get("inferenceProfileId")
+    ]
+    if not profile_ids:
+        raise RuntimeError("no inference profiles listed")
+    ids.extend(profile_ids)
+    return ids
+
+
+async def _fetch_bedrock_ids(
+    provider: str,
+    config: ProviderConfig | None,
+    timeout: float,
+    region: str,
+) -> tuple[list[str], ProviderCheckError | None]:
+    """Fetch Bedrock's catalogue through boto3. Never raises.
+
+    Bedrock needs no ``providers.yaml`` entry — it authenticates through the
+    boto3 credential chain (instance role, SSO, env), which is why ``config``
+    is allowed to be ``None`` here where the HTTP providers require one.
+    """
+    try:
+        import boto3  # noqa: F401
+    except ImportError:
+        return [], ProviderCheckError(provider, "boto3 not installed", unconfigured=True)
+
+    try:
+        ids = await asyncio.wait_for(
+            asyncio.to_thread(_list_bedrock_ids, region), timeout=timeout
+        )
+    except asyncio.TimeoutError:
+        return [], ProviderCheckError(provider, "request timed out")
+    except Exception as exc:
+        # Type name only, as with the HTTP path: a botocore error message can
+        # carry the caller's ARN and the full request URL, and this string is
+        # rendered into an admin page. NoCredentialsError is the ordinary state
+        # for a deployment with no AWS access, not a fault to escalate.
+        name = type(exc).__name__
+        unconfigured = name in ("NoCredentialsError", "PartialCredentialsError")
+        return [], ProviderCheckError(
+            provider,
+            "no AWS credentials available" if unconfigured else f"listing failed ({name})",
+            unconfigured=unconfigured,
+        )
+
+    if not ids:
+        return [], ProviderCheckError(provider, "no model ids in response")
+    return ids, None
+
+
+def _mantle_list_request(region: str, timeout: float) -> list[str]:
+    """Blocking half of the Mantle catalogue read. Runs in a worker thread.
+
+    Mantle is an OpenAI-shaped HTTP API but signs with SigV4, so it cannot go
+    through the bearer-token path above. Endpoint and service name are kept in
+    step with :mod:`mantle_provider`, which is what actually routes traffic —
+    checking a different endpoint than the one serving requests would make a
+    pass here meaningless.
+    """
+    import json
+    import urllib.request
+
+    from botocore.auth import SigV4Auth
+    from botocore.awsrequest import AWSRequest
+
+    import boto3
+
+    credentials = boto3.Session().get_credentials()
+    if credentials is None:
+        raise _NoAwsCredentials
+
+    url = f"https://bedrock-mantle.{region}.api.aws/v1/models"
+    signed = AWSRequest(method="GET", url=url, headers={"accept": "application/json"})
+    SigV4Auth(credentials.get_frozen_credentials(), "bedrock", region).add_auth(signed)
+
+    request = urllib.request.Request(url, headers=dict(signed.headers), method="GET")
+    with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
+        payload = json.loads(response.read().decode())
+
+    return [
+        item["id"]
+        for item in payload.get("data", [])
+        if isinstance(item, dict) and isinstance(item.get("id"), str) and item["id"]
+    ]
+
+
+class _NoAwsCredentials(Exception):
+    """Raised in the worker thread when the boto3 chain yields nothing.
+
+    A distinct type so the caller can classify it as *unconfigured* rather than
+    as a failure, without matching on a message string.
+    """
+
+
+async def _fetch_mantle_ids(
+    provider: str,
+    config: ProviderConfig | None,
+    timeout: float,
+    region: str,
+) -> tuple[list[str], ProviderCheckError | None]:
+    """Fetch Bedrock Mantle's catalogue over SigV4-signed HTTP. Never raises."""
+    try:
+        import boto3  # noqa: F401
+        import botocore  # noqa: F401
+    except ImportError:
+        return [], ProviderCheckError(provider, "boto3 not installed", unconfigured=True)
+
+    try:
+        ids = await asyncio.wait_for(
+            asyncio.to_thread(_mantle_list_request, region, timeout), timeout=timeout + 1
+        )
+    except asyncio.TimeoutError:
+        return [], ProviderCheckError(provider, "request timed out")
+    except _NoAwsCredentials:
+        return [], ProviderCheckError(
+            provider, "no AWS credentials available", unconfigured=True
+        )
+    except Exception as exc:
+        name = type(exc).__name__
+        unconfigured = name in ("NoCredentialsError", "PartialCredentialsError")
+        if unconfigured:
+            reason = "no AWS credentials available"
+        else:
+            # urllib's HTTPError carries a status; anything else reports its
+            # type only, for the same reason as the HTTP path.
+            status = getattr(exc, "code", None)
+            reason = f"HTTP {status}" if status else f"request failed ({name})"
+        return [], ProviderCheckError(provider, reason, unconfigured=unconfigured)
+
+    if not ids:
+        return [], ProviderCheckError(provider, "no model ids in response")
+    return ids, None
+
+
+# Providers whose catalogue comes from AWS rather than a bearer-token endpoint.
+# Signature matches the HTTP fetcher plus the region, so the runner can treat
+# both paths uniformly.
+_AWS_FETCHERS = {
+    "bedrock": _fetch_bedrock_ids,
+    "bedrock-mantle": _fetch_mantle_ids,
+}
+
+
 async def check_model_availability(
     model_registry: ModelRegistry,
     provider_configs: dict[str, ProviderConfig],
     *,
     timeout: float = 10.0,
+    bedrock_region: str = "us-east-1",
 ) -> AvailabilityReport:
     """Compare every registry mapping against its provider's live model list.
 
@@ -333,8 +514,12 @@ async def check_model_availability(
 
     checkable: list[str] = []
     for provider in sorted(wanted):
-        if provider not in _LIST_PATHS:
-            # No HTTP catalogue endpoint wired for this provider.
+        if provider in _AWS_FETCHERS:
+            # Authenticates through the boto3 chain, so no providers.yaml entry
+            # is expected or required.
+            checkable.append(provider)
+        elif provider not in _LIST_PATHS:
+            # No catalogue endpoint wired for this provider.
             report.unsupported[provider] = len(wanted[provider])
         elif provider not in provider_configs:
             # load_provider_configs drops providers with no credentials, so an
@@ -345,9 +530,15 @@ async def check_model_availability(
         else:
             checkable.append(provider)
 
-    results = await asyncio.gather(
-        *(_fetch_ids(p, provider_configs[p], timeout) for p in checkable)
-    )
+    async def _fetch(provider: str) -> tuple[list[str], ProviderCheckError | None]:
+        aws_fetcher = _AWS_FETCHERS.get(provider)
+        if aws_fetcher is not None:
+            return await aws_fetcher(
+                provider, provider_configs.get(provider), timeout, bedrock_region
+            )
+        return await _fetch_ids(provider, provider_configs[provider], timeout)
+
+    results = await asyncio.gather(*(_fetch(p) for p in checkable))
 
     for provider, (listed, error) in zip(checkable, results):
         if error is not None:

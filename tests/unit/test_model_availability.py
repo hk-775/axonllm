@@ -18,7 +18,10 @@ import pytest
 from src.gateway.admin.model_availability import (
     _extract_ids,
     _family,
+    _fetch_bedrock_ids,
     _fetch_ids,
+    _fetch_mantle_ids,
+    _list_bedrock_ids,
     _suggest,
     check_model_availability,
     should_run,
@@ -297,16 +300,16 @@ class TestCheckModelAvailability:
 
     @pytest.mark.asyncio
     async def test_providers_without_a_catalogue_endpoint_are_counted_unchecked(self):
-        """Bedrock lists through boto3, not a bearer token. Saying nothing about
-        it has to be visible, or the coverage claim overstates itself."""
-        registry = _registry(
-            _model("claude", ("bedrock", "anthropic.claude-v2"), ("vertex_ai", "claude@1")),
-        )
+        """Vertex ids are deployment paths, so listing proves nothing about
+        whether a mapping resolves. Saying nothing about it has to be visible, or
+        the coverage claim overstates itself.
+        """
+        registry = _registry(_model("claude", ("vertex_ai", "claude@1")))
 
         report = await check_model_availability(registry, {})
 
-        assert report.unsupported == {"bedrock": 1, "vertex_ai": 1}
-        assert report.unchecked_mappings == 2
+        assert report.unsupported == {"vertex_ai": 1}
+        assert report.unchecked_mappings == 1
         assert report.total_checked == 0
 
     @pytest.mark.asyncio
@@ -343,3 +346,302 @@ class TestCheckModelAvailability:
         for url, _, _ in client.requests:
             assert "completion" not in url
             assert "/messages" not in url
+
+
+# ── AWS catalogues ───────────────────────────────────────────────────
+#
+# Bedrock and Mantle authenticate through the boto3 credential chain rather than
+# a bearer token, so they bypass _fetch_ids entirely and need their own coverage.
+
+
+class _FakeBedrockClient:
+    """Stand-in for boto3's bedrock client, covering both list calls."""
+
+    def __init__(self, foundation, profiles, *, paginator=True):
+        self._foundation = foundation
+        self._profiles = profiles
+        self._paginator = paginator
+        self.calls: list[str] = []
+
+    def list_foundation_models(self):
+        self.calls.append("list_foundation_models")
+        return {"modelSummaries": [{"modelId": m} for m in self._foundation]}
+
+    def get_paginator(self, name):
+        self.calls.append(name)
+        profiles = self._profiles
+        outer = self
+
+        class _Paginator:
+            def paginate(self):
+                # Two pages, to prove pagination is actually consumed: the
+                # account has 63 profiles and a single page caps at 100 today,
+                # so a regression here would stay invisible in production until
+                # it silently truncated.
+                mid = len(profiles) // 2
+                for chunk in (profiles[:mid], profiles[mid:]):
+                    outer.calls.append("page")
+                    yield {
+                        "inferenceProfileSummaries": [
+                            {"inferenceProfileId": p} for p in chunk
+                        ]
+                    }
+
+        return _Paginator()
+
+
+def _patch_boto(monkeypatch, client):
+    import boto3
+
+    monkeypatch.setattr(boto3, "client", lambda *a, **k: client)
+    return client
+
+
+class TestBedrockListing:
+    def test_inference_profiles_are_listed_alongside_foundation_models(self, monkeypatch):
+        """The property that keeps 10 of 14 working mappings from being flagged.
+
+        models.yaml pins cross-region profiles (``us.anthropic.…``) for most
+        Bedrock mappings, and list_foundation_models does not return them.
+        """
+        _patch_boto(
+            monkeypatch,
+            _FakeBedrockClient(
+                ["anthropic.claude-sonnet-4-20250514-v1:0"],
+                ["us.anthropic.claude-opus-4-6-v1", "us.amazon.nova-pro-v1:0"],
+            ),
+        )
+
+        ids = _list_bedrock_ids("us-east-1")
+
+        assert "anthropic.claude-sonnet-4-20250514-v1:0" in ids
+        assert "us.anthropic.claude-opus-4-6-v1" in ids
+        assert "us.amazon.nova-pro-v1:0" in ids
+
+    def test_pagination_is_consumed(self, monkeypatch):
+        profiles = [f"us.vendor.model-{i}" for i in range(10)]
+        _patch_boto(monkeypatch, _FakeBedrockClient(["base"], profiles))
+
+        ids = _list_bedrock_ids("us-east-1")
+
+        assert set(profiles).issubset(set(ids))
+
+    def test_missing_profile_permission_is_a_failed_read_not_a_short_list(
+        self, monkeypatch
+    ):
+        """A caller can hold ListFoundationModels without ListInferenceProfiles.
+
+        Returning only foundation models there would flag every profile mapping
+        as retired, so the read has to fail loudly instead.
+        """
+        _patch_boto(monkeypatch, _FakeBedrockClient(["base-model"], []))
+
+        with pytest.raises(RuntimeError):
+            _list_bedrock_ids("us-east-1")
+
+    @pytest.mark.asyncio
+    async def test_that_failure_surfaces_as_an_error_with_no_findings(self, monkeypatch):
+        _patch_boto(monkeypatch, _FakeBedrockClient(["base-model"], []))
+        registry = _registry(_model("claude", ("bedrock", "us.anthropic.claude-opus-4-6-v1")))
+
+        report = await check_model_availability(registry, {})
+
+        assert report.unlisted == []
+        assert report.degraded is True
+        assert report.total_checked == 0
+
+    @pytest.mark.asyncio
+    async def test_absent_aws_credentials_are_unconfigured_not_degraded(self, monkeypatch):
+        from botocore.exceptions import NoCredentialsError
+
+        def _raise(*a, **k):
+            raise NoCredentialsError()
+
+        import boto3
+
+        monkeypatch.setattr(boto3, "client", _raise)
+
+        ids, error = await _fetch_bedrock_ids("bedrock", None, 5.0, "us-east-1")
+
+        assert ids == []
+        assert error.unconfigured is True
+
+    @pytest.mark.asyncio
+    async def test_botocore_errors_report_the_type_only(self, monkeypatch):
+        """A botocore message can carry the caller's ARN and the request URL,
+        and this string is rendered into an admin page."""
+        import boto3
+
+        def _raise(*a, **k):
+            raise RuntimeError(
+                "User arn:aws:sts::123456789012:assumed-role/secret is not authorized"
+            )
+
+        monkeypatch.setattr(boto3, "client", _raise)
+
+        ids, error = await _fetch_bedrock_ids("bedrock", None, 5.0, "us-east-1")
+
+        assert "123456789012" not in error.reason
+        assert "RuntimeError" in error.reason
+
+
+class TestMantleListing:
+    @pytest.mark.asyncio
+    async def test_ids_come_back_from_the_openai_shaped_payload(self, monkeypatch):
+        import src.gateway.admin.model_availability as mod
+
+        monkeypatch.setattr(
+            mod, "_mantle_list_request", lambda region, timeout: ["openai.gpt-5.5"]
+        )
+
+        ids, error = await _fetch_mantle_ids("bedrock-mantle", None, 5.0, "us-east-1")
+
+        assert ids == ["openai.gpt-5.5"]
+        assert error is None
+
+    @pytest.mark.asyncio
+    async def test_no_aws_credentials_is_unconfigured(self, monkeypatch):
+        import src.gateway.admin.model_availability as mod
+
+        def _raise(region, timeout):
+            raise mod._NoAwsCredentials
+
+        monkeypatch.setattr(mod, "_mantle_list_request", _raise)
+
+        ids, error = await _fetch_mantle_ids("bedrock-mantle", None, 5.0, "us-east-1")
+
+        assert ids == []
+        assert error.unconfigured is True
+
+    @pytest.mark.asyncio
+    async def test_http_error_reports_the_status_only(self, monkeypatch):
+        import urllib.error
+
+        import src.gateway.admin.model_availability as mod
+
+        def _raise(region, timeout):
+            raise urllib.error.HTTPError(
+                "https://bedrock-mantle.us-east-1.api.aws/v1/models", 403, "Forbidden", {}, None
+            )
+
+        monkeypatch.setattr(mod, "_mantle_list_request", _raise)
+
+        ids, error = await _fetch_mantle_ids("bedrock-mantle", None, 5.0, "us-east-1")
+
+        assert error.reason == "HTTP 403"
+        assert error.unconfigured is False
+
+    @pytest.mark.asyncio
+    async def test_signing_targets_the_endpoint_that_serves_traffic(self, monkeypatch):
+        """Checking a different endpoint than mantle_provider routes to would
+        make a pass here meaningless."""
+        seen: dict[str, object] = {}
+
+        class _Creds:
+            def get_frozen_credentials(self):
+                return "frozen"
+
+        class _Session:
+            def get_credentials(self):
+                return _Creds()
+
+        import boto3
+        import botocore.auth
+        import urllib.request
+
+        monkeypatch.setattr(boto3, "Session", lambda: _Session())
+        monkeypatch.setattr(
+            botocore.auth,
+            "SigV4Auth",
+            lambda creds, service, region: type(
+                "_A",
+                (),
+                {"add_auth": lambda self, req: seen.update(service=service, region=region)},
+            )(),
+        )
+
+        class _Resp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def read(self):
+                return b'{"data": [{"id": "openai.gpt-5.5"}]}'
+
+        def _urlopen(request, timeout=None):
+            seen["url"] = request.full_url
+            return _Resp()
+
+        monkeypatch.setattr(urllib.request, "urlopen", _urlopen)
+
+        from src.gateway.admin.model_availability import _mantle_list_request
+
+        ids = _mantle_list_request("us-west-2", 5.0)
+
+        assert ids == ["openai.gpt-5.5"]
+        assert seen["url"] == "https://bedrock-mantle.us-west-2.api.aws/v1/models"
+        assert seen["service"] == "bedrock"
+        assert seen["region"] == "us-west-2"
+
+
+class TestAwsProvidersNeedNoProviderConfig:
+    @pytest.mark.asyncio
+    async def test_aws_providers_are_checked_without_a_providers_yaml_entry(
+        self, monkeypatch
+    ):
+        """They authenticate through the boto3 chain, so an absent config is
+        normal — not a reason to skip them or report them unconfigured."""
+        import src.gateway.admin.model_availability as mod
+
+        _patch_boto(
+            monkeypatch,
+            _FakeBedrockClient(["base"], ["us.anthropic.claude-opus-4-6-v1"]),
+        )
+        monkeypatch.setattr(
+            mod, "_mantle_list_request", lambda region, timeout: ["openai.gpt-5.5"]
+        )
+
+        registry = _registry(
+            _model("claude", ("bedrock", "us.anthropic.claude-opus-4-6-v1")),
+            _model("gpt", ("bedrock-mantle", "openai.gpt-5.5")),
+        )
+
+        report = await check_model_availability(registry, {})
+
+        assert report.checked_providers == ["bedrock", "bedrock-mantle"]
+        assert report.total_checked == 2
+        assert report.unlisted == []
+        assert report.unsupported == {}
+
+    @pytest.mark.asyncio
+    async def test_only_vertex_and_azure_remain_unchecked(self, monkeypatch):
+        """The honesty property: whatever this module cannot ask about has to be
+        counted, so partial coverage never reads as full."""
+        registry = _registry(
+            _model("claude", ("vertex_ai", "claude@1"), ("azure_openai", "my-deployment")),
+        )
+
+        report = await check_model_availability(registry, {})
+
+        assert report.unsupported == {"azure_openai": 1, "vertex_ai": 1}
+        assert report.unchecked_mappings == 2
+
+    @pytest.mark.asyncio
+    async def test_the_configured_region_is_used(self, monkeypatch):
+        """A gateway pointed at eu-west-1 must not be audited against us-east-1,
+        where the catalogue differs."""
+        import src.gateway.admin.model_availability as mod
+
+        seen: list[str] = []
+        monkeypatch.setattr(
+            mod,
+            "_mantle_list_request",
+            lambda region, timeout: (seen.append(region), ["openai.gpt-5.5"])[1],
+        )
+        registry = _registry(_model("gpt", ("bedrock-mantle", "openai.gpt-5.5")))
+
+        await check_model_availability(registry, {}, bedrock_region="eu-west-1")
+
+        assert seen == ["eu-west-1"]

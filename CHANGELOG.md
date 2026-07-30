@@ -103,17 +103,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   event; the cost is that alias detection has to be inferred from absence rather
   than observed, and the page reports that ambiguity instead of guessing.
 
+  The availability check spans three authentication styles: bearer-token HTTP
+  endpoints, **Bedrock** via boto3, and **Bedrock Mantle** via a SigV4-signed
+  `GET /v1/models` — Mantle is OpenAI-shaped but signs with SigV4, so it cannot
+  use the bearer-token path. Bedrock reads **two** catalogues, and the second is
+  not optional: `models.yaml` pins cross-region inference profiles
+  (`us.anthropic.claude-opus-4-6-v1`) for 10 of its 14 mappings, and
+  `list_foundation_models` does not return those, so checking it alone would
+  report the majority of working Bedrock mappings as retired — a wall of
+  confident false findings about the provider carrying the most traffic. A caller
+  holding `ListFoundationModels` but not `ListInferenceProfiles` is treated as a
+  failed read rather than a short catalogue, for the same reason. This takes
+  live coverage from 18 mappings to **43**, leaving nothing in the current
+  routing table unchecked; Vertex AI and Azure OpenAI remain unchecked by design,
+  since their ids are deployment paths where listing proves nothing.
+
   Production only. In demo mode the page explains why it is empty rather than
   rendering checks that would all fail correctly and mean nothing, and makes no
-  outbound calls at all. Providers without a catalogue endpoint (Bedrock,
-  Vertex AI) are counted as *unchecked* by name, so a partial check never implies
-  full coverage. A failed provider call yields an error row and no findings — a
-  network blip cannot manufacture a wall of bogus "retired model" warnings — and
-  an empty model list is treated as a changed response shape rather than as
-  "everything is missing". Credentials never reach a rendered string: transport
-  failures report the exception type only (httpx embeds the request URL, which
-  for Google AI carries the key as a query parameter) and the Google AI key is
-  passed via `params` rather than interpolated into the URL. 75 tests in
+  outbound calls at all. Anything unchecked is counted *by name*, so a partial
+  check never implies full coverage. A failed provider call yields an error row
+  and no findings — a network blip cannot manufacture a wall of bogus "retired
+  model" warnings — and an empty model list is treated as a changed response
+  shape rather than as "everything is missing". Credentials never reach a
+  rendered string: transport failures report the exception type only (httpx
+  embeds the request URL, which for Google AI carries the key as a query
+  parameter; a botocore error can carry the caller's ARN) and the Google AI key
+  is passed via `params` rather than interpolated into the URL. 91 tests in
   `tests/unit/test_production_checklist.py` and
   `tests/unit/test_model_availability.py`.
 
@@ -218,6 +233,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   makes a third identical value look inevitable rather than assumed.
 
 ### Fixed
+- **`mantle_adapter`'s advertised model list, four of six ids of which were not
+  served.** Found by pointing the new availability check at Mantle.
+  `anthropic.claude-sonnet-4-6`, `anthropic.claude-opus-4-6-v1` and
+  `anthropic.claude-haiku-4-5-20251001-v1:0` carried Bedrock-style version
+  suffixes Mantle does not use, and `meta.llama4-maverick-17b-instruct-v1:0` has
+  no `meta.*` equivalent in the Mantle catalogue at all. Nothing broke, because
+  request routing reads `config/models.yaml` rather than any adapter's `_MODELS`
+  — which is precisely why the drift went unnoticed: it is an advertising surface
+  no request exercises. Replaced with the 11 ids the registry actually routes to,
+  all verified served, and pinned in both directions by `TestAdvertisedModels` so
+  the list and the routing table cannot diverge again without a test failing.
 - **Claude Opus 4.8 was billed at 3× the published rate.** The `anthropic`
   entry read `0.015/0.075` per 1K tokens — the retired Opus 4.1 rate — while
   Anthropic prices Opus 4.5 and later at $5/$25 per MTok, a third of the earlier

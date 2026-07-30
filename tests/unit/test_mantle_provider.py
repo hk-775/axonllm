@@ -505,3 +505,49 @@ class TestToolTranslationEdgeCases:
         _invoke(mp._invoke_messages_api, req, "anthropic.claude-sonnet-5")
         assert "tool_choice" not in cap["payload"]
         assert "tools" in cap["payload"]
+
+
+class TestAdvertisedModels:
+    """The adapter's model list versus the table that actually routes requests.
+
+    Nothing in the request path reads ``adapter.list_models()`` — routing goes
+    through the registry built from ``config/models.yaml`` — so this list drifted
+    for four of its six ids without a single failing request. That makes it a
+    pure advertising surface, and one no test covered until now.
+    """
+
+    def _routed_mantle_ids(self) -> set[str]:
+        import yaml
+
+        with open("config/models.yaml") as handle:
+            doc = yaml.safe_load(handle)
+        return {
+            mapping["model_id"]
+            for entry in doc.get("models", [])
+            for mapping in entry.get("providers", [])
+            if mapping.get("provider") == "bedrock-mantle"
+        }
+
+    def test_every_advertised_model_is_one_the_gateway_routes_to(self):
+        """Advertising an id the registry cannot route to promises a model no
+        caller can actually reach."""
+        from src.gateway.adapters.mantle_adapter import _MANTLE_MODELS
+
+        advertised = {m.model_id for m in _MANTLE_MODELS}
+        assert advertised - self._routed_mantle_ids() == set()
+
+    def test_every_routed_model_is_advertised(self):
+        """The other direction: a routable model missing from the list is
+        invisible to anything enumerating provider capability."""
+        from src.gateway.adapters.mantle_adapter import _MANTLE_MODELS
+
+        advertised = {m.model_id for m in _MANTLE_MODELS}
+        assert self._routed_mantle_ids() - advertised == set()
+
+    def test_no_bedrock_style_version_suffixes(self):
+        """Mantle ids carry no ``-v1:0`` suffix; the Bedrock spelling of the same
+        model 404s here. Three of the four stale entries failed exactly this way.
+        """
+        from src.gateway.adapters.mantle_adapter import _MANTLE_MODELS
+
+        assert [m.model_id for m in _MANTLE_MODELS if ":" in m.model_id] == []

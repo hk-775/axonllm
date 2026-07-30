@@ -570,7 +570,10 @@ async def run_checklist(
         enabled_override=environ.get("AXON_CHECK_MODEL_AVAILABILITY"),
     ):
         availability = await check_model_availability(
-            model_registry, provider_configs, timeout=timeout
+            model_registry,
+            provider_configs,
+            timeout=timeout,
+            bedrock_region=app_config.bedrock_region,
         )
 
     drift = audit_pricing(model_registry, pricing_config)
