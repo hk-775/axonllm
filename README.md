@@ -251,6 +251,13 @@ Notes that matter in practice:
   dialect — including one where the tool spec is *flat* (`name` beside `type`, no
   `function` wrapper). AxonLLM picks the route and the dialect for you, so the loop
   above is unchanged; it matters only if you read the provider's raw payloads.
+- **`stream=True` works with tools**, but a tool call arrives as one complete
+  `delta.tool_calls` rather than incrementally: the `arguments` are a JSON string,
+  and splitting them across chunks would emit fragments no client can parse until
+  reassembled. Accumulate deltas as usual and you get the same call either way.
+  Providers reached over their native SSE (OpenAI, Azure) stream text
+  incrementally as before; the rest buffer, which is unchanged from streaming
+  without tools.
 
 ## Web Interfaces
 

@@ -68,6 +68,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   model called a tool, because that field carries lifecycle status rather than a
   stop reason. A caller driving a tool loop reads that as "nothing left to do",
   so it returned the tool call to the client and never ran it.
+- **`POST /v1/chat/completions` dropped tools entirely.** The pipeline had
+  translated them per-provider since the work above, but the OpenAI-compatible
+  route never read `tools`/`tool_choice` off the request body and `ClientAgent`
+  flattened the response down to `content` — which a tool call has none of. So
+  tool calling worked for in-process callers and not for the HTTP surface the
+  README points OpenAI SDK clients at: another fluent 200 asserting no such tool
+  existed. Both directions now carry tools, and `finish_reason` is no longer
+  hardcoded to `"stop"`.
+- **`finish_reason` leaked raw provider stop reasons.** With the hardcoded
+  `"stop"` removed, values like Anthropic's `end_turn`, Gemini's `MAX_TOKENS` and
+  Mantle's `completed` reached the client — and typed OpenAI SDK clients
+  deserialize that field into an enum, so an unrecognized string is a client-side
+  validation error rather than a curiosity. The OpenAI-compatible surface now
+  maps every known provider reason onto the four legal values, defaulting to
+  `"stop"`, while the internal API keeps reporting what the provider actually
+  said.
+- **Simulated streaming discarded tool calls.** `simulate_streaming` extracted
+  `message.content` and nothing else, so a streamed tool call — which carries no
+  text — produced a single empty chunk and vanished. This is the path every
+  provider without true SSE takes (boto3 Bedrock, google_ai, and any provider
+  whose stream fails to open), so `stream=True` plus `tools` returned an empty
+  stream rather than an error. Tool calls now ride the final chunk, whole: their
+  `arguments` are a JSON string, and word-splitting them would emit fragments no
+  client can parse until reassembled.
 
 ## [0.1.0] - 2026-06-22
 
