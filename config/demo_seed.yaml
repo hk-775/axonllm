@@ -39,13 +39,14 @@ projects:
       - gemini-3.5-flash
       - gemini-3.1-pro
       - gemini-3-pro
-      - grok-3
-      - grok-3-mini
+      - grok-4.3
+      - grok-4.5
       - groq-llama-3.3-70b
       - groq-llama-3.1-8b
       - together-llama-3.3-70b
-      - together-deepseek-r1
-      - together-qwen-72b
+      - together-deepseek-v4
+      - together-qwen-3.5-9b
+      - together-gpt-oss-120b
       - fireworks-deepseek-v4
       - fireworks-gpt-oss-120b
       - jamba-large

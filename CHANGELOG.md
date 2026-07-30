@@ -65,8 +65,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   not move, and budget blocks and quota alerts under-count rather than erring
   safe — while smart routing, having no rate to read, scores the model on the
   average of the known prices. Neither path raises, which is why this is a page
-  rather than a log line: on the current config **33 of 48 provider mappings have
-  no price at all**, across seven providers with no section in the file. The page
+  rather than a log line: when the page was written **33 of 48 provider mappings
+  had no price at all**, across seven providers with no section in the file (see
+  the entry below for what filling those in found). The page
   lists every unpriced mapping, every pricing entry no model reads (usually the
   other half of a renamed model id), and a paste-ready YAML fragment for the
   gaps — with rates left at `0.0`, since a guessed price bills silently where a
@@ -82,7 +83,90 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   container `CMD`, so a piped or containerized run prints the banner and nothing
   else; `AXON_NO_BROWSER=true` suppresses it locally too.
 
+- **Real published rates for 20 of the 33 unpriced mappings** — coverage 31% →
+  73%, and five providers that had no section in `config/pricing.yaml` at all
+  (`ai21`, `bedrock-mantle`, `google_ai`, `groq`, plus new entries under
+  `openai`, `anthropic` and `bedrock`) now bill at a real rate instead of $0.00.
+  Every figure is from the provider's own price list, cited by URL and fetch date
+  in the file header: OpenAI, Anthropic and Google AI pricing pages, `groq.com`,
+  `ai21.com`, and the AWS Price List API for Bedrock and Bedrock-Mantle.
+  Three judgement calls are documented inline rather than buried:
+  - **Regional vs global Bedrock endpoints.** Claude 4.5 and later carry a 10%
+    premium on regional endpoints, and the `us.` prefix in `models.yaml` *is* a
+    regional inference profile — so those entries take the regional rate
+    ($1.10/$5.50 per MTok for Haiku 4.5, not the $1.00/$5.00 global figure).
+  - **Mantle SKUs are priced from the Bedrock rate.** Of the 66 model/direction
+    pairs where us-east-1 lists both a `…-mantle-…-standard` SKU and a plain
+    on-demand one, all 66 agree to the cent — checked rather than assumed, since
+    that equivalence is what licenses six of the new entries.
+  - **Sub-threshold context tiers.** Where a provider charges more above a
+    context length (`gemini-3.1-pro-preview` doubles above 200k, `gpt-5.5-pro`
+    above 272k), the lower rate is used and the premium noted. `CostTracker`
+    prices a request from token counts alone and has no context tier to switch
+    on, so encoding the higher rate would overcharge every ordinary request.
+
+  13 mappings were left unpriced at this point on the reasoning that their
+  providers publish no rate for the id being sent. Checking each against the
+  provider's live API rather than its pricing page showed that reasoning was
+  wrong for five of them — see the entry below.
+
+- **Stale and unroutable provider model ids, found by probing the live APIs.**
+  A pricing page is a marketing document and a model list is not a guarantee of
+  capacity, so every id `models.yaml` and the adapter `_MODELS` lists advertise
+  was tested with a real completion. Coverage rose 73% → 84% as a result, but the
+  more useful finding is that "absent from the price list" turned out to predict
+  almost nothing about whether an id works:
+  - **`grok-3` and `grok-3-mini` answered 200 — and xAI resolves both to
+    `grok-4.3`**, which it reports in the response's `model` field. Undocumented
+    aliases: absent from `/v1/language-models` and from the price list, so
+    unpriceable, so every Grok request billed **$0.00 while being served by a
+    model that costs $1.25/$2.50 per MTok**. Nothing failed, which is why it
+    survived — a 404 would have been caught the first time anyone tried it. Both
+    are replaced by the real tiers, `grok-4.3` and `grok-4.5`, now priced from
+    xAI's own API (which reports in hundred-thousandths of a cent per token —
+    calibrated against the published page rather than assumed).
+  - **`grok-2-vision-1212`** was advertised in `xai_adapter._MODELS` and is
+    simply gone: 400 `Model not found`.
+  - **Four of Together's five advertised ids need a dedicated endpoint.**
+    `DeepSeek-R1`, `Qwen2.5-72B-Instruct-Turbo`, `Llama-4-Maverick-FP8` and
+    `Mistral-Small-24B` all return 400 `Unable to access non-serverless model`.
+    That is a provisioning error, not a wrong id, so no rename fixes it — and it
+    is not fixable by picking a newer snapshot either: R1-0528, V3.1, Qwen2-72B,
+    Qwen3-Next-80B, Qwen3.5-397B and QwQ-32B are all equally unavailable. The
+    Qwen3.x `-Plus`/`-Max` tier *is* serverless but **streaming-only** (400 `This
+    model only supports streaming`), which this gateway's non-streaming path
+    cannot use. Both files now list only ids confirmed by a live non-streaming
+    completion: Llama-3.3-70B-Turbo, DeepSeek-V4-Pro, Qwen3.5-9B and
+    gpt-oss-120b, all priced from Together's own API.
+  - **`gemini-3-pro-preview` is still served** — listed by `/v1beta/models` with
+    `generateContent` support — despite being off the Gemini price list. So it is
+    a working model with no published rate, the one case neither file can fix: the
+    id is right and there is no number to put. Kept and left unpriced; the earlier
+    claim that 3.1 Pro Preview replaced it was wrong.
+
+  **8 mappings remain unpriced, all for reasons that survive checking:** the five
+  `bedrock-mantle` `openai.gpt-5.x` ids (`gpt-5.4`, `-5.6-luna` and `-5.6-terra`
+  are published only in `us-gov-east-1`/`us-gov-west-1` at $3.30/$19.80 per MTok;
+  `gpt-5.5` and `-5.6-sol` appear under none of the four Bedrock service codes),
+  `gemini-3-pro-preview` above, and the two `fireworks` ids — which are the one
+  honest unknown here, since there is no `FIREWORKS_API_KEY` in the environment
+  and the models endpoint requires one, so they could not be probed either way.
+  They are kept rather than removed on that basis: "could not check" is not
+  evidence an id is wrong, and deleting a working model is worse than leaving one
+  on the drift report. Fireworks stays unpriced for the same reason a guess would
+  be tempting — `gpt-oss-120b` is $0.15/$0.60 on both Bedrock and Together, which
+  makes a third identical value look inevitable rather than assumed.
+
 ### Fixed
+- **Claude Opus 4.8 was billed at 3× the published rate.** The `anthropic`
+  entry read `0.015/0.075` per 1K tokens — the retired Opus 4.1 rate — while
+  Anthropic prices Opus 4.5 and later at $5/$25 per MTok, a third of the earlier
+  generation. So every Opus 4.8 request overcharged: a 1M-in/100K-out call
+  recorded $22.50 against a real cost of $7.50. This is the *opposite* failure to
+  an unpriced model and invisible for the same reason — nothing cross-checks a
+  rate that parses, and the drift page can only report a price that is missing,
+  not one that is wrong. Budget blocks and quota alerts fired early against
+  inflated spend, which reads as a working system rather than a broken one.
 - **Smart routing ignored cost entirely — `cost_quality_tradeoff` was inert.**
   `_get_model_cost` read pricing off the model registry, which is populated only
   from an inline `pricing:` block in `models.yaml` — and there are none (0 of 48
@@ -95,8 +179,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   intent, with no error to notice it by. Routing now resolves pricing from the
   same provider/model_id table `CostTracker` bills from, so the cost used to
   choose a model and the cost actually charged cannot disagree.
-- A missing price is now treated as **unknown rather than free**. With 33 of 48
-  provider entries unpriced, scoring absent pricing as 0.0 would make an
+- A missing price is now treated as **unknown rather than free**. With most
+  provider entries unpriced at the time, scoring absent pricing as 0.0 would make an
   unpriced model the cheapest possible candidate — it would win for being
   *unmeasured*, not for being cheap. On the `general` panel that hands selection
   to `claude-haiku` (benchmark 78) over `claude-sonnet` (90). Unpriced

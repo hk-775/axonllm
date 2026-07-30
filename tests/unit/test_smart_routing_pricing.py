@@ -158,9 +158,11 @@ models:
 class TestUnknownCostIsNotFree:
     """A missing price must not make a model the cheapest candidate.
 
-    This is the property that keeps the fix from being a regression: 33 of the
-    48 provider entries in the shipped config are unpriced, so "missing means
-    0.0" would let the worst model win for being unmeasured.
+    This is the property that keeps the fix from being a regression: 13 of the
+    48 provider entries in the shipped config are unpriced — their providers
+    publish no rate for the pinned id — so "missing means 0.0" would let the
+    worst model win for being unmeasured. The count falls as prices are filled
+    in but is unlikely to reach zero, since some of those ids no longer exist.
     """
 
     @pytest.mark.asyncio
