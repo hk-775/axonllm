@@ -59,7 +59,8 @@ docker compose up
 - **Admin RBAC** — admin endpoints require `admin` role or `admin:*` scope (ENFORCE mode)
 
 ### Observability
-- **Admin dashboard** — Sandbox, Overview, Traces, Efficiency, Audit Log, Models, Projects, Users, API Keys, Policies, Quotas, Regions, Webhooks, Health, Configuration, Architecture
+- **Admin dashboard** — Sandbox, Overview, Traces, Efficiency, Audit Log, Models, Projects, Users, API Keys, Policies, Quotas, Regions, Webhooks, Health, Configuration, Architecture, Pricing
+- **Pricing coverage check** — flags models with no configured price, which bill at $0.00 and so silently under-count budgets. Reported at startup and on `/admin/pricing-drift`.
 - **Token efficiency analytics** — detect waste, recommend cheaper models, score prompt quality
 - **Streaming** — SSE streaming for all providers with PII re-injection
 
@@ -292,6 +293,7 @@ Notes that matter in practice:
 | Chat | `/chat` | Chat with model + provider + user selection |
 | Playground | `/playground` | Router picks provider, shows routing decision |
 | Routing Explorer | `/routing` | Smart routing or ensemble — classify prompt, explain decision |
+| Pricing Coverage | `/admin/pricing-drift` | Which models have no price, and what that costs you |
 
 ## Architecture
 
@@ -359,6 +361,7 @@ Request → Auth (OIDC/API Key) → Quota Enforcement (policy hierarchy)
 | `AWS_DEFAULT_REGION` | `us-east-1` | AWS region for Bedrock |
 | `AXON_LOAD_DEMO_DATA` | `false` | Load demo projects/users on startup; also enables reading provider keys from `.env` |
 | `AXON_DEV_ENV_FILE` | `.env` | Path to the demo env file (only read when `AXON_LOAD_DEMO_DATA=true`) |
+| `AXON_NO_BROWSER` | `false` | Stop `serve_dashboard.py` opening the pricing-coverage page when models are unpriced (already skipped when stdout is not a tty) |
 | `LLM_ROUTER_DYNAMODB_ENABLED` | `false` | Enable DynamoDB persistence |
 | `AXON_DYNAMODB_TABLE` | `axonllm-state` | DynamoDB table name (must match the provisioned table) |
 | `AXON_SERVER_PORT` | `8000` | Server port |
@@ -405,6 +408,47 @@ endpoint and payload shape itself. Two consequences worth knowing:
   `-pro`-suffixed `model_id` there stays on Chat Completions and will fail if the
   provider does not genuinely serve it.
 
+#### Pricing coverage
+
+Per-token rates live in `config/pricing.yaml`, keyed by provider and then by the
+**provider-side `model_id`** — the id sent to the provider, not the gateway's
+model name:
+
+```yaml
+providers:
+  bedrock:
+    us.anthropic.claude-sonnet-4-20250514-v1:0:
+      prompt_token_cost: 0.003       # per 1,000 tokens
+      completion_token_cost: 0.015
+```
+
+`models.yaml` and `pricing.yaml` are edited independently and nothing tied them
+together, so a model added to one and not the other has two silent consequences:
+
+- **It bills at $0.00.** An unknown provider/model pair costs zero, so the usage
+  record carries no cost and project spend does not move — budget blocks and
+  quota alerts under-count rather than erring safe.
+- **Smart routing scores it on an estimate.** With no rate to read, the cost half
+  of `cost_quality_tradeoff` substitutes the average of the known prices and
+  flags the decision `cost_estimated`.
+
+Neither raises anything, so the gateway reports the gap instead: the startup
+banner names the count and links to **`/admin/pricing-drift`**, which lists every
+unpriced mapping, every pricing entry no model reads (usually the other half of a
+renamed model id), and a paste-ready YAML fragment for the missing ones. Rates in
+the fragment are left at `0.0` deliberately — a guessed price bills silently,
+where a missing one shows up on the page.
+
+The banner is gated on unpriced mappings only, so it clears once every model has
+a rate; leftover entries are listed but not escalated, since they charge nobody
+anything.
+
+`serve_dashboard.py` also opens the page in a browser when it finds a gap, since
+a line in the startup scroll is exactly the kind of warning that gets missed.
+That only happens on an interactive terminal — the same file is the container
+`CMD`, so a piped or containerized run prints the banner and nothing else. Set
+`AXON_NO_BROWSER=true` to suppress it locally too.
+
 ### Ensemble Presets
 
 Define ensemble presets in `config/ensemble.yaml`:
@@ -439,7 +483,7 @@ pip install -e ".[dev]"
 pytest tests/ -x -q
 ```
 
-1360 tests including unit, integration, end-to-end, and Hypothesis property-based tests.
+1422 tests including unit, integration, end-to-end, and Hypothesis property-based tests.
 
 ## Deployment
 

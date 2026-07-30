@@ -57,6 +57,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   platform-injected secrets are never shadowed. Startup logs the variable names
   loaded, never their values.
 
+- **Pricing coverage report, at startup and on `/admin/pricing-drift`.**
+  `config/models.yaml` and `config/pricing.yaml` are edited independently and
+  nothing checked one against the other, so a model added without a price failed
+  twice in silence: `CostTracker.calculate_cost` returns 0.0 for an unknown
+  provider/model pair — so the usage record carries no cost, project spend does
+  not move, and budget blocks and quota alerts under-count rather than erring
+  safe — while smart routing, having no rate to read, scores the model on the
+  average of the known prices. Neither path raises, which is why this is a page
+  rather than a log line: on the current config **33 of 48 provider mappings have
+  no price at all**, across seven providers with no section in the file. The page
+  lists every unpriced mapping, every pricing entry no model reads (usually the
+  other half of a renamed model id), and a paste-ready YAML fragment for the
+  gaps — with rates left at `0.0`, since a guessed price bills silently where a
+  missing one is visible. Rename hints match on the model *family* rather than
+  string similarity: `mistral-large-2402` → `-2407` is a version bump worth
+  reusing a rate for, but `claude-haiku-4-5` → `claude-opus-4` is a different
+  tier at roughly 15× the price, and suggesting it would overcharge and look
+  deliberate. The audit performs the same provider + provider-side-`model_id`
+  lookup the biller does, so a mapping it calls priced is exactly one
+  `CostTracker` can find. Gated on unpriced mappings only, so the banner clears
+  once every model has a rate. The dev server also opens the page when it finds a
+  gap, but only on an interactive terminal — `serve_dashboard.py` is the
+  container `CMD`, so a piped or containerized run prints the banner and nothing
+  else; `AXON_NO_BROWSER=true` suppresses it locally too.
+
 ### Fixed
 - **`gpt-5.5-pro` was configured to route over Chat Completions**, where it can
   only ever 400 — the model was unusable from the day it was added. Fixed by
