@@ -270,6 +270,10 @@ def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComp
         confidence_threshold=leaderboard.config.get("confidence_threshold", 0.3),
         cost_quality_tradeoff=leaderboard.config.get("cost_quality_tradeoff", 0.3),
         default_model=leaderboard.config.get("default_model", "claude-sonnet"),
+        # The same table CostTracker bills from. models.yaml carries no inline
+        # pricing, so without this the cost half of cost_quality_tradeoff has
+        # nothing to read and collapses to a constant.
+        pricing_config=pricing,
     )
 
     # --- Routing / rate limiting / guardrails / cache ---

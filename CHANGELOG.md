@@ -58,6 +58,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   loaded, never their values.
 
 ### Fixed
+- **Smart routing ignored cost entirely — `cost_quality_tradeoff` was inert.**
+  `_get_model_cost` read pricing off the model registry, which is populated only
+  from an inline `pricing:` block in `models.yaml` — and there are none (0 of 48
+  provider entries). `config/pricing.yaml` was loaded, but only into
+  `CostTracker`, never into routing. So every one of the 45 models costed 0.0,
+  the cost term collapsed to `tradeoff × (1 − 0)` — a constant added to every
+  candidate — and ranking became pure benchmark order. The documented 70/30
+  quality-vs-cost blend silently always picked the highest-benchmark model,
+  which is generally the most expensive one: the opposite of the configured
+  intent, with no error to notice it by. Routing now resolves pricing from the
+  same provider/model_id table `CostTracker` bills from, so the cost used to
+  choose a model and the cost actually charged cannot disagree.
+- A missing price is now treated as **unknown rather than free**. With 33 of 48
+  provider entries unpriced, scoring absent pricing as 0.0 would make an
+  unpriced model the cheapest possible candidate — it would win for being
+  *unmeasured*, not for being cheap. On the `general` panel that hands selection
+  to `claude-haiku` (benchmark 78) over `claude-sonnet` (90). Unpriced
+  candidates are scored at the mean of the known costs, excluded from the
+  normalization maximum, and flagged `cost_estimated` in the decision trace.
 - **`gpt-5.5-pro` was configured to route over Chat Completions**, where it can
   only ever 400 — the model was unusable from the day it was added. Fixed by
   implementing the Responses API path above rather than deleting the config entry,
