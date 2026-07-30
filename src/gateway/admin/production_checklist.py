@@ -11,7 +11,9 @@ wrong in a way no request surfaces:
 * ``AXON_AUTH_MODE=LOG_ONLY`` admits every unauthenticated request while logging
   that it would have denied them;
 * demo data seeded in production shows fabricated spend on the real dashboard;
-* DynamoDB disabled or unreachable drops every write, by design, without raising.
+* DynamoDB disabled or unreachable drops every write, by design, without raising;
+* an API key's scopes look like a capability boundary but are never checked on
+  ``/v1/*``, and a key issued without ``expires_at`` is valid until revoked.
 
 None of these raise, so none of them appear in a log an operator greps after an
 incident. A checklist is the format that fits: the question being answered is not
@@ -87,6 +89,18 @@ class PersistenceProbe(Protocol):
     def enabled(self) -> bool: ...
 
     async def health_status(self) -> dict: ...
+
+
+@runtime_checkable
+class KeyProbe(Protocol):
+    """The part of APIKeyService this module needs: a per-project key listing.
+
+    A Protocol for the same reason as :class:`PersistenceProbe` — the checklist
+    reports on key configuration and has no business holding something that can
+    mint or revoke one.
+    """
+
+    async def list_keys(self, project_id: str) -> list: ...
 
 
 @dataclass(frozen=True)
@@ -424,6 +438,124 @@ def check_auth_mode(app_config: AppConfig) -> CheckResult:
     )
 
 
+async def check_api_keys(
+    keys: KeyProbe | None,
+    project_ids: list[str],
+) -> CheckResult:
+    """Issued API keys are scoped and expire.
+
+    Two properties of the key model that fail quietly, both verified against a
+    live ENFORCE gateway:
+
+    1. **Scopes are not enforced on the data plane.** ``AuthMiddleware`` puts
+       ``key_record.scopes`` on the RequestContext, and ``admin_rbac`` reads them
+       for ``/admin/*`` — but nothing consults them on ``/v1/*``. A key issued
+       ``["models:read"]``, and a key issued ``[]``, both invoke
+       ``/v1/chat/completions`` and spend money. What actually constrains a key
+       is its project's ``allowed_models`` and budget, so a scope string reads
+       like a capability boundary while being documentation.
+
+    2. **``expires_at`` is optional and defaults to none.** ``issue_key`` takes
+       ``expires_at: datetime | None = None`` and the admin route only sets it
+       when the caller supplies one, so the default key is valid forever. There
+       is no maximum age and no rotation reminder: revocation is the only way a
+       key ever stops working. ``rotate_key`` copies the old ``expires_at``
+       through, so rotating a non-expiring key yields another one.
+
+    WARN, not FAIL. Neither is a misconfiguration the operator can fix by
+    flipping a setting — there is no "enforce scopes" flag to set — and a key
+    that never expires is a defensible choice for a service account with a
+    revocation process. The value is in saying so before an incident, rather
+    than discovering it while trying to work out what a leaked key could reach.
+    """
+    if keys is None:
+        return CheckResult(
+            key="api_keys",
+            title="Issued API keys are scoped and expire",
+            status=Status.UNKNOWN,
+            summary="No API key service available to inspect.",
+            detail=(
+                "The checklist could not enumerate issued keys, so their scopes "
+                "and expiry are unverified — not confirmed absent."
+            ),
+            fix="Pass the gateway's APIKeyService to run_checklist.",
+        )
+
+    try:
+        found = []
+        for pid in project_ids:
+            found.extend(await keys.list_keys(pid))
+    except Exception as exc:
+        return CheckResult(
+            key="api_keys",
+            title="Issued API keys are scoped and expire",
+            status=Status.UNKNOWN,
+            summary=f"Could not list API keys ({type(exc).__name__}).",
+            fix="Check persistence connectivity and credentials.",
+        )
+
+    live = [k for k in found if not getattr(k, "revoked", False)]
+    if not live:
+        return CheckResult(
+            key="api_keys",
+            title="Issued API keys are scoped and expire",
+            status=Status.PASS,
+            summary=(
+                f"No live API keys across {len(project_ids)} "
+                f"project{'s' if len(project_ids) != 1 else ''}."
+            ),
+        )
+
+    never_expire = [k for k in live if getattr(k, "expires_at", None) is None]
+
+    rows: list[tuple[str, str]] = []
+    for k in live:
+        scopes = getattr(k, "scopes", []) or []
+        expiry = getattr(k, "expires_at", None)
+        rows.append((
+            f"{getattr(k, 'project_id', '?')} / {getattr(k, 'name', '?')}",
+            f"scopes={', '.join(scopes) if scopes else 'none'} · "
+            f"expires={expiry.date().isoformat() if expiry else 'never'}",
+        ))
+
+    n = len(live)
+    detail = (
+        "Scopes are not enforced on /v1/*. A key's scopes reach the "
+        "RequestContext and gate /admin/* through admin RBAC, but no check "
+        "consults them on the chat path — a key scoped 'models:read', or "
+        "scoped to nothing at all, can still invoke completions and spend "
+        "against the project budget. What actually limits a key is its "
+        "project's allowed_models and budget_limit, so treat the project as "
+        "the security boundary and the scope string as a label."
+    )
+    if never_expire:
+        detail += (
+            f" {len(never_expire)} of {n} live key"
+            f"{'s' if n != 1 else ''} never expire: expires_at defaults to "
+            "none, there is no maximum age, and rotate_key copies the old "
+            "value through — so revocation is the only thing that ever stops "
+            "them."
+        )
+
+    return CheckResult(
+        key="api_keys",
+        title="Issued API keys are scoped and expire",
+        status=Status.WARN,
+        summary=(
+            f"{n} live key{'s' if n != 1 else ''}; "
+            f"{len(never_expire)} without an expiry. "
+            "Scopes do not restrict /v1/* access."
+        ),
+        detail=detail,
+        fix=(
+            "Set expires_at when issuing, and rely on per-project "
+            "allowed_models and budget_limit — not scopes — to bound what a "
+            "key can reach."
+        ),
+        rows=rows,
+    )
+
+
 def check_demo_data(app_config: AppConfig, environ: dict[str, str]) -> CheckResult:
     """Demo seed data is not loaded.
 
@@ -555,6 +687,8 @@ async def run_checklist(
     pricing_config: dict[str, dict[str, TokenPricing]],
     provider_configs: dict[str, ProviderConfig],
     persistence: PersistenceProbe | None = None,
+    api_key_service: KeyProbe | None = None,
+    project_ids: list[str] | None = None,
     environ: dict[str, str] | None = None,
     timeout: float = 10.0,
 ) -> ChecklistReport:
@@ -589,6 +723,7 @@ async def run_checklist(
         check_pricing(drift),
         check_model_ids(availability),
         await check_persistence(persistence),
+        await check_api_keys(api_key_service, project_ids or []),
     ]
 
     # Worst first, stable within a severity so the order does not shift between
