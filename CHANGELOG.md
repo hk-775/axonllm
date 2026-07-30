@@ -105,20 +105,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     prices a request from token counts alone and has no context tier to switch
     on, so encoding the higher rate would overcharge every ordinary request.
 
-  **13 mappings are left deliberately unpriced**, because the provider publishes
-  no rate for the id being sent — these are stale *model ids* rather than missing
-  prices, and the fix belongs in `models.yaml`:
-  `together` (`deepseek-ai/DeepSeek-R1`, and the `Llama-3.3-70B-Instruct-Turbo`
-  and `Qwen2.5-72B-Instruct-Turbo` ids — the page now lists DeepSeek V4 Pro,
-  a base "Llama 3.3 70B" and Qwen3.x, with no Turbo tier priced separately),
-  `xai` (`grok-3`, `grok-3-mini`; the list covers only grok-4.x), `fireworks`
-  (no per-model serverless table at all), `google_ai`
-  (`gemini-3-pro-preview`, replaced by 3.1), and the five `bedrock-mantle`
-  `openai.gpt-5.x` ids (three appear only in GovCloud at premium rates, two in no
-  region). Filling these with a near-miss id's rate would bill confidently wrong
-  for a model that may not even resolve, and would clear the drift page's warning
-  while making the underlying problem invisible. Leaving them listed keeps both
-  visible.
+  13 mappings were left unpriced at this point on the reasoning that their
+  providers publish no rate for the id being sent. Checking each against the
+  provider's live API rather than its pricing page showed that reasoning was
+  wrong for five of them — see the entry below.
+
+- **Stale and unroutable provider model ids, found by probing the live APIs.**
+  A pricing page is a marketing document and a model list is not a guarantee of
+  capacity, so every id `models.yaml` and the adapter `_MODELS` lists advertise
+  was tested with a real completion. Coverage rose 73% → 84% as a result, but the
+  more useful finding is that "absent from the price list" turned out to predict
+  almost nothing about whether an id works:
+  - **`grok-3` and `grok-3-mini` answered 200 — and xAI resolves both to
+    `grok-4.3`**, which it reports in the response's `model` field. Undocumented
+    aliases: absent from `/v1/language-models` and from the price list, so
+    unpriceable, so every Grok request billed **$0.00 while being served by a
+    model that costs $1.25/$2.50 per MTok**. Nothing failed, which is why it
+    survived — a 404 would have been caught the first time anyone tried it. Both
+    are replaced by the real tiers, `grok-4.3` and `grok-4.5`, now priced from
+    xAI's own API (which reports in hundred-thousandths of a cent per token —
+    calibrated against the published page rather than assumed).
+  - **`grok-2-vision-1212`** was advertised in `xai_adapter._MODELS` and is
+    simply gone: 400 `Model not found`.
+  - **Four of Together's five advertised ids need a dedicated endpoint.**
+    `DeepSeek-R1`, `Qwen2.5-72B-Instruct-Turbo`, `Llama-4-Maverick-FP8` and
+    `Mistral-Small-24B` all return 400 `Unable to access non-serverless model`.
+    That is a provisioning error, not a wrong id, so no rename fixes it — and it
+    is not fixable by picking a newer snapshot either: R1-0528, V3.1, Qwen2-72B,
+    Qwen3-Next-80B, Qwen3.5-397B and QwQ-32B are all equally unavailable. The
+    Qwen3.x `-Plus`/`-Max` tier *is* serverless but **streaming-only** (400 `This
+    model only supports streaming`), which this gateway's non-streaming path
+    cannot use. Both files now list only ids confirmed by a live non-streaming
+    completion: Llama-3.3-70B-Turbo, DeepSeek-V4-Pro, Qwen3.5-9B and
+    gpt-oss-120b, all priced from Together's own API.
+  - **`gemini-3-pro-preview` is still served** — listed by `/v1beta/models` with
+    `generateContent` support — despite being off the Gemini price list. So it is
+    a working model with no published rate, the one case neither file can fix: the
+    id is right and there is no number to put. Kept and left unpriced; the earlier
+    claim that 3.1 Pro Preview replaced it was wrong.
+
+  **8 mappings remain unpriced, all for reasons that survive checking:** the five
+  `bedrock-mantle` `openai.gpt-5.x` ids (`gpt-5.4`, `-5.6-luna` and `-5.6-terra`
+  are published only in `us-gov-east-1`/`us-gov-west-1` at $3.30/$19.80 per MTok;
+  `gpt-5.5` and `-5.6-sol` appear under none of the four Bedrock service codes),
+  `gemini-3-pro-preview` above, and the two `fireworks` ids — which are the one
+  honest unknown here, since there is no `FIREWORKS_API_KEY` in the environment
+  and the models endpoint requires one, so they could not be probed either way.
+  They are kept rather than removed on that basis: "could not check" is not
+  evidence an id is wrong, and deleting a working model is worse than leaving one
+  on the drift report. Fireworks stays unpriced for the same reason a guess would
+  be tempting — `gpt-oss-120b` is $0.15/$0.60 on both Bedrock and Together, which
+  makes a third identical value look inevitable rather than assumed.
 
 ### Fixed
 - **Claude Opus 4.8 was billed at 3× the published rate.** The `anthropic`

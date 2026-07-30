@@ -286,20 +286,27 @@ models:
     weight: 1.0
     fallback_order: 0
 # --- xAI (Grok) ---
-- name: grok-3
-  description: Grok 3
+# grok-3 and grok-3-mini both still answer 200, so nothing looked broken — but
+# xAI resolves both to grok-4.3 and says so in the response's `model` field.
+# They are undocumented aliases: absent from /v1/language-models, absent from
+# the price list, and therefore unpriceable, which meant every Grok request
+# billed $0.00 while being served by a model that costs $1.25/$2.50 per MTok.
+# The two real tiers are named directly instead. There is no "mini" in the
+# 4.x line; 4.3 is the cheaper of the two.
+- name: grok-4.3
+  description: Grok 4.3
   routing_strategy: round-robin
   providers:
   - provider: xai
-    model_id: grok-3
+    model_id: grok-4.3
     weight: 1.0
     fallback_order: 0
-- name: grok-3-mini
-  description: Grok 3 Mini
+- name: grok-4.5
+  description: Grok 4.5
   routing_strategy: round-robin
   providers:
   - provider: xai
-    model_id: grok-3-mini
+    model_id: grok-4.5
     weight: 1.0
     fallback_order: 0
 # --- Groq (fast inference) ---
@@ -320,6 +327,12 @@ models:
     weight: 1.0
     fallback_order: 0
 # --- Together AI ---
+# Together lists ~163 chat models but serves only a handful over the shared
+# serverless endpoint; the rest return 400 "Unable to access non-serverless
+# model … create and start a new dedicated endpoint". That is a per-account
+# provisioning error, not a wrong id, so it cannot be fixed by renaming — the
+# model has to be one Together actually hosts serverlessly. Each id below was
+# confirmed with a live non-streaming completion.
 - name: together-llama-3.3-70b
   description: Llama 3.3 70B Turbo (Together)
   routing_strategy: round-robin
@@ -328,23 +341,47 @@ models:
     model_id: meta-llama/Llama-3.3-70B-Instruct-Turbo
     weight: 1.0
     fallback_order: 0
-- name: together-deepseek-r1
-  description: DeepSeek R1 (Together)
+# Was deepseek-ai/DeepSeek-R1, which is not serverless — nor is R1-0528, nor
+# V3.1. V4 Pro is the DeepSeek generation Together serves on demand.
+- name: together-deepseek-v4
+  description: DeepSeek V4 Pro (Together)
   routing_strategy: round-robin
   providers:
   - provider: together
-    model_id: deepseek-ai/DeepSeek-R1
+    model_id: deepseek-ai/DeepSeek-V4-Pro
     weight: 1.0
     fallback_order: 0
-- name: together-qwen-72b
-  description: Qwen 2.5 72B (Together)
+# Was Qwen/Qwen2.5-72B-Instruct-Turbo, also non-serverless. No 72B-class Qwen
+# is: 2-72B, 2.5-72B, Qwen3-Next-80B, Qwen3.5-397B and QwQ-32B all refuse.
+# The Qwen3.x -Plus/-Max tier is serverless but streaming-only (400 'This model
+# only supports streaming'), which this gateway's non-streaming path cannot use,
+# so the largest usable Qwen is 3.5-9B.
+- name: together-qwen-3.5-9b
+  description: Qwen 3.5 9B (Together)
   routing_strategy: round-robin
   providers:
   - provider: together
-    model_id: Qwen/Qwen2.5-72B-Instruct-Turbo
+    model_id: Qwen/Qwen3.5-9B
+    weight: 1.0
+    fallback_order: 0
+# Same open-weight model as the bedrock and bedrock-mantle gpt-oss-120b entries,
+# at the same published rate ($0.15/$0.60 per MTok) — a genuine second source for
+# it rather than a duplicate, and the adapter already advertised it.
+- name: together-gpt-oss-120b
+  description: GPT-OSS 120B (Together)
+  routing_strategy: round-robin
+  providers:
+  - provider: together
+    model_id: openai/gpt-oss-120b
     weight: 1.0
     fallback_order: 0
 # --- Fireworks AI ---
+# Unverified, unlike every other entry here: there is no FIREWORKS_API_KEY in
+# the environment, and /inference/v1/models requires one (401), so neither id
+# could be confirmed against the live API. Fireworks also publishes no per-model
+# serverless price table, so these stay unpriced. Left in place rather than
+# removed on that basis — "we could not check" is not evidence the ids are wrong,
+# and deleting a working model is worse than leaving one on the drift report.
 - name: fireworks-deepseek-v4
   description: DeepSeek V4 Pro (Fireworks)
   routing_strategy: round-robin

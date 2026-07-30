@@ -223,9 +223,13 @@ providers:
     gemini-3.1-pro-preview:
       prompt_token_cost: 0.002
       completion_token_cost: 0.012
-    # gemini-3-pro-preview is no longer on the Gemini API price list — 3.1 Pro
-    # Preview replaced it. Left unpriced: the models.yaml entry is the stale
-    # half of that pair, and pricing it here would hide that.
+    # gemini-3-pro-preview is off the price list but *not* retired: it is still
+    # served, and still listed by GET /v1beta/models with generateContent
+    # support. So it is a working model Google no longer publishes a rate for,
+    # which is the one case nothing can fix — the id is right, and there is no
+    # number to put here. Left unpriced rather than filled from 3.1 Pro Preview:
+    # a preview model's rate is not inheritable from its successor, and this is
+    # exactly the case the drift report should keep raising.
 
   groq:
     llama-3.1-8b-instant:
@@ -245,18 +249,45 @@ providers:
       prompt_token_cost: 0.002
       completion_token_cost: 0.008
 
-  # No section for fireworks, together or xai. Every model models.yaml maps to
-  # them is absent from that provider's published price list:
-  #   fireworks  deepseek-v4-pro, gpt-oss-120b — the pricing page covers
-  #              embeddings and training only, with no per-model serverless table
-  #   together   deepseek-ai/DeepSeek-R1, meta-llama/Llama-3.3-70B-Instruct-Turbo,
-  #              Qwen/Qwen2.5-72B-Instruct-Turbo. The page lists "DeepSeek V4 Pro"
-  #              ($1.74/$3.48), "Llama 3.3 70B" ($1.04/$1.04) and Qwen3.x — the
-  #              R1 and Qwen2.5 generations are gone, and the -Turbo variants are
-  #              no longer priced separately from the base id
-  #   xai        grok-3, grok-3-mini; the price list covers only grok-4.x
-  # These are stale model ids as much as missing prices, so the fix belongs in
-  # models.yaml, not here. Pricing a near-miss id would bill confidently wrong
-  # for a model that may not even resolve — "Llama 3.3 70B" is plausibly the same
-  # weights as the -Turbo id, but Turbo is a distinct serving tier and was
-  # separately priced when it existed.
+  # Rates from xAI's own GET /v1/language-models, which reports prices in
+  # hundred-thousandths of a cent per token — 12500 is $1.25 per MTok. Calibrated
+  # against docs.x.ai/docs/models, which prints grok-4.3 at $1.25/$2.50 and
+  # grok-4.5 at $2.00/$6.00, so the divisor is 10,000.
+  #
+  # Both rates double above 200k input tokens (grok-4.3 → $2.50/$5.00). The
+  # sub-threshold rate is used; see the header note on context tiers.
+  xai:
+    grok-4.3:
+      prompt_token_cost: 0.00125
+      completion_token_cost: 0.0025
+      cached_token_cost: 0.0002
+    grok-4.5:
+      prompt_token_cost: 0.002
+      completion_token_cost: 0.006
+      cached_token_cost: 0.0003
+
+  # Rates from the `pricing` block on each model in Together's GET /v1/models,
+  # in USD per 1M tokens. Only serverless-servable ids are listed — see the note
+  # in models.yaml on why the rest cannot be used regardless of price.
+  together:
+    meta-llama/Llama-3.3-70B-Instruct-Turbo:
+      prompt_token_cost: 0.00104
+      completion_token_cost: 0.00104
+    deepseek-ai/DeepSeek-V4-Pro:
+      prompt_token_cost: 0.00174
+      completion_token_cost: 0.00348
+      cached_token_cost: 0.0002
+    Qwen/Qwen3.5-9B:
+      prompt_token_cost: 0.00017
+      completion_token_cost: 0.00025
+    openai/gpt-oss-120b:
+      prompt_token_cost: 0.00015
+      completion_token_cost: 0.0006
+
+  # No section for fireworks. Its two mappings could not be verified at all —
+  # there is no FIREWORKS_API_KEY in the environment and the models endpoint
+  # requires one (401) — and Fireworks publishes no per-model serverless price
+  # table to fall back on. Guessing from another provider's rate for the same
+  # open-weight model would be a fabrication with a plausible shape: gpt-oss-120b
+  # is $0.15/$0.60 on both Bedrock and Together, which makes a third value look
+  # inevitable rather than assumed. Left on the drift report instead.
