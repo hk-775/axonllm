@@ -1494,6 +1494,27 @@ class AdminAPI:
         )
         return HTMLResponse(html)
 
+    async def landing_page(self, request: Request) -> HTMLResponse:
+        """Serve the marketing landing page at the gateway root.
+
+        Read from disk per request rather than cached, matching `dashboard` and
+        `architecture` — editing site/index.html and reloading shows the change
+        without a restart, which is the whole point of a single-file page.
+
+        site/ is outside the installed package and is not in package-data, so a
+        pip-installed gateway will not have it. That is why this 404s with an
+        explanation instead of raising: a missing landing page must not make the
+        root path a 500 on an otherwise healthy deployment.
+        """
+        index_path = _PROJECT_ROOT / "site" / "index.html"
+        if not index_path.exists():
+            return HTMLResponse(
+                "<h1>AxonLLM</h1><p>Landing page not found. The gateway is "
+                'running — see <a href="/admin/dashboard">the dashboard</a>.</p>',
+                status_code=404,
+            )
+        return HTMLResponse(index_path.read_text(encoding="utf-8"))
+
     async def pricing_drift(self, request: Request) -> HTMLResponse:
         """Report provider mappings with no price, and prices nothing uses.
 
@@ -1549,6 +1570,7 @@ def _parse_datetime(value: str | None) -> datetime | None:
 def create_admin_routes(admin_api: AdminAPI) -> list[Route]:
     """Return Starlette Route objects for the admin API."""
     return [
+        Route("/", admin_api.landing_page, methods=["GET"]),
         Route("/admin/dashboard", admin_api.dashboard, methods=["GET"]),
         Route("/admin/static/{path:path}", admin_api.static_asset, methods=["GET"]),
         Route("/admin/architecture", admin_api.architecture, methods=["GET"]),

@@ -26,6 +26,9 @@ logger = logging.getLogger(__name__)
 
 PUBLIC_PATHS = frozenset({
     "/health",
+    # The landing page. Anonymous by definition — gating it behind auth would
+    # mean only signed-in users could read the pitch.
+    "/",
     "/admin/dashboard",
     "/chat",
     "/playground",

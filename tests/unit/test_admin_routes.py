@@ -127,9 +127,20 @@ def test_create_admin_routes_returns_routes(admin_api):
     """Verify create_admin_routes returns a list of Route objects."""
     routes = create_admin_routes(admin_api)
     assert isinstance(routes, list)
-    assert len(routes) == 33
 
     paths = [r.path for r in routes]
+    # No hardcoded count: the number only ever changed because someone added a
+    # route, so asserting it fails every legitimate addition while catching
+    # nothing this doesn't catch better. The real bug is a duplicate
+    # (path, method) — Starlette matches the first and silently ignores the
+    # rest, so a route can be registered and never serve. Keyed on the pair,
+    # not the path: GET and POST on /admin/projects are two different
+    # endpoints and share a path by design.
+    keys = [(r.path, m) for r in routes for m in sorted(r.methods or ())]
+    assert len(keys) == len(set(keys)), (
+        f"duplicate (path, method): {sorted({k for k in keys if keys.count(k) > 1})}"
+    )
+    assert "/" in paths
     assert "/admin/dashboard" in paths
     assert "/admin/pricing-drift" in paths
     assert "/admin/production-checklist" in paths
@@ -770,3 +781,62 @@ class TestStaticAssets:
         # Escape attempt must not read files outside the static dir.
         assert client.get("/admin/static/..%2f..%2froutes.py").status_code == 404
         assert client.get("/admin/static/../routes.py").status_code == 404
+
+
+# ── Landing page at the gateway root ────────────────────────────────
+
+class TestLandingPage:
+    """GET / — the marketing page, served from the same origin as the dashboard.
+
+    Same-origin matters: the page's Dashboard buttons are relative links, so
+    they resolve against whatever host and port the gateway runs on. Serving
+    the page from a separate static host would require hardcoding a gateway
+    URL into it, which is wrong for every self-hosted deployment.
+    """
+
+    def test_root_serves_the_landing_page(self, client):
+        r = client.get("/")
+        assert r.status_code == 200
+        assert "text/html" in r.headers["content-type"]
+        assert "The Neural Control Plane" in r.text
+
+    def test_the_dashboard_links_are_relative(self, client):
+        """A hardcoded host here would break every deployment but localhost."""
+        r = client.get("/")
+        assert 'href="/admin/dashboard"' in r.text
+        assert "localhost:8000/admin/dashboard" not in r.text
+
+    def test_the_link_target_actually_resolves(self, client):
+        """The pair of routes, not just the href.
+
+        A relative link is only correct if the path it names is served by the
+        same app — this fails if the landing page ships without the dashboard
+        route, which is exactly the mistake the relative link invites.
+        """
+        assert client.get(client.get("/").url.path).status_code == 200
+        assert client.get("/admin/dashboard").status_code == 200
+
+    def test_a_missing_site_dir_404s_rather_than_raising(self, monkeypatch):
+        """site/ is outside the package and not in package-data.
+
+        A pip-installed gateway has no site/index.html. Reading it
+        unconditionally would turn the root path into a 500 on a deployment
+        that is otherwise completely healthy.
+        """
+        import pathlib
+
+        from src.gateway.admin import routes as routes_mod
+
+        monkeypatch.setattr(
+            routes_mod, "_PROJECT_ROOT", pathlib.Path("/nonexistent-axon-root")
+        )
+        api = AdminAPI(
+            cost_tracker=CostTracker(pricing_config={}),
+            model_registry=ModelRegistry(),
+            health_tracker=ProviderHealthTracker(),
+        )
+        with TestClient(_make_app(api)) as c:
+            r = c.get("/")
+            assert r.status_code == 404
+            # Still points somewhere useful — the gateway is up, after all.
+            assert "/admin/dashboard" in r.text
