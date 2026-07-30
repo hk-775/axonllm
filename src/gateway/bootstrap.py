@@ -564,11 +564,15 @@ def _apply_seed_data(
 
     # Usage seeds
     async def _seed_usage():
-        for s in seed.usage_seeds:
+        now = datetime.now(timezone.utc)
+        for i, s in enumerate(seed.usage_seeds):
             pt = s.get("prompt_tokens", 0)
             ct = s.get("completion_tokens", 0)
             await cost_tracker.record_usage(UsageRecord(
-                request_id=f"req-{s['project_id']}-{s['user_id']}-{s['provider']}",
+                # Indexed, because project+user+provider is not unique: several
+                # seeded calls share all three, and identical request ids read as
+                # one request retried rather than a populated trace log.
+                request_id=f"req-{i:04d}-{s['project_id']}-{s['user_id']}",
                 project_id=s["project_id"],
                 user_id=s["user_id"],
                 provider=s["provider"],
@@ -577,7 +581,13 @@ def _apply_seed_data(
                 completion_tokens=ct,
                 total_tokens=pt + ct,
                 cost=s.get("cost", 0.0),
-                timestamp=datetime.now(timezone.utc),
+                # Spread over the window the seed asks for. Stamping every record
+                # at import time puts the whole trace log on one clock minute,
+                # which is not what a live gateway looks like.
+                timestamp=now - timedelta(minutes=float(s.get("minutes_ago", 0))),
+                # The dashboard shows an average latency tile; unset it reads
+                # 0ms, i.e. a gateway that answered instantly.
+                latency_ms=float(s.get("latency_ms", 0.0)),
                 cached_tokens=s.get("cached_tokens", 0),
                 cache_creation_tokens=s.get("cache_creation_tokens", 0),
             ))

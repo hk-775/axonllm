@@ -105,3 +105,6 @@ infra/outputs.json
 # Local data
 *.db
 *.sqlite3
+
+# Demo recording artifacts — the MP4 is multi-megabyte binary; keep it out of history.
+demo/*.mp4
