@@ -182,8 +182,12 @@ class DynamoPersistence:
             "cost": record.cost,
             "timestamp": ts_iso,
             "cached_tokens": record.cached_tokens,
+            "cache_creation_tokens": record.cache_creation_tokens,
             "image_tokens": record.image_tokens,
             "reasoning_tokens": record.reasoning_tokens,
+            "latency_ms": record.latency_ms,
+            "status": record.status,
+            "routing_strategy": record.routing_strategy,
             "task_type": record.task_type,
         }
 
@@ -202,8 +206,21 @@ class DynamoPersistence:
             cost=float(item["cost"]),
             timestamp=datetime.fromisoformat(item["timestamp"]),
             cached_tokens=int(item.get("cached_tokens", 0)),
+            cache_creation_tokens=int(item.get("cache_creation_tokens", 0)),
             image_tokens=int(item.get("image_tokens", 0)),
             reasoning_tokens=int(item.get("reasoning_tokens", 0)),
+            # float() is not redundant: _convert_decimals_to_native narrows a
+            # whole-valued Decimal to int, so a latency that happens to land on
+            # 1234.0 comes back as an int and the field's declared type silently
+            # stops holding.
+            latency_ms=float(item.get("latency_ms", 0.0)),
+            # "" for a row written before this field existed, NOT "success" —
+            # the dataclass default. Defaulting an unknown row to "success"
+            # would manufacture an error rate: every pre-migration record would
+            # assert it succeeded, and the one thing a reader wants from this
+            # field is which requests failed.
+            status=str(item.get("status", "")),
+            routing_strategy=str(item.get("routing_strategy", "")),
             # Absent on every row written before this field existed. Defaulting to
             # "" rather than "general" is the whole point: an unclassified record
             # must not be counted as a classification result.
