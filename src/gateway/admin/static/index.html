@@ -2830,6 +2830,7 @@
         case 'sandbox': content = <SandboxPage />; break;
         case 'architecture': content = <ReportFrame src="/admin/architecture" title="Architecture" subtitle="How a request moves through the gateway" />; break;
         case 'pricing-drift': content = <ReportFrame src="/admin/pricing-drift" title="Pricing Coverage" subtitle="Provider mappings with no price, and prices nothing uses" />; break;
+        case 'catalog-drift': content = <ReportFrame src="/admin/catalog-drift" title="Catalogue Coverage" subtitle="Declared, described, and observed models, and where the three disagree" />; break;
         case 'production-checklist': content = <ReportFrame src="/admin/production-checklist" title="Production Readiness" subtitle="States this deployment runs in without complaint" />; break;
         default: content = <OverviewPage />;
       }
@@ -2863,6 +2864,7 @@
              the sidebar survives the click and stays highlighted. */
           { key: 'architecture', icon: '🗺', label: 'Architecture' },
           { key: 'pricing-drift', icon: '💲', label: 'Pricing' },
+          { key: 'catalog-drift', icon: '📇', label: 'Catalogue' },
           { key: 'production-checklist', icon: '✅', label: 'Readiness' },
         ]},
       ];
