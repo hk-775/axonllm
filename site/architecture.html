@@ -331,6 +331,169 @@
             transition: width 0.15s ease-out;
         }
 
+        /* --- Narration ----------------------------------------------------- */
+
+        /* Revealed by JS once the narration manifest has actually loaded. A play
+           button that is visible before its track is known is a control that can
+           only disappoint — and site/narration/ is absent on any deploy made
+           before it existed, so this has to fail by not appearing. */
+        .narration[hidden] { display: none; }
+
+        .narration {
+            display: flex;
+            align-items: center;
+            gap: 14px;
+            padding: 12px 20px;
+            border-bottom: 1px solid var(--border-soft);
+            background: linear-gradient(90deg, var(--accent-soft), var(--surface) 70%);
+        }
+
+        .narr-play {
+            appearance: none;
+            font: inherit;
+            flex-shrink: 0;
+            width: 38px;
+            height: 38px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            border: none;
+            border-radius: 50%;
+            background: var(--accent);
+            color: #fff;
+            cursor: pointer;
+            transition: background 0.2s, transform 0.1s;
+        }
+
+        .narr-play:hover { background: var(--accent-hover); }
+        .narr-play:active { transform: scale(0.94); }
+        .narr-play svg { width: 16px; height: 16px; }
+        /* Two glyphs, one swapped out by [data-state]. Toggling an SVG path's
+           `d` attribute from JS would put the icon shapes in the script, where
+           nobody looks for them. */
+        .narration[data-state="playing"] .narr-icon-play,
+        .narration:not([data-state="playing"]) .narr-icon-pause { display: none; }
+
+        .narr-body { flex: 1; min-width: 0; }
+
+        .narr-head {
+            display: flex;
+            align-items: baseline;
+            gap: 8px;
+            margin-bottom: 5px;
+        }
+
+        .narr-title {
+            font-size: 0.82rem;
+            font-weight: 600;
+            color: var(--text);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .narr-time {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.72rem;
+            color: var(--text-dim);
+            flex-shrink: 0;
+            margin-left: auto;
+            font-variant-numeric: tabular-nums;
+        }
+
+        /* role="slider", so it must take focus and show it. 6px tall with a 9px
+           hit area courtesy of the padding on .narr-track-hit below. */
+        .narr-track {
+            position: relative;
+            height: 6px;
+            border-radius: 3px;
+            background: var(--accent-ring);
+            cursor: pointer;
+        }
+
+        .narr-track:focus-visible {
+            outline: 2px solid var(--accent);
+            outline-offset: 3px;
+        }
+
+        .narr-fill {
+            position: absolute;
+            left: 0; top: 0; bottom: 0;
+            width: 0;
+            border-radius: 3px;
+            background: var(--accent);
+        }
+
+        /* The knob is inside the fill's right edge rather than positioned
+           separately, so there is one number driving both and they cannot
+           disagree mid-drag. */
+        .narr-fill::after {
+            content: '';
+            position: absolute;
+            right: -5px;
+            top: 50%;
+            width: 10px;
+            height: 10px;
+            margin-top: -5px;
+            border-radius: 50%;
+            background: var(--accent);
+            box-shadow: 0 0 0 3px var(--surface);
+        }
+
+        .narr-aside {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            flex-shrink: 0;
+        }
+
+        .narr-voice {
+            font-size: 0.7rem;
+            color: var(--text-dim);
+            white-space: nowrap;
+        }
+
+        .narr-transcript-btn {
+            appearance: none;
+            font: inherit;
+            font-size: 0.72rem;
+            font-weight: 600;
+            padding: 5px 11px;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 999px;
+            color: var(--text-mid);
+            cursor: pointer;
+            white-space: nowrap;
+            transition: border-color 0.2s, color 0.2s;
+        }
+
+        .narr-transcript-btn:hover { border-color: var(--accent); color: var(--accent); }
+        .narr-transcript-btn[aria-expanded="true"] {
+            background: var(--accent-soft);
+            border-color: var(--accent);
+            color: var(--accent);
+        }
+
+        /* Two elements rather than one: the tinted band has to span the full
+           stage width to read as a row of it, and the prose has to stop around
+           78ch to stay readable. Put both on one element and max-width clips
+           the background too, leaving a half-filled stripe. */
+        .narr-transcript {
+            padding: 14px 20px 16px;
+            border-bottom: 1px solid var(--border-soft);
+            background: var(--bg);
+        }
+
+        .narr-transcript[hidden] { display: none; }
+
+        .narr-transcript p {
+            max-width: 78ch;
+            font-size: 0.86rem;
+            line-height: 1.7;
+            color: var(--text-mid);
+        }
+
         /* --- Prose sections ------------------------------------------------ */
 
         .arch-section { padding: 0 0 56px; }
@@ -473,6 +636,12 @@
                to read. Better to start it at a legible scale and let it be
                panned, which is what the hint above the canvas says to do. */
             .panel { padding: 12px; }
+
+            /* The engine credit is the only thing here that isn't a control;
+               drop it first so play, scrub and transcript keep one row. */
+            .narration { padding: 10px 14px; gap: 10px; }
+            .narr-voice { display: none; }
+            .narr-transcript { padding: 12px 14px 14px; }
         }
 
         /* Pan-and-zoom is a pointer affordance. Without it the diagram is a
@@ -529,7 +698,8 @@
             Three views of the same system: the AWS infrastructure it deploys onto, the
             16-step pipeline every request passes through, and the component graph behind
             it. All three are generated from the source, so they describe what the code
-            does rather than what it was meant to do.
+            does rather than what it was meant to do. Each one comes with a narrated
+            walkthrough — press play above the diagram.
         </p>
         <div class="page-actions">
             <a href="architecture.drawio" download class="ghost-link">
@@ -578,6 +748,38 @@
                         <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8V5a1 1 0 011-1h3M20 8V5a1 1 0 00-1-1h-3M4 16v3a1 1 0 001 1h3M20 16v3a1 1 0 01-1 1h-3"/></svg>
                     </button>
                 </div>
+            </div>
+
+            <!-- hidden until the manifest loads: see .narration in the CSS -->
+            <div class="narration" id="narration" data-state="paused" hidden>
+                <button class="narr-play" id="narr-play" aria-label="Play narration">
+                    <svg class="narr-icon-play" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>
+                    <svg class="narr-icon-pause" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M6 5h4v14H6zM14 5h4v14h-4z"/></svg>
+                </button>
+                <div class="narr-body">
+                    <div class="narr-head">
+                        <span class="narr-title" id="narr-title">Narrated walkthrough</span>
+                        <span class="narr-time" id="narr-time">0:00 / 0:00</span>
+                    </div>
+                    <!-- A div with role="slider" rather than <input type="range">:
+                         the range thumb cannot be styled consistently across
+                         browsers without vendor pseudo-elements, and the keyboard
+                         contract (arrows, Home/End) is short enough to implement. -->
+                    <div class="narr-track" id="narr-track" role="slider" tabindex="0"
+                         aria-label="Narration position"
+                         aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"
+                         aria-valuetext="0 percent">
+                        <div class="narr-fill" id="narr-fill"></div>
+                    </div>
+                </div>
+                <div class="narr-aside">
+                    <span class="narr-voice">Amazon Polly &middot; Matthew</span>
+                    <button class="narr-transcript-btn" id="narr-transcript-btn"
+                            aria-expanded="false" aria-controls="narr-transcript">Transcript</button>
+                </div>
+            </div>
+            <div class="narr-transcript" id="narr-transcript" hidden>
+                <p id="narr-transcript-text"></p>
             </div>
 
             <p class="canvas-hint">Drag to pan &middot; use &minus; and + to zoom</p>
@@ -843,6 +1045,211 @@
             });
     }
 
+    /* --- Narration ---------------------------------------------------------
+       One <audio> element reused across the three tracks rather than three
+       elements: only one can be playing, and a single element makes "switching
+       tabs stops the narration" fall out of setting .src instead of needing to
+       be remembered for each. */
+
+    var narrRoot = document.getElementById('narration');
+    var narrPlay = document.getElementById('narr-play');
+    var narrTitle = document.getElementById('narr-title');
+    var narrTime = document.getElementById('narr-time');
+    var narrTrack = document.getElementById('narr-track');
+    var narrFill = document.getElementById('narr-fill');
+    var narrTranscript = document.getElementById('narr-transcript');
+    var narrTranscriptText = document.getElementById('narr-transcript-text');
+    var narrTranscriptBtn = document.getElementById('narr-transcript-btn');
+
+    var audio = new Audio();
+    audio.preload = 'none';  // three MP3s is ~1.6MB; fetch the one that's asked for
+    var byPanel = {};        // panel id -> track from the manifest
+    var currentTrack = null;
+    // A seek made before the file has loaded. See seekTo() — with preload='none'
+    // there is nothing to seek within yet, so the position is held here and
+    // applied when metadata arrives.
+    var pendingSeek = null;
+
+    function clock(s) {
+        if (!isFinite(s) || s < 0) s = 0;
+        var m = Math.floor(s / 60);
+        var sec = Math.floor(s % 60);
+        return m + ':' + (sec < 10 ? '0' : '') + sec;
+    }
+
+    // The manifest's duration is measured by ffprobe at build time, so the bar
+    // is correct before the file has loaded far enough to report its own.
+    function trackDuration() {
+        if (audio.src && isFinite(audio.duration) && audio.duration > 0) return audio.duration;
+        return (currentTrack && currentTrack.duration) || 0;
+    }
+
+    function position() {
+        if (pendingSeek !== null) return pendingSeek;
+        return audio.src ? audio.currentTime : 0;
+    }
+
+    function paintProgress() {
+        var dur = trackDuration();
+        var at = position();
+        var pct = dur > 0 ? Math.min(100, (at / dur) * 100) : 0;
+        narrFill.style.width = pct + '%';
+        narrTime.textContent = clock(at) + ' / ' + clock(dur);
+        narrTrack.setAttribute('aria-valuenow', Math.round(pct));
+        narrTrack.setAttribute('aria-valuetext', clock(at) + ' of ' + clock(dur));
+    }
+
+    function showTrack(panelId) {
+        var track = byPanel[panelId];
+        // Pause on every switch, including to a panel with no track: audio that
+        // keeps playing while a different diagram is on screen is narration
+        // describing something the viewer isn't looking at.
+        //
+        // The button state is set here rather than left to the 'pause' event.
+        // Pausing an element that never started firing timeupdate emits no
+        // pause event, so a switch away from a just-started track would leave a
+        // pause icon over silent audio.
+        audio.pause();
+        narrRoot.dataset.state = 'paused';
+        pendingSeek = null;
+        currentTrack = track || null;
+        narrRoot.hidden = !track;
+        if (!track) return;
+        narrTitle.textContent = track.label + ' — narrated walkthrough';
+        narrTranscriptText.textContent = track.text;
+        narrPlay.setAttribute('aria-label', 'Play ' + track.label + ' narration');
+        // Assigning .src always restarts the track. Guard on the resolved URL so
+        // re-selecting the tab you're already on doesn't rewind it.
+        var want = new URL(track.audio, document.baseURI).href;
+        if (audio.src !== want) {
+            audio.src = want;
+            audio.currentTime = 0;
+        }
+        paintProgress();
+    }
+
+    /* Seek to a position in seconds.
+
+       Assigning currentTime on an element with readyState 0 is dropped on the
+       floor — with preload='none' that is every seek made before the first
+       play, and the bar would jump while the audio started from zero anyway.
+       So the position is parked in pendingSeek and applied once metadata is in.
+       audio.load() forces the fetch that preload='none' declined, which is what
+       makes the parked seek resolve without the user pressing play first. */
+    function seekTo(seconds) {
+        var dur = trackDuration();
+        if (!dur) return;
+        var to = Math.min(dur, Math.max(0, seconds));
+        if (audio.readyState > 0) {
+            pendingSeek = null;
+            audio.currentTime = to;
+        } else {
+            pendingSeek = to;
+            audio.load();
+        }
+        paintProgress();
+    }
+
+    function seekToClientX(clientX) {
+        var dur = trackDuration();
+        if (!dur) return;
+        var box = narrTrack.getBoundingClientRect();
+        var frac = Math.min(1, Math.max(0, (clientX - box.left) / box.width));
+        seekTo(frac * dur);
+    }
+
+    function initNarration(manifest) {
+        var tracks = (manifest && manifest.tracks) || [];
+        tracks.forEach(function (t) {
+            // The manifest names the panel it belongs to; audio lives beside it.
+            byPanel[t.panel] = {
+                label: t.label,
+                text: t.text,
+                duration: t.duration || 0,
+                audio: 'narration/' + t.id + '.mp3'
+            };
+        });
+        if (!tracks.length) return;
+
+        narrPlay.addEventListener('click', function () {
+            if (audio.paused) {
+                // A rejected play() is the autoplay policy or a missing file.
+                // Either way the button must not be left claiming it's playing.
+                audio.play().catch(function () { narrRoot.dataset.state = 'paused'; });
+            } else {
+                audio.pause();
+            }
+        });
+
+        audio.addEventListener('play', function () { narrRoot.dataset.state = 'playing'; });
+        audio.addEventListener('pause', function () { narrRoot.dataset.state = 'paused'; });
+        audio.addEventListener('ended', function () {
+            narrRoot.dataset.state = 'paused';
+            // Rewind so the button plays rather than doing nothing on a finished
+            // track — the customer demo case is playing one twice.
+            audio.currentTime = 0;
+            paintProgress();
+        });
+        audio.addEventListener('timeupdate', paintProgress);
+        audio.addEventListener('loadedmetadata', function () {
+            // Apply a seek made while there was nothing to seek within.
+            if (pendingSeek !== null) {
+                var to = Math.min(audio.duration, pendingSeek);
+                pendingSeek = null;
+                audio.currentTime = to;
+            }
+            paintProgress();
+        });
+        audio.addEventListener('error', function () {
+            narrRoot.dataset.state = 'paused';
+            narrTitle.textContent = (currentTrack ? currentTrack.label + ' — ' : '')
+                + 'narration unavailable';
+        });
+
+        // Click and drag to scrub. Pointer capture so a drag that leaves the
+        // 6px bar keeps scrubbing instead of stopping the moment it slips off.
+        narrTrack.addEventListener('pointerdown', function (e) {
+            narrTrack.setPointerCapture(e.pointerId);
+            seekToClientX(e.clientX);
+        });
+        narrTrack.addEventListener('pointermove', function (e) {
+            if (narrTrack.hasPointerCapture(e.pointerId)) seekToClientX(e.clientX);
+        });
+
+        narrTrack.addEventListener('keydown', function (e) {
+            var dur = trackDuration();
+            if (!dur) return;
+            // Relative to position(), not audio.currentTime: two ArrowRights in
+            // a row before the file has loaded must land on 10s, not 5s twice.
+            var at = position();
+            var to = null;
+            if (e.key === 'ArrowRight' || e.key === 'ArrowUp') to = at + 5;
+            else if (e.key === 'ArrowLeft' || e.key === 'ArrowDown') to = at - 5;
+            else if (e.key === 'Home') to = 0;
+            // Not dur exactly: seeking to the very end fires 'ended', which
+            // rewinds to 0 — the opposite of what End asks for. Land just short.
+            else if (e.key === 'End') to = Math.max(0, dur - 0.25);
+            if (to === null) return;
+            e.preventDefault();
+            seekTo(to);
+        });
+
+        narrTranscriptBtn.addEventListener('click', function () {
+            var open = narrTranscriptBtn.getAttribute('aria-expanded') === 'true';
+            narrTranscriptBtn.setAttribute('aria-expanded', open ? 'false' : 'true');
+            narrTranscript.hidden = open;
+        });
+
+        showTrack(activePanel().id);
+    }
+
+    // Failure is silence: no manifest, no player. The diagrams are the page and
+    // they don't depend on this, so a 404 here must not surface as an error.
+    fetch('narration/architecture-narration.json')
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (m) { if (m) initNarration(m); })
+        .catch(function () { /* no narration on this deploy */ });
+
     function select(tab) {
         tabs.forEach(function (t) {
             var on = t === tab;
@@ -858,6 +1265,7 @@
                 canvas.scrollLeft = 0;
                 canvas.scrollTop = 0;
                 load(p);
+                showTrack(p.id);
             }
         });
     }
