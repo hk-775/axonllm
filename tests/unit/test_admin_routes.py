@@ -1261,6 +1261,81 @@ class TestDemoInTheRibbon:
         assert "src=" not in video.group(0), "the video is fetched on page load"
         assert 'preload="none"' in video.group(0)
 
+    def test_opening_the_dialog_does_not_start_the_video(self, client):
+        """Opening and playing are two decisions, and the open handler makes one.
+
+        The failure this prevents is a demo that begins narrating while the
+        presenter is still introducing it. Asserted against the open handler's
+        own body rather than the whole page, because there IS a play() call on
+        the page now — the overlay button's — and a document-wide search for it
+        would pass no matter which handler held it.
+        """
+        import re
+
+        html = client.get("/").text
+        opener = re.search(
+            r"\[data-demo-open\]'\).forEach\(btn => \{(.+?)\n    \}\);", html, re.S
+        )
+        assert opener, "the open handler is gone or was reshaped"
+        assert "play()" not in opener.group(1), "opening the dialog autoplays"
+
+    def test_the_dialog_has_a_play_button_the_script_binds(self, client):
+        """Without autostart, this button is the only way in.
+
+        Pairs the markup with the handler: a renamed attribute on either side
+        leaves a dialog holding a video that cannot be started, which no other
+        test here would catch now that the open handler deliberately does not.
+        """
+        html = client.get("/").text
+        assert 'class="demo-modal-play" data-demo-play' in html, "no play button"
+        assert "[data-demo-play]" in html, "the play button is not wired up"
+        assert "aria-label=\"Play the demo\"" in html, "unlabelled icon button"
+
+    def test_the_play_overlay_tracks_the_native_controls(self, client):
+        """The video has `controls`, so it can be played without our button.
+
+        If the overlay hid only on our own click it would sit over the picture
+        the moment someone used the native control bar instead — hence the
+        listeners. 'ended' too: it does not imply 'pause' everywhere, and a
+        finished demo is exactly when someone reaches to replay it.
+        """
+        html = client.get("/").text
+        for event in ("'play'", "'pause'", "'ended'"):
+            assert f"video.addEventListener({event}" in html, f"no {event} handler"
+        assert "[data-playing] .demo-modal-play { display: none; }" in html
+
+    def test_the_play_overlay_does_not_cover_the_scrubber(self, client):
+        """A wrapper spanning the frame would swallow clicks on the controls.
+
+        Centring via translate keeps the target to its own 76px, so the video
+        can be seeked as well as started. The symptom of getting this wrong is
+        subtle — the demo plays, and the scrub bar simply never responds.
+        """
+        import re
+
+        css = re.search(
+            r"\.demo-modal-play \{(.+?)\n\s*\}\n", client.get("/").text, re.S
+        )
+        assert css, "the .demo-modal-play rule is gone"
+        rule = css.group(1)
+        assert "translate(-50%, -50%)" in rule, "not centred by transform"
+        assert re.search(r"width:\s*76px", rule), "the target is no longer bounded"
+        assert "width: 100%" not in rule, "the overlay spans the frame"
+
+    def test_the_backdrop_check_ignores_keyboard_clicks(self, client):
+        """Enter on a button inside the dialog arrives as a click at 0,0.
+
+        Which is outside any centred dialog, so the backdrop-dismiss check reads
+        it as "clicked the backdrop" and closes — and the close handler pauses
+        the video, so play() aborts. Verified in Chromium: pressing Enter on the
+        play button dismissed the demo instead of starting it. `detail` is 0 for
+        a synthesized click and >= 1 for a real pointer, which separates them.
+        """
+        html = client.get("/").text
+        assert "if (!e.detail) return;" in html, (
+            "keyboard activation will be treated as a backdrop click"
+        )
+
     def test_closing_the_dialog_pauses_the_video(self, client):
         """Escape closes a dialog without going through the close button.
 
