@@ -189,6 +189,7 @@ class DynamoPersistence:
             "status": record.status,
             "routing_strategy": record.routing_strategy,
             "task_type": record.task_type,
+            "provider_request_id": record.provider_request_id,
         }
 
     @staticmethod
@@ -225,6 +226,7 @@ class DynamoPersistence:
             # "" rather than "general" is the whole point: an unclassified record
             # must not be counted as a classification result.
             task_type=str(item.get("task_type", "")),
+            provider_request_id=str(item.get("provider_request_id", "")),
         )
 
     # --- Project serialization ---

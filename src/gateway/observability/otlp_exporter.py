@@ -135,6 +135,11 @@ class OTLPSpanExporter:
             "axon.request_id": rid,
             "axon.status": status_str,
         }
+        # Provider's own id for the upstream call — set only when supplied, so a
+        # provider that omits it doesn't add an empty attribute to every span.
+        provider_rid = getattr(record, "provider_request_id", "") or ""
+        if provider_rid:
+            attrs["axon.provider_request_id"] = provider_rid
 
         ts = record.timestamp.timestamp() if getattr(record, "timestamp", None) else None
         start_ns = int(ts * 1e9) if ts else None

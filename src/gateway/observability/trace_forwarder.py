@@ -106,6 +106,9 @@ def map_usage_to_trace_event(record: UsageRecord) -> dict[str, Any]:
         "metadata": {
             "source": "axonllm",
             "request_id": record.request_id,
+            # The provider's own id for the upstream call, for cross-referencing
+            # provider-side logs. Omitted when the provider didn't supply one.
+            "provider_request_id": getattr(record, "provider_request_id", "") or "",
         },
         "timestamp": ts,
     }
