@@ -51,6 +51,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Gemini rejects unknown JSON Schema keys (`additionalProperties`, `$schema`,
   `title`, `default`) rather than ignoring them, so a schema written for OpenAI
   400'd the whole request. Schemas are now filtered recursively.
+- **Bedrock Mantle dropped tools on all three of its routes.** It is the one
+  provider that bypasses the adapter layer — it hand-builds a payload per Mantle
+  API — so the translation above never reached it, and 11 models advertised
+  `function_calling` while their tool specs went nowhere. Each route now
+  translates in both directions, which is three dialects rather than one:
+  `/anthropic/v1/messages` takes `input_schema` and content blocks,
+  `/v1/chat/completions` takes the gateway's own OpenAI shape unchanged, and
+  `/openai/v1/responses` takes a *flat* tool spec (`name`/`parameters` beside
+  `type`, no `function` wrapper) with tool traffic as top-level `function_call` /
+  `function_call_output` items rather than as messages. The two non-passthrough
+  routes reject OpenAI's shape outright (400 `Unexpected role "tool"` and 400
+  `Invalid 'input'`), so the tool loop failed rather than degrading — except on
+  Chat Completions, which answered fluently with the tools missing.
+- Mantle's Responses route reported `finish_reason: "completed"` even when the
+  model called a tool, because that field carries lifecycle status rather than a
+  stop reason. A caller driving a tool loop reads that as "nothing left to do",
+  so it returned the tool call to the client and never ran it.
 
 ## [0.1.0] - 2026-06-22
 

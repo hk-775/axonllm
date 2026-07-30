@@ -13,6 +13,24 @@ the Responses API while openai.gpt-oss-* uses Chat Completions. We therefore
 pick a preferred API by heuristic and fall back to Chat Completions when the
 provider reports the model is not supported on the chosen route.
 
+Tool calling means three dialects, not one. This module hand-builds each payload
+rather than going through the adapter layer, so it also has to do its own tool
+translation — and the three routes disagree on shape:
+
+    route              tools[]                          arguments   history
+    /anthropic/…       {name, input_schema}             object      content blocks
+    /openai/v1/resp…   {type, name, parameters} (flat)  JSON str    flat input items
+    /v1/chat/compl…    {type, function:{name, …}}       JSON str    OpenAI messages
+
+Only Chat Completions takes the gateway's own OpenAI-shaped tool traffic
+unchanged. The other two reject it outright rather than degrading: the Messages
+API answers 400 ``Unexpected role "tool"``, and the Responses API answers 400
+``Invalid 'input'``. The Responses API is the odd one — its tool spec is *flat*
+(``name``/``parameters`` at the top level, no ``function`` wrapper), and sending
+the nested Chat Completions form gets 400 ``Invalid 'tools': missing field
+`name```, with nested ``tool_choice`` likewise rejected. That shape is easy to
+assume and wrong, which is why it is written down here.
+
 Auth: SigV4 (bedrock service). All billing flows through the AWS account.
 """
 
@@ -27,6 +45,11 @@ import boto3
 from botocore.auth import SigV4Auth
 from botocore.awsrequest import AWSRequest
 
+from src.gateway.adapters.anthropic_style import (
+    openai_msg_to_anthropic,
+    openai_tool_choice_to_anthropic,
+    openai_tool_to_anthropic,
+)
 from src.gateway.models import (
     ChatCompletionRequest,
     ChatCompletionResponse,
@@ -57,6 +80,131 @@ def _is_unsupported_route_error(exc: ProviderError) -> bool:
     return exc.status_code == 400 and (
         "does not support" in msg or "isn't supported on this route" in msg
     )
+
+
+# --- OpenAI ⇄ Responses API tool translation --------------------------------
+#
+# The Responses API is the only dialect here with no implementation elsewhere in
+# the gateway (the Anthropic one is shared with the adapters, and Chat
+# Completions needs none), so these live in this module.
+
+
+def _openai_tool_to_responses(tool: dict) -> dict:
+    """Flatten one OpenAI tool spec into the Responses API's shape.
+
+    Chat Completions nests the definition under ``function``; the Responses API
+    puts ``name``/``parameters`` at the top level next to ``type``. Passing the
+    nested form through is rejected — 400 ``Invalid 'tools': missing field
+    `name``` — so the wrapper has to be unwrapped, not merely forwarded.
+
+    Accepts an already-flat or Anthropic-shaped tool too, for the same reason
+    the Anthropic converter does: not every caller of this gateway is
+    OpenAI-native, and failing a tool that is already correct is a pure loss.
+    """
+    nested = tool.get("function")
+    fn: dict = nested if isinstance(nested, dict) else tool
+    spec: dict = {
+        "type": "function",
+        "name": fn.get("name", ""),
+        # A tool with no parameters still needs the empty object; omitting the
+        # key entirely is rejected.
+        "parameters": fn.get("parameters") or fn.get("input_schema")
+                      or {"type": "object", "properties": {}},
+    }
+    description = fn.get("description")
+    if description:
+        spec["description"] = description
+    return spec
+
+
+def _openai_tool_choice_to_responses(choice: str | dict | None) -> str | dict | None:
+    """Map OpenAI's tool_choice onto the Responses API's.
+
+    The string forms ("auto"/"none"/"required") are shared, so they pass
+    through. The dict form is *flat* here — ``{"type":"function","name":…}`` —
+    and the nested Chat Completions spelling is rejected with 400
+    ``Invalid 'tool_choice': value did not match any expected variant``.
+    """
+    if choice is None:
+        return None
+    if isinstance(choice, str):
+        return choice
+    if isinstance(choice, dict):
+        name = (choice.get("function") or {}).get("name") or choice.get("name")
+        if name:
+            return {"type": "function", "name": name}
+    return None
+
+
+def _openai_msgs_to_responses_input(messages: list[dict]) -> list[dict]:
+    """Convert OpenAI-shaped messages into Responses API ``input`` items.
+
+    Tool traffic is not a message here: a tool call is a top-level
+    ``function_call`` item and its result is a ``function_call_output`` item,
+    both siblings of the role messages rather than nested inside them. Handing
+    the API raw OpenAI history instead gets 400 ``Invalid 'input': value did not
+    match any expected variant`` — including for an assistant turn with
+    ``content: null``, which the schema rejects even with no tools involved.
+    """
+    items: list[dict] = []
+    for msg in messages:
+        role = msg.get("role", "user")
+        content = msg.get("content")
+
+        if role == "tool":
+            items.append({
+                "type": "function_call_output",
+                "call_id": msg.get("tool_call_id", ""),
+                "output": content if isinstance(content, str) else json.dumps(content),
+            })
+            continue
+
+        tool_calls = msg.get("tool_calls")
+        if role == "assistant" and tool_calls:
+            # Any text alongside the calls is still its own message item; the
+            # calls become siblings, not fields.
+            if isinstance(content, str) and content:
+                items.append({"role": "assistant", "content": content})
+            for tc in tool_calls:
+                fn = tc.get("function") or {}
+                raw_args = fn.get("arguments", tc.get("arguments", {}))
+                # Unlike Anthropic, this API wants the JSON *string* — so a dict
+                # from a non-OpenAI-native caller gets encoded, and a string is
+                # forwarded verbatim rather than parsed and re-encoded (which
+                # would turn malformed arguments into a request-level failure).
+                args = raw_args if isinstance(raw_args, str) else json.dumps(raw_args or {})
+                items.append({
+                    "type": "function_call",
+                    "call_id": tc.get("id", ""),
+                    "name": fn.get("name", tc.get("name", "")),
+                    "arguments": args,
+                })
+            continue
+
+        # content=None is rejected by the schema, so normalize it away.
+        items.append({"role": role, "content": content if content is not None else ""})
+    return items
+
+
+def _responses_output_to_tool_calls(output: list[dict]) -> list[dict]:
+    """Extract OpenAI-shaped tool_calls from Responses API ``output`` items.
+
+    Calls arrive as top-level ``function_call`` items carrying ``call_id`` and
+    an ``arguments`` JSON string — already the encoding OpenAI callers expect,
+    so it is forwarded as-is rather than re-serialized.
+    """
+    return [
+        {
+            "id": item.get("call_id") or item.get("id", f"call_{i}"),
+            "type": "function",
+            "function": {
+                "name": item.get("name", ""),
+                "arguments": item.get("arguments", "") or "{}",
+            },
+        }
+        for i, item in enumerate(output)
+        if item.get("type") == "function_call"
+    ]
 
 
 def create_mantle_provider_fn(
@@ -138,19 +286,22 @@ async def _invoke_responses_api(
     else:
         instructions = None
 
-    input_parts = []
+    non_system = []
     for msg in messages:
-        role = msg.get("role", "user")
-        content = msg.get("content", "")
-        if role == "system":
-            instructions = content
+        if msg.get("role") == "system":
+            instructions = msg.get("content", "")
         else:
-            input_parts.append({"role": role, "content": content})
+            non_system.append(msg)
 
-    if len(input_parts) == 1 and input_parts[0]["role"] == "user":
-        input_val = input_parts[0]["content"]
+    input_items = _openai_msgs_to_responses_input(non_system)
+
+    # A lone user turn can be sent as a bare string. Only when it really is one
+    # plain message — a single function_call_output has no such shorthand.
+    if (len(input_items) == 1 and input_items[0].get("role") == "user"
+            and "type" not in input_items[0]):
+        input_val: str | list[dict] = input_items[0]["content"]
     else:
-        input_val = input_parts
+        input_val = input_items
 
     payload: dict = {
         "model": mapping.model_id,
@@ -164,6 +315,11 @@ async def _invoke_responses_api(
         payload["temperature"] = request.temperature
     if request.top_p is not None:
         payload["top_p"] = request.top_p
+    if request.tools:
+        payload["tools"] = [_openai_tool_to_responses(t) for t in request.tools]
+        tc = _openai_tool_choice_to_responses(request.tool_choice)
+        if tc is not None:
+            payload["tool_choice"] = tc
 
     url = f"{endpoint}/openai/v1/responses"
     body = json.dumps(payload)
@@ -178,6 +334,23 @@ async def _invoke_responses_api(
                 if content_block.get("type") == "output_text":
                     text += content_block.get("text", "")
 
+    tool_calls = _responses_output_to_tool_calls(output)
+    message: dict = {"role": "assistant", "content": text}
+    if tool_calls:
+        message["tool_calls"] = tool_calls
+        # OpenAI sends content=null alongside tool_calls; only when there is no
+        # text, so a plain response still gets "" rather than None.
+        if not text:
+            message["content"] = None
+
+    # This API reports lifecycle status ("completed"), not why generation
+    # stopped, so a tool call is invisible in it. A caller driving a tool loop
+    # branches on finish_reason, and "completed" reads as "nothing left to do" —
+    # it would return the model's tool call to the client and never run it.
+    finish_reason = response_data.get("status", "completed")
+    if tool_calls:
+        finish_reason = "tool_calls"
+
     usage_data = response_data.get("usage", {})
     prompt_tokens = usage_data.get("input_tokens", 0)
     completion_tokens = usage_data.get("output_tokens", 0)
@@ -186,8 +359,8 @@ async def _invoke_responses_api(
         id=response_data.get("id", "mantle-response"),
         choices=[{
             "index": 0,
-            "message": {"role": "assistant", "content": text},
-            "finish_reason": response_data.get("status", "completed"),
+            "message": message,
+            "finish_reason": finish_reason,
         }],
         usage=TokenUsage(
             prompt_tokens=prompt_tokens,
@@ -211,12 +384,13 @@ async def _invoke_messages_api(
     system_text = request.system or ""
 
     for msg in request.messages:
-        role = msg.get("role", "user")
-        content = msg.get("content", "")
-        if role == "system":
-            system_text = content
+        if msg.get("role") == "system":
+            system_text = msg.get("content", "")
         else:
-            messages.append({"role": role, "content": content})
+            # Shared with the Anthropic adapters: this is the same wire format,
+            # and tool traffic has to be reshaped into content blocks. Forwarding
+            # OpenAI's shape gets 400 Unexpected role "tool".
+            messages.append(openai_msg_to_anthropic(msg))
 
     payload: dict = {
         "model": mapping.model_id,
@@ -229,6 +403,11 @@ async def _invoke_messages_api(
         payload["temperature"] = request.temperature
     if request.top_p is not None:
         payload["top_p"] = request.top_p
+    if request.tools:
+        payload["tools"] = [openai_tool_to_anthropic(t) for t in request.tools]
+        tc = openai_tool_choice_to_anthropic(request.tool_choice)
+        if tc is not None:
+            payload["tool_choice"] = tc
 
     payload["anthropic_version"] = "2023-06-01"
 
@@ -240,6 +419,30 @@ async def _invoke_messages_api(
     content_blocks = response_data.get("content", [])
     text = "".join(b.get("text", "") for b in content_blocks if b.get("type") == "text")
 
+    tool_calls = [
+        {
+            "id": b.get("id", f"call_{i}"),
+            "type": "function",
+            # Anthropic sends parsed input; OpenAI callers json.loads() this
+            # field, so it has to be re-encoded as a string.
+            "function": {"name": b.get("name", ""),
+                         "arguments": json.dumps(b.get("input", {}))},
+        }
+        for i, b in enumerate(content_blocks)
+        if b.get("type") == "tool_use"
+    ]
+
+    message: dict = {"role": "assistant", "content": text}
+    if tool_calls:
+        message["tool_calls"] = tool_calls
+        if not text:
+            message["content"] = None
+
+    finish_reason = response_data.get("stop_reason", "end_turn")
+    # "tool_use" means nothing to an OpenAI-shaped caller driving a tool loop.
+    if finish_reason == "tool_use" or (tool_calls and finish_reason in (None, "stop", "end_turn")):
+        finish_reason = "tool_calls"
+
     usage_data = response_data.get("usage", {})
     prompt_tokens = usage_data.get("input_tokens", 0)
     completion_tokens = usage_data.get("output_tokens", 0)
@@ -248,8 +451,8 @@ async def _invoke_messages_api(
         id=response_data.get("id", "mantle-response"),
         choices=[{
             "index": 0,
-            "message": {"role": "assistant", "content": text},
-            "finish_reason": response_data.get("stop_reason", "end_turn"),
+            "message": message,
+            "finish_reason": finish_reason,
         }],
         usage=TokenUsage(
             prompt_tokens=prompt_tokens,
@@ -288,6 +491,12 @@ async def _invoke_chat_completions_api(
         payload["temperature"] = request.temperature
     if request.top_p is not None:
         payload["top_p"] = request.top_p
+    # This route speaks the gateway's own dialect, so tools (and the tool
+    # traffic already in `messages`) pass through untouched.
+    if request.tools:
+        payload["tools"] = request.tools
+        if request.tool_choice is not None:
+            payload["tool_choice"] = request.tool_choice
 
     url = f"{endpoint}/v1/chat/completions"
     body = json.dumps(payload)
@@ -296,8 +505,22 @@ async def _invoke_chat_completions_api(
 
     choices = response_data.get("choices", [])
     first = choices[0] if choices else {}
-    message = first.get("message", {})
-    text = message.get("content") or ""
+    provider_message = first.get("message", {})
+    text = provider_message.get("content") or ""
+
+    # Already OpenAI-shaped, but the response is rebuilt rather than forwarded,
+    # so tool_calls have to be carried across explicitly or they are dropped on
+    # a route that needed no translation at all.
+    tool_calls = provider_message.get("tool_calls") or []
+    message: dict = {"role": "assistant", "content": text}
+    if tool_calls:
+        message["tool_calls"] = tool_calls
+        if not text:
+            message["content"] = None
+
+    finish_reason = first.get("finish_reason", "stop")
+    if tool_calls and finish_reason in (None, "stop"):
+        finish_reason = "tool_calls"
 
     usage_data = response_data.get("usage", {})
     prompt_tokens = usage_data.get("prompt_tokens", 0)
@@ -307,8 +530,8 @@ async def _invoke_chat_completions_api(
         id=response_data.get("id", "mantle-response"),
         choices=[{
             "index": 0,
-            "message": {"role": "assistant", "content": text},
-            "finish_reason": first.get("finish_reason", "stop"),
+            "message": message,
+            "finish_reason": finish_reason,
         }],
         usage=TokenUsage(
             prompt_tokens=prompt_tokens,
