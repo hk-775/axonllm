@@ -26,6 +26,17 @@ from starlette.routing import Route
 _STATIC_DIR = pathlib.Path(__file__).resolve().parent / "static"
 _PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent.parent.parent
 
+# What ``AdminAPI.site_asset`` will serve out of site/, and as what. Anything
+# else 404s — notably site/infra/, which is the CDK app rather than a public
+# asset. The auth middleware reads these suffixes to decide the same set of
+# paths is anonymous, so the two can't drift into a page that renders with a
+# 401 on the SVG it needs.
+SITE_ASSET_TYPES = {
+    ".html": "text/html",
+    ".svg": "image/svg+xml",
+    ".drawio": "application/xml",
+}
+
 from src.gateway.admin.pricing_drift import audit_pricing, render_drift_page
 from src.gateway.admin.production_checklist import render_checklist_page, run_checklist
 from src.gateway.config import AppConfig
@@ -1524,6 +1535,46 @@ class AdminAPI:
             )
         return HTMLResponse(index_path.read_text(encoding="utf-8"))
 
+    async def site_asset(self, request: Request):
+        """Serve the marketing site's sibling pages and their assets.
+
+        The landing page is served at ``/``, so its nav links are relative —
+        ``architecture.html`` resolves against the gateway origin here and
+        against the bucket on S3, with no hardcoded host in either case. Without
+        this route the nav would work on the deployed site and 404 on every
+        self-hosted gateway.
+
+        Deliberately restricted: only files sitting directly in ``site/``, and
+        only the three suffixes the pages actually reference. ``site/infra/``
+        holds the CDK app (Python source, deploy config) and must not be
+        readable over HTTP, so the depth check matters as much as the traversal
+        check below it.
+
+        Registered last of all routes (see ``bootstrap.build_app``) because the
+        pattern is a bare single segment — ahead of the other factories it would
+        shadow ``/chat``, ``/playground`` and ``/routing``.
+        """
+        from starlette.responses import PlainTextResponse, Response
+
+        site_dir = _PROJECT_ROOT / "site"
+        rel = request.path_params.get("path", "")
+
+        target = (site_dir / rel).resolve()
+        try:
+            inside = target.relative_to(site_dir.resolve())
+        except ValueError:
+            return PlainTextResponse("Not found", status_code=404)
+        if len(inside.parts) != 1 or target.suffix.lower() not in SITE_ASSET_TYPES:
+            return PlainTextResponse("Not found", status_code=404)
+        if not target.is_file():
+            return PlainTextResponse("Not found", status_code=404)
+
+        return Response(
+            target.read_bytes(),
+            media_type=SITE_ASSET_TYPES[target.suffix.lower()],
+            headers={"Cache-Control": "public, max-age=3600"},
+        )
+
     async def pricing_drift(self, request: Request) -> HTMLResponse:
         """Report provider mappings with no price, and prices nothing uses.
 
@@ -1634,3 +1685,15 @@ def create_admin_routes(admin_api: AdminAPI) -> list[Route]:
         Route("/admin/efficiency", admin_api.efficiency_overview, methods=["GET"]),
         Route("/admin/projects/{id}/efficiency", admin_api.project_efficiency, methods=["GET"]),
     ]
+
+
+def create_site_routes(admin_api: AdminAPI) -> list[Route]:
+    """Return the catch-all route for the marketing site's static files.
+
+    Separate from ``create_admin_routes`` because ``/{path}`` is a bare single
+    segment and Starlette matches in order: registered alongside the admin
+    routes it would shadow ``/chat``, ``/playground`` and ``/routing``. Keeping
+    it in its own factory makes "must be appended last" something the call site
+    shows rather than something a comment asks you to remember.
+    """
+    return [Route("/{path}", admin_api.site_asset, methods=["GET"])]

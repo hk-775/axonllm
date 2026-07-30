@@ -36,6 +36,25 @@ PUBLIC_PATHS = frozenset({
 })
 
 
+def _is_site_asset(path: str) -> bool:
+    """True for the marketing site's sibling pages and their assets.
+
+    The landing page at "/" is public, and its nav links to architecture.html,
+    which in turn fetches three SVGs. Gating those behind auth would serve the
+    pitch to anonymous readers and then 401 the page it links to.
+
+    Matched by shape rather than by name so a new page added to site/ is public
+    on arrival: one path segment, and a suffix ``site_asset`` will actually
+    serve. Both conditions are the route handler's own — a path this admits but
+    the handler rejects just 404s, so widening this cannot expose a file.
+    """
+    from src.gateway.admin.routes import SITE_ASSET_TYPES
+
+    if path.count("/") != 1 or not path.startswith("/"):
+        return False
+    return any(path.lower().endswith(suffix) for suffix in SITE_ASSET_TYPES)
+
+
 class PolicyService(Protocol):
     """Interface for policy evaluation."""
 
@@ -74,6 +93,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
             or path.startswith("/chat/static")
             or path.startswith("/scim/")
             or path.startswith("/saml/")
+            or _is_site_asset(path)
         ):
             request.state.context = RequestContext(
                 user_id="anonymous",

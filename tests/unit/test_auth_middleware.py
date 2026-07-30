@@ -218,3 +218,67 @@ class TestMissingClaims:
         resp = client.get("/test", headers={"Authorization": "Bearer valid-token"})
         assert resp.status_code == 200
         assert resp.json()["roles"] == []
+
+
+class TestSiteAssetsAreAnonymous:
+    """The marketing site's pages must load without a session.
+
+    "/" is already public — gating the page it links to, or the SVGs that page
+    fetches, would serve the pitch to an anonymous reader and then 401 the
+    architecture diagram behind it. Under ENFORCE that failure is invisible
+    server-side: the HTML arrives 200 and the diagrams silently don't.
+    """
+
+    def _app(self):
+        app = Starlette(
+            routes=[
+                Route("/{path}", echo_endpoint),
+                Route("/admin/projects", echo_endpoint),
+            ]
+        )
+        app.add_middleware(AuthMiddleware, oidc_service=FakeOIDCService(), mode="ENFORCE")
+        return TestClient(app, raise_server_exceptions=False)
+
+    @pytest.mark.parametrize(
+        "path",
+        ["/architecture.html", "/architecture-pipeline.svg", "/architecture.drawio"],
+    )
+    def test_the_pages_and_their_assets_need_no_token(self, path):
+        r = self._app().get(path)
+        assert r.status_code == 200, f"{path} requires auth"
+        assert r.json()["user_id"] == "anonymous"
+
+    def test_the_exemption_does_not_reach_the_api(self):
+        """Shape-matched, so check it stays narrow.
+
+        Only single-segment paths ending in a suffix the site handler serves. An
+        API path is neither, and must still demand a token.
+        """
+        client = self._app()
+        assert client.get("/admin/projects").status_code == 401
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "/config.yaml",          # not a suffix the site serves
+            "/infra/stack.py",       # nested, and not a served suffix
+            "/deep/page.html",       # right suffix, wrong depth
+        ],
+    )
+    def test_paths_outside_the_shape_still_require_auth(self, path):
+        assert self._app().get(path).status_code == 401
+
+    def test_the_shape_tracks_what_the_handler_serves(self):
+        """One source of truth for "which suffixes are public".
+
+        The middleware reads SITE_ASSET_TYPES rather than repeating the list, so
+        adding a suffix to the handler cannot leave it publicly routable but
+        401-ing. This asserts the coupling is real, not incidental.
+        """
+        from src.gateway.admin.routes import SITE_ASSET_TYPES
+        from src.gateway.middleware.auth import _is_site_asset
+
+        for suffix in SITE_ASSET_TYPES:
+            assert _is_site_asset("/page" + suffix), suffix
+        assert not _is_site_asset("/page.py")
+        assert not _is_site_asset("/page.yaml")
