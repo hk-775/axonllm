@@ -91,74 +91,618 @@ user_budgets:
     alert_threshold: 80.0
 
 usage_seeds:
-  - project_id: proj-alpha
-    user_id: user-alice
-    provider: openai
-    model: gpt-4
-    prompt_tokens: 500
-    completion_tokens: 200
-    cost: 0.033
-  - project_id: proj-alpha
-    user_id: user-alice
-    provider: anthropic
-    model: claude-3
-    prompt_tokens: 300
-    completion_tokens: 150
-    cost: 0.0032
-    cached_tokens: 200
-    cache_creation_tokens: 50
-  - project_id: proj-alpha
-    user_id: user-alice
-    provider: google_ai
-    model: gemini-pro
-    prompt_tokens: 400
-    completion_tokens: 250
-    cost: 0.000225
-  - project_id: proj-alpha
-    user_id: user-bob
-    provider: openai
-    model: gpt-4
-    prompt_tokens: 800
-    completion_tokens: 400
-    cost: 0.054
+  - project_id: proj-beta
+    user_id: user-carol
+    provider: bedrock-mantle
+    model: gpt-5.4
+    prompt_tokens: 1130
+    completion_tokens: 1050
+    cost: 0.00953
+    latency_ms: 919.6
+    minutes_ago: 123
   - project_id: proj-alpha
     user_id: user-bob
     provider: google_ai
-    model: gemini-pro
-    prompt_tokens: 600
-    completion_tokens: 350
-    cost: 0.000325
-  - project_id: proj-beta
-    user_id: user-carol
-    provider: openai
-    model: gpt-4
-    prompt_tokens: 1000
-    completion_tokens: 500
-    cost: 0.06
-  - project_id: proj-beta
-    user_id: user-carol
-    provider: anthropic
-    model: claude-3
-    prompt_tokens: 200
-    completion_tokens: 100
-    cost: 0.002
-  - project_id: proj-beta
-    user_id: user-carol
-    provider: google_ai
-    model: gemini-pro
-    prompt_tokens: 900
-    completion_tokens: 450
-    cost: 0.00045
+    model: gemini-3-pro
+    prompt_tokens: 1370
+    completion_tokens: 1130
+    cost: 0.007363
+    latency_ms: 1280.3
+    minutes_ago: 225
   - project_id: proj-alpha
     user_id: user-bob
     provider: bedrock
-    model: claude-3
-    prompt_tokens: 600
-    completion_tokens: 300
-    cost: 0.0063
-    cached_tokens: 400
-    cache_creation_tokens: 100
-
+    model: claude-opus
+    prompt_tokens: 780
+    completion_tokens: 910
+    cost: 0.07995
+    latency_ms: 2041.6
+    minutes_ago: 223
+  - project_id: proj-beta
+    user_id: user-carol
+    provider: bedrock
+    model: claude-sonnet
+    prompt_tokens: 780
+    completion_tokens: 430
+    cost: 0.00879
+    latency_ms: 1816.0
+    minutes_ago: 96
+    cached_tokens: 526
+    cache_creation_tokens: 50
+  - project_id: proj-alpha
+    user_id: user-alice
+    provider: bedrock-mantle
+    model: gpt-5.4
+    prompt_tokens: 2780
+    completion_tokens: 1110
+    cost: 0.01166
+    latency_ms: 892.1
+    minutes_ago: 300
+  - project_id: proj-beta
+    user_id: user-carol
+    provider: bedrock
+    model: claude-sonnet
+    prompt_tokens: 1830
+    completion_tokens: 1100
+    cost: 0.02199
+    latency_ms: 1730.4
+    minutes_ago: 133
+  - project_id: proj-beta
+    user_id: user-carol
+    provider: bedrock
+    model: claude-sonnet
+    prompt_tokens: 1970
+    completion_tokens: 1130
+    cost: 0.02286
+    latency_ms: 1409.4
+    minutes_ago: 110
+  - project_id: proj-alpha
+    user_id: user-alice
+    provider: bedrock-mantle
+    model: deepseek-v3-mantle
+    prompt_tokens: 1480
+    completion_tokens: 840
+    cost: 0.001452
+    latency_ms: 1016.2
+    minutes_ago: 347
+  - project_id: proj-beta
+    user_id: user-carol
+    provider: anthropic
+    model: claude-haiku
+    prompt_tokens: 2270
+    completion_tokens: 1000
+    cost: 0.005816
+    latency_ms: 820.7
+    minutes_ago: 156
+  - project_id: proj-beta
+    user_id: user-carol
+    provider: bedrock-mantle
+    model: gpt-5.4
+    prompt_tokens: 1340
+    completion_tokens: 1110
+    cost: 0.01022
+    latency_ms: 1072.2
+    minutes_ago: 84
+  - project_id: proj-beta
+    user_id: user-carol
+    provider: google_ai
+    model: gemini-3-pro
+    prompt_tokens: 880
+    completion_tokens: 850
+    cost: 0.00535
+    latency_ms: 991.3
+    minutes_ago: 152
+  - project_id: proj-beta
+    user_id: user-carol
+    provider: google_ai
+    model: gemini-3-pro
+    prompt_tokens: 1220
+    completion_tokens: 350
+    cost: 0.003275
+    latency_ms: 907.0
+    minutes_ago: 89
+  - project_id: proj-alpha
+    user_id: user-alice
+    provider: bedrock-mantle
+    model: gpt-5.4
+    prompt_tokens: 1920
+    completion_tokens: 660
+    cost: 0.0072
+    latency_ms: 1151.7
+    minutes_ago: 312
+  - project_id: proj-alpha
+    user_id: user-bob
+    provider: anthropic
+    model: claude-haiku
+    prompt_tokens: 660
+    completion_tokens: 1100
+    cost: 0.004928
+    latency_ms: 839.6
+    minutes_ago: 232
+    cached_tokens: 460
+    cache_creation_tokens: 66
+  - project_id: proj-alpha
+    user_id: user-alice
+    provider: bedrock
+    model: claude-sonnet
+    prompt_tokens: 2020
+    completion_tokens: 1100
+    cost: 0.02256
+    latency_ms: 1679.2
+    minutes_ago: 260
+    cached_tokens: 1375
+    cache_creation_tokens: 123
+  - project_id: proj-alpha
+    user_id: user-alice
+    provider: bedrock
+    model: claude-opus
+    prompt_tokens: 260
+    completion_tokens: 1280
+    cost: 0.0999
+    latency_ms: 3265.7
+    minutes_ago: 290
+    cached_tokens: 101
+    cache_creation_tokens: 36
+  - project_id: proj-alpha
+    user_id: user-alice
+    provider: bedrock-mantle
+    model: deepseek-v3-mantle
+    prompt_tokens: 810
+    completion_tokens: 370
+    cost: 0.000687
+    latency_ms: 907.1
+    minutes_ago: 288
+  - project_id: proj-alpha
+    user_id: user-bob
+    provider: openai
+    model: gpt-5.5-pro
+    prompt_tokens: 2140
+    completion_tokens: 750
+    cost: 0.0407
+    latency_ms: 2807.3
+    minutes_ago: 248
+  - project_id: proj-alpha
+    user_id: user-alice
+    provider: bedrock-mantle
+    model: qwen3-32b-mantle
+    prompt_tokens: 1110
+    completion_tokens: 740
+    cost: 0.000814
+    latency_ms: 664.9
+    minutes_ago: 360
+  - project_id: proj-alpha
+    user_id: user-bob
+    provider: bedrock-mantle
+    model: qwen3-32b-mantle
+    prompt_tokens: 2750
+    completion_tokens: 570
+    cost: 0.001006
+    latency_ms: 466.0
+    minutes_ago: 176
+  - project_id: proj-alpha
+    user_id: user-bob
+    provider: anthropic
+    model: claude-sonnet
+    prompt_tokens: 1920
+    completion_tokens: 1090
+    cost: 0.02211
+    latency_ms: 906.7
+    minutes_ago: 238
+  - project_id: proj-alpha
+    user_id: user-alice
+    provider: openai
+    model: gpt-5.5-pro
+    prompt_tokens: 700
+    completion_tokens: 340
+    cost: 0.0171
+    latency_ms: 3499.2
+    minutes_ago: 269
+  - project_id: proj-alpha
+    user_id: user-alice
+    provider: bedrock
+    model: claude-sonnet
+    prompt_tokens: 850
+    completion_tokens: 410
+    cost: 0.0087
+    latency_ms: 1072.7
+    minutes_ago: 329
+    cached_tokens: 453
+    cache_creation_tokens: 52
+  - project_id: proj-alpha
+    user_id: user-bob
+    provider: bedrock-mantle
+    model: gpt-5.5
+    prompt_tokens: 2740
+    completion_tokens: 1380
+    cost: 0.017225
+    latency_ms: 1055.3
+    minutes_ago: 229
+  - project_id: proj-alpha
+    user_id: user-alice
+    provider: google_ai
+    model: gemini-3-pro
+    prompt_tokens: 2010
+    completion_tokens: 830
+    cost: 0.006663
+    latency_ms: 837.9
+    minutes_ago: 263
+  - project_id: proj-alpha
+    user_id: user-bob
+    provider: bedrock-mantle
+    model: deepseek-v3-mantle
+    prompt_tokens: 1310
+    completion_tokens: 1260
+    cost: 0.001905
+    latency_ms: 1031.2
+    minutes_ago: 216
+  - project_id: proj-alpha
+    user_id: user-bob
+    provider: bedrock
+    model: claude-opus
+    prompt_tokens: 1720
+    completion_tokens: 1180
+    cost: 0.1143
+    latency_ms: 2092.4
+    minutes_ago: 245
+    cached_tokens: 1147
+    cache_creation_tokens: 142
+  - project_id: proj-beta
+    user_id: user-carol
+    provider: openai
+    model: gpt-5.5-pro
+    prompt_tokens: 640
+    completion_tokens: 220
+    cost: 0.012
+    latency_ms: 3018.2
+    minutes_ago: 140
+  - project_id: proj-alpha
+    user_id: user-alice
+    provider: anthropic
+    model: claude-haiku
+    prompt_tokens: 2280
+    completion_tokens: 800
+    cost: 0.005024
+    latency_ms: 546.0
+    minutes_ago: 340
+  - project_id: proj-alpha
+    user_id: user-alice
+    provider: bedrock-mantle
+    model: qwen3-32b-mantle
+    prompt_tokens: 2260
+    completion_tokens: 240
+    cost: 0.000644
+    latency_ms: 387.1
+    minutes_ago: 353
+  - project_id: proj-alpha
+    user_id: user-bob
+    provider: bedrock-mantle
+    model: deepseek-v3-mantle
+    prompt_tokens: 2160
+    completion_tokens: 980
+    cost: 0.001824
+    latency_ms: 687.8
+    minutes_ago: 180
+  - project_id: proj-beta
+    user_id: user-carol
+    provider: bedrock-mantle
+    model: gpt-5.5
+    prompt_tokens: 410
+    completion_tokens: 500
+    cost: 0.005513
+    latency_ms: 736.9
+    minutes_ago: 128
+  - project_id: proj-alpha
+    user_id: user-alice
+    provider: bedrock-mantle
+    model: qwen3-32b-mantle
+    prompt_tokens: 2780
+    completion_tokens: 1280
+    cost: 0.00158
+    latency_ms: 924.0
+    minutes_ago: 351
+  - project_id: proj-alpha
+    user_id: user-bob
+    provider: bedrock
+    model: claude-opus
+    prompt_tokens: 1930
+    completion_tokens: 1160
+    cost: 0.11595
+    latency_ms: 4041.1
+    minutes_ago: 185
+    cached_tokens: 1004
+    cache_creation_tokens: 234
+  - project_id: proj-alpha
+    user_id: user-alice
+    provider: bedrock-mantle
+    model: deepseek-v3-mantle
+    prompt_tokens: 2260
+    completion_tokens: 200
+    cost: 0.000918
+    latency_ms: 745.2
+    minutes_ago: 310
+  - project_id: proj-alpha
+    user_id: user-alice
+    provider: google_ai
+    model: gemini-3-pro
+    prompt_tokens: 2140
+    completion_tokens: 860
+    cost: 0.006975
+    latency_ms: 1073.8
+    minutes_ago: 274
+  - project_id: proj-alpha
+    user_id: user-bob
+    provider: bedrock-mantle
+    model: gpt-5.5
+    prompt_tokens: 220
+    completion_tokens: 260
+    cost: 0.002875
+    latency_ms: 677.9
+    minutes_ago: 192
+  - project_id: proj-beta
+    user_id: user-carol
+    provider: google_ai
+    model: gemini-3-pro
+    prompt_tokens: 1210
+    completion_tokens: 540
+    cost: 0.004213
+    latency_ms: 1056.4
+    minutes_ago: 131
+  - project_id: proj-alpha
+    user_id: user-alice
+    provider: bedrock-mantle
+    model: gpt-5.5
+    prompt_tokens: 2450
+    completion_tokens: 730
+    cost: 0.010363
+    latency_ms: 1007.9
+    minutes_ago: 296
+  - project_id: proj-alpha
+    user_id: user-alice
+    provider: bedrock-mantle
+    model: qwen3-32b-mantle
+    prompt_tokens: 1580
+    completion_tokens: 800
+    cost: 0.000956
+    latency_ms: 628.1
+    minutes_ago: 306
+  - project_id: proj-alpha
+    user_id: user-bob
+    provider: bedrock
+    model: claude-opus
+    prompt_tokens: 2620
+    completion_tokens: 420
+    cost: 0.0708
+    latency_ms: 2911.5
+    minutes_ago: 202
+  - project_id: proj-alpha
+    user_id: user-alice
+    provider: bedrock-mantle
+    model: gpt-5.4
+    prompt_tokens: 640
+    completion_tokens: 990
+    cost: 0.00856
+    latency_ms: 915.3
+    minutes_ago: 316
+  - project_id: proj-alpha
+    user_id: user-bob
+    provider: bedrock-mantle
+    model: qwen3-32b-mantle
+    prompt_tokens: 1580
+    completion_tokens: 720
+    cost: 0.000892
+    latency_ms: 740.1
+    minutes_ago: 174
+  - project_id: proj-beta
+    user_id: user-carol
+    provider: anthropic
+    model: claude-sonnet
+    prompt_tokens: 2010
+    completion_tokens: 1030
+    cost: 0.02148
+    latency_ms: 1049.5
+    minutes_ago: 147
+  - project_id: proj-alpha
+    user_id: user-alice
+    provider: bedrock-mantle
+    model: gpt-5.4
+    prompt_tokens: 2230
+    completion_tokens: 670
+    cost: 0.00759
+    latency_ms: 893.4
+    minutes_ago: 335
+  - project_id: proj-alpha
+    user_id: user-alice
+    provider: openai
+    model: gpt-5.5-pro
+    prompt_tokens: 2950
+    completion_tokens: 380
+    cost: 0.02995
+    latency_ms: 3333.7
+    minutes_ago: 251
+  - project_id: proj-alpha
+    user_id: user-alice
+    provider: bedrock
+    model: claude-opus
+    prompt_tokens: 2640
+    completion_tokens: 90
+    cost: 0.04635
+    latency_ms: 2110.7
+    minutes_ago: 286
+  - project_id: proj-alpha
+    user_id: user-alice
+    provider: bedrock
+    model: claude-opus
+    prompt_tokens: 250
+    completion_tokens: 640
+    cost: 0.05175
+    latency_ms: 3166.4
+    minutes_ago: 255
+  - project_id: proj-alpha
+    user_id: user-bob
+    provider: bedrock-mantle
+    model: gpt-5.4
+    prompt_tokens: 3120
+    completion_tokens: 90
+    cost: 0.00384
+    latency_ms: 533.1
+    minutes_ago: 172
+  - project_id: proj-alpha
+    user_id: user-bob
+    provider: bedrock-mantle
+    model: deepseek-v3-mantle
+    prompt_tokens: 2220
+    completion_tokens: 1060
+    cost: 0.001938
+    latency_ms: 943.8
+    minutes_ago: 168
+  - project_id: proj-beta
+    user_id: user-carol
+    provider: anthropic
+    model: claude-haiku
+    prompt_tokens: 2170
+    completion_tokens: 540
+    cost: 0.003896
+    latency_ms: 425.7
+    minutes_ago: 114
+  - project_id: proj-alpha
+    user_id: user-bob
+    provider: bedrock-mantle
+    model: qwen3-32b-mantle
+    prompt_tokens: 2310
+    completion_tokens: 1160
+    cost: 0.00139
+    latency_ms: 678.3
+    minutes_ago: 197
+  - project_id: proj-alpha
+    user_id: user-alice
+    provider: openai
+    model: gpt-5.5-pro
+    prompt_tokens: 1640
+    completion_tokens: 1190
+    cost: 0.0558
+    latency_ms: 2922.9
+    minutes_ago: 279
+  - project_id: proj-beta
+    user_id: user-carol
+    provider: bedrock-mantle
+    model: qwen3-32b-mantle
+    prompt_tokens: 2300
+    completion_tokens: 1360
+    cost: 0.001548
+    latency_ms: 969.0
+    minutes_ago: 166
+  - project_id: proj-beta
+    user_id: user-carol
+    provider: bedrock-mantle
+    model: gpt-5.4
+    prompt_tokens: 1230
+    completion_tokens: 1140
+    cost: 0.01035
+    latency_ms: 757.8
+    minutes_ago: 103
+  - project_id: proj-alpha
+    user_id: user-alice
+    provider: anthropic
+    model: claude-sonnet
+    prompt_tokens: 2030
+    completion_tokens: 270
+    cost: 0.01014
+    latency_ms: 1039.7
+    minutes_ago: 322
+  - project_id: proj-alpha
+    user_id: user-bob
+    provider: openai
+    model: gpt-5.5-pro
+    prompt_tokens: 2200
+    completion_tokens: 120
+    cost: 0.0158
+    latency_ms: 2026.1
+    minutes_ago: 194
+  - project_id: proj-alpha
+    user_id: user-bob
+    provider: anthropic
+    model: claude-haiku
+    prompt_tokens: 2430
+    completion_tokens: 390
+    cost: 0.003504
+    latency_ms: 345.3
+    minutes_ago: 209
+  - project_id: proj-alpha
+    user_id: user-alice
+    provider: bedrock-mantle
+    model: gpt-5.4
+    prompt_tokens: 2700
+    completion_tokens: 1220
+    cost: 0.01246
+    latency_ms: 804.3
+    minutes_ago: 333
+  - project_id: proj-alpha
+    user_id: user-bob
+    provider: bedrock
+    model: claude-opus
+    prompt_tokens: 3170
+    completion_tokens: 320
+    cost: 0.07155
+    latency_ms: 1763.7
+    minutes_ago: 213
+  - project_id: proj-alpha
+    user_id: user-alice
+    provider: bedrock
+    model: claude-sonnet
+    prompt_tokens: 2170
+    completion_tokens: 1220
+    cost: 0.02481
+    latency_ms: 1487.2
+    minutes_ago: 281
+  - project_id: proj-alpha
+    user_id: user-bob
+    provider: openai
+    model: gpt-5.5-pro
+    prompt_tokens: 1120
+    completion_tokens: 1350
+    cost: 0.0596
+    latency_ms: 4720.3
+    minutes_ago: 227
+  - project_id: proj-beta
+    user_id: user-carol
+    provider: bedrock-mantle
+    model: gpt-5.5
+    prompt_tokens: 390
+    completion_tokens: 90
+    cost: 0.001388
+    latency_ms: 1188.7
+    minutes_ago: 77
+  - project_id: proj-beta
+    user_id: user-carol
+    provider: bedrock
+    model: claude-sonnet
+    prompt_tokens: 1920
+    completion_tokens: 310
+    cost: 0.01041
+    latency_ms: 1162.1
+    minutes_ago: 160
+    cached_tokens: 1265
+    cache_creation_tokens: 185
+  - project_id: proj-beta
+    user_id: user-carol
+    provider: bedrock-mantle
+    model: gpt-5.4
+    prompt_tokens: 2580
+    completion_tokens: 200
+    cost: 0.00418
+    latency_ms: 508.0
+    minutes_ago: 118
+  - project_id: proj-alpha
+    user_id: user-bob
+    provider: anthropic
+    model: claude-sonnet
+    prompt_tokens: 230
+    completion_tokens: 630
+    cost: 0.01014
+    latency_ms: 778.6
+    minutes_ago: 187
+    cached_tokens: 82
+    cache_creation_tokens: 30
 policies:
   - name: allow-all-read
     description: Allow all users read access
