@@ -571,6 +571,32 @@ class TestDashboard:
         assert "react" in body.lower()
         assert '<div id="root">' in body
 
+    def test_the_ribbon_links_to_the_architecture_page(self, client):
+        """The pill in the top ribbon, shown on Overview and every other view.
+
+        The href must be absolute. The dashboard is served from
+        /admin/dashboard, so a relative "architecture.html" resolves to
+        /admin/architecture.html — which is not a route, and the pill would
+        404 while looking perfectly fine in the markup.
+        """
+        body = client.get("/admin/dashboard").text
+        assert 'className="topbar-pill"' in body
+        assert 'href="/architecture.html"' in body
+        assert 'href="architecture.html"' not in body
+
+    def test_the_ribbon_pill_target_is_actually_served(self, site_client_for_dashboard):
+        """The pair, not just the href — same reason as the landing page's."""
+        assert site_client_for_dashboard.get("/architecture.html").status_code == 200
+
+    @pytest.fixture
+    def site_client_for_dashboard(self, admin_api):
+        from src.gateway.admin.routes import create_site_routes
+
+        app = Starlette(
+            routes=create_admin_routes(admin_api) + create_site_routes(admin_api)
+        )
+        return TestClient(app, raise_server_exceptions=False)
+
 
 # ── Virtual Model CRUD ───────────────────────────────────────────────
 
