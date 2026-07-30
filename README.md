@@ -395,6 +395,29 @@ models:
         fallback_order: 1
 ```
 
+#### Pricing drives smart routing
+
+Smart routing ranks candidates on `(1 - cost_quality_tradeoff) × benchmark +
+cost_quality_tradeoff × cheapness`, so **the cost half only works for models that
+have a price**. Prices live in `config/pricing.yaml`, keyed by provider and then
+by the *provider-side* `model_id` — the same lookup used to bill the request, so
+the cost used to choose a model matches the cost actually charged:
+
+```yaml
+providers:
+  bedrock:
+    us.amazon.nova-pro-v1:0:      # must match model_id in models.yaml
+      prompt_token_cost: 0.0008   # per 1,000 tokens
+      completion_token_cost: 0.0032
+```
+
+A model with no entry is treated as **unknown-cost, not free** — it is scored at
+the mean of the priced candidates and flagged `cost_estimated` in the decision
+trace. Scoring it as 0.0 would make it the cheapest candidate and let it win for
+being unmeasured rather than for being cheap. Add a price for any model you want
+genuinely ranked on cost. An inline `pricing:` block on a provider entry in
+`models.yaml` overrides the table for that mapping.
+
 OpenAI's `-pro` tier (`gpt-5.5-pro`, `gpt-5-pro`) is served only by the Responses
 API, and answers 400 `This is not a chat model` on Chat Completions. Configure it
 like any other model — the `openai` adapter recognizes the tier and switches
@@ -483,7 +506,7 @@ pip install -e ".[dev]"
 pytest tests/ -x -q
 ```
 
-1422 tests including unit, integration, end-to-end, and Hypothesis property-based tests.
+1457 tests including unit, integration, end-to-end, and Hypothesis property-based tests.
 
 ## Deployment
 

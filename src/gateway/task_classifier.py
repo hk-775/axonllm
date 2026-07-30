@@ -13,6 +13,36 @@ from src.gateway.models import ClassificationResult
 # do NOT get misread as math.
 _ARITHMETIC_RE = re.compile(r"\d\s*[+*=^]\s*\d|\d\s+[-/]\s+\d")
 
+# Postfix factorial ("4!", "what is 10!"). The operand must be adjacent to the
+# "!" — an exclamation mark after a word is prose ("I have 3 cats!" does not
+# match, since "!" there follows "s"). "!=" and "!!" are excluded: the first is
+# the not-equal operator in most languages, the second is emphasis.
+_FACTORIAL_RE = re.compile(r"\d!(?![=!])")
+
+# Function-call notation with a numeric argument: "sqrt(16)", "log(100)",
+# "sin(pi/2)". Two deliberate restrictions keep this off prose and code:
+#
+# * The name must be followed by "(", because keyword matching here is
+#   substring-based — a bare "ln" would fire inside "explain" and "mod" inside
+#   "model", breaking the reasoning and general cases.
+# * The argument must start with a number or a math constant, which is what
+#   separates the genuinely ambiguous names from their programming senses:
+#   log("starting server") is a logging call, log(100) is a logarithm.
+#
+# Programming builtins that happen to be mathematical (abs, round, floor, ceil,
+# pow) are left out entirely — "what does floor() do in Python" is a coding
+# question, and the numeric-argument rule alone would not tell the difference.
+_MATH_FUNC_RE = re.compile(
+    r"\b(sqrt|cbrt|log|log2|log10|ln|exp|sin|cos|tan|asin|acos|atan"
+    r"|sinh|cosh|tanh|gcd|lcm|mod)\s*\(\s*(-?[\d.]|pi\b|e\b|tau\b)"
+)
+
+# "15% of 200", "15 percent of 200" — a percentage *applied to* a quantity.
+# The trailing "of <number>" is what makes this a calculation rather than a
+# statistic quoted in prose ("up 12% year-over-year" has no "of" and so does
+# not match).
+_PERCENT_OF_RE = re.compile(r"\d\s*(?:%|\s*percent)\s+of\s+\d")
+
 
 class TaskClassifier:
     """Classifies prompts into task types using keyword/heuristic analysis."""
@@ -42,6 +72,12 @@ class TaskClassifier:
         "math": [
             "calculate", "equation", "solve", "math", "formula", "integral",
             "derivative", "probability", "statistics", "algebra", "factorial",
+            # Operations users spell out rather than write in notation. The
+            # symbolic forms are handled by the heuristics below; these catch
+            # "the square root of 144", which contains no operator at all.
+            "square root", "cube root", "logarithm", "arithmetic",
+            "multiply", "divide", "subtract", "modulo", "remainder",
+            "permutation", "combination", "quadratic", "trigonometry",
         ],
     }
 
@@ -143,3 +179,17 @@ class TaskClassifier:
             scores.setdefault("math", 0.0)
             scores["math"] += 1.5
             matched.setdefault("math", []).append("math_operators_heuristic")
+
+        # Notation that is not infix binary, and so invisible to the rule above:
+        # postfix factorial ("4!"), function calls ("sqrt(16)"), and a percentage
+        # applied to a quantity ("15% of 200"). Each carries the same weight as
+        # an arithmetic expression — they are equally unambiguous once matched.
+        for pattern, label in (
+            (_FACTORIAL_RE, "factorial_notation_heuristic"),
+            (_MATH_FUNC_RE, "math_function_heuristic"),
+            (_PERCENT_OF_RE, "percent_of_heuristic"),
+        ):
+            if pattern.search(normalized):
+                scores.setdefault("math", 0.0)
+                scores["math"] += 1.5
+                matched.setdefault("math", []).append(label)
