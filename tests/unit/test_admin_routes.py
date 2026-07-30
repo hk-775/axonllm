@@ -868,34 +868,133 @@ class TestLandingPage:
         assert "inline-flex" not in rule
         assert re.search(r"flex-direction:\s*column", rule)
 
-    def test_the_wordmark_leads_the_lockup(self, client):
-        """The wordmark is the brand; the tagline captions it.
+    def _hero_sizes(self, client) -> dict[str, float]:
+        """The four hero type sizes, in rem.
 
-        Both bounds matter and each was gotten wrong once. Too large and it
-        competes with the h1 for the page's primary line; too small and the
-        tracked-out tagline is physically wider than the wordmark row above it,
-        which puts the lockup's visual weight at the bottom.
-
-        The ratio is Ostiari's own logo.svg: a 7.5-unit tagline under a 26-unit
-        wordmark, i.e. the tagline is ~0.29x the wordmark's size.
+        Parsed from the desktop rules — the first match for each — so the
+        ordering tests below all measure the same breakpoint. The @media block
+        restates three of these and would otherwise be picked up instead.
         """
         import re
 
         html = client.get("/").text
-        word = float(re.search(
-            r"\.hero-wordmark \{[^}]*font-size:\s*([\d.]+)rem", html
-        ).group(1))
-        tag = float(re.search(
-            r"\.hero-tagline \{[^}]*font-size:\s*([\d.]+)rem", html
-        ).group(1))
-        h1_max = float(re.search(
-            r"h1 \{[^}]*font-size:\s*clamp\([^,]+,[^,]+,\s*([\d.]+)rem\)", html
-        ).group(1))
 
-        assert word < h1_max, f"wordmark {word}rem competes with the h1 at {h1_max}rem"
-        # Comfortably the larger of the two lines, not marginally so.
-        assert word >= 3 * tag, f"wordmark {word}rem vs tagline {tag}rem"
-        assert 0.25 <= tag / word <= 0.33, f"tagline/wordmark is {tag / word:.2f}"
+        def rem(pattern: str) -> float:
+            m = re.search(pattern, html)
+            assert m, f"no match for {pattern!r}"
+            return float(m.group(1))
+
+        return {
+            "wordmark": rem(r"\.hero-wordmark \{[^}]*font-size:\s*([\d.]+)rem"),
+            "tagline": rem(r"\.hero-tagline \{[^}]*font-size:\s*([\d.]+)rem"),
+            "h1": rem(r"\n        h1 \{[^}]*font-size:\s*([\d.]+)rem"),
+            "sub": rem(r"\.hero-sub \{[^}]*font-size:\s*([\d.]+)rem"),
+        }
+
+    def test_the_wordmark_is_the_largest_thing_in_the_hero(self, client):
+        """The lockup is the hero, and the headline is its subhead.
+
+        This was wrong twice in the same way and the earlier version of this
+        test enforced the wrong thing: it asserted `wordmark < h1`, on the
+        reasoning that the headline is the page's primary line. But the lockup
+        also came first in the document, so the brand led by position while the
+        headline led by size and the page had two competing heroes -- which is
+        what actually read as unprofessional.
+
+        One of them has to win outright. On a product landing page it is the
+        brand, so the ordering is asserted rather than left to taste.
+        """
+        s = self._hero_sizes(client)
+        assert s["wordmark"] > s["h1"], (
+            f"wordmark {s['wordmark']}rem does not lead the h1 at {s['h1']}rem"
+        )
+        # A clear step, not a hair's difference — 4.5 vs 2.6 read as two heroes
+        # and so would 2.7 vs 2.6.
+        assert s["h1"] / s["wordmark"] <= 0.8, (
+            f"h1 is {s['h1'] / s['wordmark']:.0%} of the wordmark; too close to read as a subhead"
+        )
+
+    def test_the_hero_type_scale_descends(self, client):
+        """wordmark > h1 > sub > tagline, strictly.
+
+        Each pair was inverted at some point: the h1 outgrew the wordmark, and
+        the tagline reached the body copy when the lockup was scaled up (0.28x
+        of a 4.4rem wordmark is 1.24rem, indistinguishable from the 1.25rem
+        sub). Asserted as one chain so raising any one size cannot quietly
+        overtake its neighbour.
+        """
+        s = self._hero_sizes(client)
+        order = ["wordmark", "h1", "sub", "tagline"]
+        scale = " > ".join(f"{k} {s[k]}rem" for k in order)
+
+        # Each step at least 15% smaller than the one above. Strict `>` is not
+        # enough: a 1.24rem tagline under a 1.25rem sub is descending by the
+        # letter and identical to the eye, which is a flat scale, not a
+        # hierarchy.
+        for bigger, smaller in zip(order, order[1:]):
+            assert s[smaller] <= 0.85 * s[bigger], (
+                f"{smaller} ({s[smaller]}rem) is not a clear step below "
+                f"{bigger} ({s[bigger]}rem) — {scale}"
+            )
+
+    def test_the_tagline_captions_the_wordmark(self, client):
+        """The ratio is Ostiari's own logo.svg: a 7.5-unit tagline under a
+        26-unit wordmark, i.e. ~0.29x.
+
+        Too small and the tracked-out tagline is far narrower than the row above
+        it; too large and it stops reading as a caption.
+        """
+        s = self._hero_sizes(client)
+        ratio = s["tagline"] / s["wordmark"]
+        assert 0.25 <= ratio <= 0.33, f"tagline/wordmark is {ratio:.2f}, want ~0.29"
+
+    def test_the_hero_sizes_are_stepped_not_fluid(self, client):
+        """A clamped headline against a fixed wordmark is what let the ratio
+        invert.
+
+        Two type scales on different mechanisms drift apart between
+        breakpoints, so `wordmark > h1` can hold at 1440px and cross over at
+        800px where nobody is looking. Both are stepped at the same breakpoint
+        instead, which is also what makes the ordering tests above meaningful at
+        more than one width.
+        """
+        import re
+
+        html = client.get("/").text
+        for sel in (r"\n        h1", r"\.hero-wordmark", r"\.hero-tagline"):
+            rule = re.search(rf"{sel} \{{([^}}]*)\}}", html).group(1)
+            assert "clamp(" not in rule and "vw" not in rule, (
+                f"{sel} is fluid; it must step with the lockup, not against it"
+            )
+
+    def test_the_narrow_viewport_keeps_the_same_ordering(self, client):
+        """The @media block restates the whole set, so it can invert on its own.
+
+        Scaling the lockup down without scaling the headline is the same bug at
+        a different width — and it is easy to miss, because the desktop tests
+        above all pass while a phone shows a headline larger than the brand.
+        """
+        import re
+
+        html = client.get("/").text
+        media = re.search(
+            r"@media \(max-width: 768px\) \{(.*?)\n        \}", html, re.S
+        ).group(1)
+
+        def rem(sel: str) -> float:
+            m = re.search(rf"{sel} \{{[^}}]*font-size:\s*([\d.]+)rem", media)
+            assert m, f"the mobile block does not restate {sel}"
+            return float(m.group(1))
+
+        word, h1, sub, tag = (
+            rem(r"\.hero-wordmark"), rem(r"h1"),
+            rem(r"\.hero-sub"), rem(r"\.hero-tagline"),
+        )
+        assert word > h1 > sub > tag, (
+            f"mobile scale is not descending: wordmark {word} > h1 {h1} "
+            f"> sub {sub} > tagline {tag}"
+        )
+        assert 0.25 <= tag / word <= 0.33, f"mobile tagline/wordmark is {tag / word:.2f}"
 
     def test_the_tagline_fits_within_the_lockup_row(self, client):
         """The failure both earlier attempts had, in opposite directions.
@@ -906,9 +1005,12 @@ class TestLandingPage:
         the mark-plus-wordmark row above it. Either way the lockup stops reading
         as one block.
 
-        Widths are estimated from Inter's measured advance ratios rather than
-        laid out, so the bound is loose: this catches "obviously wrong", which is
-        what shipped twice, not sub-pixel drift.
+        The advance ratios below are calibrated against a headless-Chrome
+        measurement of this page with Inter actually loaded — the earlier
+        estimated figures (3.67x / 15.63x) were off by ~20%, enough that this
+        test read 94% while the browser laid the line out at 100% of the row.
+        Still an estimate, so the bound stays loose: it catches "obviously
+        wrong", which is what shipped twice, not sub-pixel drift.
         """
         import re
 
@@ -923,10 +1025,11 @@ class TestLandingPage:
         tag_rem = num(r"\.hero-tagline \{[^}]*font-size:\s*([\d.]+)rem")
         track = num(r"\.hero-tagline \{[^}]*letter-spacing:\s*([\d.]+)em")
 
-        # "AxonLLM" in Inter 800 advances ~3.67x its font size; the tagline
-        # ~15.63x at 0.18em tracking, moving by one em per character beyond that.
-        row = mark + gap + word_rem * 16 * 3.67
-        tag_px = tag_rem * 16 * (15.63 - len("The Neural Control Plane") * (0.18 - track))
+        # "AxonLLM" in Inter 800 advances ~4.46x its font size; the tagline
+        # ~19.59x at 0.18em tracking, moving by one em per character beyond that.
+        # Both from Chrome, at 1440px with the webfont loaded.
+        row = mark + gap + word_rem * 16 * 4.46
+        tag_px = tag_rem * 16 * (19.59 - len("The Neural Control Plane") * (0.18 - track))
 
         ratio = tag_px / row
         assert 0.80 <= ratio <= 1.02, (
