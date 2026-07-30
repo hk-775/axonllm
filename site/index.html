@@ -15,15 +15,17 @@
             --border: #1e1e2e;
             --text: #e4e4e7;
             --text-dim: #71717a;
-            /* Purple matches --awsui-color-primary in the admin dashboard, so the
-               landing page and the product it links to read as one thing. */
-            --accent: #7c3aed;
-            --accent-bright: #a78bfa;
-            --accent-glow: rgba(124, 58, 237, 0.18);
+            /* Palette shared with the Ostiari landing page, values included.
+               Amber is light enough to read as text on --bg, so there is no
+               separate "bright" variant: one --accent covers both text and
+               fills, which is why anything sitting *on* the accent uses #000
+               rather than #fff. */
+            --accent: #f59e0b;
+            --accent-glow: rgba(245, 158, 11, 0.15);
             --green: #22c55e;
             --red: #ef4444;
             --blue: #3b82f6;
-            --amber: #f59e0b;
+            --purple: #a855f7;
             --radius: 12px;
         }
 
@@ -64,7 +66,7 @@
         .logo {
             font-size: 1.25rem;
             font-weight: 800;
-            color: var(--accent-bright);
+            color: var(--accent);
             text-decoration: none;
             letter-spacing: -0.5px;
         }
@@ -93,7 +95,7 @@
             gap: 8px;
             padding: 8px 18px;
             background: var(--accent);
-            color: #fff;
+            color: #000;
             border-radius: 8px;
             text-decoration: none;
             font-size: 0.85rem;
@@ -161,7 +163,7 @@
         }
 
         h1 .highlight {
-            background: linear-gradient(135deg, var(--accent-bright), #c4b5fd);
+            background: linear-gradient(135deg, var(--accent), #fbbf24);
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
             background-clip: text;
@@ -188,7 +190,7 @@
             gap: 8px;
             padding: 14px 28px;
             background: var(--accent);
-            color: #fff;
+            color: #000;
             border-radius: 10px;
             text-decoration: none;
             font-size: 1rem;
@@ -268,7 +270,7 @@
         .stat-num {
             font-size: 2rem;
             font-weight: 800;
-            color: var(--accent-bright);
+            color: var(--accent);
             letter-spacing: -1px;
         }
 
@@ -298,8 +300,8 @@
 
         .pipeline-visual .allow { color: var(--green); }
         .pipeline-visual .block { color: var(--red); }
-        .pipeline-visual .warn { color: var(--amber); }
-        .pipeline-visual .pick { color: var(--accent-bright); }
+        .pipeline-visual .warn { color: var(--accent); }
+        .pipeline-visual .pick { color: var(--accent); }
         .pipeline-visual .label { color: var(--text); }
 
         .features {
@@ -311,7 +313,7 @@
             font-weight: 600;
             text-transform: uppercase;
             letter-spacing: 2px;
-            color: var(--accent-bright);
+            color: var(--accent);
             margin-bottom: 12px;
         }
 
@@ -494,7 +496,7 @@
         }
 
         .tier-card.single .tier-mode { color: var(--blue); }
-        .tier-card.smart .tier-mode { color: var(--accent-bright); }
+        .tier-card.smart .tier-mode { color: var(--accent); }
         .tier-card.ensemble .tier-mode { color: var(--green); }
 
         .tier-name {
@@ -562,7 +564,7 @@
         .silent-table code {
             font-family: 'JetBrains Mono', monospace;
             font-size: 0.85em;
-            color: var(--accent-bright);
+            color: var(--accent);
         }
 
         .cta-section {
@@ -571,7 +573,7 @@
         }
 
         .cta-box {
-            background: linear-gradient(135deg, rgba(124, 58, 237, 0.1), rgba(59, 130, 246, 0.05));
+            background: linear-gradient(135deg, rgba(245, 158, 11, 0.1), rgba(59, 130, 246, 0.05));
             border: 1px solid var(--border);
             border-radius: 20px;
             padding: 80px 40px;
