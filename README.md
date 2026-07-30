@@ -59,8 +59,9 @@ docker compose up
 - **Admin RBAC** — admin endpoints require `admin` role or `admin:*` scope (ENFORCE mode)
 
 ### Observability
-- **Admin dashboard** — Sandbox, Overview, Traces, Efficiency, Audit Log, Models, Projects, Users, API Keys, Policies, Quotas, Regions, Webhooks, Health, Configuration, Architecture, Pricing
+- **Admin dashboard** — Sandbox, Overview, Traces, Efficiency, Audit Log, Models, Projects, Users, API Keys, Policies, Quotas, Regions, Webhooks, Health, Configuration, Architecture, Pricing, Readiness
 - **Pricing coverage check** — flags models with no configured price, which bill at $0.00 and so silently under-count budgets. Reported at startup and on `/admin/pricing-drift`.
+- **Production readiness checklist** — six checks for misconfigurations that serve traffic without raising anything: unpriced models, model ids the provider no longer lists (including aliases that answer 200 while serving a different model), missing credentials, `LOG_ONLY` auth, demo data, unreachable persistence. On `/admin/production-checklist`, production only.
 - **Token efficiency analytics** — detect waste, recommend cheaper models, score prompt quality
 - **Streaming** — SSE streaming for all providers with PII re-injection
 
@@ -294,6 +295,7 @@ Notes that matter in practice:
 | Playground | `/playground` | Router picks provider, shows routing decision |
 | Routing Explorer | `/routing` | Smart routing or ensemble — classify prompt, explain decision |
 | Pricing Coverage | `/admin/pricing-drift` | Which models have no price, and what that costs you |
+| Production Readiness | `/admin/production-checklist` | What is misconfigured in ways no request would reveal (production only) |
 
 ## Architecture
 
@@ -471,6 +473,53 @@ a line in the startup scroll is exactly the kind of warning that gets missed.
 That only happens on an interactive terminal — the same file is the container
 `CMD`, so a piped or containerized run prints the banner and nothing else. Set
 `AXON_NO_BROWSER=true` to suppress it locally too.
+
+#### Production readiness checklist
+
+Pricing coverage is one instance of a general problem: the gateway serves traffic
+happily while its configuration is wrong, because none of these states raise
+anything. **`/admin/production-checklist`** answers the question a log cannot —
+not "is anything broken right now" but "is this deployment ready to carry real
+traffic":
+
+| Check | Fails when | Why it is invisible otherwise |
+|---|---|---|
+| Pinned model ids exist at their providers | An id is not in the provider's own model list | A retired id fails over; an **alias answers 200 while serving a different model**, and bills $0.00 |
+| Token pricing covers every mapping | A model has no priced provider | Bills $0.00, so a budget cap on it can never trigger |
+| Every routed provider has credentials | A model has no usable provider | Providers without keys are dropped silently at startup |
+| API authentication is enforced | `AXON_AUTH_MODE=LOG_ONLY` | Requests are served *and* logged as denied |
+| Demo seed data is not loaded | `AXON_LOAD_DEMO_DATA` is unset or true | `serve_dashboard.py` — the container `CMD` — defaults it to `true` |
+| State survives a restart | DynamoDB is disabled or unreachable | Writes are swallowed by design, so billing data vanishes silently |
+
+The model-id check is the one that goes out to the network. It asks each
+configured provider what it currently serves and diffs that against
+`models.yaml` — one **list** call per provider, never a completion: listing is
+free, generating a token is not, and loading an admin page should not be a
+billable event. The tradeoff is that a retired id and an honoured-but-undocumented
+alias look identical from a list, so the page reports both as *unlisted* and says
+which two things that could mean, rather than guessing.
+
+Three things worth knowing before you rely on it:
+
+- **A check that could not run reports UNKNOWN, not PASS.** Turning the live check
+  off with `AXON_CHECK_MODEL_AVAILABILITY=false` (for an egress-filtered
+  deployment) leaves that row unknown. Collapsing "could not verify" into "fine"
+  is how an expired credential renders as a green checklist.
+- **Nothing is enforced.** No check can refuse a boot or reject a request. An
+  operator who has read a warning and decided to ship is making a call the
+  gateway is not positioned to overrule, and a readiness page that can take down
+  a deployment is one nobody enables. Failures print a startup banner; warnings
+  stay quiet, since a banner on every healthy boot is one nobody reads.
+- **It is hidden in demo mode.** A demo deliberately runs with no credentials,
+  `LOG_ONLY` auth and seeded data — exactly the configuration this checklist
+  exists to fail. Rendering it there would show a wall of red that is correct for
+  a demo and teaches operators to ignore the page, so the page explains itself
+  instead and makes no outbound calls.
+
+Providers with no catalogue endpoint (Bedrock and Vertex AI authenticate through
+IAM and use deployment-path ids, not bearer tokens and bare model names) are
+counted as *unchecked by name* rather than quietly omitted, so a partial check
+never reads as full coverage.
 
 ### Ensemble Presets
 

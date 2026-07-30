@@ -27,11 +27,14 @@ _STATIC_DIR = pathlib.Path(__file__).resolve().parent / "static"
 _PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent.parent.parent
 
 from src.gateway.admin.pricing_drift import audit_pricing, render_drift_page
+from src.gateway.admin.production_checklist import render_checklist_page, run_checklist
+from src.gateway.config import AppConfig
 from src.gateway.cost_tracker import CostTracker
 from src.gateway.efficiency_analyzer import EfficiencyAnalyzer
 from src.gateway.health_tracker import ProviderHealthTracker
 from src.gateway.model_registry import ModelRegistry
 from src.gateway.models import GuardrailRule, Project, UsageFilters
+from src.gateway.provider_config import ProviderConfig
 from src.gateway.semantic_efficiency import SemanticEfficiencyEngine
 
 if TYPE_CHECKING:
@@ -111,6 +114,8 @@ class AdminAPI:
         efficiency_analyzer: EfficiencyAnalyzer | None = None,
         semantic_engine: SemanticEfficiencyEngine | None = None,
         pricing_path: str = "config/pricing.yaml",
+        app_config: AppConfig | None = None,
+        provider_configs: dict[str, ProviderConfig] | None = None,
     ) -> None:
         self.cost_tracker = cost_tracker
         self.health_tracker = health_tracker
@@ -126,6 +131,17 @@ class AdminAPI:
         # Shown on the pricing-coverage page so the operator knows which file to
         # edit; the table itself comes from the cost tracker, already loaded.
         self._pricing_path = pricing_path
+        # For the production checklist. The typed AppConfig is threaded through
+        # rather than read from the environment in the render path, so the page
+        # reports the settings this process actually booted with — a later
+        # os.environ mutation cannot make the checklist disagree with the running
+        # gateway. Defaults to a fresh AppConfig so existing callers keep working;
+        # that carries the fail-closed defaults (ENFORCE, no demo data), which is
+        # the safe direction for a checklist to assume.
+        self._app_config = app_config if app_config is not None else AppConfig()
+        # Providers with credentials actually loaded. load_provider_configs drops
+        # the rest, so this doubles as the credential check's input.
+        self._provider_configs: dict[str, ProviderConfig] = provider_configs or {}
 
     # ------------------------------------------------------------------
     # GET /admin/overview
@@ -1488,6 +1504,27 @@ class AdminAPI:
         report = audit_pricing(self.model_registry, self.cost_tracker.pricing_config)
         return HTMLResponse(render_drift_page(report, self._pricing_path))
 
+    async def production_checklist(self, request: Request) -> HTMLResponse:
+        """Report whether this deployment is ready to carry real traffic.
+
+        Every check behind this page covers something that fails silently — an
+        unpriced model billing $0.00, LOG_ONLY auth admitting every request, a
+        retired model id — so the state is only visible if something asks. Run
+        fresh per request from the live config, so a fix shows on reload.
+
+        Hidden in demo mode: ``run_checklist`` returns a did-not-run report and
+        the page explains why, rather than listing failures that are correct for
+        a demo and would train operators to ignore it.
+        """
+        report = await run_checklist(
+            app_config=self._app_config,
+            model_registry=self.model_registry,
+            pricing_config=self.cost_tracker.pricing_config,
+            provider_configs=self._provider_configs,
+            persistence=self._persistence,
+        )
+        return HTMLResponse(render_checklist_page(report))
+
 
 # ------------------------------------------------------------------
 # Helper
@@ -1516,6 +1553,7 @@ def create_admin_routes(admin_api: AdminAPI) -> list[Route]:
         Route("/admin/static/{path:path}", admin_api.static_asset, methods=["GET"]),
         Route("/admin/architecture", admin_api.architecture, methods=["GET"]),
         Route("/admin/pricing-drift", admin_api.pricing_drift, methods=["GET"]),
+        Route("/admin/production-checklist", admin_api.production_checklist, methods=["GET"]),
         Route("/admin/overview", admin_api.overview, methods=["GET"]),
         Route("/admin/projects", admin_api.list_projects, methods=["GET"]),
         Route("/admin/projects", admin_api.create_project, methods=["POST"]),

@@ -57,6 +57,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   platform-injected secrets are never shadowed. Startup logs the variable names
   loaded, never their values.
 
+- **Production readiness checklist on `/admin/production-checklist`, with a live
+  provider model-availability check.** Six checks, each covering a state the
+  gateway serves traffic in without complaint — the config is wrong in a way no
+  request surfaces:
+  - **Pinned model ids still exist at their providers** (new). `config/models.yaml`
+    pins a provider-side `model_id`; providers retire, rename and alias those on
+    their own schedule, and nothing reconciled the two. The dangerous case is not
+    the 404 — that fails over noisily — but the *undocumented alias*: `xai`'s
+    `grok-3` answered 200 while resolving to `grok-4.3`, and because an alias
+    appears on no price list it also billed **$0.00** while being served by a
+    $1.25/$2.50-per-MTok model. The check asks each provider what it currently
+    serves and diffs that against the routing table. Verified against the live
+    APIs: it flags `grok-3` and a retired OpenAI snapshot, and correctly does
+    *not* flag `claude-opus-4-1-20250805`, which Anthropic still lists.
+  - **Token pricing covers every provider mapping** — reuses `audit_pricing`, so
+    it cannot disagree with the pricing page. FAIL when a model has no priced
+    provider at all (bills $0.00 outright, so a budget cap on it can never
+    trigger); WARN when partially priced, since the priced provider still bills.
+  - **Every routed provider has credentials.** `load_provider_configs` drops
+    providers with no key without raising, so a missing credential is invisible
+    until a request routes there. FAIL when a model has no usable provider at
+    all. Bedrock and Bedrock-Mantle count as credentialled — they authenticate
+    through the boto3 chain, not `providers.yaml`, so treating their absence as
+    missing would fail this check for most deployments.
+  - **API authentication is enforced.** `AXON_AUTH_MODE=LOG_ONLY` serves every
+    unauthenticated request while logging that it would have denied it, which
+    makes the audit trail read like the control is working.
+  - **Demo seed data is not loaded** — WARN when `AXON_LOAD_DEMO_DATA` is merely
+    *unset* rather than explicitly false, because `serve_dashboard.py` (the
+    container `CMD`) defaults it to `true`, so the same image started the
+    ordinary way seeds fabricated spend into a real dashboard.
+  - **State survives a restart.** DynamoDB writes are swallowed by design — a
+    provider call should not 500 because Dynamo hiccuped — so an unreachable
+    table loses every billing record with no request-visible symptom.
+
+  Three properties the checklist is built around. **A check that could not run
+  reports UNKNOWN, never PASS** — collapsing those is how an expired credential
+  or a blocked egress route renders as a green checklist, so disabling the live
+  check leaves the row unknown rather than passing it. **Nothing is enforced**: no
+  check can refuse a boot or reject a request, and the page says so, because a
+  readiness page that can take down a deployment is one nobody enables. **List
+  calls only, never a completion** — listing is free and idempotent, while
+  probing an id by generating a token would make loading an admin page a billable
+  event; the cost is that alias detection has to be inferred from absence rather
+  than observed, and the page reports that ambiguity instead of guessing.
+
+  Production only. In demo mode the page explains why it is empty rather than
+  rendering checks that would all fail correctly and mean nothing, and makes no
+  outbound calls at all. Providers without a catalogue endpoint (Bedrock,
+  Vertex AI) are counted as *unchecked* by name, so a partial check never implies
+  full coverage. A failed provider call yields an error row and no findings — a
+  network blip cannot manufacture a wall of bogus "retired model" warnings — and
+  an empty model list is treated as a changed response shape rather than as
+  "everything is missing". Credentials never reach a rendered string: transport
+  failures report the exception type only (httpx embeds the request URL, which
+  for Google AI carries the key as a query parameter) and the Google AI key is
+  passed via `params` rather than interpolated into the URL. 75 tests in
+  `tests/unit/test_production_checklist.py` and
+  `tests/unit/test_model_availability.py`.
+
 - **Pricing coverage report, at startup and on `/admin/pricing-drift`.**
   `config/models.yaml` and `config/pricing.yaml` are edited independently and
   nothing checked one against the other, so a model added without a price failed
