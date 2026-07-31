@@ -256,6 +256,8 @@ class DynamoPersistence:
             "guardrail_rules": json.dumps(guardrail_rules),
             "cache_enabled": project.cache_enabled,
             "cache_ttl_seconds": project.cache_ttl_seconds,
+            "semantic_cache_enabled": project.semantic_cache_enabled,
+            "semantic_cache_threshold": project.semantic_cache_threshold,
             "log_level": project.log_level,
             "log_destination": project.log_destination,
             "ltm_enabled": project.ltm_enabled,
@@ -305,6 +307,16 @@ class DynamoPersistence:
             guardrail_rules=guardrail_rules,
             cache_enabled=bool(item.get("cache_enabled", False)),
             cache_ttl_seconds=int(item.get("cache_ttl_seconds", 300)),
+            semantic_cache_enabled=bool(item.get("semantic_cache_enabled", False)),
+            # float(), not the raw value: DynamoDB returns numbers as Decimal,
+            # and a Decimal threshold compares fine but would not round-trip
+            # through JSON on the admin surface. None stays None — see the note
+            # on the field, 0.0 would mean "match everything".
+            semantic_cache_threshold=(
+                float(item["semantic_cache_threshold"])
+                if item.get("semantic_cache_threshold") is not None
+                else None
+            ),
             log_level=item.get("log_level", "INFO"),
             log_destination=item.get("log_destination"),
             ltm_enabled=bool(item.get("ltm_enabled", False)),

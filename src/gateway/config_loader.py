@@ -65,7 +65,42 @@ def load_app_config() -> AppConfig:
         oidc_issuer=os.environ.get("AXON_OIDC_ISSUER", ""),
         oidc_audience=os.environ.get("AXON_OIDC_AUDIENCE", ""),
         auth_mode=_load_auth_mode(),
+        semantic_cache_enabled=os.environ.get(
+            "AXON_SEMANTIC_CACHE", "false"
+        ).lower() == "true",
+        semantic_cache_region=os.environ.get(
+            "AXON_SEMANTIC_CACHE_REGION", os.environ.get("AXON_BEDROCK_REGION", "us-east-1")
+        ),
+        semantic_cache_model=os.environ.get("AXON_SEMANTIC_CACHE_MODEL", ""),
+        semantic_cache_threshold=_load_semantic_threshold(),
     )
+
+
+def _load_semantic_threshold() -> float | None:
+    """Parse AXON_SEMANTIC_CACHE_THRESHOLD, or None to use the module default.
+
+    An unparseable or out-of-range value falls back to None rather than to 0.0:
+    a threshold of zero makes every cached entry a match, so the failure mode of
+    a typo would be a cache that answers every question with the first response
+    it ever stored.
+    """
+    raw = os.environ.get("AXON_SEMANTIC_CACHE_THRESHOLD", "").strip()
+    if not raw:
+        return None
+    try:
+        value = float(raw)
+    except ValueError:
+        logger.warning(
+            "Unparseable AXON_SEMANTIC_CACHE_THRESHOLD=%r — using the default", raw
+        )
+        return None
+    if not 0.0 < value <= 1.0:
+        logger.warning(
+            "AXON_SEMANTIC_CACHE_THRESHOLD=%r is outside (0.0, 1.0] — using the default",
+            raw,
+        )
+        return None
+    return value
 
 
 def _load_auth_mode() -> str:

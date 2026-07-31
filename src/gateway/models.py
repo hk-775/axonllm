@@ -187,6 +187,15 @@ class Project:
     guardrail_rules: list[GuardrailRule] = field(default_factory=list)
     cache_enabled: bool = False
     cache_ttl_seconds: int = 300
+    # Reuse a cached response for a *reworded* question, not just a byte-identical
+    # one. Separate from cache_enabled and defaulting to off: exact matching can
+    # only return the answer to the question asked, while semantic matching can
+    # return the answer to a different one. Opting into the first must not opt
+    # you into the second.
+    semantic_cache_enabled: bool = False
+    # None means "use the gateway default" (semantic_cache.DEFAULT_SIMILARITY_THRESHOLD)
+    # rather than 0.0, which would match everything.
+    semantic_cache_threshold: float | None = None
     log_level: str = "INFO"
     log_destination: str | None = None
     prompt_caching_enabled: bool = False

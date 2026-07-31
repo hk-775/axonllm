@@ -151,3 +151,12 @@ class AppConfig:
     oidc_issuer: str = ""
     oidc_audience: str = ""
     auth_mode: str = "ENFORCE"  # fail-closed by default; set AXON_AUTH_MODE=LOG_ONLY for local dev only
+    # Semantic cache. Off by default at the gateway level *as well as* per
+    # project: a project flag can only take effect once an embedder exists, and
+    # building one costs a Bedrock dependency at startup. Both must say yes.
+    semantic_cache_enabled: bool = False
+    semantic_cache_region: str = "us-east-1"
+    semantic_cache_model: str = ""  # "" means the embeddings module default
+    # None means "use semantic_cache.DEFAULT_SIMILARITY_THRESHOLD". Not 0.0,
+    # which would make every comparison a hit.
+    semantic_cache_threshold: float | None = None

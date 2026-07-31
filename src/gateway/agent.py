@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, AsyncIterator
 
 from src.gateway.cache_manager import CacheManager
+from src.gateway.semantic_cache import SemanticCache
 from src.gateway.cost_tracker import CostTracker
 from src.gateway.guardrail_engine import GuardrailEngine
 from src.gateway.models import (
@@ -178,6 +179,7 @@ class GatewayAgent:
         region_router: RegionRouter | None = None,
         trace_forwarder: TraceForwarder | None = None,
         otlp_exporter: Any = None,
+        semantic_cache: SemanticCache | None = None,
     ) -> None:
         self.router = router
         self.rate_limiter = rate_limiter
@@ -199,6 +201,7 @@ class GatewayAgent:
         self._region_router = region_router
         self._trace_forwarder = trace_forwarder
         self._otlp_exporter = otlp_exporter
+        self._semantic_cache = semantic_cache
 
     # ------------------------------------------------------------------
     # Public API
@@ -438,6 +441,14 @@ class GatewayAgent:
                 return resp
 
         # 9. Cache check
+        #
+        # Two lookups, in cost order. The exact key is a hash comparison against
+        # a dict; the semantic one costs an embedding round-trip, so it only runs
+        # once the cheap path has missed. cache_key is kept for step 16, which
+        # writes the response back — recomputing it there would hash the request
+        # twice per miss.
+        cache_key: str | None = None
+        semantic_eligible = False
         if project and project.cache_enabled:
             cache_key = self.cache_manager.compute_cache_key(request, req_ctx.project_id)
             cached = await self.cache_manager.get(cache_key)
@@ -445,6 +456,25 @@ class GatewayAgent:
                 result = self._response_to_dict(cached, is_cached=True)
                 result["_rate_limit_headers"] = _rate_limit_headers
                 return result
+
+            semantic_eligible = (
+                project.semantic_cache_enabled and self._semantic_cache is not None
+            )
+            if semantic_eligible:
+                sem_hit = await self._semantic_cache.get(
+                    request,
+                    req_ctx.project_id,
+                    threshold=project.semantic_cache_threshold,
+                )
+                if sem_hit is not None:
+                    result = self._response_to_dict(sem_hit, is_cached=True)
+                    # Flagged separately from is_cached. An exact hit is the
+                    # answer to this question; a semantic hit is the answer to a
+                    # question judged equivalent, and a caller comparing
+                    # responses needs to be able to tell which it got.
+                    result["cache_type"] = "semantic"
+                    result["_rate_limit_headers"] = _rate_limit_headers
+                    return result
 
         # 9.5. Region routing — check spoke availability and data residency
         region_decision = None
@@ -698,6 +728,7 @@ class GatewayAgent:
             return resp
 
         # 11. Response guardrails
+        response_blocked = False
         if project and project.guardrail_rules:
             resp_guard = self.guardrail_engine.evaluate_response(
                 response, project.guardrail_rules
@@ -707,6 +738,11 @@ class GatewayAgent:
                     response,
                     resp_guard.message or "Response blocked by guardrail.",
                 )
+                # Not cacheable. The content is now a refusal notice, and caching
+                # it would serve that notice to every later request that matched
+                # — turning one blocked response into a block on a whole family
+                # of questions, with no violation to explain it.
+                response_blocked = True
 
         # 11.5. PII re-injection into response
         if pii_mapping is not None and pii_mapping.redacted_count > 0 and self._pii_redactor is not None:
@@ -811,6 +847,30 @@ class GatewayAgent:
                     pii_mapping=pii_mapping,
                 )
             return self._stream_response(response, budget_status, _rate_limit_headers, pii_mapping=pii_mapping)
+
+        # 15.5. Cache write
+        #
+        # Here rather than immediately after the provider call, for two reasons.
+        # It is past step 11 (guardrails) and step 11.5 (PII re-injection), so
+        # what gets stored is the response as actually returned — caching the
+        # pre-guardrail one would let a later hit bypass the guardrail entirely.
+        # And it is past step 15, so streaming responses never reach it: the
+        # cached object is complete, and replaying it as a stream is a different
+        # shape than the caller asked for.
+        #
+        # cache_key is None whenever caching is off for the project, which is
+        # what gates the exact-match write. Until now nothing called
+        # cache_manager.put at all — the step 9 read above was against a cache
+        # nothing ever wrote to, so it could only ever miss.
+        if cache_key is not None and not response_blocked:
+            ttl = project.cache_ttl_seconds if project else 300
+            await self.cache_manager.put(cache_key, response, ttl)
+            if semantic_eligible:
+                # put() swallows its own failures; an embedding outage must not
+                # turn a completed request into an error.
+                await self._semantic_cache.put(
+                    request, req_ctx.project_id, response, ttl
+                )
 
         # 16. Non-streaming return
         result = self._response_to_dict(response)
@@ -1747,6 +1807,7 @@ def create_gateway_agent(
     region_router: RegionRouter | None = None,
     trace_forwarder: TraceForwarder | None = None,
     otlp_exporter: Any = None,
+    semantic_cache: SemanticCache | None = None,
 ) -> GatewayAgent:
     """Create and wire a GatewayAgent, also setting the module-level singleton."""
     global _agent
@@ -1770,6 +1831,7 @@ def create_gateway_agent(
         region_router=region_router,
         trace_forwarder=trace_forwarder,
         otlp_exporter=otlp_exporter,
+        semantic_cache=semantic_cache,
     )
     _agent = agent
     return agent

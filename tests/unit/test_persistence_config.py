@@ -57,3 +57,58 @@ class TestHealthStatus:
         assert p.last_write_error is None
         p._record_write_failure("usage record", "req-123")
         assert p.last_write_error == "usage record req-123"
+
+
+class TestProjectRoundTrip:
+    """A Project must survive serialize -> deserialize with every field intact.
+
+    A field the serializer forgets is not an error anywhere: the write succeeds,
+    the read returns the dataclass default, and the setting quietly reverts on
+    the next restart. For a cache flag that means a project silently stops
+    caching; for a threshold it means it silently starts matching at a different
+    one than the operator set.
+    """
+
+    def _round_trip(self, project):
+        item = DynamoPersistence.serialize_project(project)
+        return DynamoPersistence.deserialize_project(item)
+
+    def test_the_semantic_cache_flags_survive(self):
+        from src.gateway.models import Project
+
+        project = Project(
+            project_id="p1", name="P1",
+            cache_enabled=True, cache_ttl_seconds=900,
+            semantic_cache_enabled=True, semantic_cache_threshold=0.97,
+        )
+        back = self._round_trip(project)
+        assert back.cache_enabled is True
+        assert back.cache_ttl_seconds == 900
+        assert back.semantic_cache_enabled is True
+        assert back.semantic_cache_threshold == 0.97
+
+    def test_an_unset_threshold_stays_none_rather_than_becoming_zero(self):
+        """0.0 would mean "match everything" — the one value that must not appear
+        by accident."""
+        from src.gateway.models import Project
+
+        back = self._round_trip(Project(project_id="p1", name="P1"))
+        assert back.semantic_cache_threshold is None
+        assert back.semantic_cache_enabled is False
+
+    def test_a_decimal_threshold_from_dynamo_becomes_a_float(self):
+        """DynamoDB returns numbers as Decimal. A Decimal compares correctly but
+        does not serialize to JSON, so the admin endpoint would 500 on a project
+        loaded from the table while working on one created in-process.
+        """
+        from decimal import Decimal
+
+        item = DynamoPersistence.serialize_project(
+            __import__("src.gateway.models", fromlist=["Project"]).Project(
+                project_id="p1", name="P1", semantic_cache_threshold=0.95,
+            )
+        )
+        item["semantic_cache_threshold"] = Decimal("0.95")
+        back = DynamoPersistence.deserialize_project(item)
+        assert isinstance(back.semantic_cache_threshold, float)
+        assert back.semantic_cache_threshold == 0.95

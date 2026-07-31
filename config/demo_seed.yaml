@@ -7,6 +7,10 @@ projects:
     budget_limit: 500.0
     alert_threshold: 400.0
     cache_enabled: true
+    # On for the demo so the setting is visible in the dashboard, but it only
+    # takes effect once the gateway has an embedder (AXON_SEMANTIC_CACHE=true).
+    # Without one the lookup is skipped and exact-match caching carries on.
+    semantic_cache_enabled: true
     prompt_caching_enabled: true
     members:
       - chat-user

@@ -327,7 +327,7 @@ Request → Auth (OIDC/API Key) → Quota Enforcement (policy hierarchy)
 6. **Access checks** — project and user model restrictions
 7. **Budget check** — project and user spend limits
 8. **Guardrails** — content policy evaluation
-9. **Cache** — exact-match response cache (SHA-256 of model + messages + params)
+9. **Cache** — exact-match response cache (SHA-256 of model + messages + params), then an optional semantic match on the reworded question. Written back after guardrails and PII re-injection, so a hit cannot bypass either
 10. **Region routing** — select spoke based on health, data residency, model availability
 11. **Provider routing** — strategy-based model selection + fallback
 12. **Response guardrails** — output filtering
@@ -356,6 +356,8 @@ Request → Auth (OIDC/API Key) → Quota Enforcement (policy hierarchy)
 | `/admin/webhooks` | GET/POST | List or add event destinations |
 | `/admin/webhooks/{name}` | DELETE | Remove a destination |
 | `/admin/webhooks/{name}/test` | POST | Send test event |
+| `/admin/semantic-cache` | GET | Semantic cache stats: entries, hits, misses, and how many candidates the literal guard rejected |
+| `/admin/semantic-cache` | DELETE | Invalidate entries — one project with `?project_id=`, all of them without |
 | `/admin/regions` | GET | Current topology |
 | `/admin/regions/health` | GET | Spoke health status |
 | `/admin/regions/health/check` | POST | Trigger health check |
@@ -385,6 +387,10 @@ Request → Auth (OIDC/API Key) → Quota Enforcement (policy hierarchy)
 | `AXON_SAML_ACS_URL` | — | Assertion Consumer Service URL (this gateway's `/saml/acs`) |
 | `AXON_SAML_IDP_SSO_URL` | — | IdP SSO redirect endpoint |
 | `AXON_SAML_IDP_CERT` / `AXON_SAML_IDP_CERT_FILE` | — | IdP signing certificate (PEM inline or file path); SAML disabled until set |
+| `AXON_SEMANTIC_CACHE` | `false` | Build the embedder for semantic caching. A project also needs `semantic_cache_enabled` — both must say yes |
+| `AXON_SEMANTIC_CACHE_REGION` | `AXON_BEDROCK_REGION` | Region for the embedding calls |
+| `AXON_SEMANTIC_CACHE_MODEL` | `amazon.titan-embed-text-v2:0` | Bedrock embedding model id |
+| `AXON_SEMANTIC_CACHE_THRESHOLD` | `0.95` | Cosine similarity a stored prompt must clear to be served. Must be in `(0, 1]`; an unparseable or out-of-range value falls back to the default rather than to `0`, which would match everything |
 | `OSTIARI_TRACES_URL` | — | When set, forward request traces to this Ostiari ingest URL (e.g. `http://control-plane:8000/api/traces/ingest`) |
 | `OSTIARI_GATEWAY_ID` | `axonllm` | Gateway identifier reported in Ostiari's Live Traces |
 | `OSTIARI_INGEST_KEY` | — | Shared secret sent as `X-Ingest-Key` when Ostiari's ingest endpoint requires auth |

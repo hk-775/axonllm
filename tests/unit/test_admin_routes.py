@@ -22,9 +22,12 @@ from src.gateway.cost_tracker import CostTracker
 from src.gateway.health_tracker import ProviderHealthTracker
 from src.gateway.model_registry import ModelRegistry
 from src.gateway.models import (
+    ChatCompletionRequest,
+    ChatCompletionResponse,
     Project,
     ProviderModelMapping,
     TokenPricing,
+    TokenUsage,
     UsageRecord,
     ModelConfig,
 )
@@ -552,6 +555,161 @@ class TestHealth:
         resp = client.get("/admin/health")
         data = resp.json()
         assert data["providers"]["openai"] == "unhealthy"
+
+
+# ── Semantic cache ───────────────────────────────────────────────────
+
+class TestSemanticCacheEndpoint:
+    """GET/DELETE /admin/semantic-cache.
+
+    The endpoint exists because a semantic cache cannot detect its own
+    staleness — the documents behind an answer change with nothing observable in
+    the request — and because "no embedder, so the cache cannot run" and
+    "running and finding nothing" are indistinguishable from a hit rate of 0.0
+    while having completely different fixes.
+    """
+
+    @pytest.fixture
+    def cache_client(self, cost_tracker, health_tracker, model_registry):
+        from src.gateway.semantic_cache import SemanticCache
+
+        class _Embedder:
+            async def embed(self, text):
+                return [1.0, 0.0, 0.0]
+
+        cache = SemanticCache(_Embedder())
+        api = AdminAPI(
+            cost_tracker=cost_tracker,
+            health_tracker=health_tracker,
+            model_registry=model_registry,
+            projects={
+                "p1": Project(project_id="p1", name="P1", cache_enabled=True,
+                              semantic_cache_enabled=True),
+                "p2": Project(project_id="p2", name="P2", cache_enabled=True),
+            },
+            semantic_cache=cache,
+        )
+        return TestClient(_make_app(api), raise_server_exceptions=False), cache
+
+    def test_stats_report_availability_and_which_projects_opted_in(self, cache_client):
+        client, _ = cache_client
+        data = client.get("/admin/semantic-cache").json()
+        assert data["available"] is True
+        assert data["reason"] is None
+        assert data["projects_enabled"] == ["p1"]
+        assert data["default_threshold"] == 0.95
+
+    def test_stats_expose_the_literal_rejection_counter(self, cache_client):
+        """Surfaced deliberately: a high value means the threshold is admitting
+        near-misses and only the literal guard is catching them — a reason to
+        raise the threshold, not a healthy state."""
+        client, _ = cache_client
+        assert "rejected_by_literals" in client.get("/admin/semantic-cache").json()["stats"]
+
+    def test_a_cache_with_no_embedder_reports_unavailable_not_a_zero_hit_rate(
+        self, cost_tracker, health_tracker, model_registry
+    ):
+        from src.gateway.semantic_cache import SemanticCache
+
+        api = AdminAPI(
+            cost_tracker=cost_tracker, health_tracker=health_tracker,
+            model_registry=model_registry, semantic_cache=SemanticCache(),
+        )
+        client = TestClient(_make_app(api), raise_server_exceptions=False)
+        data = client.get("/admin/semantic-cache").json()
+        assert data["available"] is False
+        assert "embedder" in data["reason"]
+
+    def test_no_cache_wired_at_all_is_reported_as_unavailable(self, client):
+        data = client.get("/admin/semantic-cache").json()
+        assert data["available"] is False
+
+    def test_invalidating_a_project_reports_how_many_entries_went(self, cache_client):
+        client, cache = cache_client
+        req = ChatCompletionRequest(
+            model="gpt-4",
+            messages=[{"role": "user", "content": "a question long enough to cache"}],
+        )
+        resp = ChatCompletionResponse(
+            id="r1", choices=[{"message": {"role": "assistant", "content": "x"}}],
+            usage=TokenUsage(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+            model="gpt-4", provider="openai",
+        )
+        asyncio.run(cache.put(req, "p1", resp, 300))
+        assert cache.entry_count() == 1
+
+        data = client.request("DELETE", "/admin/semantic-cache?project_id=p1").json()
+        assert data == {"scope": "p1", "removed": 1}
+        assert cache.entry_count() == 0
+
+    def test_invalidating_without_a_project_clears_everything(self, cache_client):
+        client, _ = cache_client
+        data = client.request("DELETE", "/admin/semantic-cache").json()
+        assert data["scope"] == "all"
+
+    def test_invalidating_with_no_cache_wired_is_a_404_not_a_silent_success(self, client):
+        """A 200 here would tell an operator their stale answers were cleared
+        when nothing happened."""
+        assert client.request("DELETE", "/admin/semantic-cache").status_code == 404
+
+
+class TestProjectSemanticCacheFields:
+    """The per-project flag and threshold on the project CRUD surface."""
+
+    def test_the_flags_default_off_on_create(self, client):
+        client.post("/admin/projects", json={"project_id": "p1", "name": "P1"})
+        data = client.get("/admin/projects/p1").json()
+        assert data["semantic_cache_enabled"] is False
+        assert data["semantic_cache_threshold"] is None
+
+    def test_creating_with_the_flags_set(self, client):
+        client.post("/admin/projects", json={
+            "project_id": "p1", "name": "P1",
+            "cache_enabled": True,
+            "semantic_cache_enabled": True,
+            "semantic_cache_threshold": 0.97,
+        })
+        data = client.get("/admin/projects/p1").json()
+        assert data["semantic_cache_enabled"] is True
+        assert data["semantic_cache_threshold"] == 0.97
+
+    def test_updating_the_flags(self, client):
+        client.post("/admin/projects", json={"project_id": "p1", "name": "P1"})
+        resp = client.put("/admin/projects/p1", json={
+            "semantic_cache_enabled": True, "semantic_cache_threshold": 0.9,
+        })
+        assert resp.status_code == 200
+        data = client.get("/admin/projects/p1").json()
+        assert data["semantic_cache_enabled"] is True
+        assert data["semantic_cache_threshold"] == 0.9
+
+    def test_null_clears_the_threshold_back_to_the_gateway_default(self, client):
+        client.post("/admin/projects", json={
+            "project_id": "p1", "name": "P1", "semantic_cache_threshold": 0.9,
+        })
+        client.put("/admin/projects/p1", json={"semantic_cache_threshold": None})
+        assert client.get("/admin/projects/p1").json()["semantic_cache_threshold"] is None
+
+    @pytest.mark.parametrize("bad", [0, 0.0, -0.5, 1.5, 95, "high"])
+    def test_an_out_of_range_threshold_is_rejected_rather_than_stored(self, client, bad):
+        """0 would make every entry a match, and 95 is a percentage where a
+        fraction belongs — the likeliest real typo. Both would present as a
+        cache with an excellent hit rate answering the wrong questions.
+        """
+        client.post("/admin/projects", json={"project_id": "p1", "name": "P1"})
+        resp = client.put("/admin/projects/p1", json={"semantic_cache_threshold": bad})
+        assert resp.status_code == 400
+        assert "semantic_cache_threshold" in resp.json()["error"]["message"]
+        assert client.get("/admin/projects/p1").json()["semantic_cache_threshold"] is None
+
+    @pytest.mark.parametrize("bad", [0, 1.5, 95])
+    def test_create_validates_the_threshold_too(self, client, bad):
+        """Validating only on update would leave the same bad value reachable
+        through the other door."""
+        resp = client.post("/admin/projects", json={
+            "project_id": "p1", "name": "P1", "semantic_cache_threshold": bad,
+        })
+        assert resp.status_code == 400
 
 
 # ── Dashboard endpoint ───────────────────────────────────────────────
