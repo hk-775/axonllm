@@ -476,15 +476,18 @@ Request → Auth (OIDC/API Key) → Quota Enforcement (policy hierarchy)
 | `/admin/quotas/{project_id}` | GET | Current quota state for a project |
 | `/admin/quotas/{project_id}/reset` | POST | Reset spend counter |
 | `/admin/quotas/simulate` | POST | Test if a request would be allowed |
-| `/admin/keys` | GET/POST | List or issue API keys |
+| `/admin/projects/{id}/keys` | GET/POST | List a project's API keys, or issue one. The raw key is returned by `POST` only, once |
 | `/admin/keys/{key_id}/rotate` | POST | Rotate an API key |
-| `/admin/keys/{key_id}/revoke` | POST | Revoke an API key |
-| `/admin/policies` | GET/POST | List or create policy nodes |
-| `/admin/policies/{node_id}` | GET/PUT/DELETE | Manage a policy node |
-| `/admin/policies/resolve/{project_id}` | GET | Resolve effective policy |
+| `/admin/keys/{key_id}` | DELETE | Revoke an API key |
+| `/admin/policies` | GET/POST | List or create **Cedar authorization** policies (see the note below — not the quota hierarchy) |
+| `/admin/policies/hierarchy` | GET/POST | List or create **quota policy** nodes |
+| `/admin/policies/hierarchy/{node_id}` | GET/PUT | Read or replace a quota node. `PUT` replaces `limits` wholesale rather than merging, so send every field you want to keep. No `DELETE` |
+| `/admin/policies/effective/{project_id}` | GET | Resolve the inherited quota policy for a project. `?env=` to resolve an environment |
 | `/admin/audit/records` | GET | Query audit records |
-| `/admin/audit/verify` | POST | Verify hash chain integrity |
+| `/admin/audit/verify` | GET | Verify hash chain integrity |
 | `/admin/audit/stats` | GET | Audit statistics |
+| `/admin/audit/export` | GET | Export audit records |
+| `/admin/audit/security` | GET | Security-relevant events only |
 | `/admin/webhooks` | GET/POST | List or add event destinations |
 | `/admin/webhooks/{name}` | DELETE | Remove a destination |
 | `/admin/webhooks/{name}/test` | POST | Send test event |
@@ -496,6 +499,19 @@ Request → Auth (OIDC/API Key) → Quota Enforcement (policy hierarchy)
 | `/admin/regions/health/check` | POST | Trigger health check |
 | `/admin/regions/failover` | POST | Force failover |
 | `/admin/regions/{region}/status` | PUT | Set spoke status |
+
+### Two different things live under `/admin/policies`
+
+They share a URL prefix and nothing else, which is worth knowing before you call
+the wrong one:
+
+* **`/admin/policies`** — Cedar authorization policies. Text like
+  `permit(principal, action == Action::"read", resource);`, each with a `mode` of
+  `ENFORCE` or `LOG_ONLY`. These decide *who may do what*.
+* **`/admin/policies/hierarchy/*`** — the quota policy hierarchy: org → business
+  unit → project → environment, where a child inherits its parent's limits and
+  can only tighten them. These decide *how much*. `effective/{project_id}`
+  collapses the chain into the single policy the request path actually enforces.
 
 ## Configuration
 
