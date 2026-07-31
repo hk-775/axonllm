@@ -1200,6 +1200,56 @@ class TestGuidedTour:
         assert client.get("/admin/static/tour/../../../config/providers.yaml").status_code == 404
         assert client.get("/admin/static/tour/..%2f..%2f..%2fconfig%2fproviders.yaml").status_code == 404
 
+    # ── Reachability ────────────────────────────────────────────────────────
+    # test_every_scene_names_a_view_the_shell_can_render covers one direction:
+    # nothing may navigate to a view that does not exist. These cover the other,
+    # which is how the Policy Hierarchy page went missing -- it was written,
+    # wired into the view switch, and then linked from nowhere, so the only way
+    # to reach it was to set the view by hand.
+
+    def test_every_rendered_view_is_reachable_without_editing_the_source(self, client):
+        """A view in the switch that nothing navigates to is dead code wearing a
+        working page's clothes: it renders perfectly and no user can ever see it.
+        """
+        import re
+
+        html = client.get("/admin/dashboard").text
+        views = set(re.findall(r"case '([a-z-]+)': content =", html))
+        assert views, "could not find the view switch — this test needs updating"
+
+        # Anything that puts a view key in reach: a sidebar item, an activeViews
+        # entry for a subview, a navigate()/setView() call, or a tour scene.
+        reachable = set()
+        reachable.update(re.findall(r"\{ key: '([a-z-]+)'", html))
+        reachable.update(re.findall(r"activeViews: \[([^\]]*)\]", html) and
+                         re.findall(r"'([a-z-]+)'", " ".join(
+                             re.findall(r"activeViews: \[([^\]]*)\]", html))))
+        reachable.update(re.findall(r"(?:navigate|setView)\('([a-z-]+)'\)", html))
+        reachable.update(re.findall(r'"view": "([a-z-]+)"', html))
+
+        orphans = views - reachable
+        assert orphans == set(), (
+            f"views nothing can navigate to: {sorted(orphans)} — either link them "
+            f"or delete them"
+        )
+
+    def test_the_policy_hierarchy_page_is_in_the_sidebar(self, client):
+        """Named explicitly, because this is the page that was orphaned. The
+        generic test above would also catch it, but only as one id in a list."""
+        html = client.get("/admin/dashboard").text
+        assert "case 'policy-hierarchy': content =" in html
+        assert "{ key: 'policy-hierarchy'" in html
+
+    def test_the_hierarchy_page_indents_by_depth(self, client):
+        """The page's whole claim is that a child's limits are narrowed by its
+        parent's. It reads the flat /admin/policies/hierarchy list, so without
+        the depth-first ordering the rows arrive in dict order and the nesting is
+        invisible -- which is the state the page shipped in."""
+        html = client.get("/admin/dashboard").text
+        assert "const flatten = (all) =>" in html
+        assert "const rows = flatten(nodes);" in html
+        assert "depth * 1.25" in html
+
 
 class TestArchitecturePage:
     """GET /architecture.html — the interactive architecture page.

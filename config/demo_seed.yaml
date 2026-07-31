@@ -717,6 +717,122 @@ policies:
     policy_text: 'forbid(principal, action, resource) unless { principal.role == "senior" };'
     mode: LOG_ONLY
 
+# --- Policy hierarchy --------------------------------------------------------
+# The org > business_unit > project > environment tree the Govern > Hierarchy
+# page renders and the quota enforcer reads on every request. Distinct from the
+# `policies` section above, which is Cedar authorization text.
+#
+# Seeded because the feature's whole point is inheritance, and inheritance is
+# invisible with one level: before this, the only nodes that existed were flat
+# per-project ones synthesized from each project's budget_limit, every one with
+# parent_id: null. Nothing on screen showed a limit being narrowed by a parent.
+#
+# Two rules govern what the numbers may say, and both are enforced by tests:
+#
+# 1. A child may never exceed its parent — the resolver rejects it outright
+#    (PolicyHierarchyResolver.validate_node_limits), so a seed that violated
+#    this would fail at startup rather than load quietly.
+# 2. The resolved limits must not throttle the shipped demo. proj-alpha is the
+#    project the chat playground posts to (bootstrap picks the first seeded
+#    project as its default), so its effective rate and budget stay at least
+#    what a demo session needs, and its allowed_models stays a superset of the
+#    46 models the project itself lists. The tighter values live on proj-beta
+#    and on the environment nodes, which no demo traffic touches.
+policy_nodes:
+  - node_id: org:acme
+    node_type: org
+    parent_id: null
+    display_name: Acme Corp
+    limits:
+      rate_limit_rpm: 5000
+      budget_limit: 50000.0
+      max_tokens_per_request: 32768
+
+  # Redaction is switched on at the BU rather than the org so the page shows
+  # both states: a child inheriting PII settings it did not ask for, and a
+  # sibling BU with redaction off. Once a parent enables it no descendant can
+  # turn it off, which is the invariant worth being able to point at.
+  - node_id: bu:platform
+    node_type: business_unit
+    parent_id: org:acme
+    display_name: Platform Engineering
+    limits:
+      rate_limit_rpm: 2000
+      budget_limit: 20000.0
+      pii_redaction_enabled: true
+      pii_redact_types:
+        - email
+        - ssn
+
+  - node_id: bu:research
+    node_type: business_unit
+    parent_id: org:acme
+    display_name: Applied Research
+    limits:
+      rate_limit_rpm: 1000
+      budget_limit: 15000.0
+      max_tokens_per_request: 16384
+
+  # No allowed_models here: proj-alpha carries the demo's 46-model list on the
+  # project record itself, and an intersection at this level would silently
+  # shrink what the Models page offers. Budget matches the project's own 500.0
+  # so the Quotas page agrees with the Projects page.
+  - node_id: proj-alpha
+    node_type: project
+    parent_id: bu:platform
+    display_name: Alpha Team
+    limits:
+      rate_limit_rpm: 1000
+      budget_limit: 500.0
+
+  - node_id: proj-beta
+    node_type: project
+    parent_id: bu:research
+    display_name: Beta Team
+    limits:
+      rate_limit_rpm: 200
+      budget_limit: 200.0
+      allowed_models:
+        - claude-haiku
+        - gpt-4o-mini
+        - nova-lite
+        - nova-micro
+
+  # Environment nodes are addressed as "<project>:<env>" — get_ancestry builds
+  # that id when a caller passes ?env=, so the separator is not decorative.
+  #
+  # prod is the *tighter* of the two on purpose. The intuition runs the other
+  # way (production should get more headroom), but these are per-request
+  # ceilings on a shared gateway: a runaway prod job is the expensive one, and
+  # a dev sandbox is where someone legitimately asks for a long completion.
+  - node_id: proj-alpha:prod
+    node_type: environment
+    parent_id: proj-alpha
+    display_name: Alpha Production
+    limits:
+      rate_limit_rpm: 600
+      max_tokens_per_request: 4096
+      # Strict regime: redaction is permanent here. Once this is false no
+      # descendant can re-enable re-injection, so responses come back with the
+      # placeholder tokens still in place rather than the original values.
+      pii_reinject: false
+
+  - node_id: proj-alpha:dev
+    node_type: environment
+    parent_id: proj-alpha
+    display_name: Alpha Development
+    limits:
+      rate_limit_rpm: 300
+      max_tokens_per_request: 8192
+
+  - node_id: proj-beta:prod
+    node_type: environment
+    parent_id: proj-beta
+    display_name: Beta Production
+    limits:
+      rate_limit_rpm: 120
+      max_tokens_per_request: 4096
+
 unhealthy_providers:
   - provider: azure_openai
     cooldown_seconds: 600
