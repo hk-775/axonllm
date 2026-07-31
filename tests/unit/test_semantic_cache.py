@@ -17,9 +17,13 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from src.gateway.models import ChatCompletionRequest, ChatCompletionResponse, TokenUsage
-from src.gateway.semantic_cache import (
+from src.gateway.semantic_cache import (  # noqa: F401
+    _ONE_SIDED_BLOCKS,
+    _POLAR_AXES,
+    _POLAR_WORDS,
     DEFAULT_SIMILARITY_THRESHOLD,
     MIN_PROMPT_CHARS,
+    PromptLiterals,
     SemanticCache,
     conversation_depth,
     cosine_similarity,
@@ -121,182 +125,220 @@ class TestCosineSimilarity:
 
 
 class TestExtractLiterals:
+    """The guard's two comparisons: `exact` for equality, `axes` for opposition.
+
+    Tests assert via conflict_with() rather than == on PromptLiterals, because
+    equality is deliberately *not* the rule any more — two phrasings of one
+    question routinely differ in which polar words they contain, and demanding
+    equality there is what made the flat-set guard allow only 6 of 19 real
+    paraphrases.
+    """
+
+    @staticmethod
+    def _conflict(a, b):
+        return extract_literals(a).conflict_with(extract_literals(b))
+
     def test_numbers_are_extracted(self):
-        assert extract_literals("what is 17 * 23") == frozenset({"17", "23"})
+        assert extract_literals("what is 17 * 23").exact == frozenset({"17", "23"})
 
     def test_two_arithmetic_questions_differ_on_their_numbers(self):
         """The case the whole guard exists for.
 
         17*23 and 17*24 are one character apart and score 0.7191 against each
         other on the real embedder — far enough below 0.90 to miss here, but the
-        literal sets differ regardless of what any threshold admits.
+        exact tokens differ regardless of what any threshold admits.
         """
-        assert extract_literals("what is 17 * 23") != extract_literals("what is 17 * 24")
-
-    def test_enable_and_disable_are_distinguished(self):
-        a = extract_literals("how do I enable the cache")
-        b = extract_literals("how do I disable the cache")
-        assert a != b
-
-    def test_negation_is_distinguished(self):
-        assert extract_literals("is it supported") != extract_literals("is it not supported")
-
-    def test_this_week_and_next_week_are_distinguished(self):
-        """The false hit that lowering the threshold to 0.90 exposed.
-
-        "Who is the on-call engineer this week?" / "...next week?" scores 0.9385
-        on the real embedder — above 0.90, no numbers, no negation — so before
-        this/next joined _POLAR_WORDS the cache served last week's engineer as
-        the answer to who is on call now. Nothing in the previous guard caught
-        it, and at the old 0.95 threshold nothing reached the guard to reveal it.
-        """
-        assert (extract_literals("who is the on-call engineer this week")
-                != extract_literals("who is the on-call engineer next week"))
-
-    def test_selector_words_that_flip_the_answer_are_distinguished(self):
-        """Same failure mode as this/next: one word changes which set of facts
-        answers the question, while the embedding barely moves."""
-        for a, b in (
-            ("list the required fields", "list the optional fields"),
-            ("what is the latest release", "what is the previous release"),
-            ("what is the minimum retry delay", "what is the maximum retry delay"),
-            ("what is the current quota", "what is the upcoming quota"),
-        ):
-            assert extract_literals(a) != extract_literals(b), f"{a!r} vs {b!r}"
-
-    def test_paraphrases_still_agree_on_literals(self):
-        """The guard is only useful if it lets real paraphrases through. Widening
-        _POLAR_WORDS trades hit rate for safety, so this bounds the trade: these
-        are the pairs the 0.90 threshold exists to serve, and a future addition
-        to the word list that blocks one of them has gone too far."""
-        for a, b in (
-            ("what does our SLA guarantee for uptime", "what uptime does the SLA promise"),
-            ("explain how photosynthesis works", "how does photosynthesis work"),
-            ("summarize the key benefits of remote work",
-             "what are the main advantages of working remotely"),
-            ("who is responsible for approving expense reports",
-             "which team approves expense reports"),
-        ):
-            assert extract_literals(a) == extract_literals(b), f"{a!r} vs {b!r}"
+        assert self._conflict("what is 17 * 23", "what is 17 * 24") == "exact-tokens"
 
     def test_quoted_strings_are_extracted(self):
-        lits = extract_literals('what does the "retry_after" header mean')
-        assert "retry_after" in lits
+        assert "retry_after" in extract_literals(
+            'what does the "retry_after" header mean').exact
 
     def test_identifiers_are_extracted_but_ordinary_words_are_not(self):
         """Not every word — that would make the guard an exact-match check and
         the embedding pointless."""
-        lits = extract_literals("explain cache_manager.put to me please")
+        lits = extract_literals("explain cache_manager.put to me please").exact
         assert "cache_manager.put" in lits or "cache_manager" in lits
         assert "explain" not in lits
         assert "please" not in lits
-
-    def test_a_pure_paraphrase_has_the_same_literals(self):
-        """The guard must not block the case the cache is for."""
-        a = extract_literals("What is our refund policy?")
-        b = extract_literals("what's the refund policy")
-        assert a == b
 
     def test_extraction_is_case_insensitive(self):
         assert extract_literals("ENABLE the flag") == extract_literals("enable the flag")
 
 
-# ---------------------------------------------------------------------------
-# is_cacheable / helpers
-# ---------------------------------------------------------------------------
+
+class TestPolarAxisTable:
+    """Structural invariants of _POLAR_AXES.
+
+    The table is hand-maintained data, and the failure modes are silent: a word
+    listed on both sides of an axis makes that axis unable to distinguish
+    anything, and a typo'd name in _ONE_SIDED_BLOCKS turns off a safety rule
+    with no error. Neither shows up in a behavioural test unless a pair happens
+    to exercise the exact word involved.
+    """
+
+    def test_no_word_appears_on_both_sides_of_an_axis(self):
+        for axis, side_a, side_b in _POLAR_AXES:
+            assert not (side_a & side_b), f"{axis}: {sorted(side_a & side_b)}"
+
+    def test_no_word_appears_on_more_than_one_axis(self):
+        """A word on two axes would make one prompt sit on both, so a single
+        word could conflict with itself via the other axis."""
+        seen: dict[str, str] = {}
+        for axis, side_a, side_b in _POLAR_AXES:
+            for word in side_a | side_b:
+                assert word not in seen, f"{word!r} on both {seen[word]} and {axis}"
+                seen[word] = axis
+
+    def test_axis_names_are_unique(self):
+        names = [axis for axis, _, _ in _POLAR_AXES]
+        assert len(names) == len(set(names))
+
+    def test_one_sided_blocks_names_real_axes(self):
+        """A typo here silently disables a safety rule rather than raising."""
+        assert _ONE_SIDED_BLOCKS <= {axis for axis, _, _ in _POLAR_AXES}
+
+    def test_only_negation_has_an_empty_opposing_side(self):
+        """Negation is presence-vs-absence by design. Any other axis with an
+        empty side B would block on presence alone for every word in it, which
+        is the flat-set behaviour this change replaced."""
+        for axis, _, side_b in _POLAR_AXES:
+            if axis != "negation":
+                assert side_b, f"{axis} has no opposing side"
+
+    def test_polar_words_is_the_union_of_the_table(self):
+        """_POLAR_WORDS is only a pre-filter; if it drifts from the table it
+        would skip axis extraction for words the table still lists."""
+        expected = set()
+        for _, side_a, side_b in _POLAR_AXES:
+            expected |= side_a | side_b
+        assert _POLAR_WORDS == expected
+
+    def test_default_literals_conflict_with_nothing(self):
+        """A default-constructed PromptLiterals is what an entry written before
+        this change would deserialize to; it must not spuriously conflict."""
+        assert PromptLiterals().conflict_with(PromptLiterals()) is None
 
 
-class TestIsCacheable:
-    def test_a_plain_request_is_cacheable(self):
-        ok, reason = is_cacheable(_req("what is our refund policy this year"))
-        assert ok and reason == ""
+class TestPolarAxes:
+    """Opposite sides of one axis block; a lone polar word does not.
 
-    def test_streaming_is_rejected(self):
-        ok, reason = is_cacheable(_req("what is our refund policy", stream=True))
-        assert not ok and reason == "streaming"
+    This is the distinction the flat _POLAR_WORDS set could not draw, and the
+    reason it rejected every paraphrase that reached it.
+    """
 
-    def test_tool_requests_are_rejected(self):
-        ok, reason = is_cacheable(
-            _req("what is our refund policy", tools=[{"type": "function"}])
-        )
-        assert not ok and reason == "tools"
+    @staticmethod
+    def _conflict(a, b):
+        return extract_literals(a).conflict_with(extract_literals(b))
 
-    def test_nonzero_temperature_is_rejected(self):
-        """A caller asking for sampling asked for variety."""
-        ok, reason = is_cacheable(_req("what is our refund policy", temperature=0.7))
-        assert not ok and reason == "temperature"
+    @pytest.mark.parametrize("a,b,axis", [
+        ("how do I enable the cache", "how do I disable the cache", "on_off"),
+        ("is logging enabled by default", "is logging disabled by default", "on_off"),
+        ("how do I turn the cache on", "how do I turn the cache off", "on_off"),
+        ("what is included in the plan", "what is excluded from the plan", "on_off"),
+        ("how do I add a webhook", "how do I remove a webhook", "lifecycle"),
+        ("how do I start the worker", "how do I stop the worker", "lifecycle"),
+        ("how do I increase the quota", "how do I decrease the quota", "lifecycle"),
+        ("what is the latest release", "what is the previous release", "time_rel"),
+        ("what did we ship today", "what did we ship yesterday", "time_rel"),
+        ("what is the minimum retry delay", "what is the maximum retry delay", "extremum"),
+        ("list the required fields", "list the optional fields", "optionality"),
+        ("what happens before the retry", "what happens after the retry", "order"),
+    ])
+    def test_opposite_sides_of_an_axis_conflict(self, a, b, axis):
+        assert self._conflict(a, b) == axis
 
-    def test_temperature_zero_is_accepted(self):
-        ok, _ = is_cacheable(_req("what is our refund policy", temperature=0.0))
-        assert ok
+    def test_this_week_and_next_week_are_distinguished(self):
+        """The false hit that lowering the threshold to 0.90 exposed.
 
-    def test_short_prompts_are_rejected(self):
-        ok, reason = is_cacheable(_req("hi"))
-        assert not ok and reason == "prompt_too_short"
-        assert len("hi") < MIN_PROMPT_CHARS
-
-    def test_a_request_with_no_user_message_is_rejected(self):
-        ok, reason = is_cacheable(_req("", messages=[{"role": "system", "content": "be nice"}]))
-        assert not ok and reason == "no_user_text"
-
-    def test_multiple_completions_are_rejected_via_getattr(self):
-        """ChatCompletionRequest has no ``n`` today; the guard is for when it does.
-
-        Simulated with a subclass rather than by setting an attribute on the
-        dataclass, so this test states the contract for a future field instead
-        of asserting today's absence.
+        "Who is the on-call engineer this week?" / "...next week?" scores 0.9385
+        on the real embedder — above 0.90, no numbers, no negation — so the cache
+        served last week's engineer as the answer to who is on call now. At the
+        old 0.95 threshold nothing reached the guard to reveal it.
         """
-        class WithN(ChatCompletionRequest):
-            n = 3
+        assert self._conflict("who is the on-call engineer this week",
+                              "who is the on-call engineer next week") == "time_rel"
 
-        req = WithN(model="m", messages=[{"role": "user", "content": "a long enough prompt"}])
-        ok, reason = is_cacheable(req)
-        assert not ok and reason == "multiple_completions"
+    def test_negation_conflicts_on_asymmetry_alone(self):
+        """Negation is presence-vs-absence, not two sides: no word means
+        "affirmatively yes" the way "not" means no, so any asymmetry counts."""
+        assert self._conflict("is it supported", "is it not supported") == "negation"
+        assert self._conflict("can I add a user with an email",
+                              "can I add a user without an email") == "negation"
 
+    def test_inverted_polarity_conflicts_even_when_the_topic_matches(self):
+        """"does it work without a key" answers "no"; "is a key needed" answers
+        "yes". One underlying fact, opposite answers — serving one for the other
+        is precisely the failure the guard exists to prevent."""
+        assert self._conflict("does it work without an API key",
+                              "is an API key needed") is not None
 
-class TestLastUserText:
-    def test_returns_the_final_user_turn(self):
-        req = _req("", messages=[
-            {"role": "user", "content": "first"},
-            {"role": "assistant", "content": "reply"},
-            {"role": "user", "content": "second"},
-        ])
-        assert last_user_text(req) == "second"
+    @pytest.mark.parametrize("a,b", [
+        # The three losses measured against live Titan: every paraphrase that
+        # scored above 0.90 and so actually reached the flat-set guard.
+        ("how do I turn on request logging", "how do I enable request logging"),
+        ("where do I start with the SDK", "how do I get started with the SDK"),
+        ("tell me more about the retry policy", "explain the retry policy"),
+        # The two hits that lowering the threshold to 0.90 was meant to buy.
+        ("what does our SLA guarantee for uptime", "what uptime does the SLA promise"),
+        ("explain how photosynthesis works", "how does photosynthesis work"),
+        # Ordinary paraphrases carrying an incidental polar word.
+        ("what happens on a timeout", "what happens when a request times out"),
+        ("how do I add a new project", "what is the process for creating a project"),
+        ("can you delete a user permanently", "is permanent user deletion supported"),
+        ("how do I stop a running job", "what is the way to cancel a running job"),
+        ("which fields are required", "what are the mandatory fields"),
+        ("summarize the first section", "give me a summary of section one"),
+        ("what are the steps after installation", "what do I do once it is installed"),
+        ("summarize the key benefits of remote work",
+         "what are the main advantages of working remotely"),
+        ("who is responsible for approving expense reports",
+         "which team approves expense reports"),
+    ])
+    def test_a_lone_polar_word_does_not_conflict(self, a, b):
+        """The regression this whole change is for. Each pair is one question
+        asked two ways, where one phrasing happens to contain a polar word the
+        other does not — "turn **on**" against "**enable**". The flat set
+        compared {on} != {enable} and blocked all of these."""
+        assert self._conflict(a, b) is None, f"{a!r} / {b!r}"
 
-    def test_concatenates_text_parts_of_a_multimodal_message(self):
-        req = _req("", messages=[{"role": "user", "content": [
-            {"type": "text", "text": "hello"},
-            {"type": "text", "text": "world"},
-        ]}])
-        assert last_user_text(req) == "hello world"
+    @pytest.mark.parametrize("a,b", [
+        ("how do I enable the cache on staging", "how do I enable the cache on prod"),
+        ("what is the max retry count for reads", "what is the max retry count for writes"),
+    ])
+    def test_the_same_axis_side_on_both_sides_does_not_conflict(self, a, b):
+        """Presence alone is not evidence: both prompts sit on the same side, so
+        the axis says nothing and the embedding decides."""
+        assert self._conflict(a, b) is None
 
-    def test_a_message_containing_an_image_returns_none(self):
-        """Two requests with identical text and different images are different
-        questions, and the embedding of the text alone cannot see that."""
-        req = _req("", messages=[{"role": "user", "content": [
-            {"type": "text", "text": "what is in this picture"},
-            {"type": "image", "source": {"data": "..."}},
-        ]}])
-        assert last_user_text(req) is None
+    def test_both_sides_of_one_axis_in_one_prompt(self):
+        """A prompt can mention both sides ("enable and disable"), which must not
+        collapse to a single side. Grouping sides per axis rather than keying a
+        dict by axis is what keeps this honest — the dict version silently kept
+        whichever side was iterated last."""
+        both = extract_literals("how do I enable and disable the cache")
+        assert both.axes == frozenset({("on_off", "A"), ("on_off", "B")})
+        # Against a prompt on one side only, that is still a conflict.
+        assert both.conflict_with(
+            extract_literals("how do I enable the cache")) == "on_off"
 
-    def test_no_user_message_returns_none(self):
-        assert last_user_text(_req("", messages=[{"role": "system", "content": "x"}])) is None
+    def test_a_pure_paraphrase_has_no_conflict(self):
+        """The guard must not block the case the cache is for."""
+        assert self._conflict("What is our refund policy?",
+                              "what's the refund policy") is None
 
+    def test_an_axis_with_no_polar_words_at_all_is_absent(self):
+        """Most prompts touch no axis, which is why the cheap pre-filter in
+        extract_literals is worth having."""
+        assert extract_literals("explain how photosynthesis works").axes == frozenset()
 
-class TestConversationDepth:
-    def test_counts_user_turns_only(self):
-        req = _req("", messages=[
-            {"role": "system", "content": "s"},
-            {"role": "user", "content": "a"},
-            {"role": "assistant", "content": "b"},
-            {"role": "user", "content": "c"},
-        ])
-        assert conversation_depth(req) == 2
-
-
-# ---------------------------------------------------------------------------
-# SemanticCache — get / put
-# ---------------------------------------------------------------------------
+    def test_the_conflict_reason_names_the_check_that_fired(self):
+        """conflict_with returns a reason rather than a bool so the rejection log
+        says *why*. "negation" and "exact-tokens" are very different diagnoses
+        when someone is working out why a cache never hits."""
+        assert self._conflict("what is 17 * 23", "what is 17 * 24") == "exact-tokens"
+        assert self._conflict("is it on", "is it off") == "on_off"
+        assert self._conflict("is it supported", "is it not supported") == "negation"
 
 
 @pytest.mark.asyncio

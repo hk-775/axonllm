@@ -264,6 +264,24 @@ a weaker claim — worth distinguishing if you are comparing responses or debugg
 an unexpected reply. See `AXON_SEMANTIC_CACHE*` under
 [Environment Variables](#environment-variables).
 
+**A semantic hit needs more than a high score.** Cosine similarity alone will
+serve `17 * 23` from `17 * 24`, or last week's on-call rota for this week's — the
+embeddings really are that close, and the reply is confidently wrong with nothing
+in it to say so. Two checks run after the score clears the threshold:
+
+* **Literal tokens must match exactly.** Numbers, dates, quoted strings and code
+  identifiers, whatever the embedding says.
+* **Polar opposites must not disagree.** Antonyms are compared by *axis* —
+  enable/disable, this/next, min/max — so `"how do I enable X"` will not serve
+  `"how do I disable X"`. Only opposition blocks: a polar word present in one
+  phrasing and absent from the other ("turn **on** logging" vs "**enable**
+  logging") is not evidence of a different question. The exception is the handful
+  of axes where a lone word does change which facts answer the question, such as
+  `"the current quota"` against `"the quota"`.
+
+Rejections are counted separately from misses; `GET /admin/semantic-cache`
+reports them, and the debug log names the axis that fired.
+
 ### Names, addresses, and the limits of regex
 
 PII redaction runs two detectors, and only the first is on by default.
