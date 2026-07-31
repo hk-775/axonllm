@@ -23,10 +23,16 @@ So the design is deliberately reluctant:
   for a target hit rate — the cost of a false hit (a wrong answer) is much worse
   than a false miss (a normal API call). See DEFAULT_SIMILARITY_THRESHOLD for
   the measurements.
-* **Literal tokens must agree.** Numbers, dates, quoted strings, code
-  identifiers and negations are compared exactly, whatever the embedding says.
-  This is what stops 17*23 vs 17*24 — the semantic distance is tiny, but the
-  numbers differ, so it is never a hit.
+* **Literal tokens must agree.** Numbers, dates, quoted strings and code
+  identifiers are compared exactly, whatever the embedding says. This is what
+  stops 17*23 vs 17*24 — the semantic distance is tiny, but the numbers differ,
+  so it is never a hit.
+* **Polar opposites must not disagree.** Negations and antonym pairs are
+  compared by *axis* — "enable" against "disable", "this week" against "next
+  week" — rather than by which polar words each prompt happens to contain. A
+  word appearing in one phrasing and not the other ("turn **on** logging" vs
+  "**enable** logging") is not evidence of a different question, and treating it
+  as such rejected almost every real paraphrase. See ``_POLAR_AXES``.
 * **Whole classes of request are skipped.** Non-zero temperature (the caller
   asked for variety), tools (the answer is a side effect, not text), and
   streaming (a replayed stream is a different shape).
@@ -92,9 +98,10 @@ logger = logging.getLogger(__name__)
 # One caveat this measurement earned the hard way: at 0.95 the guard's coverage
 # was untested, because nothing scored high enough to reach it. Lowering to 0.90
 # exposed "Who is the on-call engineer this week?" / "...next week?" at 0.9385 —
-# a wrong answer that passed the guard, since this/next are not numbers and were
-# not in _POLAR_WORDS. Lowering a threshold makes the literal guard load-bearing
-# where it previously was not; see the list below.
+# a wrong answer that passed the guard, since this/next are not numbers and no
+# axis covered them. Lowering a threshold makes the literal guard load-bearing
+# where it previously was not, in both directions: the same change also revealed
+# that the guard was rejecting every paraphrase it saw. See _POLAR_AXES.
 DEFAULT_SIMILARITY_THRESHOLD = 0.90
 
 # Per project. Small on purpose: every entry is compared on every lookup (a
@@ -114,29 +121,103 @@ _QUOTED_RE = re.compile(r"'([^']*)'|\"([^\"]*)\"|`([^`]*)`")
 # Identifier-ish: has an underscore, a dot between letters, or internal caps.
 # Deliberately not "any word" — that would make the whole check an exact match.
 _IDENT_RE = re.compile(r"\b(?:\w+_\w+|\w+\.\w+|[a-z]+[A-Z]\w*)\b")
-# Negations and polar opposites. "how to enable X" / "how to disable X" embed
-# almost identically, and the answers are opposites.
+# Polar opposites, grouped into axes: (side A, side B).
 #
-# The temporal and selector words in the third group were added when the
-# threshold moved from 0.95 to 0.90. "Who is the on-call engineer this week?" /
-# "...next week?" scores 0.9385 — above 0.90, no numbers to compare, no negation
-# — so it was served as a hit, returning the wrong engineer. These words behave
-# exactly like enable/disable: a one-word change that flips the answer while
-# barely moving the embedding.
-_POLAR_WORDS = frozenset(
-    {
-        "not", "no", "never", "none", "without", "cannot", "cant", "dont",
-        "doesnt", "isnt", "arent", "wasnt", "werent", "shouldnt", "wouldnt",
-        "enable", "disable", "enabled", "disabled", "allow", "deny", "denied",
-        "add", "remove", "delete", "create", "destroy", "start", "stop",
-        "increase", "decrease", "before", "after", "include", "exclude",
-        "on", "off", "true", "false", "yes",
-        # Which one / when — distinguishes questions the embedding treats as one.
-        "this", "next", "last", "previous", "current", "upcoming", "prior",
-        "today", "tomorrow", "yesterday", "now", "latest", "oldest", "newest",
-        "first", "final", "min", "max", "minimum", "maximum",
-        "required", "optional", "highest", "lowest", "more", "less",
-    }
+# Two prompts are treated as different questions when they land on *opposite
+# sides of the same axis* — "enable" against "disable", "this week" against
+# "next week". A word appearing on one side with nothing opposing it on the
+# other says nothing about whether the questions differ, so it does not block.
+#
+# This replaced a single flat set of polar words compared for equality, which
+# conflated two different situations and was measurably wrong about the second:
+#
+#     "how do I disable X"        vs "how do I enable X"        -> different
+#     "how do I turn on logging"  vs "how do I enable logging"  -> the SAME
+#
+# The flat set blocked both, because {on} != {enable}. On a 45-pair labelled
+# corpus it allowed only 6 of 19 real paraphrases; measured against live Titan,
+# all three paraphrases that scored above the 0.90 threshold — and so were the
+# only ones the guard ever saw — were rejected. That silently cancelled out the
+# hits that lowering the threshold to 0.90 had just bought.
+#
+# It also *missed* "what is included in the plan" / "what is excluded from the
+# plan", because only the uninflected include/exclude were listed. Axes make the
+# inflections part of the data rather than something to remember: a missing form
+# now weakens one axis instead of leaving a lone word to compare unequal.
+#
+# Adding to this table is the safe direction. Adding a word to only one side is
+# not: it makes that word block on presence alone for the axes below that treat
+# a one-sided appearance as decisive.
+_POLAR_AXES: tuple[tuple[str, frozenset[str], frozenset[str]], ...] = (
+    # Negation is presence-vs-absence, not two sides: there is no word that
+    # means "affirmatively yes" the way "not" means no, so any asymmetry counts.
+    (
+        "negation",
+        frozenset({
+            "not", "no", "never", "none", "without", "cannot", "cant", "dont",
+            "doesnt", "isnt", "arent", "wasnt", "werent", "shouldnt",
+            "wouldnt", "wont", "havent", "hasnt", "nothing", "neither", "nor",
+        }),
+        frozenset(),
+    ),
+    (
+        "on_off",
+        frozenset({"enable", "enabled", "enabling", "on", "allow", "allowed",
+                   "true", "yes", "include", "included", "including",
+                   "permit", "permitted", "grant", "granted"}),
+        frozenset({"disable", "disabled", "disabling", "off", "deny", "denied",
+                   "false", "exclude", "excluded", "excluding",
+                   "forbid", "forbidden", "revoke", "revoked"}),
+    ),
+    (
+        "lifecycle",
+        frozenset({"add", "added", "create", "created", "creating", "start",
+                   "started", "starting", "increase", "increased", "install",
+                   "installed", "enroll", "subscribe"}),
+        frozenset({"remove", "removed", "delete", "deleted", "deleting",
+                   "destroy", "destroyed", "stop", "stopped", "stopping",
+                   "decrease", "decreased", "uninstall", "cancel", "cancelled",
+                   "unsubscribe"}),
+    ),
+    # Which one, in time. A one-sided appearance is decisive here: "the current
+    # quota" and "the quota" can differ, where "start the job" and "start the
+    # job now" do not — so `now` sits with the words that need an opposite.
+    (
+        "time_rel",
+        frozenset({"this", "current", "currently", "today", "latest", "newest",
+                   "recent"}),
+        frozenset({"next", "last", "previous", "prior", "upcoming", "tomorrow",
+                   "yesterday", "oldest", "earliest", "former"}),
+    ),
+    (
+        "order",
+        frozenset({"before", "preceding", "first", "initial"}),
+        frozenset({"after", "following", "final", "subsequent"}),
+    ),
+    (
+        "extremum",
+        frozenset({"min", "minimum", "lowest", "least", "fewest", "smallest"}),
+        frozenset({"max", "maximum", "highest", "most", "largest", "greatest"}),
+    ),
+    (
+        "optionality",
+        frozenset({"required", "mandatory", "compulsory"}),
+        frozenset({"optional", "voluntary"}),
+    ),
+)
+
+# Axes where a word on one side with nothing opposing it still blocks.
+#
+# The distinction is whether the word narrows *which* facts answer the question
+# or merely colours how it is asked. "the current quota" vs "the quota" may well
+# have different answers, so time_rel is decisive on its own. "start the job"
+# vs "start the job now" is one question, so lifecycle is not — it needs to see
+# an actual opposite before it blocks.
+_ONE_SIDED_BLOCKS = frozenset({"negation", "time_rel", "extremum", "optionality"})
+
+# Every word in the table, for the cheap pre-filter in _axis_sides.
+_POLAR_WORDS = frozenset().union(
+    *(a | b for _, a, b in _POLAR_AXES)
 )
 
 
@@ -162,7 +243,7 @@ class SemanticCacheEntry:
     request_model: str = ""
     # Extracted once at insert. Recomputing per comparison would make every
     # lookup O(entries x prompt length) on top of the vector maths.
-    literals: frozenset[str] = field(default_factory=frozenset)
+    literals: PromptLiterals = field(default_factory=lambda: PromptLiterals())
 
 
 @dataclass
@@ -210,27 +291,95 @@ class SemanticCacheStats:
         }
 
 
-def extract_literals(text: str) -> frozenset[str]:
-    """Tokens that must agree exactly for two prompts to be the same question.
+_WORD_RE = re.compile(r"[a-z']+")
 
-    Numbers, quoted strings, identifiers, and polar words (negations and
-    opposites). Everything else is left to the embedding — the point is to catch
-    the specific cases where embeddings are blind, not to reimplement equality.
+
+@dataclass(frozen=True)
+class PromptLiterals:
+    """What must agree between two prompts for them to be the same question.
+
+    Two kinds of evidence, compared differently, which is why this is a
+    structure rather than the single set it used to be:
+
+    ``exact``
+        Numbers, quoted strings and code identifiers. Compared for equality —
+        "17 * 23" and "17 * 24" are different questions, full stop.
+    ``axes``
+        Which side of each polar axis the prompt sits on, as ``(axis, side)``
+        pairs. Compared for *opposition*, not equality: sharing no polar words
+        at all is normal for two phrasings of one question.
+    """
+
+    exact: frozenset[str] = frozenset()
+    axes: frozenset[tuple[str, str]] = frozenset()
+
+    def conflict_with(self, other: PromptLiterals) -> str | None:
+        """Why these two prompts are different questions, or None if they agree.
+
+        Returns a short reason rather than a bool so the rejection log says
+        which check fired — "negation" and "numbers" are very different
+        diagnoses when someone is working out why a cache never hits.
+        """
+        if self.exact != other.exact:
+            return "exact-tokens"
+
+        # Sides per axis, not one side per axis: "how do I enable and disable
+        # this" sits on both, and a dict keyed by axis would silently keep
+        # whichever came last and compare the wrong one.
+        mine = self._by_axis()
+        theirs = other._by_axis()
+        for axis in set(mine) | set(theirs):
+            a = mine.get(axis, frozenset())
+            b = theirs.get(axis, frozenset())
+            if a == b:
+                continue
+            if a and b:
+                # Both mention the axis but not identically: enable vs disable,
+                # or "enable" vs "enable and disable".
+                return axis
+            if axis in _ONE_SIDED_BLOCKS:
+                # One prompt mentions the axis and the other does not at all,
+                # and this axis narrows which facts answer the question:
+                # "the latest release" vs "the release".
+                return axis
+        return None
+
+    def _by_axis(self) -> dict[str, frozenset[str]]:
+        grouped: dict[str, set[str]] = {}
+        for axis, side in self.axes:
+            grouped.setdefault(axis, set()).add(side)
+        return {k: frozenset(v) for k, v in grouped.items()}
+
+
+def extract_literals(text: str) -> PromptLiterals:
+    """Split a prompt into the evidence :meth:`PromptLiterals.conflict_with` uses.
+
+    Deliberately not "every word" — that would make the guard an exact-match
+    check and the embedding pointless. The point is to catch the specific cases
+    where embeddings are blind, and leave everything else to the vector.
     """
     lowered = text.lower()
-    found: set[str] = set()
+    exact: set[str] = set()
 
-    found.update(_NUMBER_RE.findall(lowered))
+    exact.update(_NUMBER_RE.findall(lowered))
     for groups in _QUOTED_RE.findall(text):
         # findall over alternated groups yields a tuple with empties for the
         # branches that did not match.
         for g in groups:
             if g:
-                found.add(g.lower())
-    found.update(m.lower() for m in _IDENT_RE.findall(text))
-    found.update(w for w in re.findall(r"[a-z']+", lowered) if w in _POLAR_WORDS)
+                exact.add(g.lower())
+    exact.update(m.lower() for m in _IDENT_RE.findall(text))
 
-    return frozenset(found)
+    words = set(_WORD_RE.findall(lowered))
+    axes: set[tuple[str, str]] = set()
+    if words & _POLAR_WORDS:  # cheap pre-filter; most prompts have none
+        for axis, side_a, side_b in _POLAR_AXES:
+            if words & side_a:
+                axes.add((axis, "A"))
+            if words & side_b:
+                axes.add((axis, "B"))
+
+    return PromptLiterals(exact=frozenset(exact), axes=frozenset(axes))
 
 
 def cosine_similarity(a: list[float], b: list[float]) -> float:
@@ -560,12 +709,12 @@ class SemanticCache:
             # The guard that does the real work. Two prompts can sit at 0.99
             # and still be different questions when a number or a negation
             # differs, and no threshold short of 1.0 separates them.
-            if literals != entry.literals:
+            conflict = literals.conflict_with(entry.literals)
+            if conflict is not None:
                 self.stats.rejected_by_literals += 1
                 logger.debug(
-                    "semantic cache rejected on literals: %.4f %r vs %r (%s vs %s)",
-                    score, prompt[:60], entry.prompt[:60],
-                    sorted(literals), sorted(entry.literals),
+                    "semantic cache rejected on %s: %.4f %r vs %r",
+                    conflict, score, prompt[:60], entry.prompt[:60],
                 )
                 continue
 
