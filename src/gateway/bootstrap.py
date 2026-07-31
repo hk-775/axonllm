@@ -55,6 +55,7 @@ from src.gateway.security.event_dispatcher import (
     EventDispatcher,
 )
 from src.gateway.security.injection_detector import PromptInjectionDetector
+from src.gateway.security.pii_ner import build_entity_detector
 from src.gateway.security.pii_redactor import PIIRedactor
 from src.gateway.cache_manager import CacheManager
 from src.gateway.embeddings import build_embedder
@@ -197,7 +198,12 @@ def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComp
     health_monitor = SpokeHealthMonitor(hub_config=hub_config)
 
     # --- Security services ---
-    pii_redactor = PIIRedactor()
+    # The entity detector is constructed unconditionally but used only when a
+    # policy sets pii_ner_enabled: building it costs nothing (the boto3 client is
+    # lazy) and wiring it here keeps the decision in policy rather than in
+    # startup config, so one BU can enable name detection without a redeploy.
+    pii_redactor = PIIRedactor(
+        entity_detector=build_entity_detector(region=app_config.aws_region))
     injection_detector = PromptInjectionDetector()
     audit_trail = AuditTrail(persistence=persistence)
     # Reload the hash-chain head so audit continuity survives restarts. Loop-safe:

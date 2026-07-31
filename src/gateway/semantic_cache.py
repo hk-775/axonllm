@@ -18,9 +18,11 @@ in Q1" and "revenue in Q2", or "how do I enable X" and "how do I disable X".
 So the design is deliberately reluctant:
 
 * **Off unless asked for.** Per-project, defaulting to disabled.
-* **A high threshold.** 0.95 cosine, well above the ~0.85 where paraphrases
-  land, because the cost of a false hit (a wrong answer) is much worse than a
-  false miss (a normal API call).
+* **A high threshold.** 0.90 cosine. Chosen for its distance from the
+  highest-scoring *different*-question pair (0.7476 on the calibration set), not
+  for a target hit rate — the cost of a false hit (a wrong answer) is much worse
+  than a false miss (a normal API call). See DEFAULT_SIMILARITY_THRESHOLD for
+  the measurements.
 * **Literal tokens must agree.** Numbers, dates, quoted strings, code
   identifiers and negations are compared exactly, whatever the embedding says.
   This is what stops 17*23 vs 17*24 — the semantic distance is tiny, but the
@@ -64,17 +66,36 @@ logger = logging.getLogger(__name__)
 # hit rate against wrong answers rather than finding a clean line.
 #
 # Hits on the paraphrase set at each threshold, with the literal guard applied,
-# and false hits on the different-question set:
+# and false hits on a 14-pair different-question set:
 #
-#     0.80  ->  3/8 hits, 0 false      0.95  ->  1/8 hits, 0 false
+#     0.80  ->  4/8 hits, 0 false      0.95  ->  0/8 hits, 0 false
 #     0.90  ->  2/8 hits, 0 false      0.98  ->  0/8 hits, 0 false
 #
-# 0.95 is chosen: a low hit rate is a missed saving, a false hit is a confident
-# wrong answer nobody is watching for. 0.80 also showed no false hits here, but
-# it sits 0.20 above the worst different-question pair on a 16-pair sample —
-# too thin to trust on real traffic. Override per project if the workload is
-# genuinely tolerant.
-DEFAULT_SIMILARITY_THRESHOLD = 0.95
+# 0.90 is chosen. It buys the two clearest paraphrases in the set —
+#
+#     0.9258  "What does our SLA guarantee for uptime?" / "What uptime does the
+#             SLA promise?"
+#     0.9185  "Explain how photosynthesis works" / "How does photosynthesis
+#             work?"
+#
+# — which 0.95 rejected, and it clears the highest different-question pair the
+# literal guard admits (0.7476) by 0.15. That margin matters more than the
+# threshold: a low hit rate is a missed saving, a false hit is a confident wrong
+# answer nobody is watching for.
+#
+# 0.80 doubles the hits with no false hits *on this sample*, and is still not
+# taken: its extra two pairs score 0.8119 and 0.8468, close enough to the 0.7476
+# ceiling that a single unseen phrasing could land between them. 14 pairs is not
+# enough evidence to spend a 0.15 margin. Override per project if the workload
+# is genuinely tolerant.
+#
+# One caveat this measurement earned the hard way: at 0.95 the guard's coverage
+# was untested, because nothing scored high enough to reach it. Lowering to 0.90
+# exposed "Who is the on-call engineer this week?" / "...next week?" at 0.9385 —
+# a wrong answer that passed the guard, since this/next are not numbers and were
+# not in _POLAR_WORDS. Lowering a threshold makes the literal guard load-bearing
+# where it previously was not; see the list below.
+DEFAULT_SIMILARITY_THRESHOLD = 0.90
 
 # Per project. Small on purpose: every entry is compared on every lookup (a
 # linear scan — see _best_match), so this bounds lookup work as well as memory.
@@ -95,6 +116,13 @@ _QUOTED_RE = re.compile(r"'([^']*)'|\"([^\"]*)\"|`([^`]*)`")
 _IDENT_RE = re.compile(r"\b(?:\w+_\w+|\w+\.\w+|[a-z]+[A-Z]\w*)\b")
 # Negations and polar opposites. "how to enable X" / "how to disable X" embed
 # almost identically, and the answers are opposites.
+#
+# The temporal and selector words in the third group were added when the
+# threshold moved from 0.95 to 0.90. "Who is the on-call engineer this week?" /
+# "...next week?" scores 0.9385 — above 0.90, no numbers to compare, no negation
+# — so it was served as a hit, returning the wrong engineer. These words behave
+# exactly like enable/disable: a one-word change that flips the answer while
+# barely moving the embedding.
 _POLAR_WORDS = frozenset(
     {
         "not", "no", "never", "none", "without", "cannot", "cant", "dont",
@@ -103,6 +131,11 @@ _POLAR_WORDS = frozenset(
         "add", "remove", "delete", "create", "destroy", "start", "stop",
         "increase", "decrease", "before", "after", "include", "exclude",
         "on", "off", "true", "false", "yes",
+        # Which one / when — distinguishes questions the embedding treats as one.
+        "this", "next", "last", "previous", "current", "upcoming", "prior",
+        "today", "tomorrow", "yesterday", "now", "latest", "oldest", "newest",
+        "first", "final", "min", "max", "minimum", "maximum",
+        "required", "optional", "highest", "lowest", "more", "less",
     }
 )
 

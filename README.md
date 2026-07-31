@@ -264,6 +264,92 @@ a weaker claim — worth distinguishing if you are comparing responses or debugg
 an unexpected reply. See `AXON_SEMANTIC_CACHE*` under
 [Environment Variables](#environment-variables).
 
+### Names, addresses, and the limits of regex
+
+PII redaction runs two detectors, and only the first is on by default.
+
+**Pattern matching** finds values with a fixed shape: an SSN is three digits, a
+dash, two digits, a dash, four. Deterministic, free, no network call. It covers
+`email`, `ssn`, `credit_card`, `phone`, `ip_address`, `aws_account_id`,
+`medical_record`, `iban`, `passport`, `ipv6`.
+
+**It cannot find a name.** A name has no shape — `Alice Smith` is
+indistinguishable from `Acme Corp` or `Main Street` by pattern alone, which is
+why there is no name entry in `PII_PATTERNS`. Given this prompt:
+
+```
+Hi, I'm Alice Smith from Seattle. My email is alice.smith@example.com, SSN 123-45-6789.
+```
+
+pattern matching produces:
+
+```
+Hi, I'm Alice Smith from Seattle. My email is [EMAIL_1], SSN [SSN_1].
+```
+
+The name and the city pass straight through to the provider. That is a design
+limit, not a bug.
+
+**Entity detection** (`pii_ner_enabled`, off by default) adds a second pass using
+Amazon Comprehend for the shapeless types — `name`, `address`, `age` — and the
+same prompt becomes:
+
+```
+Hi, I'm [NAME_1] from [ADDRESS_1]. My email is [EMAIL_1], SSN [SSN_1].
+```
+
+Re-injection restores every value on the way out, so the caller still reads the
+originals; only the provider sees tokens.
+
+#### Why it's off by default
+
+Two reasons, both measured:
+
+1. **It costs more than the model.** Comprehend bills ~$0.0001 per 100
+   characters with a 3-unit minimum. For a 500-character prompt that is $0.0005
+   — more than the $0.000375 of Sonnet input tokens for the same text. At 1M
+   requests/month it adds roughly $500.
+2. **It over-redacts.** Confidence scores do not separate real PII from public
+   figures: `Robert Chen, our new hire` scores 0.999 and `Napoleon` scores
+   1.000. There is no threshold that keeps one and drops the other, so with
+   `name` enabled, *"Who was the better general, Napoleon or Wellington?"*
+   reaches the model as *"Who was the better general, `[NAME_2]` or
+   `[NAME_1]`?"* — and answers accordingly. `address` behaves the same way with
+   city names. (Token numbering runs right-to-left because substitution does;
+   the mapping is what matters, and it round-trips either way.)
+
+So it belongs on policies where names genuinely matter (HR, healthcare, support
+transcripts) rather than on everything. Enable it per policy node, or deploy-wide
+with `AXON_PII_NER_DEFAULT`.
+
+The two detectors are a **union, not a replacement**: Comprehend misses
+`10.0.0.7` in *"Deploy to 10.0.0.7 using the deploy_key"*, which `ip_address`
+catches trivially. Structured tokens belong to the regexes, shapeless ones to
+entity detection. Overlapping spans are resolved longest-wins before any
+substitution, so a detected address containing a phone-shaped number produces one
+token rather than a corrupted string.
+
+**Entity detection fails open.** A Comprehend outage degrades to regex-only
+redaction and logs a warning rather than failing the request. The tradeoff is
+explicit: an unredacted name is worse than an error, but a gateway that rejects
+all traffic when an optional detector is throttled is worse still.
+
+#### Seeing it
+
+`POST /admin/pii/preview` recomputes redaction on demand and returns both
+columns. The Security & Audit page in the dashboard renders it side by side —
+the audit trail can record *that* redaction happened and how many items it
+replaced, but never what the provider received, because storing that would mean
+storing the PII the feature exists to keep out of storage.
+
+```bash
+curl -X POST localhost:8000/admin/pii/preview \
+  -H 'Content-Type: application/json' \
+  -d '{"text": "I am Alice Smith, email a@b.com", "ner": true}'
+```
+
+Nothing is persisted by this endpoint.
+
 ### Tool calling — one definition, every provider
 
 Define tools once in OpenAI's shape. Each adapter translates them into its
@@ -386,6 +472,7 @@ Request → Auth (OIDC/API Key) → Quota Enforcement (policy hierarchy)
 | `/admin/webhooks/{name}/test` | POST | Send test event |
 | `/admin/semantic-cache` | GET | Semantic cache stats: entries, hits, misses, and how many candidates the literal guard rejected |
 | `/admin/semantic-cache` | DELETE | Invalidate entries — one project with `?project_id=`, all of them without |
+| `/admin/pii/preview` | POST | Show what redaction does to a given string: `{"text": "..."}` returns the redacted and re-injected forms. Add `"ner": true` for the entity-detection column (billable). Nothing is persisted |
 | `/admin/regions` | GET | Current topology |
 | `/admin/regions/health` | GET | Spoke health status |
 | `/admin/regions/health/check` | POST | Trigger health check |
@@ -418,7 +505,11 @@ Request → Auth (OIDC/API Key) → Quota Enforcement (policy hierarchy)
 | `AXON_SEMANTIC_CACHE` | `false` | Build the embedder for semantic caching. A project also needs `semantic_cache_enabled` — both must say yes |
 | `AXON_SEMANTIC_CACHE_REGION` | `AXON_BEDROCK_REGION` | Region for the embedding calls |
 | `AXON_SEMANTIC_CACHE_MODEL` | `amazon.titan-embed-text-v2:0` | Bedrock embedding model id |
-| `AXON_SEMANTIC_CACHE_THRESHOLD` | `0.95` | Cosine similarity a stored prompt must clear to be served. Must be in `(0, 1]`; an unparseable or out-of-range value falls back to the default rather than to `0`, which would match everything |
+| `AXON_SEMANTIC_CACHE_THRESHOLD` | `0.90` | Cosine similarity a stored prompt must clear to be served. Must be in `(0, 1]`; an unparseable or out-of-range value falls back to the default rather than to `0`, which would match everything |
+| `AXON_PII_REDACTION_DEFAULT` | `false` | Turn regex redaction on for any request whose policy doesn't configure it. Makes a standalone deploy safe-by-default with one flag |
+| `AXON_PII_REDACT_TYPES` | all patterns | Comma-separated subset of regex PII types to redact when the default above is on |
+| `AXON_PII_NER_DEFAULT` | `false` | Turn entity detection on for policies that don't configure it. **Bills per request** — see [Names, addresses, and the limits of regex](#names-addresses-and-the-limits-of-regex) |
+| `AXON_PII_NER_TYPES` | `name,address,age` | Comma-separated subset of entity types to detect |
 | `OSTIARI_TRACES_URL` | — | When set, forward request traces to this Ostiari ingest URL (e.g. `http://control-plane:8000/api/traces/ingest`) |
 | `OSTIARI_GATEWAY_ID` | `axonllm` | Gateway identifier reported in Ostiari's Live Traces |
 | `OSTIARI_INGEST_KEY` | — | Shared secret sent as `X-Ingest-Key` when Ostiari's ingest endpoint requires auth |

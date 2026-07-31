@@ -400,6 +400,13 @@ class ResolvedPolicy:
     # the original PII is NOT re-injected into the response. Strict-regime mode
     # (no plaintext held in memory). Defaults to True to preserve behavior.
     pii_reinject: bool = True
+    # Named-entity detection for the PII types regex cannot express (names,
+    # addresses, ages). Off by default and separate from pii_redaction_enabled
+    # because it calls a paid per-request service — measured at more than the
+    # model's own input-token cost for the same text — so enabling redaction
+    # must not silently enable it. See security/pii_ner.py.
+    pii_ner_enabled: bool = False
+    pii_ner_types: list[str] | None = None
 
 
 # --- Validation ---

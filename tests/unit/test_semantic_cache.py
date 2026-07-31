@@ -128,7 +128,7 @@ class TestExtractLiterals:
         """The case the whole guard exists for.
 
         17*23 and 17*24 are one character apart and score 0.7191 against each
-        other on the real embedder — far enough below 0.95 to miss here, but the
+        other on the real embedder — far enough below 0.90 to miss here, but the
         literal sets differ regardless of what any threshold admits.
         """
         assert extract_literals("what is 17 * 23") != extract_literals("what is 17 * 24")
@@ -140,6 +140,44 @@ class TestExtractLiterals:
 
     def test_negation_is_distinguished(self):
         assert extract_literals("is it supported") != extract_literals("is it not supported")
+
+    def test_this_week_and_next_week_are_distinguished(self):
+        """The false hit that lowering the threshold to 0.90 exposed.
+
+        "Who is the on-call engineer this week?" / "...next week?" scores 0.9385
+        on the real embedder — above 0.90, no numbers, no negation — so before
+        this/next joined _POLAR_WORDS the cache served last week's engineer as
+        the answer to who is on call now. Nothing in the previous guard caught
+        it, and at the old 0.95 threshold nothing reached the guard to reveal it.
+        """
+        assert (extract_literals("who is the on-call engineer this week")
+                != extract_literals("who is the on-call engineer next week"))
+
+    def test_selector_words_that_flip_the_answer_are_distinguished(self):
+        """Same failure mode as this/next: one word changes which set of facts
+        answers the question, while the embedding barely moves."""
+        for a, b in (
+            ("list the required fields", "list the optional fields"),
+            ("what is the latest release", "what is the previous release"),
+            ("what is the minimum retry delay", "what is the maximum retry delay"),
+            ("what is the current quota", "what is the upcoming quota"),
+        ):
+            assert extract_literals(a) != extract_literals(b), f"{a!r} vs {b!r}"
+
+    def test_paraphrases_still_agree_on_literals(self):
+        """The guard is only useful if it lets real paraphrases through. Widening
+        _POLAR_WORDS trades hit rate for safety, so this bounds the trade: these
+        are the pairs the 0.90 threshold exists to serve, and a future addition
+        to the word list that blocks one of them has gone too far."""
+        for a, b in (
+            ("what does our SLA guarantee for uptime", "what uptime does the SLA promise"),
+            ("explain how photosynthesis works", "how does photosynthesis work"),
+            ("summarize the key benefits of remote work",
+             "what are the main advantages of working remotely"),
+            ("who is responsible for approving expense reports",
+             "which team approves expense reports"),
+        ):
+            assert extract_literals(a) == extract_literals(b), f"{a!r} vs {b!r}"
 
     def test_quoted_strings_are_extracted(self):
         lits = extract_literals('what does the "retry_after" header mean')
@@ -313,7 +351,7 @@ class TestSemanticCacheBasics:
     async def test_a_close_paraphrase_above_the_threshold_hits(self):
         emb = FakeEmbedder(vectors={
             "what is the refund policy": [1.0, 0.0],
-            # cos ~= 0.9988, above 0.95, and the literals agree
+            # cos ~= 0.9988, above 0.90, and the literals agree
             "what's the refund policy": [1.0, 0.05],
         })
         cache = SemanticCache(emb)
@@ -324,7 +362,7 @@ class TestSemanticCacheBasics:
     async def test_a_score_just_below_the_threshold_misses(self):
         emb = FakeEmbedder(vectors={
             "what is the refund policy": [1.0, 0.0],
-            "what is the shipping policy": [1.0, 0.4],  # cos ~= 0.928
+            "what is the shipping policy": [1.0, 0.55],  # cos ~= 0.876
         })
         cache = SemanticCache(emb)
         await cache.put(_req("what is the refund policy"), "p1", _resp(), 300)
@@ -433,14 +471,16 @@ class TestThresholdOverride:
     async def test_a_per_call_threshold_can_admit_a_lower_score(self):
         emb = FakeEmbedder(vectors={
             "what is the refund policy": [1.0, 0.0],
-            "what is the refund policy again": [1.0, 0.4],  # cos ~= 0.928
+            "what is the refund policy again": [1.0, 0.55],  # cos ~= 0.876
         })
         cache = SemanticCache(emb)
         await cache.put(_req("what is the refund policy"), "p1", _resp(), 300)
 
+        # Below the default, above the override — the gap is the point. A score
+        # clearing both would assert nothing about which threshold was used.
         assert await cache.get(_req("what is the refund policy again"), "p1") is None
         assert await cache.get(
-            _req("what is the refund policy again"), "p1", threshold=0.90
+            _req("what is the refund policy again"), "p1", threshold=0.85
         ) is not None
 
     async def test_a_per_call_threshold_can_tighten_as_well_as_loosen(self):
@@ -463,8 +503,12 @@ class TestThresholdOverride:
         assert await cache.get(_req("how do I reset my password"), "p1", threshold=None) is None
 
     async def test_the_default_threshold_is_the_conservative_calibrated_one(self):
+        """Pinned to the measured value, not just "some float". The threshold is
+        the single number deciding whether a wrong answer gets served, and it was
+        calibrated against real Titan embeddings — a casual edit here should
+        break a test and send the reader to the comment on the constant."""
         assert SemanticCache().threshold == DEFAULT_SIMILARITY_THRESHOLD
-        assert DEFAULT_SIMILARITY_THRESHOLD == 0.95
+        assert DEFAULT_SIMILARITY_THRESHOLD == 0.90
 
 
 @pytest.mark.asyncio
