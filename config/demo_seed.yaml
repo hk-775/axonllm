@@ -764,10 +764,33 @@ policy_nodes:
       rate_limit_rpm: 2000
       budget_limit: 20000.0
       pii_redaction_enabled: true
+      # Widened past the original email+ssn so the demo prompt's phone, card and
+      # host address are actually redacted on the request path. They were being
+      # caught in the preview panel but passed through on a real call, which
+      # made the panel look like it was overstating what the gateway does.
+      #
+      # Not the full pattern set: aws_account_id matches any bare 12-digit
+      # number and passport matches a letter followed by 6-9 digits, both of
+      # which fire on ordinary identifiers in demo traffic. Leaving them off is
+      # itself the point — the type list is a policy decision, not a default.
       pii_redact_types:
         - email
         - ssn
+        - phone
+        - credit_card
+        - ip_address
+        - medical_record
 
+  # Entity detection lives here rather than on bu:platform so the two BUs show
+  # the two regimes side by side: platform redacts what regex can match, research
+  # also redacts names and addresses. Putting it on platform would have changed
+  # what every existing demo request does, and proj-alpha (the playground's
+  # default project) hangs off platform.
+  #
+  # This is the only node in the seed that costs money per request — Comprehend
+  # bills ~$0.0001/100 chars, more than the model's own input tokens for the same
+  # text. Scoped to one BU on purpose; see the README section on the limits of
+  # regex for why it is not a sensible global default.
   - node_id: bu:research
     node_type: business_unit
     parent_id: org:acme
@@ -776,6 +799,28 @@ policy_nodes:
       rate_limit_rpm: 1000
       budget_limit: 15000.0
       max_tokens_per_request: 16384
+      pii_redaction_enabled: true
+      # Matches bu:platform's list rather than a shorter one. The first draft
+      # here was [email, ssn, phone], which made proj-beta redact the name but
+      # leave the credit card and host IP in place — the BU with the extra
+      # detector was measurably *less* protective than its sibling on the
+      # structured types, which reads as a bug in the product rather than a
+      # policy choice. The two BUs should differ in one axis only: entity
+      # detection.
+      pii_redact_types:
+        - email
+        - ssn
+        - phone
+        - credit_card
+        - ip_address
+        - medical_record
+      pii_ner_enabled: true
+      # name only, not the full name/address/age default. Research prompts are
+      # full of place names and organisations, and address would redact "Seattle"
+      # out of a legitimate question. The narrower set is the honest demo of how
+      # you would actually deploy this.
+      pii_ner_types:
+        - name
 
   # No allowed_models here: proj-alpha carries the demo's 46-model list on the
   # project record itself, and an intersection at this level would silently

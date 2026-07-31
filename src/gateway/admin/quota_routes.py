@@ -43,6 +43,13 @@ class QuotaAPI:
                 "allowed_providers": policy.allowed_providers,
                 "pii_redaction_enabled": policy.pii_redaction_enabled,
                 "pii_redact_types": policy.pii_redact_types,
+                # Another whitelist rebuild that dropped fields it didn't know
+                # about: a project with entity detection on reported the same
+                # policy as one without, so the only per-request paid feature in
+                # the hierarchy was invisible here.
+                "pii_reinject": policy.pii_reinject,
+                "pii_ner_enabled": policy.pii_ner_enabled,
+                "pii_ner_types": policy.pii_ner_types,
             },
             "usage": {
                 "current_spend": round(current_spend, 4),

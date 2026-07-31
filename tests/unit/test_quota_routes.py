@@ -1,6 +1,7 @@
 """Tests for quota admin API routes."""
 
 import asyncio
+import dataclasses
 
 import pytest
 from starlette.applications import Starlette
@@ -8,7 +9,7 @@ from starlette.testclient import TestClient
 
 from src.gateway.admin.quota_routes import QuotaAPI, create_quota_routes
 from src.gateway.auth.policy_hierarchy import PolicyHierarchyResolver
-from src.gateway.models import PolicyNode
+from src.gateway.models import PolicyNode, ResolvedPolicy
 from src.gateway.quota_enforcer import QuotaEnforcer
 
 
@@ -80,6 +81,39 @@ class TestGetProjectQuota:
         asyncio.run(enforcer.record_spend("proj:ml", 2500.0))
         resp = client.get("/admin/quotas/proj:ml")
         assert resp.json()["usage"]["budget_utilization_pct"] == 50.0
+
+    def test_every_resolved_policy_field_is_reported(self, setup):
+        """policy_limits is a hand-written whitelist, so a field added to
+        ResolvedPolicy is reported nowhere until someone remembers to add it
+        here too. That has already happened twice: pii_reinject and the two
+        pii_ner_* fields resolved correctly on the request path but were
+        invisible in this response, so two projects with different policies
+        looked identical. Comparing against the dataclass makes the omission a
+        test failure instead of a silent reporting gap."""
+        client, _, _ = setup
+        reported = set(client.get("/admin/quotas/proj:ml").json()["policy_limits"])
+        expected = {f.name for f in dataclasses.fields(ResolvedPolicy)}
+        assert reported == expected, (
+            f"not reported: {expected - reported}; unknown: {reported - expected}")
+
+    def test_entity_detection_settings_are_visible(self, setup):
+        """The one policy feature that costs money per request. If the admin API
+        does not surface it, an operator cannot tell which projects are paying
+        for Comprehend without reading the seed file."""
+        client, _, resolver = setup
+        node = PolicyNode("proj:ner", "project", "org:acme", "NER",
+                          limits={"pii_redaction_enabled": True,
+                                  "pii_ner_enabled": True,
+                                  "pii_ner_types": ["name"]})
+        _run(resolver._persistence.save_policy_node(node))
+        _run(resolver.load_nodes())
+
+        limits = client.get("/admin/quotas/proj:ner").json()["policy_limits"]
+        assert limits["pii_ner_enabled"] is True
+        assert limits["pii_ner_types"] == ["name"]
+        # And a project without it reports off rather than absent.
+        assert client.get("/admin/quotas/proj:ml").json()[
+            "policy_limits"]["pii_ner_enabled"] is False
 
 
 class TestResetSpend:
