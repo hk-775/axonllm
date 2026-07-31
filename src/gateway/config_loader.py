@@ -32,6 +32,10 @@ class DemoSeedData:
     user_budgets: list[dict] = field(default_factory=list)
     usage_seeds: list[dict] = field(default_factory=list)
     policies: list[dict] = field(default_factory=list)
+    # The org > business_unit > project > environment tree. Distinct from
+    # ``policies``, which is Cedar authorization text; these carry the numeric
+    # and model limits the quota enforcer reads on every request.
+    policy_nodes: list[dict] = field(default_factory=list)
     unhealthy_providers: list[dict] = field(default_factory=list)
     audit_events: list[dict] = field(default_factory=list)
     api_keys: list[dict] = field(default_factory=list)
@@ -173,6 +177,7 @@ def load_demo_seed_config(path: str) -> DemoSeedData:
         user_budgets=raw.get("user_budgets", []),
         usage_seeds=raw.get("usage_seeds", []),
         policies=raw.get("policies", []),
+        policy_nodes=raw.get("policy_nodes", []),
         unhealthy_providers=raw.get("unhealthy_providers", []),
         audit_events=raw.get("audit_events", []),
         api_keys=raw.get("api_keys", []),
@@ -268,6 +273,8 @@ def serialize_demo_seed_config(seed_data: DemoSeedData) -> dict:
         result["usage_seeds"] = seed_data.usage_seeds
     if seed_data.policies:
         result["policies"] = seed_data.policies
+    if seed_data.policy_nodes:
+        result["policy_nodes"] = seed_data.policy_nodes
     if seed_data.unhealthy_providers:
         result["unhealthy_providers"] = seed_data.unhealthy_providers
     if seed_data.audit_events:

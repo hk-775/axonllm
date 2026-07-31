@@ -515,6 +515,36 @@ def build_gateway_agent(app_config: AppConfig | None = None) -> GatewayAgent:
 # ---------------------------------------------------------------------------
 
 
+def _validate_seed_hierarchy(policy_resolver: PolicyHierarchyResolver) -> None:
+    """Re-check the seeded tree against the resolver's own child<=parent rule.
+
+    The nodes were assigned directly to bypass parent-before-child ordering, so
+    the validation set_node() would have done is applied here instead — over the
+    complete tree, where every parent is present.
+
+    Raises rather than warns. A seed whose child exceeds its parent describes a
+    hierarchy the resolver will not honour: the merge silently clamps to the
+    parent's value, so the dashboard would show a limit that is not the limit in
+    force. Failing at startup keeps the demo honest about its own numbers.
+    """
+    violations: list[str] = []
+    for node in policy_resolver._nodes.values():
+        found = asyncio.run(policy_resolver.validate_node_limits(node))
+        violations.extend(f"{node.node_id} -> {v}" for v in found)
+    # Every node also has to reach a root, or its limits come from a chain the
+    # resolver cannot walk: get_ancestry stops at the first missing parent and
+    # returns a partial path, so the node quietly resolves to less than the seed
+    # describes. A typo in a parent_id is the likely cause and reads as a
+    # mysteriously permissive project otherwise.
+    for node in policy_resolver._nodes.values():
+        if node.parent_id is not None and node.parent_id not in policy_resolver._nodes:
+            violations.append(f"{node.node_id} -> unknown parent {node.parent_id!r}")
+    if violations:
+        raise ValueError(
+            "Seeded policy hierarchy is invalid: " + "; ".join(sorted(violations))
+        )
+
+
 def _apply_seed_data(
     seed: DemoSeedData,
     cost_tracker: CostTracker,
@@ -546,8 +576,11 @@ def _apply_seed_data(
                 budget_limit=proj.budget_limit,
                 alert_threshold=proj.alert_threshold,
             )
-        # Seed a policy node so the quota endpoint can resolve the project's
-        # budget_limit (the resolver reads limits from PolicyNodes, not projects).
+        # Fallback policy node, so the quota endpoint can still resolve the
+        # project's budget_limit (the resolver reads limits from PolicyNodes,
+        # not projects). Parentless and project-level: a flat node carrying one
+        # limit. The policy_nodes section below overwrites it where the seed
+        # describes a real tree, which is why this runs first.
         if proj.budget_limit is not None:
             policy_resolver._nodes[proj.project_id] = PolicyNode(
                 node_id=proj.project_id,
@@ -556,6 +589,23 @@ def _apply_seed_data(
                 display_name=proj.name,
                 limits={"budget_limit": proj.budget_limit},
             )
+
+    # Policy hierarchy. Assigned directly rather than through set_node() because
+    # a tree arrives in file order, not parent-first: set_node validates against
+    # a parent that may be several lines further down and would reject the child
+    # for exceeding limits it cannot see yet. The invariant is not skipped —
+    # _validate_seed_hierarchy re-checks the whole tree once it is all present,
+    # which is strictly stronger than validating each node on arrival.
+    for pn in seed.policy_nodes:
+        policy_resolver._nodes[pn["node_id"]] = PolicyNode(
+            node_id=pn["node_id"],
+            node_type=pn["node_type"],
+            parent_id=pn.get("parent_id"),
+            display_name=pn.get("display_name", pn["node_id"]),
+            limits=pn.get("limits") or {},
+        )
+    if seed.policy_nodes:
+        _validate_seed_hierarchy(policy_resolver)
 
     # User budgets
     user_configs: dict[str, dict] = {}

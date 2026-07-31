@@ -2526,7 +2526,7 @@
       const [showForm, setShowForm] = useState(false);
       const [error, setError] = useState(null);
       const [msg, setMsg] = useState(null);
-      const [form, setForm] = useState({ node_id: '', node_type: 'org', parent_id: '', display_name: '', rate_limit_rpm: '', budget_limit: '', pii_redaction_enabled: false, pii_redact_types: '' });
+      const [form, setForm] = useState({ node_id: '', node_type: 'org', parent_id: '', display_name: '', rate_limit_rpm: '', budget_limit: '', max_tokens_per_request: '', pii_redaction_enabled: false, pii_redact_types: '' });
 
       const load = useCallback(() => {
         api.get('/admin/policies/hierarchy').then(setNodes).catch(e => setError('Failed to load: ' + (e && e.message ? e.message : 'unknown error')));
@@ -2539,6 +2539,7 @@
         const limits = {};
         if (form.rate_limit_rpm) limits.rate_limit_rpm = parseInt(form.rate_limit_rpm);
         if (form.budget_limit) limits.budget_limit = parseFloat(form.budget_limit);
+        if (form.max_tokens_per_request) limits.max_tokens_per_request = parseInt(form.max_tokens_per_request);
         if (form.pii_redaction_enabled) limits.pii_redaction_enabled = true;
         if (form.pii_redact_types) limits.pii_redact_types = form.pii_redact_types.split(',').map(s => s.trim());
         try {
@@ -2559,9 +2560,56 @@
         switch (t) { case 'org': return 'badge-blue'; case 'business_unit': return 'badge-green'; case 'project': return 'badge-grey'; default: return 'badge-grey'; }
       };
 
+      /* Order the flat /admin/policies/hierarchy list into parent-before-child
+         and record each node's depth, so the table can indent.
+
+         The point of this page is that a child's limits are narrowed by its
+         parent's. A flat list with a parent_id column leaves the reader to
+         reconstruct that from ids; depth-first order with indentation shows it.
+
+         Roots are anything whose parent is absent, not just parent_id === null:
+         a project seeded without a hierarchy has no parent, and so does one
+         whose parent_id points at a node that was deleted. Both must still
+         appear — a node silently missing from this table reads as a limit that
+         does not exist, which is the opposite of the truth. */
+      const flatten = (all) => {
+        const known = {};
+        all.forEach(n => { known[n.node_id] = true; });
+        // Roots keyed under null rather than a sentinel id, so no reserved
+        // string can ever collide with a real node_id.
+        const byParent = new Map();
+        all.forEach(n => {
+          const key = (n.parent_id && known[n.parent_id]) ? n.parent_id : null;
+          if (!byParent.has(key)) byParent.set(key, []);
+          byParent.get(key).push(n);
+        });
+        const out = [];
+        // Guards against a parent_id cycle. The resolver tolerates one (its own
+        // walk keeps a visited set) so the API will happily serve it, and
+        // unguarded recursion here would hang the page instead of showing it.
+        const seen = {};
+        const walk = (key, depth) => {
+          const kids = byParent.get(key) || [];
+          // Sorted by id so the order is stable across reloads; the API returns
+          // dict insertion order, which shifts as nodes are added.
+          kids.slice().sort((a, b) => a.node_id.localeCompare(b.node_id)).forEach(n => {
+            if (seen[n.node_id]) return;
+            seen[n.node_id] = true;
+            out.push({ node: n, depth: depth });
+            walk(n.node_id, depth + 1);
+          });
+        };
+        walk(null, 0);
+        // Anything a cycle kept out of the walk still gets a row, unindented.
+        all.forEach(n => { if (!seen[n.node_id]) out.push({ node: n, depth: 0 }); });
+        return out;
+      };
+
+      const rows = flatten(nodes);
+
       return (
         <div>
-          <div className="page-header"><h1>Policy Hierarchy</h1><p>Org &gt; Business Unit &gt; Project &gt; Environment — most restrictive wins</p></div>
+          <div className="page-header"><h1>Policy Hierarchy</h1><p>Org &gt; Business Unit &gt; Project &gt; Environment. Each row inherits from the row it is indented under, and the most restrictive value wins — a child can never raise a limit its parent set. An em dash means the node sets no value of its own and takes its parent's.</p></div>
           {error && <Flash type="error">{error}</Flash>}
           {msg && <Flash type="success">{msg}</Flash>}
           <div style={{ marginBottom: '1rem' }}><Btn variant="primary" onClick={() => setShowForm(true)}>Add Node</Btn></div>
@@ -2572,10 +2620,19 @@
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.5rem' }}>
                   <div><label style={{ fontWeight: 600, fontSize: '13px' }}>Node ID</label><input style={{ display: 'block', width: '100%', padding: '0.4rem', border: '2px solid var(--awsui-color-border-input)', borderRadius: '6px', marginTop: '0.25rem' }} value={form.node_id} onChange={e => setForm({ ...form, node_id: e.target.value })} placeholder="org:acme" /></div>
                   <div><label style={{ fontWeight: 600, fontSize: '13px' }}>Type</label><select style={{ display: 'block', width: '100%', padding: '0.4rem', border: '2px solid var(--awsui-color-border-input)', borderRadius: '6px', marginTop: '0.25rem' }} value={form.node_type} onChange={e => setForm({ ...form, node_type: e.target.value })}><option value="org">Org</option><option value="business_unit">Business Unit</option><option value="project">Project</option><option value="environment">Environment</option></select></div>
-                  <div><label style={{ fontWeight: 600, fontSize: '13px' }}>Parent ID</label><input style={{ display: 'block', width: '100%', padding: '0.4rem', border: '2px solid var(--awsui-color-border-input)', borderRadius: '6px', marginTop: '0.25rem' }} value={form.parent_id} onChange={e => setForm({ ...form, parent_id: e.target.value })} placeholder="(none for root org)" /></div>
+                  <div><label style={{ fontWeight: 600, fontSize: '13px' }}>Parent</label><select style={{ display: 'block', width: '100%', padding: '0.4rem', border: '2px solid var(--awsui-color-border-input)', borderRadius: '6px', marginTop: '0.25rem' }} value={form.parent_id} onChange={e => setForm({ ...form, parent_id: e.target.value })}>
+                    {/* Chosen from what exists, because create_node accepts any
+                        parent_id and one naming no node yields a second root
+                        whose limits are bounded by nothing. */}
+                    <option value="">(none — root org)</option>
+                    {rows.map(({ node: n, depth }) => (
+                      <option key={n.node_id} value={n.node_id}>{'\u00A0'.repeat(depth * 2)}{n.node_id}</option>
+                    ))}
+                  </select></div>
                   <div><label style={{ fontWeight: 600, fontSize: '13px' }}>Display Name</label><input style={{ display: 'block', width: '100%', padding: '0.4rem', border: '2px solid var(--awsui-color-border-input)', borderRadius: '6px', marginTop: '0.25rem' }} value={form.display_name} onChange={e => setForm({ ...form, display_name: e.target.value })} /></div>
                   <div><label style={{ fontWeight: 600, fontSize: '13px' }}>Rate Limit (RPM)</label><input type="number" style={{ display: 'block', width: '100%', padding: '0.4rem', border: '2px solid var(--awsui-color-border-input)', borderRadius: '6px', marginTop: '0.25rem' }} value={form.rate_limit_rpm} onChange={e => setForm({ ...form, rate_limit_rpm: e.target.value })} /></div>
                   <div><label style={{ fontWeight: 600, fontSize: '13px' }}>Budget Limit ($)</label><input type="number" style={{ display: 'block', width: '100%', padding: '0.4rem', border: '2px solid var(--awsui-color-border-input)', borderRadius: '6px', marginTop: '0.25rem' }} value={form.budget_limit} onChange={e => setForm({ ...form, budget_limit: e.target.value })} /></div>
+                  <div><label style={{ fontWeight: 600, fontSize: '13px' }}>Max Tokens / Request</label><input type="number" style={{ display: 'block', width: '100%', padding: '0.4rem', border: '2px solid var(--awsui-color-border-input)', borderRadius: '6px', marginTop: '0.25rem' }} value={form.max_tokens_per_request} onChange={e => setForm({ ...form, max_tokens_per_request: e.target.value })} placeholder="(inherit)" /></div>
                 </div>
                 <div style={{ marginTop: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                   <input type="checkbox" id="pii-enabled" checked={form.pii_redaction_enabled} onChange={e => setForm({ ...form, pii_redaction_enabled: e.target.checked })} />
@@ -2595,17 +2652,39 @@
                 <EmptyState title="No policy nodes" subtitle="Create an org node to start building your hierarchy." />
               ) : (
                 <table>
-                  <thead><tr><th>Node ID</th><th>Type</th><th>Parent</th><th>Display Name</th><th>Rate Limit</th><th>Budget</th><th>PII</th></tr></thead>
+                  <thead><tr><th>Node</th><th>Type</th><th>Display Name</th><th>Rate Limit</th><th>Budget</th><th>Max Tokens</th><th>PII</th></tr></thead>
                   <tbody>
-                    {nodes.map(n => (
+                    {rows.map(({ node: n, depth }) => (
                       <tr key={n.node_id}>
-                        <td><strong>{n.node_id}</strong></td>
+                        {/* Indent by depth instead of showing a Parent column.
+                            The parent is the row above; a column repeating its
+                            id costs width without adding anything the position
+                            does not already say. */}
+                        <td style={{ paddingLeft: `calc(0.75rem + ${depth * 1.25}rem)` }}>
+                          {depth > 0 && (
+                            <span aria-hidden="true" style={{ color: 'var(--awsui-color-text-secondary)', marginRight: '0.4rem' }}>└</span>
+                          )}
+                          <strong>{n.node_id}</strong>
+                        </td>
                         <td><span className={`badge ${nodeTypeColor(n.node_type)}`}>{n.node_type}</span></td>
-                        <td>{n.parent_id || '-'}</td>
                         <td>{n.display_name}</td>
-                        <td>{n.limits.rate_limit_rpm || '-'}</td>
-                        <td>{n.limits.budget_limit ? `$${n.limits.budget_limit.toLocaleString()}` : '-'}</td>
-                        <td>{n.limits.pii_redaction_enabled ? <span className="badge badge-green">ON</span> : '-'}</td>
+                        {/* An em dash, not a zero: a node that sets no limit of
+                            its own inherits its parent's, which is the opposite
+                            of a limit of nothing. */}
+                        <td>{n.limits.rate_limit_rpm ? `${n.limits.rate_limit_rpm} RPM` : '—'}</td>
+                        <td>{n.limits.budget_limit ? `$${n.limits.budget_limit.toLocaleString()}` : '—'}</td>
+                        <td>{n.limits.max_tokens_per_request ? n.limits.max_tokens_per_request.toLocaleString() : '—'}</td>
+                        <td>
+                          {n.limits.pii_redaction_enabled
+                            ? <span className="badge badge-green">{(n.limits.pii_redact_types || []).join(', ') || 'ON'}</span>
+                            : (n.limits.pii_reinject === false
+                                /* Not a redaction toggle: this node keeps
+                                   redaction as inherited but makes it
+                                   permanent, so the response comes back with
+                                   placeholders rather than the originals. */
+                                ? <span className="badge badge-orange">no re-inject</span>
+                                : '—')}
+                        </td>
                       </tr>
                     ))}
                   </tbody>
@@ -3092,6 +3171,10 @@
         ]},
         { label: 'Govern', items: [
           { key: 'policies', icon: '🔒', label: 'Policies' },
+          /* The org > BU > project > environment tree. PolicyHierarchyPage was
+             built and wired into the view switch, but nothing ever linked to it
+             — the only way in was to set the view by hand. */
+          { key: 'policy-hierarchy', icon: '🏛', label: 'Hierarchy' },
           { key: 'quotas', icon: '📏', label: 'Quotas' },
           { key: 'regions', icon: '🌐', label: 'Regions' },
           { key: 'webhooks', icon: '🔔', label: 'Webhooks' },
