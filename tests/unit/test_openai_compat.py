@@ -462,3 +462,56 @@ class TestModels:
         assert d["object"] == "list"
         assert {m["id"] for m in d["data"]} == {"claude-sonnet", "gpt-4"}
         assert all(m["object"] == "model" and m["owned_by"] == "axonllm" for m in d["data"])
+
+
+class TestCacheMetadata:
+    """A cached response must be distinguishable from a provider call.
+
+    This route rebuilds the completion rather than passing the pipeline dict
+    through, and mints a fresh ``chatcmpl-<uuid>`` every time — so a dropped
+    flag leaves a caller with no way at all to tell a hit from a real call. It
+    was dropped, and went unnoticed because nothing ever wrote to the cache,
+    which made ``is_cached`` unreachable in practice.
+    """
+
+    def test_an_uncached_response_carries_no_cache_fields(self):
+        """Absence is the signal for a provider call, so it has to stay absent."""
+        client, _ = _make_client()
+        d = client.post("/v1/chat/completions", json={
+            "model": "claude-sonnet", "messages": [{"role": "user", "content": "hi"}],
+        }).json()
+        assert "x_cached" not in d
+        assert "x_cache_type" not in d
+
+    def test_an_exact_hit_is_labelled(self):
+        client, _ = _make_client(chat_extra={"is_cached": True})
+        d = client.post("/v1/chat/completions", json={
+            "model": "claude-sonnet", "messages": [{"role": "user", "content": "hi"}],
+        }).json()
+        assert d["x_cached"] is True
+        assert d["x_cache_type"] == "exact"
+
+    def test_a_semantic_hit_is_labelled_differently(self):
+        """The two are not interchangeable: an exact hit is the answer to this
+        question, a semantic hit the answer to one judged equivalent."""
+        client, _ = _make_client(
+            chat_extra={"is_cached": True, "cache_type": "semantic"}
+        )
+        d = client.post("/v1/chat/completions", json={
+            "model": "claude-sonnet", "messages": [{"role": "user", "content": "hi"}],
+        }).json()
+        assert d["x_cached"] is True
+        assert d["x_cache_type"] == "semantic"
+
+    def test_the_rest_of_the_completion_is_still_well_formed(self):
+        """The cache fields are an extension, not a replacement — an OpenAI
+        client that ignores unknown keys must still see a normal completion."""
+        client, _ = _make_client(chat_extra={"is_cached": True})
+        d = client.post("/v1/chat/completions", json={
+            "model": "claude-sonnet", "messages": [{"role": "user", "content": "hi"}],
+        }).json()
+        assert d["object"] == "chat.completion"
+        assert d["id"].startswith("chatcmpl-")
+        assert d["choices"][0]["message"]["content"] == "hello there"
+        assert d["choices"][0]["finish_reason"] == "stop"
+        assert d["usage"]["total_tokens"] == 5

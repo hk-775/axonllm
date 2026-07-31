@@ -327,7 +327,7 @@ Request → Auth (OIDC/API Key) → Quota Enforcement (policy hierarchy)
 6. **Access checks** — project and user model restrictions
 7. **Budget check** — project and user spend limits
 8. **Guardrails** — content policy evaluation
-9. **Cache** — exact-match response cache (SHA-256 of model + messages + params), then an optional semantic match on the reworded question. Written back after guardrails and PII re-injection, so a hit cannot bypass either
+9. **Cache** — exact-match response cache (SHA-256 of model + messages + params), then an optional semantic match on the reworded question. Written back after guardrails and PII re-injection, so a hit cannot bypass either. A hit is labelled on the way out: `x_cached: true` plus `x_cache_type` of `exact` or `semantic` (absent on a provider call)
 10. **Region routing** — select spoke based on health, data residency, model availability
 11. **Provider routing** — strategy-based model selection + fallback
 12. **Response guardrails** — output filtering

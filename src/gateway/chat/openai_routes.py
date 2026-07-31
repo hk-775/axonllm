@@ -216,6 +216,17 @@ class OpenAICompatAPI:
         # extension field. Standard OpenAI clients ignore unknown keys.
         if "smart_routing" in resp:
             completion["x_smart_routing"] = resp["smart_routing"]
+        # Same for the cache. This route rebuilds the response rather than
+        # passing the pipeline dict through, so without this a cached response
+        # is indistinguishable from a fresh one: the id is a new uuid either
+        # way. It went unnoticed because nothing ever wrote to the cache, so
+        # is_cached was unreachable — now that it isn't, a caller comparing two
+        # responses needs to be able to tell a hit from a provider call, and a
+        # semantic hit (an answer to a question judged equivalent) from an exact
+        # one.
+        if resp.get("is_cached"):
+            completion["x_cached"] = True
+            completion["x_cache_type"] = resp.get("cache_type", "exact")
         return JSONResponse(completion)
 
     async def _stream(self, model, messages, temperature, max_tokens, user_id,
