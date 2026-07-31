@@ -1711,6 +1711,107 @@ class TestDemoInTheRibbon:
         )
 
 
+class TestDemoVideoIsReproducible:
+    """The committed film and the script that describes it must agree.
+
+    The video is a binary blob nothing in the test suite can look inside, so what
+    is checkable is the relationship between it and ``scripts/demo/narration.json``
+    — the file every stage of the build derives its timings from. If someone edits
+    a sentence and does not re-run the build, the captions and the audio disagree
+    and nothing else notices: the page still loads, the video still plays, and the
+    subtitle track quietly describes a different take.
+    """
+
+    @pytest.fixture
+    def repo_root(self):
+        import pathlib
+
+        return pathlib.Path(__file__).resolve().parents[2]
+
+    @pytest.fixture
+    def narration(self, repo_root):
+        import json
+
+        path = repo_root / "scripts" / "demo" / "narration.json"
+        assert path.is_file(), "the narration script is not committed"
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def test_the_toolchain_that_built_the_video_is_committed(self, repo_root):
+        """Otherwise the film is a binary no one can regenerate.
+
+        The narration MP3s have ``build_narration_audio.sh`` next to them for
+        exactly this reason. This asset was for a while the one generated thing in
+        the repo whose producer lived only on the machine that ran it.
+        """
+        demo_dir = repo_root / "scripts" / "demo"
+        for stage in ("synthesize.py", "record.py", "encode.py", "make_captions.py"):
+            assert (demo_dir / stage).is_file(), f"{stage} is missing"
+        assert (demo_dir / "README.md").is_file(), "no instructions for running them"
+
+    def test_the_captions_tile_the_narration_exactly(self, narration, repo_root):
+        """Cue boundaries are scene boundaries, so the two cannot drift.
+
+        Both are derived from the measured MP3 lengths rather than timed by hand.
+        A mismatch here means the VTT was built from a different take of the
+        script than the one committed — the drift this whole arrangement exists to
+        make impossible.
+        """
+        import re
+
+        vtt = (repo_root / "site" / "axonllm-demo.vtt").read_text(encoding="utf-8")
+        stamps = re.findall(r"--> (\d\d):(\d\d):(\d\d\.\d\d\d)", vtt)
+        assert stamps, "no cue timings in the caption file"
+        last = max(int(h) * 3600 + int(m) * 60 + float(s) for h, m, s in stamps)
+        total = narration["total_duration"]
+        # Within a frame at 30fps. Not equality: the cue stamps are rounded to
+        # milliseconds and the per-scene durations to hundredths.
+        assert abs(last - total) < 0.04, (
+            f"captions end at {last:.2f}s but the narration runs {total:.2f}s — "
+            "the VTT was built from a different take"
+        )
+
+    def test_the_video_matches_the_length_of_the_script(self, narration, repo_root):
+        """The film is as long as the words, because the encoder makes it so.
+
+        Each scene's frame rate is set to frames/duration, so the picture ends
+        when the sentence does. A video that no longer matches the script's total
+        was built from different frames or different audio.
+        """
+        import shutil
+        import subprocess
+
+        if not shutil.which("ffprobe"):
+            pytest.skip("ffprobe not installed")
+
+        mp4 = repo_root / "site" / "axonllm-demo.mp4"
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=nw=1:nk=1", str(mp4)],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        assert abs(float(out) - narration["total_duration"]) < 0.5, (
+            f"the video runs {float(out):.2f}s but the script totals "
+            f"{narration['total_duration']:.2f}s"
+        )
+
+    def test_every_scene_has_measured_text_and_a_duration(self, narration):
+        """A scene with no duration would be given a guessed frame budget.
+
+        ``text`` is what the captions are built from and ``ssml`` is what Polly
+        speaks, so a scene carrying only one of them ships a subtitle that
+        disagrees with the audio, or an unnarrated stretch of film.
+        """
+        scenes = narration["scenes"]
+        assert scenes, "no scenes"
+        for s in scenes:
+            assert s.get("ssml"), f"{s['id']} has nothing to speak"
+            assert s.get("text"), f"{s['id']} has no caption text"
+            assert isinstance(s.get("duration"), (int, float)) and s["duration"] > 0, (
+                f"{s['id']} has no measured duration — run synthesize.py"
+            )
+        assert abs(sum(s["duration"] for s in scenes) - narration["total_duration"]) < 0.05
+
+
 class TestLandingPageStatBand:
     """The four numbers under the hero, each a claim about the source.
 
