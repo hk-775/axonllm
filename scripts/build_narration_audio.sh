@@ -1,24 +1,42 @@
 #!/usr/bin/env bash
 #
-# Synthesize the architecture narration with Amazon Polly.
+# Synthesize a narration track set with Amazon Polly.
 #
-#   ./scripts/build_narration_audio.sh
+#   ./scripts/build_narration_audio.sh [architecture|tour]
 #
-# site/narration/architecture-narration.json is the single source of the script.
-# This writes one MP3 per diagram into site/narration/ and records the measured
-# duration of each back into the JSON, so the page can show a real progress bar
-# instead of guessing.
+# Two narrations share this script, because they differ only in which JSON is
+# the source and where the MP3s land:
 #
-# The MP3s are committed. site/ is uploaded to S3 verbatim (see site/infra/
-# stack.py) with no build step, and a customer demo that needs an AWS credential
+#   architecture  site/narration/            — the three diagrams on the site
+#   tour          src/gateway/admin/static/tour/ — the dashboard's guided demo
+#
+# The chosen JSON is the single source of its script. This writes one MP3 per
+# track next to it and records the measured duration back into the JSON, so the
+# player shows a real progress bar instead of guessing.
+#
+# The MP3s are committed, not built on demand. site/ is uploaded to S3 verbatim
+# (see site/infra/stack.py) with no build step, the dashboard serves static/
+# straight off the checkout, and a customer demo that needs an AWS credential
 # and a network round-trip to make sound is a demo that fails in a meeting room.
 # Re-run this after editing the narration, and commit the results together.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-SRC="site/narration/architecture-narration.json"
-OUT_DIR="site/narration"
+case "${1:-architecture}" in
+    architecture)
+        SRC="site/narration/architecture-narration.json"
+        OUT_DIR="site/narration"
+        ;;
+    tour)
+        SRC="src/gateway/admin/static/tour/tour-narration.json"
+        OUT_DIR="src/gateway/admin/static/tour"
+        ;;
+    *)
+        echo "usage: $0 [architecture|tour]" >&2
+        exit 2
+        ;;
+esac
 
 if [[ ! -f "$SRC" ]]; then
     echo "error: $SRC not found" >&2
@@ -97,4 +115,4 @@ done
 rm -f /tmp/axon-ssml.xml
 
 echo
-echo "==> done. Commit site/narration/*.mp3 with the JSON."
+echo "==> done. Commit $OUT_DIR/*.mp3 with the JSON."
