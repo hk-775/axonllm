@@ -104,6 +104,8 @@ def _is_servable_site_path(inside: pathlib.PurePath) -> bool:
         return True
     return len(inside.parts) == 2 and inside.parts[0] in SITE_ASSET_DIRS
 
+
+from src.gateway.admin.catalog_drift import audit_catalog, render_catalog_drift_page
 from src.gateway.admin.pricing_drift import audit_pricing, render_drift_page
 from src.gateway.admin.production_checklist import render_checklist_page, run_checklist
 from src.gateway.config import AppConfig
@@ -199,6 +201,7 @@ class AdminAPI:
         efficiency_analyzer: EfficiencyAnalyzer | None = None,
         semantic_engine: SemanticEfficiencyEngine | None = None,
         pricing_path: str = "config/pricing.yaml",
+        catalog_path: str = "config/catalog.yaml",
         app_config: AppConfig | None = None,
         provider_configs: dict[str, ProviderConfig] | None = None,
         api_key_service: object | None = None,
@@ -217,6 +220,10 @@ class AdminAPI:
         # Shown on the pricing-coverage page so the operator knows which file to
         # edit; the table itself comes from the cost tracker, already loaded.
         self._pricing_path = pricing_path
+        # Same idea for the catalogue-coverage page. Both files are named on the
+        # page rather than assumed, because the drift it reports is fixed by
+        # editing one of the two and it is not obvious from a finding which.
+        self._catalog_path = catalog_path
         # For the production checklist. The typed AppConfig is threaded through
         # rather than read from the environment in the render path, so the page
         # reports the settings this process actually booted with — a later
@@ -1689,6 +1696,33 @@ class AdminAPI:
             )
         )
 
+    async def catalog_drift(self, request: Request) -> HTMLResponse:
+        """Report the three-way gap between declared, described, and observed models.
+
+        The catalogue and the registry are separate files that nothing forces to
+        agree, and every way they disagree fails quietly: /admin/catalog answers
+        for models no mapping can reach, a routed model with no catalogue entry
+        reports ``capabilities: []`` which reads as *none* rather than *unknown*,
+        and traffic can name a model the registry never declared.
+
+        Usage records are passed in so the report can separate a model that is
+        declared and idle from one that is carrying traffic — and flag the
+        reverse, traffic with no declaration, which is shadow AI observed rather
+        than surveyed. Rendered fresh per request from the live registry, so
+        editing either file and reloading shows the new coverage.
+        """
+        report = audit_catalog(
+            self.model_registry, self._catalog, self.cost_tracker._records
+        )
+        return HTMLResponse(
+            render_catalog_drift_page(
+                report,
+                self._config_path,
+                self._catalog_path,
+                embed=_is_embedded(request),
+            )
+        )
+
     async def production_checklist(self, request: Request) -> HTMLResponse:
         """Report whether this deployment is ready to carry real traffic.
 
@@ -1757,6 +1791,7 @@ def create_admin_routes(admin_api: AdminAPI) -> list[Route]:
         Route("/admin/static/{path:path}", admin_api.static_asset, methods=["GET"]),
         Route("/admin/architecture", admin_api.architecture, methods=["GET"]),
         Route("/admin/pricing-drift", admin_api.pricing_drift, methods=["GET"]),
+        Route("/admin/catalog-drift", admin_api.catalog_drift, methods=["GET"]),
         Route("/admin/production-checklist", admin_api.production_checklist, methods=["GET"]),
         Route("/admin/overview", admin_api.overview, methods=["GET"]),
         Route("/admin/projects", admin_api.list_projects, methods=["GET"]),

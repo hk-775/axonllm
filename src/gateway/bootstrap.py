@@ -410,6 +410,7 @@ def build_starlette_app(app_config: AppConfig | None = None) -> Starlette:
         efficiency_analyzer=comp.efficiency_analyzer,
         semantic_engine=comp.semantic_engine,
         pricing_path=app_config.pricing_config_path,
+        catalog_path=app_config.catalog_config_path,
         # For the production-readiness checklist: the settings this process booted
         # with, the providers whose credentials actually loaded, and the key
         # service, so the checklist can report the scopes and expiry of issued

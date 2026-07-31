@@ -27,6 +27,14 @@ from src.gateway.admin.pricing_drift import (
     UnpricedMapping,
     render_drift_page,
 )
+from src.gateway.admin.catalog_drift import (
+    CatalogDriftReport,
+    DormantModel,
+    UndeclaredTraffic,
+    UndescribedMapping,
+    UnroutableCatalogEntry,
+    render_catalog_drift_page,
+)
 from src.gateway.admin.production_checklist import (
     CheckResult,
     ChecklistReport,
@@ -110,9 +118,44 @@ def _checklist_page(*, embed: bool = False) -> str:
     )
 
 
-PAGES = [("pricing-drift", _drift_page), ("production-checklist", _checklist_page)]
+def _catalog_page(*, embed: bool = False) -> str:
+    """One of every finding, so each table and banner variant renders.
 
-# The same two pages framed in the dashboard shell. Same fixtures, so a content
+    The undeclared-traffic entry matters most: it is the only path that reaches
+    the .banner.fail branch, and a report built from the real config has none of
+    them — so without a synthetic one, that branch is never styled-checked.
+    """
+    report = CatalogDriftReport(
+        total_mappings=49, described_mappings=10, total_models=46,
+        undescribed=[
+            UndescribedMapping(model="gpt-4", provider="openai",
+                               model_id="gpt-4-turbo"),
+            UndescribedMapping(model="llama-3", provider="groq",
+                               model_id="llama-3-70b",
+                               provider_section_missing=True),
+        ],
+        unroutable=[UnroutableCatalogEntry(provider="openai",
+                                           model_id="gpt-3.5-old",
+                                           display_name="GPT-3.5 (retired)")],
+        dormant=[DormantModel(model="claude-opus", providers=("anthropic",))],
+        undeclared=[UndeclaredTraffic(model="mystery-v2", provider="xai",
+                                      requests=3)],
+        providers_missing_section=["groq"],
+        models_without_capabilities=["gpt-4", "llama-3"],
+        observed_models=9,
+    )
+    return render_catalog_drift_page(
+        report, "config/models.yaml", "config/catalog.yaml", embed=embed
+    )
+
+
+PAGES = [
+    ("pricing-drift", _drift_page),
+    ("catalog-drift", _catalog_page),
+    ("production-checklist", _checklist_page),
+]
+
+# The same pages framed in the dashboard shell. Same fixtures, so a content
 # assertion that holds standalone is being made against identical input.
 EMBEDDED = [
     (name, functools.partial(render, embed=True)) for name, render in PAGES
