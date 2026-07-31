@@ -32,11 +32,14 @@ _TOOL_CALL = [{
 class _CapturingGateway:
     """Records request_data and returns a canned OpenAI-shaped response."""
 
-    def __init__(self, choice=None, stream_chunks=None):
+    def __init__(self, choice=None, stream_chunks=None, extra=None):
         self.requests: list[dict] = []
         self.choice = choice or {"message": {"role": "assistant", "content": "ok"},
                                  "finish_reason": "stop"}
         self.stream_chunks = stream_chunks
+        # Merged into the response, so a test can pose as a pipeline that
+        # served the answer from the cache.
+        self.extra = extra or {}
         self.cost_tracker = SimpleNamespace(_records=[])
         self._user_configs = {}
 
@@ -45,7 +48,7 @@ class _CapturingGateway:
         if request_data.get("stream"):
             return self._stream()
         return {"id": "x", "model": "m", "provider": "p",
-                "choices": [self.choice], "usage": {}}
+                "choices": [self.choice], "usage": {}, **self.extra}
 
     async def _stream(self):
         for chunk in (self.stream_chunks or []):
@@ -166,3 +169,34 @@ class TestStreamResponseSide:
         chunks = _collect(ca.chat_stream("m", [{"role": "user", "content": "hi"}]))
         assert chunks[0]["content"] == ""
         assert chunks[0]["tool_calls"] == _TOOL_CALL
+
+
+class TestCacheFlagPassThrough:
+    """The same flattening that lost tool calls also lost the cache flag.
+
+    Both HTTP routes build their responses from this dict rather than from the
+    pipeline's, so a key dropped here is unrecoverable upstream — and since the
+    OpenAI route mints a fresh completion id per request, a caller has nothing
+    else to tell a cache hit from a real provider call by.
+    """
+
+    def test_an_exact_hit_survives_the_flattening(self):
+        gw = _CapturingGateway(extra={"is_cached": True})
+        ca = ClientAgent(gw)
+        r = asyncio.run(ca.chat("m", [{"role": "user", "content": "hi"}]))
+        assert r["is_cached"] is True
+
+    def test_a_semantic_hit_keeps_its_label(self):
+        gw = _CapturingGateway(extra={"is_cached": True, "cache_type": "semantic"})
+        ca = ClientAgent(gw)
+        r = asyncio.run(ca.chat("m", [{"role": "user", "content": "hi"}]))
+        assert r["is_cached"] is True
+        assert r["cache_type"] == "semantic"
+
+    def test_a_provider_call_is_not_labelled_as_cached(self):
+        """Absence is what marks a real call, so nothing may be added by default."""
+        gw = _CapturingGateway()
+        ca = ClientAgent(gw)
+        r = asyncio.run(ca.chat("m", [{"role": "user", "content": "hi"}]))
+        assert "is_cached" not in r
+        assert "cache_type" not in r

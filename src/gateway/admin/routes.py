@@ -130,6 +130,35 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _parse_semantic_threshold(raw) -> tuple[float | None, str | None]:
+    """Validate a semantic_cache_threshold from a request body.
+
+    Returns ``(value, error)``; exactly one is non-None, except for a valid
+    ``null`` which returns ``(None, None)`` and means "use the gateway default".
+
+    Validated rather than trusted because the damaging value here is a
+    plausible-looking one. 0, a negative number, or a percentage typed as 95
+    all make every cached entry a match, so the project starts answering
+    unrelated questions with whatever it cached first — which presents as a
+    working cache with a suspiciously good hit rate, not as an error.
+    """
+    if raw is None:
+        return None, None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None, (
+            "semantic_cache_threshold must be a number in (0.0, 1.0], "
+            "or null for the default"
+        )
+    if not 0.0 < value <= 1.0:
+        return None, (
+            f"semantic_cache_threshold {value} is outside (0.0, 1.0]; "
+            "null selects the default"
+        )
+    return value, None
+
+
 PROVIDER_MODEL_CATALOG = {
     "openai": {
         "display_name": "OpenAI",
@@ -205,6 +234,7 @@ class AdminAPI:
         app_config: AppConfig | None = None,
         provider_configs: dict[str, ProviderConfig] | None = None,
         api_key_service: object | None = None,
+        semantic_cache: object | None = None,
     ) -> None:
         self.cost_tracker = cost_tracker
         self.health_tracker = health_tracker
@@ -239,6 +269,11 @@ class AdminAPI:
         # and expiry of issued keys. Optional: when absent that check reports
         # UNKNOWN rather than passing, since unverified is not the same as clean.
         self._api_key_service = api_key_service
+        # The same instance the gateway agent holds, so the stats reported are
+        # the live counters rather than a second cache's. None when the caller
+        # did not wire one; the endpoint then reports it as unavailable, which is
+        # distinguishable from a wired cache with no hits.
+        self._semantic_cache = semantic_cache
 
     # ------------------------------------------------------------------
     # GET /admin/overview
@@ -357,6 +392,8 @@ class AdminAPI:
             ],
             "cache_enabled": project.cache_enabled,
             "cache_ttl_seconds": project.cache_ttl_seconds,
+            "semantic_cache_enabled": project.semantic_cache_enabled,
+            "semantic_cache_threshold": project.semantic_cache_threshold,
             "log_level": project.log_level,
             "prompt_caching_enabled": project.prompt_caching_enabled,
             "users": users,
@@ -396,6 +433,15 @@ class AdminAPI:
             for g in body.get("guardrail_rules", [])
         ]
 
+        semantic_threshold, threshold_err = _parse_semantic_threshold(
+            body.get("semantic_cache_threshold")
+        )
+        if threshold_err is not None:
+            return JSONResponse(
+                {"error": {"type": "invalid_request", "message": threshold_err}},
+                status_code=400,
+            )
+
         project = Project(
             project_id=project_id,
             name=name,
@@ -405,6 +451,8 @@ class AdminAPI:
             guardrail_rules=guardrail_rules,
             cache_enabled=body.get("cache_enabled", False),
             cache_ttl_seconds=body.get("cache_ttl_seconds", 300),
+            semantic_cache_enabled=body.get("semantic_cache_enabled", False),
+            semantic_cache_threshold=semantic_threshold,
             log_level=body.get("log_level", "INFO"),
             log_destination=body.get("log_destination"),
             prompt_caching_enabled=body.get("prompt_caching_enabled", False),
@@ -467,6 +515,16 @@ class AdminAPI:
             project.cache_enabled = body["cache_enabled"]
         if "cache_ttl_seconds" in body:
             project.cache_ttl_seconds = body["cache_ttl_seconds"]
+        if "semantic_cache_enabled" in body:
+            project.semantic_cache_enabled = body["semantic_cache_enabled"]
+        if "semantic_cache_threshold" in body:
+            value, err = _parse_semantic_threshold(body["semantic_cache_threshold"])
+            if err is not None:
+                return JSONResponse(
+                    {"error": {"type": "invalid_request", "message": err}},
+                    status_code=400,
+                )
+            project.semantic_cache_threshold = value
         if "log_level" in body:
             project.log_level = body["log_level"]
         if "log_destination" in body:
@@ -1776,6 +1834,66 @@ class AdminAPI:
             render_checklist_page(report, embed=_is_embedded(request))
         )
 
+    # ------------------------------------------------------------------
+    # GET /admin/semantic-cache  |  DELETE /admin/semantic-cache
+    # ------------------------------------------------------------------
+
+    async def semantic_cache_stats(self, request: Request) -> JSONResponse:
+        """Counters for the semantic cache, and which projects opted in.
+
+        ``available`` distinguishes "no embedder, so the cache cannot run" from
+        "running and returning no hits" — the two look identical from a hit rate
+        of 0.0 and have completely different fixes. ``rejected_by_literals`` is
+        surfaced for the same reason: a high value means the similarity
+        threshold is admitting near-misses and only the literal guard is
+        catching them, which is a signal to raise the threshold rather than a
+        healthy state.
+        """
+        cache = self._semantic_cache
+        if cache is None:
+            return JSONResponse({
+                "available": False,
+                "reason": "no semantic cache wired into this gateway",
+            })
+
+        opted_in = sorted(
+            p.project_id for p in self.projects.values() if p.semantic_cache_enabled
+        )
+        return JSONResponse({
+            "available": cache.enabled,
+            "reason": None if cache.enabled else "no embedder (check AXON_SEMANTIC_CACHE and AWS credentials)",
+            "default_threshold": cache.threshold,
+            "entries": cache.entry_count(),
+            "projects_enabled": opted_in,
+            "stats": cache.stats.as_dict(),
+        })
+
+    async def invalidate_semantic_cache(self, request: Request) -> JSONResponse:
+        """Drop cached entries, for one project (``?project_id=``) or all.
+
+        A semantic cache cannot detect its own staleness: the documents or
+        prompts behind an answer change with nothing observable in the request,
+        so the only correct response to "these answers are wrong now" is an
+        operator clearing it. Without this the alternative is a restart.
+        """
+        cache = self._semantic_cache
+        if cache is None:
+            return JSONResponse(
+                {"error": {"type": "not_available",
+                           "message": "no semantic cache wired into this gateway"}},
+                status_code=404,
+            )
+        project_id = request.query_params.get("project_id")
+        removed = cache.invalidate(project_id)
+        logger.info(
+            "semantic cache invalidated: scope=%s removed=%d",
+            project_id or "all", removed,
+        )
+        return JSONResponse({
+            "scope": project_id or "all",
+            "removed": removed,
+        })
+
 
 # ------------------------------------------------------------------
 # Helper
@@ -1849,6 +1967,8 @@ def create_admin_routes(admin_api: AdminAPI) -> list[Route]:
         Route("/admin/traces", admin_api.traces, methods=["GET"]),
         Route("/admin/efficiency", admin_api.efficiency_overview, methods=["GET"]),
         Route("/admin/projects/{id}/efficiency", admin_api.project_efficiency, methods=["GET"]),
+        Route("/admin/semantic-cache", admin_api.semantic_cache_stats, methods=["GET"]),
+        Route("/admin/semantic-cache", admin_api.invalidate_semantic_cache, methods=["DELETE"]),
     ]
 
 

@@ -559,3 +559,304 @@ async def test_health_check_entrypoint_without_agent():
     finally:
         agent_module._agent = original
 
+
+
+# ---------------------------------------------------------------------------
+# Cache write-back and semantic cache
+# ---------------------------------------------------------------------------
+
+
+class _FakeEmbedder:
+    """Returns a fixed vector per prompt; every unlisted prompt gets the same one.
+
+    A shared default means unlisted prompts score 1.0 against each other, which
+    is the useful setting for testing the *guards* — it isolates them from the
+    similarity threshold.
+    """
+
+    def __init__(self, vectors: dict[str, list[float]] | None = None) -> None:
+        self.vectors = vectors or {}
+        self.calls: list[str] = []
+
+    async def embed(self, text: str) -> list[float]:
+        self.calls.append(text)
+        return self.vectors.get(text, [1.0, 0.0, 0.0])
+
+
+def _cache_agent(
+    mock_router, mock_rate_limiter, cost_tracker, project, *, embedder=None
+):
+    from src.gateway.semantic_cache import SemanticCache
+
+    cm = CacheManager()
+    sc = SemanticCache(embedder) if embedder is not None else None
+    agent = GatewayAgent(
+        router=mock_router,
+        rate_limiter=mock_rate_limiter,
+        guardrail_engine=GuardrailEngine(),
+        cache_manager=cm,
+        cost_tracker=cost_tracker,
+        projects={project.project_id: project},
+        semantic_cache=sc,
+    )
+    return agent, cm, sc
+
+
+@pytest.mark.asyncio
+async def test_a_repeated_request_is_served_from_the_cache(
+    mock_router, mock_rate_limiter, cost_tracker
+):
+    """Regression: nothing ever called cache_manager.put.
+
+    The read at step 9 existed from the start, but no code path wrote to the
+    cache, so a project with cache_enabled=True paid for every repeat and
+    reported is_cached=False forever. Green tests either pre-populated the cache
+    by hand or asserted only on a miss, so nothing noticed.
+    """
+    project = _make_project(cache_enabled=True, cache_ttl_seconds=300)
+    agent, cm, _ = _cache_agent(mock_router, mock_rate_limiter, cost_tracker, project)
+
+    first = await agent.handle_chat_completion(_base_request_data(), _base_context())
+    second = await agent.handle_chat_completion(_base_request_data(), _base_context())
+
+    assert first.get("is_cached") is not True
+    assert second["is_cached"] is True
+    assert mock_router.execute_with_fallback.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_caching_stays_off_for_a_project_that_did_not_ask_for_it(
+    mock_router, mock_rate_limiter, cost_tracker
+):
+    project = _make_project(cache_enabled=False)
+    agent, cm, _ = _cache_agent(mock_router, mock_rate_limiter, cost_tracker, project)
+
+    await agent.handle_chat_completion(_base_request_data(), _base_context())
+    await agent.handle_chat_completion(_base_request_data(), _base_context())
+
+    assert mock_router.execute_with_fallback.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_a_blocked_response_is_not_cached(
+    mock_router, mock_rate_limiter, cost_tracker
+):
+    """Otherwise one guardrail block becomes a block on every matching request.
+
+    The stored content would be the refusal notice, served to later callers with
+    no violation of their own to explain it — and it would bypass the guardrail
+    engine entirely, since a cache hit returns at step 9.
+    """
+    mock_router.execute_with_fallback = AsyncMock(
+        return_value=_make_response(content="here is the badword")
+    )
+    rules = [
+        GuardrailRule(
+            name="block_badword",
+            rule_type="keyword_block",
+            pattern="badword",
+            action="block",
+            applies_to="response",
+        )
+    ]
+    project = _make_project(cache_enabled=True, guardrail_rules=rules)
+    agent, cm, _ = _cache_agent(mock_router, mock_rate_limiter, cost_tracker, project)
+
+    await agent.handle_chat_completion(_base_request_data(), _base_context())
+    assert len(cm._cache) == 0
+
+
+@pytest.mark.asyncio
+async def test_a_streaming_request_does_not_populate_the_cache(
+    mock_router, mock_rate_limiter, cost_tracker
+):
+    """The write sits after the streaming return, so a stream never reaches it."""
+    project = _make_project(cache_enabled=True)
+    agent, cm, _ = _cache_agent(mock_router, mock_rate_limiter, cost_tracker, project)
+
+    data = {**_base_request_data(), "stream": True}
+    result = await agent.handle_chat_completion(data, _base_context())
+    # Drain the generator so the streaming path runs to completion.
+    if hasattr(result, "__aiter__"):
+        async for _ in result:
+            pass
+    assert len(cm._cache) == 0
+
+
+@pytest.mark.asyncio
+async def test_a_reworded_question_hits_the_semantic_cache(
+    mock_router, mock_rate_limiter, cost_tracker
+):
+    project = _make_project(cache_enabled=True, semantic_cache_enabled=True)
+    agent, cm, sc = _cache_agent(
+        mock_router, mock_rate_limiter, cost_tracker, project,
+        embedder=_FakeEmbedder(),
+    )
+
+    first = {"messages": [{"role": "user", "content": "what is our refund policy"}],
+             "model": "gpt-4"}
+    reworded = {"messages": [{"role": "user", "content": "what's the refund policy"}],
+                "model": "gpt-4"}
+
+    await agent.handle_chat_completion(first, _base_context())
+    result = await agent.handle_chat_completion(reworded, _base_context())
+
+    assert result["is_cached"] is True
+    assert result["cache_type"] == "semantic"
+    assert mock_router.execute_with_fallback.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_a_semantic_hit_is_labelled_differently_from_an_exact_hit(
+    mock_router, mock_rate_limiter, cost_tracker
+):
+    """An exact hit is the answer to this question; a semantic hit is the answer
+    to one judged equivalent. A caller has to be able to tell them apart."""
+    project = _make_project(cache_enabled=True, semantic_cache_enabled=True)
+    agent, cm, sc = _cache_agent(
+        mock_router, mock_rate_limiter, cost_tracker, project,
+        embedder=_FakeEmbedder(),
+    )
+
+    data = {"messages": [{"role": "user", "content": "what is our refund policy"}],
+            "model": "gpt-4"}
+    await agent.handle_chat_completion(data, _base_context())
+    exact = await agent.handle_chat_completion(data, _base_context())
+
+    assert exact["is_cached"] is True
+    assert "cache_type" not in exact
+
+
+@pytest.mark.asyncio
+async def test_the_semantic_cache_is_not_consulted_when_the_project_opts_out(
+    mock_router, mock_rate_limiter, cost_tracker
+):
+    """cache_enabled must not imply semantic_cache_enabled — opting into exact
+    matching is not opting into answering a different question."""
+    embedder = _FakeEmbedder()
+    project = _make_project(cache_enabled=True, semantic_cache_enabled=False)
+    agent, cm, sc = _cache_agent(
+        mock_router, mock_rate_limiter, cost_tracker, project, embedder=embedder,
+    )
+
+    first = {"messages": [{"role": "user", "content": "what is our refund policy"}],
+             "model": "gpt-4"}
+    reworded = {"messages": [{"role": "user", "content": "what's the refund policy"}],
+                "model": "gpt-4"}
+
+    await agent.handle_chat_completion(first, _base_context())
+    result = await agent.handle_chat_completion(reworded, _base_context())
+
+    assert result.get("is_cached") is not True
+    assert embedder.calls == []
+    assert mock_router.execute_with_fallback.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_an_exact_repeat_never_pays_for_an_embedding(
+    mock_router, mock_rate_limiter, cost_tracker
+):
+    """The semantic lookup runs only after the exact key misses, so the cheap
+    path stays cheap."""
+    embedder = _FakeEmbedder()
+    project = _make_project(cache_enabled=True, semantic_cache_enabled=True)
+    agent, cm, sc = _cache_agent(
+        mock_router, mock_rate_limiter, cost_tracker, project, embedder=embedder,
+    )
+
+    data = {"messages": [{"role": "user", "content": "what is our refund policy"}],
+            "model": "gpt-4"}
+    await agent.handle_chat_completion(data, _base_context())
+    calls_after_write = len(embedder.calls)
+    await agent.handle_chat_completion(data, _base_context())
+
+    assert len(embedder.calls) == calls_after_write
+
+
+@pytest.mark.asyncio
+async def test_differing_numbers_are_not_served_a_semantic_hit(
+    mock_router, mock_rate_limiter, cost_tracker
+):
+    """End to end through the agent: the embedder gives both prompts the same
+    vector, so similarity is 1.0 and only the literal guard prevents the wrong
+    answer being returned."""
+    project = _make_project(cache_enabled=True, semantic_cache_enabled=True)
+    agent, cm, sc = _cache_agent(
+        mock_router, mock_rate_limiter, cost_tracker, project,
+        embedder=_FakeEmbedder(),
+    )
+
+    await agent.handle_chat_completion(
+        {"messages": [{"role": "user", "content": "what is 17 times 23"}], "model": "gpt-4"},
+        _base_context(),
+    )
+    result = await agent.handle_chat_completion(
+        {"messages": [{"role": "user", "content": "what is 17 times 24"}], "model": "gpt-4"},
+        _base_context(),
+    )
+
+    assert result.get("is_cached") is not True
+    assert mock_router.execute_with_fallback.await_count == 2
+    assert sc.stats.rejected_by_literals == 1
+
+
+@pytest.mark.asyncio
+async def test_a_project_threshold_is_honoured_over_the_gateway_default(
+    mock_router, mock_rate_limiter, cost_tracker
+):
+    embedder = _FakeEmbedder(vectors={
+        "what is our refund policy": [1.0, 0.0],
+        "what is our shipping policy": [1.0, 0.4],  # cos ~= 0.928
+    })
+    project = _make_project(
+        cache_enabled=True, semantic_cache_enabled=True, semantic_cache_threshold=0.90,
+    )
+    agent, cm, sc = _cache_agent(
+        mock_router, mock_rate_limiter, cost_tracker, project, embedder=embedder,
+    )
+
+    await agent.handle_chat_completion(
+        {"messages": [{"role": "user", "content": "what is our refund policy"}], "model": "gpt-4"},
+        _base_context(),
+    )
+    result = await agent.handle_chat_completion(
+        {"messages": [{"role": "user", "content": "what is our shipping policy"}], "model": "gpt-4"},
+        _base_context(),
+    )
+
+    # 0.928 clears the project's 0.90 but not the 0.95 default, so a hit here
+    # proves the project value reached the lookup.
+    assert result["is_cached"] is True
+    assert result["cache_type"] == "semantic"
+
+
+@pytest.mark.asyncio
+async def test_an_embedding_outage_does_not_fail_the_request(
+    mock_router, mock_rate_limiter, cost_tracker
+):
+    class _Broken:
+        async def embed(self, text):
+            raise RuntimeError("bedrock is down")
+
+    project = _make_project(cache_enabled=True, semantic_cache_enabled=True)
+    agent, cm, sc = _cache_agent(
+        mock_router, mock_rate_limiter, cost_tracker, project, embedder=_Broken(),
+    )
+
+    result = await agent.handle_chat_completion(_base_request_data(), _base_context())
+    assert result["choices"][0]["message"]["content"] == "Hello!"
+    assert "error" not in result
+
+
+@pytest.mark.asyncio
+async def test_a_gateway_with_no_semantic_cache_still_caches_exactly(
+    mock_router, mock_rate_limiter, cost_tracker
+):
+    """semantic_cache=None is the default for every existing caller."""
+    project = _make_project(cache_enabled=True, semantic_cache_enabled=True)
+    agent, cm, sc = _cache_agent(mock_router, mock_rate_limiter, cost_tracker, project)
+    assert sc is None
+
+    await agent.handle_chat_completion(_base_request_data(), _base_context())
+    second = await agent.handle_chat_completion(_base_request_data(), _base_context())
+    assert second["is_cached"] is True

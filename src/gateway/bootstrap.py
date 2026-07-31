@@ -57,6 +57,11 @@ from src.gateway.security.event_dispatcher import (
 from src.gateway.security.injection_detector import PromptInjectionDetector
 from src.gateway.security.pii_redactor import PIIRedactor
 from src.gateway.cache_manager import CacheManager
+from src.gateway.embeddings import build_embedder
+from src.gateway.semantic_cache import (
+    DEFAULT_SIMILARITY_THRESHOLD,
+    SemanticCache,
+)
 from src.gateway.chat.client_agent import ClientAgent
 from src.gateway.chat.routes import ChatAPI, create_chat_routes
 from src.gateway.chat.openai_routes import OpenAICompatAPI, create_openai_routes
@@ -128,6 +133,10 @@ class GatewayComponents:
     health_monitor: SpokeHealthMonitor | None = None
     efficiency_analyzer: EfficiencyAnalyzer | None = None
     semantic_engine: SemanticEfficiencyEngine | None = None
+    # Always present, but ``enabled`` is False unless AXON_SEMANTIC_CACHE=true
+    # produced an embedder. Non-optional so the admin surface can report stats
+    # and "unavailable" from the same object instead of branching on None.
+    semantic_cache: SemanticCache = field(default_factory=SemanticCache)
     # Providers whose credentials loaded. load_provider_configs drops the rest,
     # so this is also the set the readiness checklist can distinguish
     # "configured" from "in models.yaml but unusable".
@@ -304,6 +313,30 @@ def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComp
     guardrail_engine = GuardrailEngine()
     cache_manager = CacheManager()
 
+    # Semantic cache. build_embedder() is only called when the gateway is
+    # configured for it: constructing one resolves AWS credentials, and a
+    # deploy that never asked for the cache should not pay that at startup or
+    # fail because of it.
+    semantic_embedder = None
+    if app_config.semantic_cache_enabled:
+        semantic_embedder = build_embedder(
+            region=app_config.semantic_cache_region,
+            model_id=app_config.semantic_cache_model or None,
+        )
+        if semantic_embedder is None:
+            logger.warning(
+                "AXON_SEMANTIC_CACHE=true but no embedder could be built — "
+                "semantic caching is off; exact-match caching is unaffected"
+            )
+    semantic_cache = SemanticCache(
+        embedder=semantic_embedder,
+        similarity_threshold=(
+            app_config.semantic_cache_threshold
+            if app_config.semantic_cache_threshold is not None
+            else DEFAULT_SIMILARITY_THRESHOLD
+        ),
+    )
+
     # --- Multi-provider factory ---
     provider_configs = load_provider_configs(app_config.providers_config_path)
     multi_factory = MultiProviderFactory(
@@ -335,6 +368,7 @@ def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComp
         region_router=region_router,
         trace_forwarder=trace_forwarder,
         otlp_exporter=otlp_exporter,
+        semantic_cache=semantic_cache,
     )
 
     # --- Efficiency analysis ---
@@ -381,6 +415,7 @@ def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComp
         health_monitor=health_monitor,
         efficiency_analyzer=efficiency_analyzer,
         semantic_engine=semantic_engine,
+        semantic_cache=semantic_cache,
         provider_configs=provider_configs,
     )
 
@@ -418,6 +453,10 @@ def build_starlette_app(app_config: AppConfig | None = None) -> Starlette:
         app_config=app_config,
         provider_configs=comp.provider_configs,
         api_key_service=comp.api_key_service,
+        # The same instance the gateway agent holds, so /admin/semantic-cache
+        # reports the live counters and DELETE clears the cache requests are
+        # actually served from.
+        semantic_cache=comp.semantic_cache,
     )
 
     # Key, policy, audit, webhook, region, and quota admin APIs
@@ -565,6 +604,12 @@ def _apply_seed_data(
             budget_limit=p.get("budget_limit"),
             alert_threshold=p.get("alert_threshold"),
             cache_enabled=p.get("cache_enabled", False),
+            # Was omitted here, so a seed setting cache_ttl_seconds got the
+            # 300s default silently. Harmless while nothing wrote to the cache;
+            # not harmless now that something does.
+            cache_ttl_seconds=p.get("cache_ttl_seconds", 300),
+            semantic_cache_enabled=p.get("semantic_cache_enabled", False),
+            semantic_cache_threshold=p.get("semantic_cache_threshold"),
             prompt_caching_enabled=p.get("prompt_caching_enabled", False),
             members=p.get("members", []),
             allowed_models=p.get("allowed_models"),

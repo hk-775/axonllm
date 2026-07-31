@@ -236,6 +236,34 @@ API key, not the request body. Supported: `model`, `messages`, `temperature`,
 `max_tokens`, `stream`, `tools`, `tool_choice`. Ensemble/smart-routing model names
 (e.g. `ensemble:quality`) work here too.
 
+### Telling a cache hit from a provider call
+
+A cached response is labelled on the way out, because nothing else in the reply
+distinguishes one: the content is identical by construction, and `/v1` mints a
+fresh `chatcmpl-<uuid>` per response whether it called a provider or not.
+
+| Route | Fields on a hit |
+|-------|-----------------|
+| `/v1/chat/completions` | `x_cached: true` and `x_cache_type`: `"exact"` or `"semantic"` |
+| `/api/chat` | `is_cached: true` and `cache_type` (`cache_type` only on a semantic hit) |
+
+**The names differ on purpose.** On `/v1` the `x_` prefix marks a field as an
+AxonLLM extension rather than part of OpenAI's spec — the same convention
+`x_smart_routing` already follows there. It keeps the field from colliding with
+anything OpenAI adds later, which would break SDK clients. `/api/chat` is
+AxonLLM's own API with no upstream spec to stay clear of, so it uses the plain
+names the pipeline produces. Renaming either one would make it inconsistent with
+the rest of its own route.
+
+On both routes **the fields are absent on a provider call** — absence is the
+signal, so treat a missing field as "not cached" rather than testing for `false`.
+
+`exact` means this request's key matched a stored one. `semantic` means the
+question was judged equivalent to an earlier one and served its answer, which is
+a weaker claim — worth distinguishing if you are comparing responses or debugging
+an unexpected reply. See `AXON_SEMANTIC_CACHE*` under
+[Environment Variables](#environment-variables).
+
 ### Tool calling — one definition, every provider
 
 Define tools once in OpenAI's shape. Each adapter translates them into its
@@ -327,7 +355,7 @@ Request → Auth (OIDC/API Key) → Quota Enforcement (policy hierarchy)
 6. **Access checks** — project and user model restrictions
 7. **Budget check** — project and user spend limits
 8. **Guardrails** — content policy evaluation
-9. **Cache** — exact-match response cache (SHA-256 of model + messages + params)
+9. **Cache** — exact-match response cache (SHA-256 of model + messages + params), then an optional semantic match on the reworded question. Written back after guardrails and PII re-injection, so a hit cannot bypass either. A hit is labelled on the way out: `x_cached: true` plus `x_cache_type` of `exact` or `semantic` (absent on a provider call)
 10. **Region routing** — select spoke based on health, data residency, model availability
 11. **Provider routing** — strategy-based model selection + fallback
 12. **Response guardrails** — output filtering
@@ -356,6 +384,8 @@ Request → Auth (OIDC/API Key) → Quota Enforcement (policy hierarchy)
 | `/admin/webhooks` | GET/POST | List or add event destinations |
 | `/admin/webhooks/{name}` | DELETE | Remove a destination |
 | `/admin/webhooks/{name}/test` | POST | Send test event |
+| `/admin/semantic-cache` | GET | Semantic cache stats: entries, hits, misses, and how many candidates the literal guard rejected |
+| `/admin/semantic-cache` | DELETE | Invalidate entries — one project with `?project_id=`, all of them without |
 | `/admin/regions` | GET | Current topology |
 | `/admin/regions/health` | GET | Spoke health status |
 | `/admin/regions/health/check` | POST | Trigger health check |
@@ -385,6 +415,10 @@ Request → Auth (OIDC/API Key) → Quota Enforcement (policy hierarchy)
 | `AXON_SAML_ACS_URL` | — | Assertion Consumer Service URL (this gateway's `/saml/acs`) |
 | `AXON_SAML_IDP_SSO_URL` | — | IdP SSO redirect endpoint |
 | `AXON_SAML_IDP_CERT` / `AXON_SAML_IDP_CERT_FILE` | — | IdP signing certificate (PEM inline or file path); SAML disabled until set |
+| `AXON_SEMANTIC_CACHE` | `false` | Build the embedder for semantic caching. A project also needs `semantic_cache_enabled` — both must say yes |
+| `AXON_SEMANTIC_CACHE_REGION` | `AXON_BEDROCK_REGION` | Region for the embedding calls |
+| `AXON_SEMANTIC_CACHE_MODEL` | `amazon.titan-embed-text-v2:0` | Bedrock embedding model id |
+| `AXON_SEMANTIC_CACHE_THRESHOLD` | `0.95` | Cosine similarity a stored prompt must clear to be served. Must be in `(0, 1]`; an unparseable or out-of-range value falls back to the default rather than to `0`, which would match everything |
 | `OSTIARI_TRACES_URL` | — | When set, forward request traces to this Ostiari ingest URL (e.g. `http://control-plane:8000/api/traces/ingest`) |
 | `OSTIARI_GATEWAY_ID` | `axonllm` | Gateway identifier reported in Ostiari's Live Traces |
 | `OSTIARI_INGEST_KEY` | — | Shared secret sent as `X-Ingest-Key` when Ostiari's ingest endpoint requires auth |

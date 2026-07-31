@@ -86,6 +86,14 @@ class ClientAgent:
         # Include smart_routing metadata if present
         if "smart_routing" in response:
             result["smart_routing"] = response["smart_routing"]
+        # Whether the answer came from the cache, and which cache. This dict is
+        # a whitelist rebuild, so a key not named here is dropped — and both
+        # routes above build their responses from this result, not from the
+        # pipeline's. Unreachable until the cache started being written to.
+        if response.get("is_cached"):
+            result["is_cached"] = True
+            if "cache_type" in response:
+                result["cache_type"] = response["cache_type"]
         # Include ensemble metadata if present
         if "ensemble" in response:
             result["ensemble"] = response["ensemble"]

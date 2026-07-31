@@ -861,7 +861,7 @@
             <li data-step="4–5"><strong>Check model access</strong> — project allow-list intersected with the user's</li>
             <li data-step="6–7"><strong>Check budgets</strong> — project and user, tightest limit wins</li>
             <li data-step="8"><strong>Apply request guardrails</strong></li>
-            <li data-step="9"><strong>Look up the cache</strong> — a hit returns here and never reaches a provider</li>
+            <li data-step="9"><strong>Look up the cache</strong> — exact key first, then a semantic match on the reworded question; a hit returns here and never reaches a provider</li>
             <li data-step="9.5"><strong>Route by region</strong> — hub to spoke, honouring data-residency zones; skipped in single-region deploys</li>
             <li data-step="10"><strong>Route and execute</strong> — direct with a fallback chain, smart (classify &rarr; leaderboard &rarr; cost/quality), or ensemble (panel &rarr; quorum &rarr; synthesis)</li>
             <li data-step="11"><strong>Apply response guardrails</strong></li>
@@ -869,7 +869,9 @@
             <li data-step="11.6"><strong>Append to the audit trail</strong> — SHA-256 hash chain, head reloaded on restart</li>
             <li data-step="12"><strong>Track cost and spend</strong> — priced from the pricing table and charged against the project and user quota</li>
             <li data-step="13–14"><strong>Budget status and session storage</strong> — recorded after the response is complete</li>
-            <li data-step="15–16"><strong>Stream or return</strong> — SSE opened straight from the provider, or JSON</li>
+            <li data-step="15"><strong>Stream, if asked</strong> — SSE opened straight from the provider</li>
+            <li data-step="15.5"><strong>Write the cache</strong> — after guardrails and PII re-injection, so a later hit cannot bypass either, and after the streaming return so only complete responses are stored</li>
+            <li data-step="16"><strong>Return</strong> — JSON, with routing and cache metadata attached</li>
         </ol>
     </div>
 </section>

@@ -221,6 +221,62 @@ class TestLoadAppConfig:
         assert config.load_demo_data is True
 
 
+class TestSemanticCacheConfig:
+    """The threshold parser, whose failure mode is a working-looking cache.
+
+    A threshold of 0 makes every cached entry a match, so the project starts
+    answering unrelated questions with whatever it stored first. That presents
+    as a suspiciously good hit rate rather than as an error, which is why a bad
+    value falls back to the module default instead of to a number.
+    """
+
+    def _clean(self, monkeypatch):
+        for key in list(os.environ):
+            if key.startswith("AXON_"):
+                monkeypatch.delenv(key, raising=False)
+
+    def test_the_cache_is_off_unless_asked_for(self, monkeypatch):
+        self._clean(monkeypatch)
+        config = load_app_config()
+        assert config.semantic_cache_enabled is False
+        assert config.semantic_cache_threshold is None
+
+    def test_enabling_and_setting_a_threshold(self, monkeypatch):
+        self._clean(monkeypatch)
+        monkeypatch.setenv("AXON_SEMANTIC_CACHE", "true")
+        monkeypatch.setenv("AXON_SEMANTIC_CACHE_THRESHOLD", "0.9")
+        config = load_app_config()
+        assert config.semantic_cache_enabled is True
+        assert config.semantic_cache_threshold == 0.9
+
+    @pytest.mark.parametrize("raw", ["abc", "", "0", "0.0", "-0.5", "1.5", "95"])
+    def test_an_unusable_threshold_falls_back_to_none_not_to_zero(self, monkeypatch, raw):
+        """"95" is in the list deliberately: a percentage typed where a fraction
+        belongs is the likeliest real typo, and it must not be accepted."""
+        self._clean(monkeypatch)
+        monkeypatch.setenv("AXON_SEMANTIC_CACHE_THRESHOLD", raw)
+        assert load_app_config().semantic_cache_threshold is None
+
+    def test_a_threshold_of_exactly_one_is_allowed(self, monkeypatch):
+        """1.0 means "identical embeddings only" — restrictive, not invalid."""
+        self._clean(monkeypatch)
+        monkeypatch.setenv("AXON_SEMANTIC_CACHE_THRESHOLD", "1.0")
+        assert load_app_config().semantic_cache_threshold == 1.0
+
+    def test_the_embedding_region_defaults_to_the_bedrock_region(self, monkeypatch):
+        """The embedder talks to Bedrock, so a deploy that moved Bedrock to
+        another region should not silently keep embedding in us-east-1."""
+        self._clean(monkeypatch)
+        monkeypatch.setenv("AXON_BEDROCK_REGION", "eu-west-1")
+        assert load_app_config().semantic_cache_region == "eu-west-1"
+
+    def test_the_embedding_region_can_be_set_independently(self, monkeypatch):
+        self._clean(monkeypatch)
+        monkeypatch.setenv("AXON_BEDROCK_REGION", "eu-west-1")
+        monkeypatch.setenv("AXON_SEMANTIC_CACHE_REGION", "us-west-2")
+        assert load_app_config().semantic_cache_region == "us-west-2"
+
+
 # ---------------------------------------------------------------------------
 # Serialization round-trips
 # ---------------------------------------------------------------------------
