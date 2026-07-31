@@ -1,0 +1,80 @@
+{
+  "_comment": "Customer-facing narration, v2. Numbers here must match what the seeded gateway actually renders — 66 requests, $1.26, 1.4s average latency, 9 models with traffic, 8 of 49 unpriced mappings. Checked against the live API before recording, not written from memory.",
+  "voice": "Matthew",
+  "engine": "neural",
+  "_engine_note": "<emphasis> is unsupported on the neural engine (InvalidSsmlException); phrasing comes from <break> and sentence shape instead.",
+  "scenes": [
+    {
+      "id": "01-hero",
+      "surface": "landing",
+      "ssml": "<speak>Most teams reach a point where language models are running in five places, on three vendors, with no shared record of what any of it costs. <break time=\"500ms\"/>AxonLLM is a control plane for that problem.</speak>",
+      "text": "Most teams reach a point where language models are running in five places, on three vendors, with no shared record of what any of it costs. AxonLLM is a control plane for that problem.",
+      "duration": 10.54
+    },
+    {
+      "id": "02-stats",
+      "surface": "landing",
+      "ssml": "<speak>It fronts thirteen providers and forty-six models behind a single OpenAI-compatible endpoint. <break time=\"400ms\"/>One wire format, whatever is answering underneath.</speak>",
+      "text": "It fronts thirteen providers and forty-six models behind a single OpenAI-compatible endpoint. One wire format, whatever is answering underneath.",
+      "duration": 8.47
+    },
+    {
+      "id": "03-pipeline",
+      "surface": "landing",
+      "ssml": "<speak>Every request crosses the same fifteen stages. <break time=\"400ms\"/>Authentication, injection scanning, P-I-I redaction, then the quota hierarchy — organisation, business unit, project, environment. <break time=\"400ms\"/>The budget check happens before a provider is billed, not after.</speak>",
+      "text": "Every request crosses the same fifteen stages: authentication, injection scanning, PII redaction, then the quota hierarchy of organisation, business unit, project and environment. The budget check happens before a provider is billed, not after.",
+      "duration": 17.66
+    },
+    {
+      "id": "04-integration",
+      "surface": "landing",
+      "ssml": "<speak>Adopting it is a one-line change. <break time=\"400ms\"/>You keep the OpenAI SDK your code already uses and point its base U-R-L at the gateway. <break time=\"350ms\"/>No new client library, no rewrite.</speak>",
+      "text": "Adopting it is a one-line change. You keep the OpenAI SDK your code already uses and point its base URL at the gateway. No new client library, no rewrite.",
+      "duration": 12.07
+    },
+    {
+      "id": "05-providers",
+      "surface": "landing",
+      "ssml": "<speak>Behind that one endpoint sit thirteen adapters — Bedrock, Anthropic, OpenAI, Google, and the rest — each translated to a common format, including tool calls and streaming.</speak>",
+      "text": "Behind that one endpoint sit thirteen adapters — Bedrock, Anthropic, OpenAI, Google and the rest — each translated to a common format, including tool calls and streaming.",
+      "duration": 10.3
+    },
+    {
+      "id": "06-overview",
+      "surface": "dashboard",
+      "ssml": "<speak>This is the operator's view of a running gateway. <break time=\"450ms\"/>Sixty-six requests, a dollar twenty-six of spend, and an eighty-seven point five percent cache hit rate across two projects. <break time=\"400ms\"/>Ten providers, health-checked continuously — so cost and availability are things you watch, not things you reconstruct from an invoice.</speak>",
+      "text": "This is the operator's view of a running gateway: 66 requests, $1.26 of spend, and an 87.5% cache hit rate across two projects. Ten providers, health-checked continuously, so cost and availability are things you watch, not things you reconstruct from an invoice.",
+      "_verified": "All four read off the live API at capture time. cache_hit_rate comes from /admin/overview (routes.py:179) and is cached / (cached + cache_creation) — of the tokens that touched the cache, the share that were reads. It is NOT cached/total_tokens, which is 3.9% and is a different question.",
+      "duration": 17.9
+    },
+    {
+      "id": "07-traces",
+      "surface": "dashboard",
+      "ssml": "<speak>Every call is recorded individually. <break time=\"400ms\"/>Which model answered, which provider served it, the user it belonged to, tokens, cost and latency — averaging about one-point-four seconds here. <break time=\"400ms\"/>This is the audit trail, and it is one trail for all thirteen providers.</speak>",
+      "text": "Every call is recorded individually: which model answered, which provider served it, the user it belonged to, tokens, cost and latency — averaging about 1.4 seconds here. This is the audit trail, and it is one trail for all thirteen providers.",
+      "duration": 15.31
+    },
+    {
+      "id": "08-models",
+      "surface": "dashboard",
+      "ssml": "<speak>The catalogue is where routing is configured. <break time=\"400ms\"/>Each model carries its own strategy — least-latency, cost-optimised, or round-robin — and its own ordered list of providers to fall back through. <break time=\"400ms\"/>Changing how traffic is routed does not touch application code.</speak>",
+      "text": "The catalogue is where routing is configured. Each model carries its own strategy — least-latency, cost-optimised or round-robin — and its own ordered list of providers to fall back through. Changing how traffic is routed does not touch application code.",
+      "duration": 14.66
+    },
+    {
+      "id": "09-pricing",
+      "surface": "dashboard",
+      "ssml": "<speak>And this page is the one worth showing a sceptic. <break time=\"450ms\"/>Eight of forty-nine provider mappings have no price attached. Requests routed to them bill at zero, so budgets and quota alerts quietly under-count. <break time=\"400ms\"/>Nothing errors — the gateway simply tells you, instead of letting it stay hidden.</speak>",
+      "text": "And this page is the one worth showing a sceptic. Eight of 49 provider mappings have no price attached; requests routed to them bill at zero, so budgets and quota alerts quietly under-count. Nothing errors — the gateway simply tells you, instead of letting it stay hidden.",
+      "duration": 15.94
+    },
+    {
+      "id": "10-close",
+      "surface": "landing",
+      "ssml": "<speak>One API, every model, full control. <break time=\"450ms\"/>AxonLLM is open source under M-I-T zero, and runs with a single docker compose command.</speak>",
+      "text": "One API, every model, full control. AxonLLM is open source under MIT-0, and runs with a single docker compose command.",
+      "duration": 10.44
+    }
+  ],
+  "total_duration": 133.29
+}
