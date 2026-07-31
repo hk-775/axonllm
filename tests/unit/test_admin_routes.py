@@ -597,7 +597,7 @@ class TestSemanticCacheEndpoint:
         assert data["available"] is True
         assert data["reason"] is None
         assert data["projects_enabled"] == ["p1"]
-        assert data["default_threshold"] == 0.95
+        assert data["default_threshold"] == 0.90
 
     def test_stats_expose_the_literal_rejection_counter(self, cache_client):
         """Surfaced deliberately: a high value means the threshold is admitting

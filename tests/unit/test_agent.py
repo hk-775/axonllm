@@ -806,10 +806,14 @@ async def test_a_project_threshold_is_honoured_over_the_gateway_default(
 ):
     embedder = _FakeEmbedder(vectors={
         "what is our refund policy": [1.0, 0.0],
-        "what is our shipping policy": [1.0, 0.4],  # cos ~= 0.928
+        "what is our shipping policy": [1.0, 0.55],  # cos ~= 0.876
     })
+    # 0.85 rather than 0.90: the score has to sit *between* the project value and
+    # the gateway default, or the assertion below passes whether or not the
+    # project value was read. When the default moved 0.95 -> 0.90 this test kept
+    # passing while testing nothing.
     project = _make_project(
-        cache_enabled=True, semantic_cache_enabled=True, semantic_cache_threshold=0.90,
+        cache_enabled=True, semantic_cache_enabled=True, semantic_cache_threshold=0.85,
     )
     agent, cm, sc = _cache_agent(
         mock_router, mock_rate_limiter, cost_tracker, project, embedder=embedder,
@@ -824,7 +828,7 @@ async def test_a_project_threshold_is_honoured_over_the_gateway_default(
         _base_context(),
     )
 
-    # 0.928 clears the project's 0.90 but not the 0.95 default, so a hit here
+    # 0.876 clears the project's 0.85 but not the 0.90 default, so a hit here
     # proves the project value reached the lookup.
     assert result["is_cached"] is True
     assert result["cache_type"] == "semantic"
