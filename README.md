@@ -236,6 +236,34 @@ API key, not the request body. Supported: `model`, `messages`, `temperature`,
 `max_tokens`, `stream`, `tools`, `tool_choice`. Ensemble/smart-routing model names
 (e.g. `ensemble:quality`) work here too.
 
+### Telling a cache hit from a provider call
+
+A cached response is labelled on the way out, because nothing else in the reply
+distinguishes one: the content is identical by construction, and `/v1` mints a
+fresh `chatcmpl-<uuid>` per response whether it called a provider or not.
+
+| Route | Fields on a hit |
+|-------|-----------------|
+| `/v1/chat/completions` | `x_cached: true` and `x_cache_type`: `"exact"` or `"semantic"` |
+| `/api/chat` | `is_cached: true` and `cache_type` (`cache_type` only on a semantic hit) |
+
+**The names differ on purpose.** On `/v1` the `x_` prefix marks a field as an
+AxonLLM extension rather than part of OpenAI's spec — the same convention
+`x_smart_routing` already follows there. It keeps the field from colliding with
+anything OpenAI adds later, which would break SDK clients. `/api/chat` is
+AxonLLM's own API with no upstream spec to stay clear of, so it uses the plain
+names the pipeline produces. Renaming either one would make it inconsistent with
+the rest of its own route.
+
+On both routes **the fields are absent on a provider call** — absence is the
+signal, so treat a missing field as "not cached" rather than testing for `false`.
+
+`exact` means this request's key matched a stored one. `semantic` means the
+question was judged equivalent to an earlier one and served its answer, which is
+a weaker claim — worth distinguishing if you are comparing responses or debugging
+an unexpected reply. See `AXON_SEMANTIC_CACHE*` under
+[Environment Variables](#environment-variables).
+
 ### Tool calling — one definition, every provider
 
 Define tools once in OpenAI's shape. Each adapter translates them into its

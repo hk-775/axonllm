@@ -423,3 +423,90 @@ class TestCedarPolicyE2E:
         log_forbid = {**_FORBID_UNLESS_ADMIN, "mode": "LOG_ONLY"}
         client, key = _cedar_app([_WRITE_PERMIT, log_forbid])
         assert self._post(client, key).status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# Cache labelling on the native route
+# ---------------------------------------------------------------------------
+
+
+def _caching_app():
+    """The same stack, but with caching on for the project.
+
+    Deliberately not the shared fixture: that project has caching off, and
+    turning it on there would change what every other test in this file
+    exercises.
+    """
+    persistence = FakePersistence()
+    resolver = PolicyHierarchyResolver(persistence=persistence)
+    api_key_service = APIKeyService(persistence=persistence)
+    key_record, raw_key = _run(api_key_service.issue_key(
+        project_id="proj:ml", name="cache-key",
+        scopes=["chat:completions"], created_by="admin",
+    ))
+    router = FakeRouter()
+    gateway_agent = GatewayAgent(
+        router=router,
+        rate_limiter=SlidingWindowRateLimiter(config=RateLimitConfig()),
+        guardrail_engine=GuardrailEngine(),
+        cache_manager=CacheManager(),
+        cost_tracker=CostTracker(pricing_config={}),
+        projects={"proj:ml": Project(
+            project_id="proj:ml", name="ML Team", cache_enabled=True,
+        )},
+        quota_enforcer=QuotaEnforcer(),
+        policy_resolver=resolver,
+        audit_trail=AuditTrail(persistence=None),
+        event_dispatcher=EventDispatcher(),
+    )
+    client_agent = ClientAgent(
+        gateway_agent, default_project_id="proj:ml", default_user_id="chat-user",
+    )
+    app = Starlette(routes=create_chat_routes(ChatAPI(client_agent)))
+    app.add_middleware(SecurityMiddleware)
+    app.add_middleware(
+        AuthMiddleware, api_key_service=api_key_service, mode="ENFORCE",
+    )
+    return TestClient(app), raw_key, router
+
+
+class TestNativeRouteCacheLabelling:
+    """``/api/chat`` labels a hit with bare ``is_cached``, not ``x_cached``.
+
+    The two names are documented as intentional in the README: ``/v1`` prefixes
+    its extensions to stay clear of OpenAI's spec, and this route has no
+    upstream spec to avoid colliding with. Asserted here so a later "tidy-up"
+    that unifies them has to change a test that says why.
+    """
+
+    def _post(self, client, key, content="What is the answer?"):
+        return client.post("/api/chat", json={
+            "model": "test-model",
+            "messages": [{"role": "user", "content": content}],
+        }, headers={"X-Api-Key": key})
+
+    def test_a_provider_call_carries_no_cache_fields(self):
+        """Absence is the documented signal, so callers can test for a missing
+        key rather than a false one."""
+        client, key, _ = _caching_app()
+        body = self._post(client, key).json()
+        assert "is_cached" not in body
+        assert "cache_type" not in body
+
+    def test_a_repeat_is_labelled_and_never_reaches_the_router(self):
+        client, key, router = _caching_app()
+        assert self._post(client, key).status_code == 200
+        router.last_request = None          # anything after this is a real call
+        body = self._post(client, key).json()
+        assert body["is_cached"] is True
+        assert router.last_request is None, "the repeat went to the provider"
+        assert body["content"] == "The answer is 42."
+
+    def test_the_prefixed_names_stay_off_this_route(self):
+        """x_ marks an extension to someone else's spec. This route is not that,
+        and a client reading the native shape would not look for them."""
+        client, key, _ = _caching_app()
+        self._post(client, key)
+        body = self._post(client, key).json()
+        assert "x_cached" not in body
+        assert "x_cache_type" not in body
