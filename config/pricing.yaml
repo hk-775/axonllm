@@ -293,11 +293,10 @@ providers:
   # serverless text model carries its own input/cached/output rate, which is
   # where these come from.
   #
-  # Still unverified against the live API: there is no FIREWORKS_API_KEY in the
-  # environment and /inference/v1/models requires one (401), so the two model
-  # ids in models.yaml remain unconfirmed. That is a separate gap from pricing
-  # and does not make a published rate less real — a wrong id bills nothing at
-  # all, which the drift report shows either way.
+  # Both keys are ids GET /inference/v1/models returns (checked 2026-07-30), so
+  # the lookup they have to match is confirmed, not assumed. That matters more
+  # here than for other providers: the key is the full account-qualified path,
+  # and a near-miss bills $0.00 silently rather than erroring.
   fireworks:
     accounts/fireworks/models/deepseek-v4-pro:
       prompt_token_cost: 0.00174

@@ -376,16 +376,15 @@ models:
     weight: 1.0
     fallback_order: 0
 # --- Fireworks AI ---
-# Unverified, unlike every other entry here: there is no FIREWORKS_API_KEY in
-# the environment, and /inference/v1/models requires one (401), so neither id
-# could be confirmed against the live API. Left in place rather than removed on
-# that basis — "we could not check" is not evidence the ids are wrong, and
-# deleting a working model is worse than leaving one on the drift report.
+# Both ids confirmed against GET /inference/v1/models (2026-07-30), which lists
+# 19 serverless models — these two among them. They were carried here unverified
+# for a while, because the endpoint needs a key and there was none; the note
+# then said so rather than implying the ids had been checked.
 #
-# Both are priced now. This note previously said Fireworks published no
-# per-model serverless rates; that was wrong, and it is what kept them billing
-# at $0.00. Each model's page on fireworks.ai/models carries its own rate — see
-# the fireworks section in pricing.yaml.
+# Both are priced too. An earlier note claimed Fireworks published no per-model
+# serverless rates, which was wrong and is what kept them billing at $0.00 —
+# each model's page on fireworks.ai/models carries its own rate. See the
+# fireworks section in pricing.yaml.
 - name: fireworks-deepseek-v4
   description: DeepSeek V4 Pro (Fireworks)
   routing_strategy: round-robin
