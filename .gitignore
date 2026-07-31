@@ -106,5 +106,8 @@ infra/outputs.json
 *.db
 *.sqlite3
 
-# Demo recording artifacts — the MP4 is multi-megabyte binary; keep it out of history.
-demo/*.mp4
+# Demo recording intermediates now go under the system temp dir, not the tree --
+# see scripts/demo/paths.py. The one MP4 that ships (site/axonllm-demo.mp4) is
+# committed deliberately, because site/ is uploaded to S3 with no build step.
+# Nothing here needs ignoring; a stray demo MP4 should show up as untracked
+# rather than vanish silently.
