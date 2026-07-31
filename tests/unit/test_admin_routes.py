@@ -2219,3 +2219,103 @@ class TestLandingPageStatBand:
         assert claimed <= defined * 1.5, (
             f"the page claims {claimed} against only {defined} test functions"
         )
+
+
+class TestAdminApiReferenceIsReal:
+    """Every path in the README's Admin API Reference must actually route.
+
+    The table drifted badly before this test existed, and in the direction that
+    costs the most: the documented path 404s, so someone integrating against the
+    docs concludes the feature is missing rather than that the docs are wrong.
+    Four of twenty-six rows were fiction — ``/admin/policies/resolve/{id}``,
+    ``/admin/policies/{node_id}``, ``/admin/keys``, and
+    ``/admin/keys/{key_id}/revoke`` — and one more documented ``POST`` on a
+    ``GET``-only route. Renaming a route is a one-line change that leaves no
+    trace in the README, which is exactly why it needs checking mechanically.
+
+    Deliberately one-directional. An undocumented route is a judgement call
+    (internal, deprecated, not worth a row), but a *documented* route that does
+    not exist is always a bug.
+    """
+
+    # Class-scoped and classmethods: building the real app reads five config
+    # files, which is not worth repeating per test.
+    @pytest.fixture(scope="class")
+    @classmethod
+    def routed(cls):
+        """Path templates the real app serves, mapped to their methods.
+
+        The whole app rather than ``create_admin_routes`` alone: admin endpoints
+        come from eight different factories composed in bootstrap, and the README
+        documents them as one surface. Building anything less would let a row
+        pass by matching a route that is never mounted.
+        """
+        import re
+
+        from src.gateway.bootstrap import build_starlette_app
+        from src.gateway.config import AppConfig
+
+        app = build_starlette_app(AppConfig(
+            models_config_path="config/models.yaml",
+            providers_config_path="config/providers.yaml",
+            pricing_config_path="config/pricing.yaml",
+            demo_seed_config_path="config/demo_seed.yaml",
+            catalog_config_path="config/catalog.yaml",
+            load_demo_data=True,
+        ))
+
+        routed: dict[str, set[str]] = {}
+        for route in app.routes:
+            if not hasattr(route, "path"):
+                continue
+            # Parameter *names* are free to differ between the docs and the
+            # code — {id} vs {project_id} is a naming choice, not a broken
+            # link. Converters too: {node_id:path} is still one segment to a
+            # reader. What must match is the shape.
+            shape = re.sub(r"\{[^}]+\}", "{}", route.path)
+            routed.setdefault(shape, set()).update(route.methods or set())
+        return routed
+
+    @pytest.fixture(scope="class")
+    @classmethod
+    def documented(cls):
+        """The ``| `/admin/...` | METHOD |`` rows of the reference table."""
+        import pathlib
+        import re
+
+        readme = pathlib.Path(__file__).resolve().parents[2] / "README.md"
+        rows = re.findall(
+            r"^\|\s*`(/admin/[^`]+)`\s*\|\s*([A-Z/]+)\s*\|",
+            readme.read_text(encoding="utf-8"),
+            re.M,
+        )
+        assert rows, "the Admin API Reference table is gone or reshaped"
+        return rows
+
+    def test_every_documented_path_exists(self, documented, routed):
+        import re
+
+        missing = [p for p, _ in documented if re.sub(r"\{[^}]+\}", "{}", p) not in routed]
+        assert not missing, (
+            f"documented but not routed, so these 404: {missing}"
+        )
+
+    def test_every_documented_method_is_accepted(self, documented, routed):
+        """A row claiming POST on a GET-only route is the same bug, quieter.
+
+        It fails with 405 rather than 404, which reads even more like a server
+        problem than a documentation one. ``/admin/audit/verify`` was documented
+        as POST for as long as the table existed.
+        """
+        import re
+
+        wrong = []
+        for path, methods in documented:
+            actual = routed.get(re.sub(r"\{[^}]+\}", "{}", path), set())
+            if not actual:
+                continue  # the test above owns this case
+            for method in methods.split("/"):
+                if method not in actual:
+                    wrong.append(
+                        f"{method} {path} (routes {sorted(actual - {'HEAD'})})")
+        assert not wrong, f"documented methods that are not routed: {wrong}"
