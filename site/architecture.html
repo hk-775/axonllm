@@ -331,6 +331,45 @@
             transition: width 0.15s ease-out;
         }
 
+        /* --- Narration highlights ------------------------------------------
+           The narration lights the boxes it is talking about. Drawio tags every
+           shape it exports with data-cell-id, so the cue data names cells by the
+           same id they have in architecture.drawio and nothing here has to know
+           what a box is made of.
+
+           Dimming is on the panel rather than on each cell: .is-dimmed goes on
+           the panel, and the lit cells opt back out. Fading ~130 cells to bring
+           six forward is one class toggle instead of 130.
+
+           .arch-cell is added by markCells() rather than selected on
+           [data-cell-id] here, because drawio's two wrapper groups carry that
+           attribute as well and dimming those would dim the whole diagram. */
+        .panel.is-dimmed .arch-cell {
+            opacity: 0.28;
+            transition: opacity 0.4s ease;
+        }
+
+        /* Never dimmed: the title and subtitle are what the reader orients by,
+           and .arch-frame marks the structural containers the lit cells sit in
+           — fading a VPC boundary makes the task inside it look unplaced. */
+        .panel.is-dimmed .arch-cell.arch-frame,
+        .panel.is-dimmed .arch-cell.is-lit {
+            opacity: 1;
+        }
+
+        /* A drop-shadow filter rather than a stroke or a background: the cells
+           are groups of paths and text with their own fills, and this lifts one
+           without touching any of them. Violet at two radii reads as a glow at
+           the 55–100% zooms the canvas actually uses. */
+        .panel .arch-cell.is-lit {
+            filter: drop-shadow(0 0 3px var(--accent))
+                    drop-shadow(0 0 10px var(--accent-glow));
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+            .panel.is-dimmed .arch-cell { transition: none; }
+        }
+
         /* --- Narration ----------------------------------------------------- */
 
         /* Revealed by JS once the narration manifest has actually loaded. A play
@@ -1034,8 +1073,13 @@
                 natural[panel.id] = parseFloat(svg.getAttribute('width')) || 1400;
                 svg.removeAttribute('height');
                 svg.setAttribute('role', 'img');
+                markCells(panel);
                 panel.dataset.loaded = 'done';
                 if (zoom[panel.id]) { applyZoom(panel); } else { fit(panel); }
+                // A panel can finish loading while its narration is already
+                // playing — switching tabs mid-track, or the first tab loading
+                // after autoplay. Light whatever the current cue asks for.
+                if (panel.classList.contains('is-active')) paintHighlight();
             })
             .catch(function (err) {
                 panel.dataset.loaded = '';
@@ -1043,6 +1087,215 @@
                     + 'Could not load this diagram (' + String(err.message).replace(/[<>&]/g, '')
                     + '). The <a href="architecture.drawio" download>.drawio file</a> has all three pages.</p>';
             });
+    }
+
+    /* --- Narration highlights ----------------------------------------------
+       Drawio wraps the diagram in two groups that themselves carry
+       data-cell-id ("0" and "1"), so the real cells are the third level down.
+       Tag them once at load with .arch-cell and index them by id, and the
+       highlight code never has to walk that structure again. */
+
+    // panel id -> { cellId: <g> } for the cells the cues can name.
+    var cells = {};
+
+    // Containers, not content: dimming these leaves the boxes inside them
+    // floating. Titles are here for the same reason — see the CSS.
+    var FRAME_CELLS = {
+        'title1': 1, 'title2': 1, 'title3': 1,
+        'sub1': 1, 'sub2': 1, 'sub3': 1,
+        'vpc': 1, 'ecs': 1
+    };
+
+    function markCells(panel) {
+        var index = {};
+        var all = panel.querySelectorAll('svg g[data-cell-id]');
+        Array.prototype.forEach.call(all, function (g) {
+            // Leaf groups only. The wrappers carry the attribute too, and one of
+            // them is the whole diagram — dimming it would fade everything at
+            // once, including the cells meant to stand out. Testing for a nested
+            // data-cell-id finds the real cells without this code having to know
+            // how deep drawio happens to nest them.
+            if (g.querySelector('g[data-cell-id]')) return;
+            var id = g.getAttribute('data-cell-id');
+            g.classList.add('arch-cell');
+            if (FRAME_CELLS[id]) g.classList.add('arch-frame');
+            index[id] = g;
+        });
+        cells[panel.id] = index;
+    }
+
+    /* Which cue is live at a given position.
+
+       Cue times are not stored. Each cue names a sentence index, and a
+       sentence's span is its share of the track's measured duration by
+       character count — the same apportionment scripts/demo/make_captions.py
+       uses to time the demo video's captions. So re-recording a track re-times
+       its highlights: there is no second set of numbers to keep in step. */
+    function cueAt(track, at) {
+        if (!track || !track.cues || !track.cues.length) return null;
+        var bounds = track.starts;
+        if (!bounds) return null;
+        var live = null;
+        for (var i = 0; i < track.cues.length; i++) {
+            if (at + 0.001 < bounds[i]) break;
+            live = track.cues[i];
+        }
+        return live;
+    }
+
+    /* Split on the same boundary make_captions.py uses: after . ! ? followed by
+       a space and a capital — not on every period, because "$1.26", "1.4
+       seconds" and "MIT-0" all contain one.
+
+       Written as a scan rather than a lookbehind split. Lookbehind is a syntax
+       error in Safari before 16.4, and a syntax error anywhere in this script
+       takes the zoom, pan and tab controls down with the narration. */
+    function splitSentences(text) {
+        var out = [];
+        var re = /[.!?]\s+(?=[A-Z])/g;
+        var from = 0;
+        var m;
+        while ((m = re.exec(text)) !== null) {
+            // Keep the terminator with the sentence it ends; resume at the capital.
+            out.push(text.slice(from, m.index + 1));
+            from = re.lastIndex;
+        }
+        out.push(text.slice(from));
+        return out.filter(function (s) { return s.length > 0; });
+    }
+
+    // Sentence start times, in seconds, for a track: each sentence takes its
+    // share of the measured duration by character count.
+    function sentenceStarts(text, duration) {
+        var sents = splitSentences(text.trim());
+        var total = 0, i;
+        for (i = 0; i < sents.length; i++) total += sents[i].length;
+        if (!total) return null;
+        var starts = [];
+        var at = 0;
+        for (i = 0; i < sents.length; i++) {
+            starts.push(at);
+            at += duration * sents[i].length / total;
+        }
+        return starts;
+    }
+
+    var litPanel = null;   // panel currently carrying .is-dimmed
+    var litCue = null;     // cue object whose cells are lit, for change detection
+
+    /* Screen rect enclosing a cue's boxes, or null if it can't be measured.
+
+       Measured from the shapes, not the groups. Drawio puts every label in a
+       <foreignObject width="100%">, so a group's own rect is the width of the
+       whole diagram and would report every cell as being everywhere.
+
+       Built from cue.cells — the boxes — and not cue.links. A cue lights the
+       arrows between its boxes too, and an arrow can be long enough to cross the
+       viewport on its own: on a phone that made "is any of this cue on screen?"
+       answer yes while both boxes it joined sat off the right edge. The boxes
+       are what the viewer is being asked to look at, so they alone say where. */
+    function litRect(index, cue) {
+        var box = null;
+        cue.cells.forEach(function (id) {
+            var g = index[id];
+            if (!g) return;
+            var shapes = g.querySelectorAll('path, rect, ellipse, circle, polygon, image');
+            Array.prototype.forEach.call(shapes, function (el) {
+                var r = el.getBoundingClientRect();
+                if (!r.width && !r.height) return;
+                if (!box) { box = { left: r.left, right: r.right, top: r.top, bottom: r.bottom }; return; }
+                box.left = Math.min(box.left, r.left);
+                box.right = Math.max(box.right, r.right);
+                box.top = Math.min(box.top, r.top);
+                box.bottom = Math.max(box.bottom, r.bottom);
+            });
+        });
+        return box;
+    }
+
+    /* Bring a cue's cells into view if none of them are on screen.
+
+       Where the diagram fits the canvas — every desktop width — this never
+       fires. It exists for the narrow case, measured on a 390px viewport: the
+       infrastructure diagram is 1563px wide, so by the time the narration
+       reaches CloudWatch and ECR those boxes are off the right edge and the
+       viewer is looking at a dimmed diagram with nothing lit on it.
+
+       Only when nothing is visible, and never mid-drag: nudging a diagram the
+       viewer is holding takes the canvas away from them. `panning` is declared
+       further down with the pan handlers; that assignment runs during this
+       script, long before any audio event can call this. */
+    function scrollCueIntoView(panel, cue) {
+        if (panning) return;
+        var index = cells[panel.id] || {};
+        var box = litRect(index, cue);
+        if (!box) return;
+        var view = canvas.getBoundingClientRect();
+        var showsX = box.right > view.left && box.left < view.right;
+        var showsY = box.bottom > view.top && box.top < view.bottom;
+        if (showsX && showsY) return;
+        // Smooth, unless the reader asked for less motion — in which case a
+        // diagram sliding under them is exactly what they asked not to have.
+        var still = window.matchMedia
+            && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+        var opts = { behavior: still ? 'auto' : 'smooth' };
+        // Centre it: a cue's cells are a cluster, and scrolling its left edge to
+        // the left edge of the canvas often leaves the rest of the cluster out.
+        if (!showsX) {
+            opts.left = canvas.scrollLeft + (box.left - view.left)
+                - (view.width - (box.right - box.left)) / 2;
+        }
+        if (!showsY) {
+            opts.top = canvas.scrollTop + (box.top - view.top)
+                - (view.height - (box.bottom - box.top)) / 2;
+        }
+        canvas.scrollTo(opts);
+    }
+
+    function clearHighlight() {
+        if (!litPanel) { litCue = null; return; }
+        litPanel.classList.remove('is-dimmed');
+        var index = cells[litPanel.id] || {};
+        Object.keys(index).forEach(function (id) {
+            index[id].classList.remove('is-lit');
+        });
+        litPanel = null;
+        litCue = null;
+    }
+
+    /* Light the cells for wherever the audio is now.
+
+       Called from timeupdate (every ~250ms), so it returns early when the cue
+       has not changed rather than rewriting class lists four times a second. */
+    function paintHighlight() {
+        var panel = activePanel();
+        // Highlighting a paused diagram would leave most of it faded with no
+        // audio to explain why, so a pause restores the whole picture.
+        if (!currentTrack || audio.paused) { clearHighlight(); return; }
+
+        var cue = cueAt(currentTrack, position());
+        // A cue with no cells is how a track's closing lines say "show the whole
+        // diagram again" — the summing-up sentences are about all of it.
+        if (!cue || !cue.cells.length) { clearHighlight(); return; }
+        if (panel === litPanel && cue === litCue) return;
+
+        if (litPanel && litPanel !== panel) clearHighlight();
+        var index = cells[panel.id];
+        if (!index) return;  // SVG still loading; the load handler repaints
+
+        Object.keys(index).forEach(function (id) {
+            // Boxes and the connectors between them both light. Forced to a
+            // boolean deliberately: classList.toggle treats an undefined second
+            // argument as absent and flips the class instead of setting it, so a
+            // cue with no links would light every cell it meant to leave dark.
+            var on = cue.cells.indexOf(id) !== -1
+                || !!(cue.links && cue.links.indexOf(id) !== -1);
+            index[id].classList.toggle('is-lit', on);
+        });
+        panel.classList.add('is-dimmed');
+        litPanel = panel;
+        litCue = cue;
+        scrollCueIntoView(panel, cue);
     }
 
     /* --- Narration ---------------------------------------------------------
@@ -1111,6 +1364,10 @@
         // pause icon over silent audio.
         audio.pause();
         narrRoot.dataset.state = 'paused';
+        // Explicitly, not via the 'pause' handler: as above, pausing an element
+        // that never started fires no pause event, which would leave the panel
+        // we are switching away from dimmed for the rest of the visit.
+        clearHighlight();
         pendingSeek = null;
         currentTrack = track || null;
         narrRoot.hidden = !track;
@@ -1161,12 +1418,24 @@
     function initNarration(manifest) {
         var tracks = (manifest && manifest.tracks) || [];
         tracks.forEach(function (t) {
+            var duration = t.duration || 0;
+            var cues = t.cues || [];
+            // Resolve each cue's sentence index to a time once, here, rather
+            // than on every timeupdate. A cue naming a sentence the text does
+            // not have is dropped: a manifest edited without re-checking should
+            // cost that one highlight, not the player.
+            var starts = sentenceStarts(t.text, duration);
+            var live = starts ? cues.filter(function (c) {
+                return c.sentence >= 0 && c.sentence < starts.length;
+            }) : [];
             // The manifest names the panel it belongs to; audio lives beside it.
             byPanel[t.panel] = {
                 label: t.label,
                 text: t.text,
-                duration: t.duration || 0,
-                audio: 'narration/' + t.id + '.mp3'
+                duration: duration,
+                audio: 'narration/' + t.id + '.mp3',
+                cues: live,
+                starts: live.map(function (c) { return starts[c.sentence]; })
             };
         });
         if (!tracks.length) return;
@@ -1181,16 +1450,27 @@
             }
         });
 
-        audio.addEventListener('play', function () { narrRoot.dataset.state = 'playing'; });
-        audio.addEventListener('pause', function () { narrRoot.dataset.state = 'paused'; });
+        audio.addEventListener('play', function () {
+            narrRoot.dataset.state = 'playing';
+            paintHighlight();
+        });
+        audio.addEventListener('pause', function () {
+            narrRoot.dataset.state = 'paused';
+            // Undim: a faded diagram with nothing playing reads as broken.
+            clearHighlight();
+        });
         audio.addEventListener('ended', function () {
             narrRoot.dataset.state = 'paused';
             // Rewind so the button plays rather than doing nothing on a finished
             // track — the customer demo case is playing one twice.
             audio.currentTime = 0;
+            clearHighlight();
             paintProgress();
         });
-        audio.addEventListener('timeupdate', paintProgress);
+        audio.addEventListener('timeupdate', function () {
+            paintProgress();
+            paintHighlight();
+        });
         audio.addEventListener('loadedmetadata', function () {
             // Apply a seek made while there was nothing to seek within.
             if (pendingSeek !== null) {
