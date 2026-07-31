@@ -512,3 +512,92 @@ class TestDriftRoute:
         resp = client.get("/admin/pricing-drift")
         assert "have no price" not in resp.text
         assert "banner ok" in resp.text
+
+
+class TestShippedPricingCoverage:
+    """Assertions about the real config/pricing.yaml, not a fixture.
+
+    Every test above builds its own registry and table, which is right for the
+    audit logic but says nothing about the files that ship. These pin the
+    coverage of the actual configs, because an unpriced mapping is invisible at
+    runtime: CostTracker returns 0.00 on a miss rather than raising, so the
+    request succeeds, the bill reads zero, and project spend, budget blocks and
+    quota alerts all under-count.
+    """
+
+    @pytest.fixture
+    def report(self):
+        from src.gateway.config_loader import load_pricing_config
+
+        registry = ModelRegistry()
+        registry.load("config/models.yaml")
+        return audit_pricing(registry, load_pricing_config("config/pricing.yaml"))
+
+    def test_every_referenced_provider_has_a_pricing_section(self, report):
+        """A provider with no section at all prices *none* of its models.
+
+        This is how fireworks came to bill nothing on both its mappings: the
+        section was omitted on the belief that Fireworks published no per-model
+        rates, which was wrong. One missing block is a wider hole than one
+        missing key, so it gets its own assertion.
+        """
+        assert report.providers_missing_section == []
+
+    def test_the_fireworks_rates_are_the_published_ones(self):
+        """Pinned to the numbers on fireworks.ai/models, per 1k tokens.
+
+        Not a tautology against the YAML: these two mappings shipped unpriced,
+        and the failure mode is silent. If a future edit drops the section or a
+        rate, this says so instead of the bill quietly returning to $0.00.
+        """
+        from src.gateway.config_loader import load_pricing_config
+
+        fireworks = load_pricing_config("config/pricing.yaml")["fireworks"]
+
+        deepseek = fireworks["accounts/fireworks/models/deepseek-v4-pro"]
+        assert (deepseek.prompt_token_cost, deepseek.completion_token_cost) == (
+            0.00174,
+            0.00348,
+        )
+
+        oss = fireworks["accounts/fireworks/models/gpt-oss-120b"]
+        assert (oss.prompt_token_cost, oss.completion_token_cost) == (0.00015, 0.0006)
+
+    def test_a_fireworks_request_no_longer_bills_zero(self):
+        """The consequence, asserted through the biller rather than the table.
+
+        A rate that loads but is not reachable by the key CostTracker looks up
+        is the same outcome as no rate at all -- the provider-side model_id from
+        models.yaml is the key, not the gateway's friendly name.
+        """
+        from src.gateway.config_loader import load_pricing_config
+
+        tracker = CostTracker(load_pricing_config("config/pricing.yaml"))
+
+        for model_id in (
+            "accounts/fireworks/models/deepseek-v4-pro",
+            "accounts/fireworks/models/gpt-oss-120b",
+        ):
+            cost = tracker.calculate_cost("fireworks", model_id, 3000, 800)
+            assert cost > 0, f"{model_id} still bills $0.00"
+
+    def test_the_remaining_gaps_are_the_documented_ones(self, report):
+        """Not a coverage floor but an exact set, so a *new* unpriced mapping
+        fails even though the count happens to stay the same.
+
+        These six are unpriced because no correct number exists to record, each
+        confirmed against the primary source: gemini-3-pro-preview is still
+        served but off Google's price list; the five bedrock-mantle gpt-5.x SKUs
+        are either absent from the AWS Price List in every region (5.5, 5.6-sol)
+        or listed only in us-gov-east-1 / us-gov-west-1 at GovCloud rates
+        (5.4, 5.6-luna, 5.6-terra). Filling any of them would replace a visible
+        gap with an invisible wrong bill.
+        """
+        assert {(u.provider, u.model_id) for u in report.unpriced} == {
+            ("google_ai", "gemini-3-pro-preview"),
+            ("bedrock-mantle", "openai.gpt-5.4"),
+            ("bedrock-mantle", "openai.gpt-5.5"),
+            ("bedrock-mantle", "openai.gpt-5.6-luna"),
+            ("bedrock-mantle", "openai.gpt-5.6-sol"),
+            ("bedrock-mantle", "openai.gpt-5.6-terra"),
+        }

@@ -13,6 +13,8 @@
 #   google_ai       ai.google.dev/gemini-api/docs/pricing
 #   groq            groq.com/pricing
 #   ai21            ai21.com/pricing
+#   fireworks       fireworks.ai/models/fireworks/<model> (per-model, not the
+#                   aggregate /pricing page — that one covers embeddings only)
 #   bedrock         AWS Price List API, us-east-1, on-demand standard tier
 #   bedrock-mantle  same, Mantle SKUs (see the note on that section)
 #
@@ -284,10 +286,28 @@ providers:
       prompt_token_cost: 0.00015
       completion_token_cost: 0.0006
 
-  # No section for fireworks. Its two mappings could not be verified at all —
-  # there is no FIREWORKS_API_KEY in the environment and the models endpoint
-  # requires one (401) — and Fireworks publishes no per-model serverless price
-  # table to fall back on. Guessing from another provider's rate for the same
-  # open-weight model would be a fabrication with a plausible shape: gpt-oss-120b
-  # is $0.15/$0.60 on both Bedrock and Together, which makes a third value look
-  # inevitable rather than assumed. Left on the drift report instead.
+  # Rates from each model's own page on fireworks.ai/models, in USD per 1M
+  # tokens. An earlier note here said Fireworks published no per-model price
+  # table and left both mappings unpriced on that basis; that was wrong. The
+  # aggregate /pricing page does only show tiers for embeddings, but each
+  # serverless text model carries its own input/cached/output rate, which is
+  # where these come from.
+  #
+  # Still unverified against the live API: there is no FIREWORKS_API_KEY in the
+  # environment and /inference/v1/models requires one (401), so the two model
+  # ids in models.yaml remain unconfirmed. That is a separate gap from pricing
+  # and does not make a published rate less real — a wrong id bills nothing at
+  # all, which the drift report shows either way.
+  fireworks:
+    accounts/fireworks/models/deepseek-v4-pro:
+      prompt_token_cost: 0.00174
+      completion_token_cost: 0.00348
+      cached_token_cost: 0.000145
+    # $0.15/$0.60, matching Bedrock and Together to the cent for the same
+    # open-weight model. The agreement is the reason the old note gave for
+    # *not* recording a third value; it is in fact each provider publishing
+    # the same rate, and Fireworks publishes its own cached-input rate too.
+    accounts/fireworks/models/gpt-oss-120b:
+      prompt_token_cost: 0.00015
+      completion_token_cost: 0.0006
+      cached_token_cost: 0.000014
