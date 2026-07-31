@@ -1396,6 +1396,129 @@ class TestArchitecturePage:
                 f"{track['id']}: transcript differs from the synthesized SSML"
             )
 
+    # ── Narration highlights ─────────────────────────────────────────
+
+    def test_every_cued_cell_exists_in_the_diagram_it_points_into(self, site_client):
+        """A cue names drawio cell ids; a typo is a box that never lights.
+
+        Silent by construction: the player looks each id up in the SVG it just
+        loaded and skips what it cannot find, so a renamed cell costs one
+        highlight and raises nothing. The SVG is the source of truth here
+        because it is what the browser actually receives.
+        """
+        import re
+
+        for track in site_client.get(
+            "/narration/architecture-narration.json"
+        ).json()["tracks"]:
+            svg = site_client.get(f"/architecture-{track['id']}.svg")
+            assert svg.status_code == 200, f"architecture-{track['id']}.svg missing"
+            known = set(re.findall(r'data-cell-id="([^"]+)"', svg.text))
+            for cue in track["cues"]:
+                for cell in cue["cells"] + cue.get("links", []):
+                    assert cell in known, (
+                        f"{track['id']} cue at sentence {cue['sentence']} names "
+                        f"{cell!r}, which is not in architecture-{track['id']}.svg"
+                    )
+
+    def test_cells_are_boxes_and_links_are_connectors(self, site_client):
+        """The split is what keeps the auto-scroll pointed at the right thing.
+
+        A connector can be long enough to span a narrow viewport on its own, so
+        the player measures where to scroll from "cells" only. Put an arrow in
+        that list and the scroll target becomes the arrow's bounding box, which
+        on a phone can be "visible" while both boxes it joins are off-screen.
+        architecture.drawio marks every connector edge="1", so which list an id
+        belongs in is a fact about the diagram, not a judgement call.
+        """
+        import pathlib
+        import re
+
+        drawio = (
+            pathlib.Path(__file__).resolve().parents[2]
+            / "site"
+            / "architecture.drawio"
+        ).read_text(encoding="utf-8")
+        connectors = set(re.findall(r'<mxCell id="([^"]+)"[^>]*edge="1"', drawio))
+        assert connectors, "no edges found — has the drawio format changed?"
+
+        for track in site_client.get(
+            "/narration/architecture-narration.json"
+        ).json()["tracks"]:
+            for cue in track["cues"]:
+                for cell in cue["cells"]:
+                    assert cell not in connectors, (
+                        f"{track['id']}: {cell!r} is a connector, so it belongs "
+                        'in "links" — in "cells" it would drag the auto-scroll'
+                    )
+                for link in cue.get("links", []):
+                    assert link in connectors, (
+                        f"{track['id']}: {link!r} is a box, so it belongs in "
+                        '"cells" — "links" is not measured for scrolling'
+                    )
+
+    def test_every_cue_anchors_to_a_sentence_the_narration_has(self, site_client):
+        """Cues carry a sentence index, not a timestamp.
+
+        The player divides a track's measured duration between its sentences by
+        character count — the same apportionment make_captions.py uses — so
+        re-recording re-times the highlights and there is no second set of
+        numbers to maintain. The cost is that the index has to be in range:
+        editing the prose to have fewer sentences drops the highlights off the
+        end, and the player skips them silently rather than throwing.
+        """
+        import re
+
+        for track in site_client.get(
+            "/narration/architecture-narration.json"
+        ).json()["tracks"]:
+            sentences = [
+                s for s in re.split(r"(?<=[.!?])\s+(?=[A-Z])", track["text"].strip())
+                if s.strip()
+            ]
+            seen = -1
+            for cue in track["cues"]:
+                index = cue["sentence"]
+                assert 0 <= index < len(sentences), (
+                    f"{track['id']} cue {index} is outside the "
+                    f"{len(sentences)} sentences its narration has"
+                )
+                # Ordered, because the player walks the list and keeps the last
+                # cue whose sentence has started. An out-of-order entry would be
+                # unreachable rather than wrong-looking.
+                assert index > seen, (
+                    f"{track['id']}: cue sentences are out of order at {index}"
+                )
+                seen = index
+
+    def test_each_track_ends_by_showing_the_whole_diagram(self, site_client):
+        """The closing lines are about all of it, so nothing should stay dimmed.
+
+        An empty cell list is how a track says "undim". Without a final one the
+        summing-up sentence — "the point of this diagram is the count of exits"
+        — would play with six boxes lit and the rest faded out.
+        """
+        for track in site_client.get(
+            "/narration/architecture-narration.json"
+        ).json()["tracks"]:
+            last = track["cues"][-1]
+            assert not last["cells"] and not last.get("links"), (
+                f"{track['id']} ends on a cue that leaves the diagram dimmed"
+            )
+
+    def test_the_highlight_never_dims_the_frame_it_draws_inside(self, site_client):
+        """Containers stay lit, or the boxes inside them look unplaced.
+
+        The page keeps titles and the two structural containers out of the dim.
+        Asserted against the page because the list lives there: a container
+        added to a diagram and not to FRAME_CELLS fades while its contents are
+        highlighted, which reads as a rendering bug.
+        """
+        html = site_client.get("/architecture.html").text
+        assert "FRAME_CELLS" in html, "the frame exemption is gone"
+        for cell in ("vpc", "ecs", "title1", "sub1"):
+            assert f"'{cell}'" in html, f"{cell} lost its exemption from dimming"
+
     def test_the_audio_is_seekable(self, site_client):
         """Range support is what makes the scrub bar work.
 
