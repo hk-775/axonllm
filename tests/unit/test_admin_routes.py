@@ -571,6 +571,32 @@ class TestDashboard:
         assert "react" in body.lower()
         assert '<div id="root">' in body
 
+    def test_the_ribbon_links_to_the_architecture_page(self, client):
+        """The pill in the top ribbon, shown on Overview and every other view.
+
+        The href must be absolute. The dashboard is served from
+        /admin/dashboard, so a relative "architecture.html" resolves to
+        /admin/architecture.html — which is not a route, and the pill would
+        404 while looking perfectly fine in the markup.
+        """
+        body = client.get("/admin/dashboard").text
+        assert 'className="topbar-pill"' in body
+        assert 'href="/architecture.html"' in body
+        assert 'href="architecture.html"' not in body
+
+    def test_the_ribbon_pill_target_is_actually_served(self, site_client_for_dashboard):
+        """The pair, not just the href — same reason as the landing page's."""
+        assert site_client_for_dashboard.get("/architecture.html").status_code == 200
+
+    @pytest.fixture
+    def site_client_for_dashboard(self, admin_api):
+        from src.gateway.admin.routes import create_site_routes
+
+        app = Starlette(
+            routes=create_admin_routes(admin_api) + create_site_routes(admin_api)
+        )
+        return TestClient(app, raise_server_exceptions=False)
+
 
 # ── Virtual Model CRUD ───────────────────────────────────────────────
 
@@ -1177,10 +1203,174 @@ class TestArchitecturePage:
         assert "content: attr(data-step)" in html
         assert "counter(step)" not in html
 
+    # ── Narration ────────────────────────────────────────────────────
+
+    def test_the_narration_manifest_is_served(self, site_client):
+        """The page fetches it to decide whether to show a player at all.
+
+        A 404 here is a silent feature removal: the player stays hidden, the
+        diagrams still work, and nobody notices the walkthrough is gone.
+        """
+        r = site_client.get("/narration/architecture-narration.json")
+        assert r.status_code == 200
+        assert r.headers["content-type"] == "application/json"
+        assert r.json()["voice"] == "Matthew"
+
+    def test_every_narration_track_has_its_audio(self, site_client):
+        """Track ids name the MP3s by convention, so a rename fails at runtime.
+
+        The player builds "narration/<id>.mp3" from the manifest rather than
+        reading a path out of it. That keeps the JSON small and makes the
+        convention worth asserting: an id edited without renaming the file
+        leaves a play button that errors on click.
+        """
+        manifest = site_client.get("/narration/architecture-narration.json").json()
+        tracks = manifest["tracks"]
+        assert len(tracks) == 3, f"expected one track per diagram, got {len(tracks)}"
+        for track in tracks:
+            r = site_client.get(f"/narration/{track['id']}.mp3")
+            assert r.status_code == 200, f"{track['id']}.mp3 missing"
+            assert r.headers["content-type"] == "audio/mpeg"
+            # ID3/MPEG frame sync. Catches a truncated or HTML-error-page file
+            # committed under an .mp3 name, which would 200 and never play.
+            assert r.content[:3] == b"ID3" or r.content[:2] == b"\xff\xfb", (
+                f"{track['id']}.mp3 is not an MP3"
+            )
+
+    def test_every_narration_track_names_a_panel_on_the_page(self, site_client):
+        """The manifest binds tracks to panels by id, in one direction only.
+
+        The page looks tracks up by panel id, so a typo in the manifest is a
+        panel with no narration and no error. Asserted both ways: every track
+        must find its panel, and every panel must have a track — otherwise
+        switching tabs hides the player mid-demo.
+        """
+        import re
+
+        html = site_client.get("/architecture.html").text
+        panel_ids = set(re.findall(r'role="tabpanel" id="([^"]+)"', html))
+        assert len(panel_ids) == 3, f"expected three panels, found {panel_ids}"
+
+        manifest = site_client.get("/narration/architecture-narration.json").json()
+        track_panels = {t["panel"] for t in manifest["tracks"]}
+        assert track_panels == panel_ids, (
+            f"narration and panels disagree: {track_panels ^ panel_ids}"
+        )
+
+    def test_the_narration_durations_are_real(self, site_client):
+        """The progress bar reads duration from here before the file loads.
+
+        build_narration_audio.sh writes the ffprobe measurement back into the
+        JSON. A zero or missing value gives a bar that cannot move and a
+        "0:00 / 0:00" readout on a track that plays for a minute and a half.
+        """
+        manifest = site_client.get("/narration/architecture-narration.json").json()
+        for track in manifest["tracks"]:
+            assert track.get("duration", 0) > 10, (
+                f"{track['id']} has no plausible duration — re-run the build script"
+            )
+
+    def test_the_narration_text_matches_the_ssml(self, site_client):
+        """Two fields, one script: the transcript must be what Polly read.
+
+        The SSML is what got synthesized; the plain text is what the transcript
+        panel shows. They are maintained by hand as a pair, so a claim corrected
+        in one and not the other puts a caption on screen that disagrees with
+        the audio playing under it.
+        """
+        import re
+
+        manifest = site_client.get("/narration/architecture-narration.json").json()
+        for track in manifest["tracks"]:
+            spoken = re.sub(r"<[^>]+>", "", track["ssml"])
+            spoken = re.sub(r"\s+", " ", spoken).strip()
+            shown = re.sub(r"\s+", " ", track["text"]).strip()
+            assert spoken == shown, (
+                f"{track['id']}: transcript differs from the synthesized SSML"
+            )
+
+    def test_the_audio_is_seekable(self, site_client):
+        """Range support is what makes the scrub bar work.
+
+        Without Accept-Ranges a browser reports audio.seekable as empty and
+        refuses to seek at all — the bar moves and the audio doesn't. Measured
+        in Chromium, not inferred. S3 serves ranges, so a gateway that doesn't
+        would demo worse than the deployed site.
+        """
+        head = site_client.get("/narration/infrastructure.mp3")
+        assert head.headers.get("accept-ranges") == "bytes"
+
+        r = site_client.get(
+            "/narration/infrastructure.mp3", headers={"Range": "bytes=100-199"}
+        )
+        assert r.status_code == 206
+        assert r.headers["content-range"].startswith("bytes 100-199/")
+        assert len(r.content) == 100
+
+    def test_an_unusable_range_serves_the_whole_file(self, site_client):
+        """A media element must never be handed an error for a bad range.
+
+        The spec allows ignoring a Range it doesn't understand, and the whole
+        file is already in memory, so 200 is both cheaper and safer than the
+        416 a stricter reading would send.
+        """
+        full = len(site_client.get("/narration/infrastructure.mp3").content)
+        for bad in ("bananas", "bytes=99999999-", "bytes=500-100", "bytes=0-1,5-6"):
+            r = site_client.get(
+                "/narration/infrastructure.mp3", headers={"Range": bad}
+            )
+            assert r.status_code == 200, f"{bad!r} produced {r.status_code}"
+            assert len(r.content) == full, f"{bad!r} truncated the response"
+
     def test_the_site_route_does_not_expose_the_cdk_app(self, site_client):
-        """site/infra/ holds the deploy config, not public assets."""
+        """site/infra/ holds the deploy config, not public assets.
+
+        The narration lives one level down in site/narration/, so the depth
+        check alone no longer keeps this out — SITE_ASSET_DIRS names the one
+        subdirectory that is public, and site/infra/ is not in it.
+        """
         for path in ("/infra", "/infra/stack.py", "/infra/app.py"):
             assert site_client.get(path).status_code == 404, f"{path} is readable"
+
+    def test_a_served_suffix_inside_the_cdk_app_is_still_refused(self, site_client):
+        """The dangerous case, made real rather than asserted against nothing.
+
+        Everything currently in site/infra/ is .py, which 404s on the suffix
+        check alone — so a depth rule that had replaced the directory allow-list
+        would pass the test above while handing out site/infra/cdk.json. This
+        writes one to prove the refusal comes from the allow-list.
+        """
+        import pathlib
+
+        infra = pathlib.Path(__file__).resolve().parents[2] / "site" / "infra"
+        planted = infra / "cdk.json"
+        assert not planted.exists(), "would clobber a real file — rename the probe"
+        planted.write_text('{"app": "python3 app.py"}', encoding="utf-8")
+        try:
+            assert site_client.get("/infra/cdk.json").status_code == 404
+        finally:
+            planted.unlink()
+
+    def test_only_the_named_subdirectory_is_public(self, site_client):
+        """Depth is not the rule; the allow-list is.
+
+        Asserted against the constants rather than a fixed path so adding a
+        directory to SITE_ASSET_DIRS is a deliberate act with a test that
+        already describes what it means.
+        """
+        import pathlib
+
+        from src.gateway.admin.routes import SITE_ASSET_DIRS, _is_servable_site_path
+
+        assert "narration" in SITE_ASSET_DIRS
+        assert _is_servable_site_path(pathlib.PurePosixPath("narration/x.mp3"))
+        assert not _is_servable_site_path(pathlib.PurePosixPath("infra/cdk.json"))
+        # Two levels below site/ is out regardless of the directory.
+        assert not _is_servable_site_path(
+            pathlib.PurePosixPath("narration/deep/x.mp3")
+        )
+        # A served suffix in an unlisted directory is still out.
+        assert not _is_servable_site_path(pathlib.PurePosixPath("secrets/x.json"))
 
     def test_the_site_route_rejects_traversal(self, site_client):
         """The path param is attacker-controlled; confine it to site/."""
@@ -1189,18 +1379,25 @@ class TestArchitecturePage:
             assert r.status_code == 404, f"{path} escaped site/ ({r.status_code})"
 
     def test_the_site_route_does_not_shadow_the_app_pages(self, admin_api):
-        """"/{path}" is a bare segment — order decides whether /chat survives.
+        """These are bare segments — order decides whether /chat survives.
 
         build_app appends the site routes last for exactly this reason. If they
         were ever merged into create_admin_routes, /chat, /playground and
         /routing would resolve here and 404 instead of rendering.
+
+        Both patterns are also asserted to be segment-counted rather than
+        ``:path`` convertors. A ``/{path:path}`` would swallow /admin/projects
+        and every other multi-segment route, turning "must be last" from a
+        three-page concern into an application-wide one.
         """
         from src.gateway.admin.routes import create_site_routes
 
         site_paths = {r.path for r in create_site_routes(admin_api)}
-        assert site_paths == {"/{path}"}, site_paths
+        assert site_paths == {"/{path}", "/{directory}/{path}"}, site_paths
+        for path in site_paths:
+            assert ":path" not in path, f"{path} matches unbounded depth"
         admin_paths = {r.path for r in create_admin_routes(admin_api)}
-        assert "/{path}" not in admin_paths
+        assert not site_paths & admin_paths, site_paths & admin_paths
 
 
 class TestDemoInTheRibbon:
@@ -1260,6 +1457,81 @@ class TestDemoInTheRibbon:
         assert video, "the dialog has no video element"
         assert "src=" not in video.group(0), "the video is fetched on page load"
         assert 'preload="none"' in video.group(0)
+
+    def test_opening_the_dialog_does_not_start_the_video(self, client):
+        """Opening and playing are two decisions, and the open handler makes one.
+
+        The failure this prevents is a demo that begins narrating while the
+        presenter is still introducing it. Asserted against the open handler's
+        own body rather than the whole page, because there IS a play() call on
+        the page now — the overlay button's — and a document-wide search for it
+        would pass no matter which handler held it.
+        """
+        import re
+
+        html = client.get("/").text
+        opener = re.search(
+            r"\[data-demo-open\]'\).forEach\(btn => \{(.+?)\n    \}\);", html, re.S
+        )
+        assert opener, "the open handler is gone or was reshaped"
+        assert "play()" not in opener.group(1), "opening the dialog autoplays"
+
+    def test_the_dialog_has_a_play_button_the_script_binds(self, client):
+        """Without autostart, this button is the only way in.
+
+        Pairs the markup with the handler: a renamed attribute on either side
+        leaves a dialog holding a video that cannot be started, which no other
+        test here would catch now that the open handler deliberately does not.
+        """
+        html = client.get("/").text
+        assert 'class="demo-modal-play" data-demo-play' in html, "no play button"
+        assert "[data-demo-play]" in html, "the play button is not wired up"
+        assert "aria-label=\"Play the demo\"" in html, "unlabelled icon button"
+
+    def test_the_play_overlay_tracks_the_native_controls(self, client):
+        """The video has `controls`, so it can be played without our button.
+
+        If the overlay hid only on our own click it would sit over the picture
+        the moment someone used the native control bar instead — hence the
+        listeners. 'ended' too: it does not imply 'pause' everywhere, and a
+        finished demo is exactly when someone reaches to replay it.
+        """
+        html = client.get("/").text
+        for event in ("'play'", "'pause'", "'ended'"):
+            assert f"video.addEventListener({event}" in html, f"no {event} handler"
+        assert "[data-playing] .demo-modal-play { display: none; }" in html
+
+    def test_the_play_overlay_does_not_cover_the_scrubber(self, client):
+        """A wrapper spanning the frame would swallow clicks on the controls.
+
+        Centring via translate keeps the target to its own 76px, so the video
+        can be seeked as well as started. The symptom of getting this wrong is
+        subtle — the demo plays, and the scrub bar simply never responds.
+        """
+        import re
+
+        css = re.search(
+            r"\.demo-modal-play \{(.+?)\n\s*\}\n", client.get("/").text, re.S
+        )
+        assert css, "the .demo-modal-play rule is gone"
+        rule = css.group(1)
+        assert "translate(-50%, -50%)" in rule, "not centred by transform"
+        assert re.search(r"width:\s*76px", rule), "the target is no longer bounded"
+        assert "width: 100%" not in rule, "the overlay spans the frame"
+
+    def test_the_backdrop_check_ignores_keyboard_clicks(self, client):
+        """Enter on a button inside the dialog arrives as a click at 0,0.
+
+        Which is outside any centred dialog, so the backdrop-dismiss check reads
+        it as "clicked the backdrop" and closes — and the close handler pauses
+        the video, so play() aborts. Verified in Chromium: pressing Enter on the
+        play button dismissed the demo instead of starting it. `detail` is 0 for
+        a synthesized click and >= 1 for a real pointer, which separates them.
+        """
+        html = client.get("/").text
+        assert "if (!e.detail) return;" in html, (
+            "keyboard activation will be treated as a backdrop click"
+        )
 
     def test_closing_the_dialog_pauses_the_video(self, client):
         """Escape closes a dialog without going through the close button.

@@ -240,6 +240,52 @@
 
         .demo-modal-close:hover { background: rgba(12, 10, 9, 0.85); }
 
+        /* Opening the dialog no longer starts the video — this is what starts
+           it. A 76px target in the middle of the frame rather than the ~20px
+           triangle in the native control bar, because the person reaching for
+           it is usually presenting to a room and pointing at a projector.
+
+           Centred with translate rather than by a flex wrapper spanning the
+           frame: such a wrapper would also cover the native control bar and
+           swallow clicks on the scrubber, so the video could be started but
+           never seeked. */
+        .demo-modal-play {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: 76px;
+            height: 76px;
+            display: grid;
+            place-items: center;
+            border: 1px solid rgba(255, 255, 255, 0.35);
+            border-radius: 999px;
+            background: rgba(12, 10, 9, 0.62);
+            color: #fff;
+            cursor: pointer;
+            transition: background 0.15s, transform 0.15s;
+        }
+
+        .demo-modal-play:hover,
+        .demo-modal-play:focus-visible {
+            background: var(--accent, #7c3aed);
+            transform: translate(-50%, -50%) scale(1.06);
+        }
+
+        /* Against the video, not the page background, so it stays visible on
+           the letterboxed black frame. */
+        .demo-modal-play:focus-visible { outline: 2px solid #fff; outline-offset: 3px; }
+
+        /* The glyph is nudged right by a third of its width: a triangle's
+           optical centre sits left of its bounding box, so a centred polygon
+           reads as off-centre inside a circle. */
+        .demo-modal-play svg { width: 30px; height: 30px; margin-left: 4px; }
+
+        /* Hidden while the video runs so it does not sit over the picture. It
+           returns on pause, which is what a presenter who paused to talk over a
+           frame then reaches for. */
+        .demo-modal[data-playing] .demo-modal-play { display: none; }
+
         .hero {
             padding: 160px 0 100px;
             text-align: center;
@@ -1056,7 +1102,7 @@
                 <div class="stat-label">Routing strategies</div>
             </div>
             <div class="stat">
-                <div class="stat-num">1,780</div>
+                <div class="stat-num">1,810</div>
                 <div class="stat-label">Tests passing</div>
             </div>
         </div>
@@ -1344,6 +1390,14 @@ resp = client.chat.completions.create(
      them the download. The script sets src on first open. -->
 <dialog class="demo-modal" id="demo-modal" aria-label="AxonLLM product demo">
     <button type="button" class="demo-modal-close" data-demo-close aria-label="Close demo">&times;</button>
+    <!-- After the <video> in the DOM would be tidier, but this must come before
+         it so the close button stays the first thing Tab reaches: Escape aside,
+         a keyboard user who cannot find the way out of a modal is stuck. -->
+    <button type="button" class="demo-modal-play" data-demo-play aria-label="Play the demo">
+        <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <polygon points="6 4 20 12 6 20 6 4"></polygon>
+        </svg>
+    </button>
     <video id="demo-video" controls preload="none" playsinline
            poster="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 9'%3E%3Crect width='16' height='9' fill='%230c0a09'/%3E%3C/svg%3E">
         <!-- Cue timings are the measured MP3 lengths the encoder set each
@@ -1378,12 +1432,32 @@ document.querySelectorAll('.install-cmd').forEach(el => {
             // <dialog>. Guarded so reopening does not reload and restart it.
             if (!video.getAttribute('src')) video.setAttribute('src', 'axonllm-demo.mp4');
             modal.showModal();
-            // play() rejects if the browser blocks autoplay. The click is a user
-            // gesture so it should not, but an unhandled rejection would still
-            // surface in the console; the controls are there either way.
+            // Deliberately does NOT play. Opening the dialog and starting the
+            // narration are two decisions: someone demoing in a meeting opens
+            // this while still talking, and audio that begins on its own talks
+            // over them. The overlay button below is the second decision.
+        });
+    });
+
+    document.querySelectorAll('[data-demo-play]').forEach(btn => {
+        btn.addEventListener('click', () => {
+            // A rejection here is a missing file rather than the autoplay
+            // policy — this is inside a click. Either way the overlay must come
+            // back rather than leaving a frame with no way to start it, which
+            // the 'pause' listener below handles.
             video.play().catch(() => {});
         });
     });
+
+    // Driven by the events, not set alongside the calls above: the native
+    // control bar can play and pause too, and an overlay tracking only our own
+    // button would sit over a running video the moment someone used it.
+    video.addEventListener('play', () => { modal.dataset.playing = ''; });
+    video.addEventListener('pause', () => { delete modal.dataset.playing; });
+    // 'ended' does not imply 'pause' on every engine, so the overlay is
+    // restored here as well — a finished demo is the case where someone most
+    // wants to replay it.
+    video.addEventListener('ended', () => { delete modal.dataset.playing; });
 
     document.querySelectorAll('[data-demo-close]').forEach(btn => {
         btn.addEventListener('click', () => modal.close());
@@ -1393,6 +1467,12 @@ document.querySelectorAll('.install-cmd').forEach(el => {
     // the test is whether the click landed outside the dialog's box rather than
     // on a child of it.
     modal.addEventListener('click', e => {
+        // Keyboard activation of a button inside the dialog also arrives here
+        // as a click, with detail 0 and coordinates 0,0 — which is outside any
+        // centred dialog, so without this guard pressing Enter on the play
+        // button dismisses the demo instead of starting it. A real pointer
+        // click always carries detail >= 1.
+        if (!e.detail) return;
         const r = modal.getBoundingClientRect();
         const outside = e.clientX < r.left || e.clientX > r.right ||
                         e.clientY < r.top || e.clientY > r.bottom;

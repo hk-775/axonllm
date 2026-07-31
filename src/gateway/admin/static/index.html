@@ -87,6 +87,38 @@
       background: #10b981; animation: pulse 2s infinite;
     }
     @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
+    /* Pill link to the interactive architecture page. Tinted rather than
+       outlined like the tagline pill beside it: that one is a static caption
+       and this is the only thing in the ribbon you can click, so at equal
+       weight the two read as one decorative pair and nobody tries it. */
+    .topbar-pill {
+      display: inline-flex; align-items: center; gap: 0.4rem;
+      font-size: 11px; font-weight: 600; color: #6d28d9;
+      background: rgba(237,233,254,0.9); border: 1px solid rgba(139,92,246,0.35);
+      padding: 0.25rem 0.7rem; border-radius: 999px;
+      text-decoration: none; white-space: nowrap;
+      transition: background 0.15s, border-color 0.15s, color 0.15s;
+    }
+    .topbar-pill:hover, .topbar-pill:focus-visible {
+      background: #7c3aed; border-color: #7c3aed; color: #fff;
+    }
+    /* The ribbon sits on a translucent gradient, so the browser default
+       outline can land on a light band and disappear. */
+    .topbar-pill:focus-visible { outline: 2px solid #4c1d95; outline-offset: 2px; }
+    .topbar-pill svg { width: 12px; height: 12px; flex-shrink: 0; }
+    /* Under ~1100px the 44px ribbon is already tight enough that the status
+       caption wraps to two lines. Drop the decorative pills before the
+       actionable one: the tagline and the status caption say nothing an
+       operator needs, and the pill is the only thing here you can click. */
+    @media (max-width: 1100px) {
+      .topbar-tagline { display: none; }
+    }
+    /* 960 rather than 860: at 900 the status caption still wrapped to 43px
+       inside the 44px bar, which reads as a rendering fault rather than a
+       caption. Measured, not guessed. */
+    @media (max-width: 960px) {
+      .topbar-status { display: none; }
+    }
 
     /* ── Sidebar (Ostiari-style: white, colored section borders) ── */
     .sidebar {
@@ -2920,7 +2952,24 @@
                 <div className="topbar-status"><div className="dot"></div>AxonLLM — The neural control plane for enterprise LLMs</div>
               </div>
               <div className="topbar-right">
-                <div style={{borderRadius: '999px', background: 'rgba(255,255,255,0.6)', border: '1px solid rgba(214,211,209,0.5)', padding: '0.2rem 0.75rem'}}>
+                {/* Absolute, not relative: the dashboard is served from
+                    /admin/dashboard, so "architecture.html" would resolve to
+                    /admin/architecture.html and 404. Leading slash hits the
+                    site route, which serves it on any host the gateway runs on
+                    — no origin baked in. */}
+                <a className="topbar-pill" href="/architecture.html"
+                   target="_blank" rel="noopener"
+                   title="Interactive architecture diagrams — infrastructure, request pipeline, components">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
+                       strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <rect x="3" y="3" width="7" height="7" rx="1"></rect>
+                    <rect x="14" y="3" width="7" height="7" rx="1"></rect>
+                    <rect x="14" y="14" width="7" height="7" rx="1"></rect>
+                    <rect x="3" y="14" width="7" height="7" rx="1"></rect>
+                  </svg>
+                  Interactive Architecture
+                </a>
+                <div className="topbar-tagline" style={{borderRadius: '999px', background: 'rgba(255,255,255,0.6)', border: '1px solid rgba(214,211,209,0.5)', padding: '0.2rem 0.75rem'}}>
                   <span style={{fontSize: '10px', color: '#78716c'}}>Multi-provider routing · Real-time analytics</span>
                 </div>
               </div>

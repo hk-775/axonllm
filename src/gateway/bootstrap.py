@@ -412,9 +412,12 @@ def build_starlette_app(app_config: AppConfig | None = None) -> Starlette:
         pricing_path=app_config.pricing_config_path,
         catalog_path=app_config.catalog_config_path,
         # For the production-readiness checklist: the settings this process booted
-        # with, and the providers whose credentials actually loaded.
+        # with, the providers whose credentials actually loaded, and the key
+        # service, so the checklist can report the scopes and expiry of issued
+        # keys rather than assume they are bounded.
         app_config=app_config,
         provider_configs=comp.provider_configs,
+        api_key_service=comp.api_key_service,
     )
 
     # Key, policy, audit, webhook, region, and quota admin APIs

@@ -35,16 +35,75 @@ SITE_ASSET_TYPES = {
     ".html": "text/html",
     ".svg": "image/svg+xml",
     ".drawio": "application/xml",
-    # The narrated walkthrough the landing page's ribbon opens. Served out of
-    # site/ rather than embedded in the page so the gateway and the S3 bucket
-    # hand out the same one asset, and so a visitor who never opens it never
-    # downloads it.
+    # The product demo the landing page's ribbon opens. Served out of site/
+    # rather than embedded in the page so the gateway and the S3 bucket hand out
+    # the same one asset, and so a visitor who never opens it never downloads it.
     ".mp4": "video/mp4",
     # Its captions. A <track> whose src 404s fails silently — the video plays
     # with the CC button doing nothing — so this belongs next to the .mp4 rather
     # than being noticed later by someone watching muted.
     ".vtt": "text/vtt",
+    # The architecture walkthrough: the MP3s Polly generated and the JSON the
+    # page reads its transcript and durations from.
+    ".mp3": "audio/mpeg",
+    ".json": "application/json",
 }
+
+# Subdirectories of site/ that ``site_asset`` will serve into, named rather than
+# reached by relaxing the depth check: site/infra/ is the CDK app, and any rule
+# phrased as "one level down is fine" would have handed it out.
+SITE_ASSET_DIRS = frozenset({"narration"})
+
+
+def _parse_byte_range(header: str | None, size: int) -> tuple[int | None, int | None]:
+    """Parse a Range header into inclusive (start, end), or (None, None).
+
+    Returns (None, None) for anything not understood, which the caller answers
+    with a plain 200 — the spec's own advice, and the behaviour a media element
+    copes with. Only a single ``bytes=`` range is handled: multipart/byteranges
+    exists for image tiles and PDF viewers, and no browser asks for it when
+    seeking audio.
+
+    A range that starts past the end is also treated as unparseable rather than
+    answered with 416. The caller holds the whole file in memory, so the honest
+    response to "give me byte 900000 of an 800000-byte file" is the file.
+    """
+    if not header or not header.startswith("bytes=") or size == 0:
+        return None, None
+    spec = header[6:].strip()
+    if "," in spec:
+        return None, None
+    first, _, last = spec.partition("-")
+    try:
+        if not first:
+            # "bytes=-500" — the trailing N bytes.
+            if not last:
+                return None, None
+            start, end = max(0, size - int(last)), size - 1
+        else:
+            start = int(first)
+            end = int(last) if last else size - 1
+    except ValueError:
+        return None, None
+    end = min(end, size - 1)
+    if start > end or start >= size or start < 0:
+        return None, None
+    return start, end
+
+
+def _is_servable_site_path(inside: pathlib.PurePath) -> bool:
+    """Whether ``inside`` — a path already proven to be under site/ — is public.
+
+    Shared with the auth middleware, which must exempt exactly the set this
+    admits. Written against a relative path rather than a URL so the traversal
+    check stays where it belongs: the caller resolves first, this only decides.
+    """
+    if inside.suffix.lower() not in SITE_ASSET_TYPES:
+        return False
+    if len(inside.parts) == 1:
+        return True
+    return len(inside.parts) == 2 and inside.parts[0] in SITE_ASSET_DIRS
+
 
 from src.gateway.admin.catalog_drift import audit_catalog, render_catalog_drift_page
 from src.gateway.admin.pricing_drift import audit_pricing, render_drift_page
@@ -145,6 +204,7 @@ class AdminAPI:
         catalog_path: str = "config/catalog.yaml",
         app_config: AppConfig | None = None,
         provider_configs: dict[str, ProviderConfig] | None = None,
+        api_key_service: object | None = None,
     ) -> None:
         self.cost_tracker = cost_tracker
         self.health_tracker = health_tracker
@@ -175,6 +235,10 @@ class AdminAPI:
         # Providers with credentials actually loaded. load_provider_configs drops
         # the rest, so this doubles as the credential check's input.
         self._provider_configs: dict[str, ProviderConfig] = provider_configs or {}
+        # Read-only, and only by the production checklist, to report the scopes
+        # and expiry of issued keys. Optional: when absent that check reports
+        # UNKNOWN rather than passing, since unverified is not the same as clean.
+        self._api_key_service = api_key_service
 
     # ------------------------------------------------------------------
     # GET /admin/overview
@@ -1559,35 +1623,63 @@ class AdminAPI:
         this route the nav would work on the deployed site and 404 on every
         self-hosted gateway.
 
-        Deliberately restricted: only files sitting directly in ``site/``, and
-        only the three suffixes the pages actually reference. ``site/infra/``
-        holds the CDK app (Python source, deploy config) and must not be
-        readable over HTTP, so the depth check matters as much as the traversal
-        check below it.
+        Deliberately restricted: only the suffixes in ``SITE_ASSET_TYPES``, and
+        only files sitting directly in ``site/`` or in one of the directories
+        named in ``SITE_ASSET_DIRS``. ``site/infra/`` holds the CDK app (Python
+        source, deploy config) and must not be readable over HTTP, so the depth
+        check matters as much as the traversal check below it — and the allowed
+        subdirectories are listed by name rather than admitted by depth, so
+        adding one is a decision rather than a side effect.
 
-        Registered last of all routes (see ``bootstrap.build_app``) because the
-        pattern is a bare single segment — ahead of the other factories it would
-        shadow ``/chat``, ``/playground`` and ``/routing``.
+        Registered last of all routes (see ``bootstrap.build_app``) because one
+        of its patterns is a bare single segment — ahead of the other factories
+        it would shadow ``/chat``, ``/playground`` and ``/routing``.
+
+        Serves byte ranges. Without them a browser reports ``audio.seekable`` as
+        an empty range and refuses to seek at all, so the narration player's
+        scrub bar would move and the audio would not — measured, not assumed.
+        S3 serves ranges, so omitting them here would also make the gateway a
+        worse demo than the deployed site.
         """
         from starlette.responses import PlainTextResponse, Response
 
         site_dir = _PROJECT_ROOT / "site"
-        rel = request.path_params.get("path", "")
+        # Read off the URL rather than the path params: two route shapes reach
+        # this handler (a file in site/, and a file one level down), and the URL
+        # is the same string both times. Nothing is percent-decoded on the way,
+        # so an encoded traversal stays an ordinary filename that simply is not
+        # there — it 404s on is_file() below rather than escaping the checks.
+        rel = request.url.path.lstrip("/")
 
         target = (site_dir / rel).resolve()
         try:
             inside = target.relative_to(site_dir.resolve())
         except ValueError:
             return PlainTextResponse("Not found", status_code=404)
-        if len(inside.parts) != 1 or target.suffix.lower() not in SITE_ASSET_TYPES:
+        if not _is_servable_site_path(inside):
             return PlainTextResponse("Not found", status_code=404)
         if not target.is_file():
             return PlainTextResponse("Not found", status_code=404)
 
+        body = target.read_bytes()
+        media_type = SITE_ASSET_TYPES[target.suffix.lower()]
+        headers = {
+            "Cache-Control": "public, max-age=3600",
+            # Advertised unconditionally: a browser that gets no Accept-Ranges
+            # treats the resource as unseekable even if a Range would have
+            # worked, and the whole file is already in memory either way.
+            "Accept-Ranges": "bytes",
+        }
+
+        start, end = _parse_byte_range(request.headers.get("range"), len(body))
+        if start is None:
+            return Response(body, media_type=media_type, headers=headers)
+        headers["Content-Range"] = f"bytes {start}-{end}/{len(body)}"
         return Response(
-            target.read_bytes(),
-            media_type=SITE_ASSET_TYPES[target.suffix.lower()],
-            headers={"Cache-Control": "public, max-age=3600"},
+            body[start : end + 1],
+            status_code=206,
+            media_type=media_type,
+            headers=headers,
         )
 
     async def pricing_drift(self, request: Request) -> HTMLResponse:
@@ -1649,6 +1741,8 @@ class AdminAPI:
             pricing_config=self.cost_tracker.pricing_config,
             provider_configs=self._provider_configs,
             persistence=self._persistence,
+            api_key_service=self._api_key_service,
+            project_ids=list(self.projects),
         )
         return HTMLResponse(
             render_checklist_page(report, embed=_is_embedded(request))
@@ -1731,12 +1825,21 @@ def create_admin_routes(admin_api: AdminAPI) -> list[Route]:
 
 
 def create_site_routes(admin_api: AdminAPI) -> list[Route]:
-    """Return the catch-all route for the marketing site's static files.
+    """Return the catch-all routes for the marketing site's static files.
 
     Separate from ``create_admin_routes`` because ``/{path}`` is a bare single
     segment and Starlette matches in order: registered alongside the admin
     routes it would shadow ``/chat``, ``/playground`` and ``/routing``. Keeping
     it in its own factory makes "must be appended last" something the call site
     shows rather than something a comment asks you to remember.
+
+    Two patterns rather than a ``{path:path}`` convertor: that one also matches
+    ``/admin/projects`` and every other multi-segment route, which would make
+    the ordering requirement above cover the whole application rather than three
+    single-segment pages. Depth is bounded by the pattern, and the handler
+    re-checks it anyway.
     """
-    return [Route("/{path}", admin_api.site_asset, methods=["GET"])]
+    return [
+        Route("/{path}", admin_api.site_asset, methods=["GET"]),
+        Route("/{directory}/{path}", admin_api.site_asset, methods=["GET"]),
+    ]
