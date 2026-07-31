@@ -1398,3 +1398,285 @@ class TestArchitecturePage:
             assert ":path" not in path, f"{path} matches unbounded depth"
         admin_paths = {r.path for r in create_admin_routes(admin_api)}
         assert not site_paths & admin_paths, site_paths & admin_paths
+
+
+class TestDemoInTheRibbon:
+    """The narrated walkthrough the ribbon's Demo button opens.
+
+    Two failure modes worth pinning: the video and its captions are new suffixes
+    in SITE_ASSET_TYPES, and an unserved one is silent — the dialog opens on a
+    black box, or the CC button does nothing. Nothing builds site/, so a renamed
+    file breaks at runtime only.
+    """
+
+    @pytest.fixture
+    def site_client(self, admin_api):
+        from src.gateway.admin.routes import create_site_routes
+
+        app = Starlette(routes=create_admin_routes(admin_api) + create_site_routes(admin_api))
+        return TestClient(app, raise_server_exceptions=False)
+
+    def test_the_ribbon_opens_the_dialog(self, client):
+        """A <button> rather than an <a>: it opens a dialog, it does not navigate.
+
+        Also guards the pairing — the button's data-demo-open is what the script
+        binds, so a renamed attribute leaves a button that does nothing.
+        """
+        html = client.get("/").text
+        assert "data-demo-open" in html
+        assert '<dialog class="demo-modal" id="demo-modal"' in html
+        assert "showModal()" in html
+
+    def test_the_video_and_captions_are_served(self, site_client):
+        """Both are referenced by the dialog and both are new suffixes."""
+        for path, ctype in (
+            ("/axonllm-demo.mp4", "video/mp4"),
+            ("/axonllm-demo.vtt", "text/vtt"),
+        ):
+            r = site_client.get(path)
+            assert r.status_code == 200, f"{path} is referenced but not served"
+            # Prefix, not equality: text/* picks up a charset parameter.
+            assert r.headers["content-type"].startswith(ctype)
+
+    def test_the_captions_are_a_valid_vtt(self, site_client):
+        """A <track> whose file is malformed fails as silently as a 404 does."""
+        body = site_client.get("/axonllm-demo.vtt").text
+        assert body.startswith("WEBVTT"), "a VTT without the magic line is ignored"
+        assert "-->" in body, "no cue timings"
+
+    def test_the_video_is_not_fetched_until_the_dialog_opens(self, client):
+        """~5.7MB against a landing page most visitors never press play on.
+
+        The src is assigned by the open handler, so a src attribute in the markup
+        would mean every visit downloads the video whatever preload says.
+        """
+        import re
+
+        html = client.get("/").text
+        video = re.search(r"<video[^>]*id=\"demo-video\"[^>]*>", html)
+        assert video, "the dialog has no video element"
+        assert "src=" not in video.group(0), "the video is fetched on page load"
+        assert 'preload="none"' in video.group(0)
+
+    def test_opening_the_dialog_does_not_start_the_video(self, client):
+        """Opening and playing are two decisions, and the open handler makes one.
+
+        The failure this prevents is a demo that begins narrating while the
+        presenter is still introducing it. Asserted against the open handler's
+        own body rather than the whole page, because there IS a play() call on
+        the page now — the overlay button's — and a document-wide search for it
+        would pass no matter which handler held it.
+        """
+        import re
+
+        html = client.get("/").text
+        opener = re.search(
+            r"\[data-demo-open\]'\).forEach\(btn => \{(.+?)\n    \}\);", html, re.S
+        )
+        assert opener, "the open handler is gone or was reshaped"
+        assert "play()" not in opener.group(1), "opening the dialog autoplays"
+
+    def test_the_dialog_has_a_play_button_the_script_binds(self, client):
+        """Without autostart, this button is the only way in.
+
+        Pairs the markup with the handler: a renamed attribute on either side
+        leaves a dialog holding a video that cannot be started, which no other
+        test here would catch now that the open handler deliberately does not.
+        """
+        html = client.get("/").text
+        assert 'class="demo-modal-play" data-demo-play' in html, "no play button"
+        assert "[data-demo-play]" in html, "the play button is not wired up"
+        assert "aria-label=\"Play the demo\"" in html, "unlabelled icon button"
+
+    def test_the_play_overlay_tracks_the_native_controls(self, client):
+        """The video has `controls`, so it can be played without our button.
+
+        If the overlay hid only on our own click it would sit over the picture
+        the moment someone used the native control bar instead — hence the
+        listeners. 'ended' too: it does not imply 'pause' everywhere, and a
+        finished demo is exactly when someone reaches to replay it.
+        """
+        html = client.get("/").text
+        for event in ("'play'", "'pause'", "'ended'"):
+            assert f"video.addEventListener({event}" in html, f"no {event} handler"
+        assert "[data-playing] .demo-modal-play { display: none; }" in html
+
+    def test_the_play_overlay_does_not_cover_the_scrubber(self, client):
+        """A wrapper spanning the frame would swallow clicks on the controls.
+
+        Centring via translate keeps the target to its own 76px, so the video
+        can be seeked as well as started. The symptom of getting this wrong is
+        subtle — the demo plays, and the scrub bar simply never responds.
+        """
+        import re
+
+        css = re.search(
+            r"\.demo-modal-play \{(.+?)\n\s*\}\n", client.get("/").text, re.S
+        )
+        assert css, "the .demo-modal-play rule is gone"
+        rule = css.group(1)
+        assert "translate(-50%, -50%)" in rule, "not centred by transform"
+        assert re.search(r"width:\s*76px", rule), "the target is no longer bounded"
+        assert "width: 100%" not in rule, "the overlay spans the frame"
+
+    def test_the_backdrop_check_ignores_keyboard_clicks(self, client):
+        """Enter on a button inside the dialog arrives as a click at 0,0.
+
+        Which is outside any centred dialog, so the backdrop-dismiss check reads
+        it as "clicked the backdrop" and closes — and the close handler pauses
+        the video, so play() aborts. Verified in Chromium: pressing Enter on the
+        play button dismissed the demo instead of starting it. `detail` is 0 for
+        a synthesized click and >= 1 for a real pointer, which separates them.
+        """
+        html = client.get("/").text
+        assert "if (!e.detail) return;" in html, (
+            "keyboard activation will be treated as a backdrop click"
+        )
+
+    def test_closing_the_dialog_pauses_the_video(self, client):
+        """Escape closes a dialog without going through the close button.
+
+        Bound on the dialog's own close event rather than the button's click, so
+        Escape and the button both stop the audio; otherwise a dismissed dialog
+        keeps narrating from nowhere.
+        """
+        html = client.get("/").text
+        assert "addEventListener('close'" in html
+
+    def test_the_dialog_is_centred_despite_the_reset(self, client):
+        """`* { margin: 0 }` overrides the UA stylesheet's dialog { margin: auto }.
+
+        Which is precisely what centres a modal dialog, so without restoring it
+        the dialog pins to the top-left corner over the nav. Cheap to assert,
+        and the symptom is the whole feature looking broken.
+        """
+        import re
+
+        # Up to the next selector rather than the next `}` — the rule's own
+        # comments quote CSS braces, which a lazy `.+?}` stops inside.
+        css = re.search(r"\.demo-modal \{(.+?)\n\s*\}\n", client.get("/").text, re.S)
+        assert css, "the .demo-modal rule is gone"
+        assert "margin: auto" in css.group(1)
+
+    def test_the_ribbon_has_room_for_the_extra_button(self, client):
+        """Adding a fifth item to the ribbon is a width budget, not a free action.
+
+        The container is 1200px with 24px of padding each side — a 1152px content
+        box — and the row is logo + links + buttons with nowrap, so anything that
+        does not fit closes the gaps rather than wrapping. Measured in Chrome at
+        18px of button padding and a 26px link gap the row came to 1149px, which
+        left space-between 3px to distribute and put the logo flush against the
+        first link. This asserts the two values that bought the room back, since
+        the arithmetic is invisible in the CSS itself.
+        """
+        import re
+
+        html = client.get("/").text
+        cta = re.search(r"\.nav-cta \{(.+?)\}", html, re.S)
+        assert cta, "the .nav-cta rule is gone"
+        pad = re.search(r"padding:\s*\d+px\s+(\d+)px", cta.group(1))
+        assert pad and int(pad.group(1)) <= 14, (
+            f"nav button side padding is {pad and pad.group(1)}px; four buttons "
+            "means every px costs 8px of row"
+        )
+        links = re.search(r"\.nav-links \{(.+?)\}", html, re.S)
+        gap = re.search(r"gap:\s*(\d+)px", links.group(1))
+        assert gap and int(gap.group(1)) <= 20, f"link gap is {gap and gap.group(1)}px"
+        assert "white-space: nowrap" in links.group(1), (
+            "without nowrap the shortfall is taken out of the links, which wrap "
+            "to two lines and grow the nav from 73px to 84px"
+        )
+
+    def test_the_links_drop_before_they_touch_the_buttons(self, client):
+        """Below 1200px the container narrows but the ribbon's contents do not.
+
+        Measured: 37px of gap at 1200px, closing 10px per 20px of viewport, so it
+        reaches the container's own 24px padding rhythm just under 1180 — which is
+        where the first two links have to go. A breakpoint left at the old 1150px
+        would show a 17px gap first.
+        """
+        import re
+
+        html = client.get("/").text
+        widths = [int(w) for w in re.findall(r"@media \(max-width: (\d+)px\)", html)]
+        assert 1180 in widths, (
+            f"no breakpoint at 1180px, where the gaps hit 24px; found {sorted(set(widths))}"
+        )
+
+
+class TestLandingPageStatBand:
+    """The four numbers under the hero, each a claim about the source.
+
+    These went stale unnoticed: the band read 1,574 tests against a real 1,716,
+    and 5 routing strategies against a six-member enum. A number nobody checks
+    is a number that drifts, and on the page a customer reads first. Derived from
+    the source here rather than eyeballed, the same way the architecture page's
+    step numbers are.
+    """
+
+    @pytest.fixture
+    def band(self, client):
+        import re
+
+        html = client.get("/").text
+        pairs = re.findall(
+            r'<div class="stat-num">([^<]+)</div>\s*<div class="stat-label">([^<]+)</div>',
+            html,
+        )
+        assert pairs, "the stat band is gone"
+        return {label: int(num.replace(",", "")) for num, label in pairs}
+
+    def test_provider_adapters(self, band):
+        """One module per provider. base/style/registry helpers are not adapters."""
+        import pathlib
+
+        d = pathlib.Path(__file__).resolve().parents[2] / "src" / "gateway" / "adapters"
+        adapters = {
+            p.stem
+            for p in d.glob("*_adapter.py")
+            if p.stem not in {"base", "registry"}
+        }
+        assert band["Provider adapters"] == len(adapters), sorted(adapters)
+
+    def test_models_routed(self, band):
+        import pathlib
+
+        import yaml
+
+        cat = pathlib.Path(__file__).resolve().parents[2] / "config" / "models.yaml"
+        models = yaml.safe_load(cat.read_text(encoding="utf-8"))["models"]
+        assert band["Models routed"] == len(models)
+
+    def test_routing_strategies(self, band):
+        """RoutingStrategy is the definition; the page cannot claim fewer."""
+        from src.gateway.models import RoutingStrategy
+
+        assert band["Routing strategies"] == len(RoutingStrategy)
+
+    def test_tests_passing_is_not_stale(self, band):
+        """The number of `def test_` is a floor the claim must clear.
+
+        A floor and not equality, because parametrize expands one function into
+        several cases: 1,716 collect from 1,639 definitions, and grep cannot see
+        the difference. That makes this a staleness check rather than a ceiling —
+        which is the failure this actually had, the band sitting at 1,574 while
+        the suite had grown past 1,600 definitions.
+        """
+        import pathlib
+        import re
+
+        root = pathlib.Path(__file__).resolve().parents[2]
+        defined = sum(
+            len(re.findall(r"^\s*(?:async )?def test_", p.read_text(encoding="utf-8"), re.M))
+            for p in (root / "tests").rglob("test_*.py")
+        )
+        claimed = band["Tests passing"]
+        assert claimed >= defined, (
+            f"the page claims {claimed} tests passing against {defined} test "
+            "functions, before parametrize expands them — the band is stale"
+        )
+        # Not so far ahead of the definitions that it cannot be real either:
+        # parametrize inflates the count, but not by half.
+        assert claimed <= defined * 1.5, (
+            f"the page claims {claimed} against only {defined} test functions"
+        )

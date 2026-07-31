@@ -116,8 +116,18 @@
 
         .nav-links {
             display: flex;
-            gap: 32px;
+            gap: 20px;
             list-style: none;
+            /* The row is a fixed budget, and it is the *content* box that
+               matters: a 1200px container with 24px padding each side leaves
+               1152px, not 1200. Logo 130 + links + buttons must land near
+               1075px, so space-between has ~38px to put either side of the
+               links; at 1149px it had 3px and the logo sat against "How It
+               Works". nowrap keeps the shortfall from being taken out of the
+               links, which otherwise wrap to two lines each and grow the nav
+               from 73px to 84px. */
+            flex-shrink: 0;
+            white-space: nowrap;
         }
 
         .nav-links a {
@@ -130,11 +140,14 @@
 
         .nav-links a:hover { color: var(--text); }
 
+        /* 14px of side padding rather than 18: four buttons in the group means
+           every padding change costs or buys 8x itself, and 32px across the
+           group is the difference between the links having room and touching. */
         .nav-cta {
             display: inline-flex;
             align-items: center;
-            gap: 8px;
-            padding: 8px 18px;
+            gap: 7px;
+            padding: 8px 14px;
             background: var(--accent);
             color: #fff;
             border-radius: 8px;
@@ -148,6 +161,130 @@
             background: var(--accent-hover);
             box-shadow: 0 4px 12px rgba(124, 58, 237, 0.2);
         }
+
+        /* The demo trigger. A <button> rather than an <a>, because it opens a
+           dialog rather than navigating — so it reaches keyboard users on Space
+           as well as Enter, and needs the type/border/font reset a UA stylesheet
+           applies to buttons but not links. */
+        .nav-cta-demo {
+            background: var(--accent-soft);
+            color: var(--accent-hover);
+            border: 1px solid rgba(139, 92, 246, 0.35);
+            font-family: inherit;
+            cursor: pointer;
+        }
+
+        .nav-cta-demo:hover {
+            background: var(--accent);
+            border-color: var(--accent);
+            color: #fff;
+            box-shadow: 0 4px 12px rgba(124, 58, 237, 0.2);
+        }
+
+        /* ── The demo dialog ──────────────────────────────────────────────
+           A real <dialog>: the browser handles the top layer, the backdrop, the
+           focus trap and Escape, none of which a div-with-z-index gets right. */
+        .demo-modal {
+            /* Third term keeps a 16:9 box inside a short viewport: without it a
+               1120px-wide dialog is 630px tall and overhangs a 600px window. */
+            width: min(1120px, 92vw, (100vh - 80px) * 16 / 9);
+            padding: 0;
+            /* Restores what the UA stylesheet gives a modal dialog and the
+               `* { margin: 0 }` reset above takes away. Centring a dialog is
+               margin:auto against inset:0 — without it the reset pins it to the
+               top-left corner, over the nav. */
+            margin: auto;
+            /* Also the containing block for the close button's absolute
+               positioning, so it lands on the video's corner. */
+            position: fixed;
+            inset: 0;
+            height: fit-content;
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            background: #0c0a09;   /* letterbox bars match the video, not the page */
+            overflow: hidden;
+            box-shadow: 0 24px 60px rgba(12, 10, 9, 0.4);
+        }
+
+        .demo-modal::backdrop {
+            background: rgba(12, 10, 9, 0.72);
+            backdrop-filter: blur(3px);
+        }
+
+        .demo-modal video {
+            display: block;
+            width: 100%;
+            aspect-ratio: 16 / 9;
+            background: #0c0a09;
+        }
+
+        /* Absolute against the dialog, which is positioned above — otherwise it
+           resolves against the initial containing block and lands in the page's
+           top-right corner rather than the video's. */
+        .demo-modal-close {
+            position: absolute;
+            top: 10px;
+            right: 12px;
+            width: 32px;
+            height: 32px;
+            display: grid;
+            place-items: center;
+            border: 0;
+            border-radius: 8px;
+            background: rgba(12, 10, 9, 0.55);
+            color: #fff;
+            font-size: 18px;
+            line-height: 1;
+            cursor: pointer;
+        }
+
+        .demo-modal-close:hover { background: rgba(12, 10, 9, 0.85); }
+
+        /* Opening the dialog no longer starts the video — this is what starts
+           it. A 76px target in the middle of the frame rather than the ~20px
+           triangle in the native control bar, because the person reaching for
+           it is usually presenting to a room and pointing at a projector.
+
+           Centred with translate rather than by a flex wrapper spanning the
+           frame: such a wrapper would also cover the native control bar and
+           swallow clicks on the scrubber, so the video could be started but
+           never seeked. */
+        .demo-modal-play {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: 76px;
+            height: 76px;
+            display: grid;
+            place-items: center;
+            border: 1px solid rgba(255, 255, 255, 0.35);
+            border-radius: 999px;
+            background: rgba(12, 10, 9, 0.62);
+            color: #fff;
+            cursor: pointer;
+            transition: background 0.15s, transform 0.15s;
+        }
+
+        .demo-modal-play:hover,
+        .demo-modal-play:focus-visible {
+            background: var(--accent, #7c3aed);
+            transform: translate(-50%, -50%) scale(1.06);
+        }
+
+        /* Against the video, not the page background, so it stays visible on
+           the letterboxed black frame. */
+        .demo-modal-play:focus-visible { outline: 2px solid #fff; outline-offset: 3px; }
+
+        /* The glyph is nudged right by a third of its width: a triangle's
+           optical centre sits left of its bounding box, so a centred polygon
+           reads as off-centre inside a circle. */
+        .demo-modal-play svg { width: 30px; height: 30px; margin-left: 4px; }
+
+        /* Hidden while the video runs so it does not sit over the picture. It
+           returns on pause, which is what a presenter who paused to talk over a
+           frame then reaches for. */
+        .demo-modal[data-playing] .demo-modal-play { display: none; }
 
         .hero {
             padding: 160px 0 100px;
@@ -797,8 +934,29 @@
 
         footer a:hover { color: var(--text); }
 
-        @media (max-width: 768px) {
+        /* Below 1200px the container narrows but the ribbon's contents do not,
+           so the gaps close at a fixed rate: measured, 37px at 1200 shrinking
+           10px per 20px of viewport, reaching the container's own 24px padding
+           rhythm just under 1180. Drop the two least-load-bearing links there —
+           both are anchors to sections a visitor scrolls past anyway — which
+           buys 152px and keeps Demo, Docs, Dashboard and GitHub intact, since
+           those are the only ways off this page. */
+        @media (max-width: 1180px) {
+            .nav-links li:nth-child(5),   /* Silent Failures */
+            .nav-links li:nth-child(1) {  /* How It Works */
+                display: none;
+            }
+        }
+
+        /* And here the same 24px floor arrives for the remaining four links:
+           measured 31px of gap at 960px, so below it they would touch the
+           buttons. The buttons stay; they are the navigation that matters. */
+        @media (max-width: 950px) {
             .nav-links { display: none; }
+        }
+
+        @media (max-width: 768px) {
+            /* .nav-links is already hidden by the 950px rule above. */
             /* Scaled as a set, so the tagline keeps matching the top line's
                width rather than overrunning it on a narrow viewport, and the
                headline keeps yielding to the wordmark. Same four ratios as
@@ -850,7 +1008,22 @@
             <li><a href="#silent">Silent Failures</a></li>
             <li><a href="architecture.html">Architecture</a></li>
         </ul>
-        <div style="display:flex;gap:10px;align-items:center;">
+        <div style="display:flex;gap:8px;align-items:center;flex-shrink:0;">
+            <!-- Ahead of Docs and Dashboard: it is the shortest path to
+                 understanding the product, and the only ribbon item that
+                 explains itself. Tinted rather than a bordered outline like
+                 Docs and GitHub so it reads as the one thing to try, without
+                 competing with the solid Dashboard button beside it.
+
+                 "Demo" and not "Watch demo · 2:13": the ribbon is a fixed
+                 budget and the long label measured 178px, the widest item in
+                 the row, which pushed the six nav links into wrapping. The
+                 runtime moved to the tooltip, where it costs no width. -->
+            <button type="button" class="nav-cta nav-cta-demo" data-demo-open
+                    title="Watch the 2-minute product demo">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5.14v13.72a1 1 0 0 0 1.52.86l11.14-6.86a1 1 0 0 0 0-1.72L9.52 4.28A1 1 0 0 0 8 5.14z"/></svg>
+                Demo
+            </button>
             <a href="https://github.com/aws-samples/sample-axonllm#readme" class="nav-cta" style="background:var(--surface);color:var(--text);border:1px solid var(--border);">
                 Docs
             </a>
@@ -925,11 +1098,11 @@
                 <div class="stat-label">Models routed</div>
             </div>
             <div class="stat">
-                <div class="stat-num">5</div>
+                <div class="stat-num">6</div>
                 <div class="stat-label">Routing strategies</div>
             </div>
             <div class="stat">
-                <div class="stat-num">1,703</div>
+                <div class="stat-num">1,749</div>
                 <div class="stat-label">Tests passing</div>
             </div>
         </div>
@@ -1212,6 +1385,31 @@ resp = client.chat.completions.create(
     </div>
 </footer>
 
+<!-- No `src` and no `preload` until the dialog is opened: the file is ~5.7MB and
+     most visitors never press play, so naming it here would cost every one of
+     them the download. The script sets src on first open. -->
+<dialog class="demo-modal" id="demo-modal" aria-label="AxonLLM product demo">
+    <button type="button" class="demo-modal-close" data-demo-close aria-label="Close demo">&times;</button>
+    <!-- After the <video> in the DOM would be tidier, but this must come before
+         it so the close button stays the first thing Tab reaches: Escape aside,
+         a keyboard user who cannot find the way out of a modal is stuck. -->
+    <button type="button" class="demo-modal-play" data-demo-play aria-label="Play the demo">
+        <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <polygon points="6 4 20 12 6 20 6 4"></polygon>
+        </svg>
+    </button>
+    <video id="demo-video" controls preload="none" playsinline
+           poster="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 9'%3E%3Crect width='16' height='9' fill='%230c0a09'/%3E%3C/svg%3E">
+        <!-- Cue timings are the measured MP3 lengths the encoder set each
+             scene's frame rate from, so the captions cannot drift from the
+             voice. `default` because the demo is watched muted more often than
+             not — in a meeting, on a laptop in an office. -->
+        <track kind="captions" src="axonllm-demo.vtt" srclang="en" label="English" default>
+        Your browser cannot play this video.
+        <a href="axonllm-demo.mp4">Download it instead.</a>
+    </video>
+</dialog>
+
 <script>
 document.querySelectorAll('.install-cmd').forEach(el => {
     el.addEventListener('click', () => {
@@ -1221,6 +1419,70 @@ document.querySelectorAll('.install-cmd').forEach(el => {
         setTimeout(() => { code.textContent = orig; }, 1500);
     });
 });
+
+// ── Demo dialog ──────────────────────────────────────────────────────────
+(() => {
+    const modal = document.getElementById('demo-modal');
+    const video = document.getElementById('demo-video');
+    if (!modal || !video || typeof modal.showModal !== 'function') return;
+
+    document.querySelectorAll('[data-demo-open]').forEach(btn => {
+        btn.addEventListener('click', () => {
+            // Assigned on first open, not in the markup: see the comment on the
+            // <dialog>. Guarded so reopening does not reload and restart it.
+            if (!video.getAttribute('src')) video.setAttribute('src', 'axonllm-demo.mp4');
+            modal.showModal();
+            // Deliberately does NOT play. Opening the dialog and starting the
+            // narration are two decisions: someone demoing in a meeting opens
+            // this while still talking, and audio that begins on its own talks
+            // over them. The overlay button below is the second decision.
+        });
+    });
+
+    document.querySelectorAll('[data-demo-play]').forEach(btn => {
+        btn.addEventListener('click', () => {
+            // A rejection here is a missing file rather than the autoplay
+            // policy — this is inside a click. Either way the overlay must come
+            // back rather than leaving a frame with no way to start it, which
+            // the 'pause' listener below handles.
+            video.play().catch(() => {});
+        });
+    });
+
+    // Driven by the events, not set alongside the calls above: the native
+    // control bar can play and pause too, and an overlay tracking only our own
+    // button would sit over a running video the moment someone used it.
+    video.addEventListener('play', () => { modal.dataset.playing = ''; });
+    video.addEventListener('pause', () => { delete modal.dataset.playing; });
+    // 'ended' does not imply 'pause' on every engine, so the overlay is
+    // restored here as well — a finished demo is the case where someone most
+    // wants to replay it.
+    video.addEventListener('ended', () => { delete modal.dataset.playing; });
+
+    document.querySelectorAll('[data-demo-close]').forEach(btn => {
+        btn.addEventListener('click', () => modal.close());
+    });
+
+    // Click the backdrop to dismiss. The backdrop is not its own element, so
+    // the test is whether the click landed outside the dialog's box rather than
+    // on a child of it.
+    modal.addEventListener('click', e => {
+        // Keyboard activation of a button inside the dialog also arrives here
+        // as a click, with detail 0 and coordinates 0,0 — which is outside any
+        // centred dialog, so without this guard pressing Enter on the play
+        // button dismisses the demo instead of starting it. A real pointer
+        // click always carries detail >= 1.
+        if (!e.detail) return;
+        const r = modal.getBoundingClientRect();
+        const outside = e.clientX < r.left || e.clientX > r.right ||
+                        e.clientY < r.top || e.clientY > r.bottom;
+        if (outside) modal.close();
+    });
+
+    // Covers Escape and the close button alike — `close` fires for both, so the
+    // video cannot be left playing to an invisible dialog.
+    modal.addEventListener('close', () => video.pause());
+})();
 </script>
 
 </body>

@@ -35,8 +35,16 @@ SITE_ASSET_TYPES = {
     ".html": "text/html",
     ".svg": "image/svg+xml",
     ".drawio": "application/xml",
-    # The narrated walkthrough: the MP3s Polly generated and the JSON the page
-    # reads its transcript and durations from.
+    # The product demo the landing page's ribbon opens. Served out of site/
+    # rather than embedded in the page so the gateway and the S3 bucket hand out
+    # the same one asset, and so a visitor who never opens it never downloads it.
+    ".mp4": "video/mp4",
+    # Its captions. A <track> whose src 404s fails silently — the video plays
+    # with the CC button doing nothing — so this belongs next to the .mp4 rather
+    # than being noticed later by someone watching muted.
+    ".vtt": "text/vtt",
+    # The architecture walkthrough: the MP3s Polly generated and the JSON the
+    # page reads its transcript and durations from.
     ".mp3": "audio/mpeg",
     ".json": "application/json",
 }
