@@ -129,3 +129,70 @@ class TestPIIRedactionCascade:
         assert set(policy.pii_redact_types) == {
             "email", "ssn", "credit_card", "phone", "aws_account_id"
         }
+
+
+class TestNERCascade:
+    """Entity detection cascades like redaction, but is a separate switch.
+
+    Separate because it calls a paid per-request service: a parent that enables
+    regex redaction must not silently start billing every child.
+    """
+
+    def test_ner_is_off_by_default(self, resolver, persistence):
+        org = PolicyNode("org:acme", "org", None, "Acme",
+                         limits={"pii_redaction_enabled": True, "pii_redact_types": ["email"]})
+        _run(persistence.save_policy_node(org))
+        policy = _run(resolver.resolve("org:acme"))
+        assert policy.pii_redaction_enabled is True
+        # Enabling redaction must NOT enable entity detection.
+        assert policy.pii_ner_enabled is False
+        assert policy.pii_ner_types is None
+
+    def test_org_enables_ner_for_all_children(self, resolver, persistence):
+        org = PolicyNode("org:acme", "org", None, "Acme",
+                         limits={"pii_redaction_enabled": True,
+                                 "pii_redact_types": ["email"],
+                                 "pii_ner_enabled": True,
+                                 "pii_ner_types": ["name"]})
+        proj = PolicyNode("proj:hr", "project", "org:acme", "HR",
+                          limits={"rate_limit_rpm": 500})
+        _run(persistence.save_policy_node(org))
+        _run(persistence.save_policy_node(proj))
+        policy = _run(resolver.resolve("proj:hr"))
+        assert policy.pii_ner_enabled is True
+        assert policy.pii_ner_types == ["name"]
+
+    def test_child_cannot_disable_parent_ner(self, resolver, persistence):
+        org = PolicyNode("org:acme", "org", None, "Acme",
+                         limits={"pii_redaction_enabled": True, "pii_ner_enabled": True})
+        proj = PolicyNode("proj:ml", "project", "org:acme", "ML",
+                          limits={"pii_ner_enabled": False})
+        _run(persistence.save_policy_node(org))
+        _run(persistence.save_policy_node(proj))
+        policy = _run(resolver.resolve("proj:ml"))
+        # Same ratchet as pii_redaction_enabled: privacy settings only tighten.
+        assert policy.pii_ner_enabled is True
+
+    def test_child_broadens_ner_types(self, resolver, persistence):
+        org = PolicyNode("org:acme", "org", None, "Acme",
+                         limits={"pii_redaction_enabled": True,
+                                 "pii_ner_enabled": True, "pii_ner_types": ["name"]})
+        bu = PolicyNode("bu:health", "business_unit", "org:acme", "Health",
+                        limits={"pii_ner_types": ["address"]})
+        _run(persistence.save_policy_node(org))
+        _run(persistence.save_policy_node(bu))
+        policy = _run(resolver.resolve("bu:health"))
+        # Union — a child adds types but never removes the parent's.
+        assert policy.pii_ner_types == ["address", "name"]
+
+    def test_a_child_enabling_ner_does_not_affect_siblings(self, resolver, persistence):
+        org = PolicyNode("org:acme", "org", None, "Acme",
+                         limits={"pii_redaction_enabled": True})
+        hr = PolicyNode("proj:hr", "project", "org:acme", "HR",
+                        limits={"pii_ner_enabled": True})
+        ml = PolicyNode("proj:ml", "project", "org:acme", "ML", limits={})
+        for n in (org, hr, ml):
+            _run(persistence.save_policy_node(n))
+        assert _run(resolver.resolve("proj:hr")).pii_ner_enabled is True
+        # The sibling pays nothing — the cost is opt-in per branch.
+        assert _run(resolver.resolve("proj:ml")).pii_ner_enabled is False

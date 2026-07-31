@@ -472,6 +472,9 @@
         success: { bg: '#f2fcf3', border: '#037f0c', color: '#037f0c', icon: '✓' },
         error: { bg: '#fff7f7', border: '#d91515', color: '#d91515', icon: '✕' },
         info: { bg: '#f2f8fd', border: '#0972d3', color: '#0972d3', icon: 'ℹ' },
+        // Degraded-but-serving, as distinct from error (failed) and info
+        // (normal). Without this, type="warning" silently rendered as info.
+        warning: { bg: '#fffdf5', border: '#855900', color: '#855900', icon: '⚠' },
       };
       const c = colors[type] || colors.info;
       return (
@@ -2356,6 +2359,169 @@
     }
 
     /* ================================================================== */
+    /*  PII Redaction Preview                                              */
+    /* ================================================================== */
+    /* The audit trail can show THAT redaction happened and how many items it
+       replaced, but never what the provider actually received — storing that
+       would mean storing the PII the feature exists to keep out of storage. So
+       this recomputes on demand against the real engine.
+
+       Two columns because the difference is the point: the regex column leaves
+       a name untouched (PII_PATTERNS has no name pattern — a name has no shape
+       to match), the NER column catches it. The default example is chosen to
+       show exactly that. */
+    const PII_SAMPLE = "Hi, I'm Alice Smith from Seattle. My email is alice.smith@example.com, "
+      + "SSN 123-45-6789, and you can reach me at 555-234-5678. "
+      + "Card on file 4111 1111 1111 1111, deployed from 10.0.0.7.";
+
+    function PiiDiff({ label, sub, text, count, tone }) {
+      /* Tokens highlighted so the substitution is visible at a glance rather
+         than something the reader has to diff by eye. */
+      const parts = String(text || '').split(/(\[[A-Z_]+_\d+\])/g);
+      return (
+        <div style={{ flex: '1 1 320px', minWidth: '280px' }}>
+          <div style={{ display: 'flex', alignItems: 'baseline', gap: '0.5rem', marginBottom: '0.35rem' }}>
+            <strong style={{ fontSize: '13px' }}>{label}</strong>
+            {typeof count === 'number' && (
+              <span className={`badge ${tone || 'badge-grey'}`}>{count} redacted</span>
+            )}
+          </div>
+          {sub && <div style={{ fontSize: '11px', color: 'var(--awsui-color-text-secondary, #666)', marginBottom: '0.35rem' }}>{sub}</div>}
+          <pre style={{
+            margin: 0, padding: '0.6rem', borderRadius: '4px', fontSize: '12px',
+            whiteSpace: 'pre-wrap', wordBreak: 'break-word', lineHeight: 1.5,
+            background: '#fafaf9', border: '1px solid #e7e5e4', minHeight: '5.5rem',
+          }}>
+            {parts.map((p, i) => /^\[[A-Z_]+_\d+\]$/.test(p)
+              ? <mark key={i} style={{ background: '#fde68a', fontWeight: 600, borderRadius: '2px', padding: '0 2px' }}>{p}</mark>
+              : <span key={i}>{p}</span>)}
+          </pre>
+        </div>
+      );
+    }
+
+    function PiiPreviewPanel() {
+      const [text, setText] = useState(PII_SAMPLE);
+      const [useNer, setUseNer] = useState(false);
+      const [result, setResult] = useState(null);
+      const [busy, setBusy] = useState(false);
+      const [err, setErr] = useState(null);
+
+      const run = useCallback((withNer) => {
+        setBusy(true); setErr(null);
+        api.post('/admin/pii/preview', { text, ner: !!withNer })
+          .then(r => { setResult(r); setBusy(false); })
+          .catch(e => { setErr(e && e.message ? e.message : 'Preview failed'); setBusy(false); });
+      }, [text]);
+
+      /* Run once on mount so the panel shows the point immediately rather than
+         an empty box the visitor has to interact with to understand. NER is off
+         on that first call — it bills per request, so it stays explicit. */
+      useEffect(() => { run(false); }, []);
+
+      const ner = result && result.ner;
+
+      return (
+        <div className="container" style={{ marginBottom: '1rem' }}>
+          <div className="container-header">
+            <h2>PII Redaction Preview</h2>
+          </div>
+          <div className="container-body">
+            <div style={{ fontSize: '12px', color: 'var(--awsui-color-text-secondary, #666)', marginBottom: '0.75rem' }}>
+              What the provider actually receives. Nothing here is stored — the audit
+              trail records that redaction happened and how many items it replaced,
+              never the values themselves.
+            </div>
+            <textarea
+              value={text}
+              onChange={e => setText(e.target.value)}
+              rows={4}
+              maxLength={4000}
+              style={{ width: '100%', fontSize: '12px', fontFamily: 'monospace', padding: '0.5rem', boxSizing: 'border-box' }}
+            />
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', margin: '0.6rem 0' }}>
+              <button className="btn btn-primary" disabled={busy || !text.trim()} onClick={() => run(useNer)}>
+                {busy ? 'Redacting…' : 'Redact'}
+              </button>
+              <label style={{ fontSize: '12px', display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
+                <input type="checkbox" checked={useNer} onChange={e => { setUseNer(e.target.checked); run(e.target.checked); }} />
+                Add entity detection (names, addresses) — billed per request
+              </label>
+              <button className="btn" style={{ fontSize: '11px' }} onClick={() => setText(PII_SAMPLE)}>Reset example</button>
+            </div>
+            {err && <Flash type="error">{err}</Flash>}
+            {result && (
+              <div>
+                <div style={{ display: 'flex', gap: '1rem', flexWrap: 'wrap' }}>
+                  <PiiDiff
+                    label="Pattern matching"
+                    sub="Regex only — structured values with a fixed shape"
+                    text={result.redacted}
+                    count={result.redacted_count}
+                    tone="badge-blue"
+                  />
+                  {useNer && (
+                    ner && ner.available ? (
+                      <PiiDiff
+                        label="Pattern matching + entity detection"
+                        sub={`Adds ${(result.supported_ner_types || []).join(', ')} — values with no fixed shape`}
+                        text={ner.redacted}
+                        count={ner.redacted_count}
+                        tone="badge-green"
+                      />
+                    ) : (
+                      <div style={{ flex: '1 1 320px', minWidth: '280px' }}>
+                        <strong style={{ fontSize: '13px' }}>Pattern matching + entity detection</strong>
+                        <div style={{ marginTop: '0.35rem' }}>
+                          <Flash type="warning">
+                            Entity detection unavailable{ner && ner.reason ? `: ${ner.reason}` : ''}.
+                            Pattern matching is unaffected — the request path degrades the same way.
+                          </Flash>
+                        </div>
+                      </div>
+                    )
+                  )}
+                </div>
+                {/* The finding, stated rather than left to be inferred. */}
+                {useNer && ner && ner.available && ner.additional_count > 0 && (
+                  <div style={{ marginTop: '0.75rem' }}>
+                    <Flash type="info">
+                      Entity detection caught {ner.additional_count} additional item{ner.additional_count === 1 ? '' : 's'}
+                      {ner.types_found && ner.types_found.length > 0 ? ` (${ner.types_found.filter(t => (result.types_found || []).indexOf(t) === -1).join(', ')})` : ''} that
+                      pattern matching cannot express. A name or a city has no fixed shape to match,
+                      which is why the left column leaves them in place. The tradeoff: entity
+                      detection also redacts public figures and place names in ordinary questions,
+                      so it is off unless a policy enables it.
+                    </Flash>
+                  </div>
+                )}
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem', marginTop: '0.75rem', alignItems: 'center' }}>
+                  {(result.types_found || []).map(t => (
+                    <span key={t} className="badge badge-blue">{t}</span>
+                  ))}
+                  {useNer && ner && ner.available && (ner.types_found || [])
+                    .filter(t => (result.types_found || []).indexOf(t) === -1)
+                    .map(t => <span key={t} className="badge badge-green">{t}</span>)}
+                  {/* Round-trip status is reported, not asserted: a pattern whose
+                      match cannot be restored should show up here rather than
+                      silently mangle the caller's answer. */}
+                  <span className={`badge ${result.round_trip_exact ? 'badge-green' : 'badge-red'}`}>
+                    <span className="badge-dot"></span>
+                    {result.round_trip_exact ? 'Re-injection lossless' : 'Re-injection mismatch'}
+                  </span>
+                </div>
+                <div style={{ fontSize: '11px', color: 'var(--awsui-color-text-secondary, #666)', marginTop: '0.6rem' }}>
+                  The caller gets the original values back on the way out; the provider only
+                  ever saw the tokens.
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      );
+    }
+
+    /* ================================================================== */
     /*  Security / Audit Page                                              */
     /* ================================================================== */
     function SecurityPage() {
@@ -2392,6 +2558,7 @@
             <div className="stat-card"><div className="stat-label">Chain Integrity</div><div className="stat-value">{integrity ? <span className={`badge ${integrity.chain_valid ? 'badge-green' : 'badge-red'}`}><span className="badge-dot"></span>{integrity.status}</span> : '-'}</div></div>
             <div className="stat-card"><div className="stat-label">Security Events</div><div className="stat-value">{records.length}</div></div>
           </div>
+          <PiiPreviewPanel />
           {stats && stats.by_type && Object.keys(stats.by_type).length > 0 && (
             <div className="container" style={{ marginBottom: '1rem' }}>
               <div className="container-header"><h2>Event Breakdown</h2></div>

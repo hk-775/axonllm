@@ -324,8 +324,13 @@ class GatewayAgent:
         # 2.9. PII redaction
         if self._pii_redactor is not None:
             effective_policy = resolved_policy or ResolvedPolicy()
-            redacted_messages, pii_mapping = self._pii_redactor.redact_messages(
-                request.messages or [], effective_policy
+            # _async so a policy with pii_ner_enabled also gets name/address
+            # detection. It delegates to the sync path when NER is off, so the
+            # default request keeps its previous cost and behaviour exactly.
+            redacted_messages, pii_mapping = (
+                await self._pii_redactor.redact_messages_async(
+                    request.messages or [], effective_policy
+                )
             )
             if pii_mapping.redacted_count > 0:
                 # replace() rather than re-listing every field: a hand-rolled

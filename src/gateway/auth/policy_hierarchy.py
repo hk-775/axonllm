@@ -159,6 +159,23 @@ class PolicyHierarchyResolver:
         if limits.get("pii_reinject") is False:
             current.pii_reinject = False
 
+        # Entity detection (names/addresses): same ratchet as pii_redaction_enabled
+        # — a parent that turns it on cannot be overridden downward. Separate from
+        # pii_redaction_enabled because it calls a paid per-request service, so
+        # enabling redaction must never silently enable it.
+        if limits.get("pii_ner_enabled"):
+            current.pii_ner_enabled = True
+
+        # Entity types: union, matching pii_redact_types. A child can broaden
+        # what is detected but never narrow what a parent requires.
+        node_ner_types = limits.get("pii_ner_types")
+        if node_ner_types is not None:
+            if current.pii_ner_types is None:
+                current.pii_ner_types = list(node_ner_types)
+            else:
+                current.pii_ner_types = sorted(
+                    set(current.pii_ner_types) | set(node_ner_types))
+
         return current
 
     async def set_node(self, node: PolicyNode) -> None:
