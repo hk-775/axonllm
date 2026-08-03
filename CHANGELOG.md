@@ -281,6 +281,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   makes a third identical value look inevitable rather than assumed.
 
 ### Fixed
+- **The Cedar authorization layer was unusable in every direction at once:
+  adding your first policy took the gateway offline, and no policy you wrote ever
+  persisted or took effect.** Four defects compounding:
+  - **The first `permit` bricked everything it didn't match.** Evaluation was
+    default-deny globally, so `permit(principal, action == Action::"read",
+    resource);` — the obvious first policy, and the one the README suggested —
+    403'd all eight write endpoints including `POST /api/chat` and
+    `POST /admin/policies`. That last one meant the gateway could not be recovered
+    through its own API. Deny is now scoped per action: an action is governed once
+    some `ENFORCE` statement names it (or omits the action clause), and within a
+    governed action Cedar's rules are unchanged — a permit is required, and forbid
+    still wins. An action nobody wrote a rule about falls through to
+    authentication, admin RBAC, and quota enforcement, which are always on.
+  - **A single `LOG_ONLY` policy denied every method.** `LOG_ONLY` statements
+    `continue`d without setting `permitted`, so under global default-deny the
+    documented way to *safely trial* a policy — and the mode `POST /admin/policies`
+    defaults to — was the worst case: GET, POST, PUT, PATCH, DELETE and HEAD all
+    DENY. LOG_ONLY now governs nothing, so it cannot change a decision.
+  - **Policies never persisted and never took effect.** `create_policy` had no
+    persistence call and statements were compiled once at construction, so a
+    policy applied only after a restart it could not survive. Added
+    `save_cedar_policy` / `load_all_cedar_policies` to `persistence.py` (keyed
+    `CEDAR_POLICY#<name>`, matching the route's update-by-name identity),
+    `CedarPolicyService.reload()`, and the wiring: bootstrap builds one evaluator
+    and hands the same instance to both `AdminAPI` and `AuthMiddleware`, so a
+    `POST` recompiles the object requests actually consult. Persisted policies
+    load at startup and merge over seeded ones by name.
+  - **Scope clauses the parser can't honour were silently dropped, widening the
+    statement.** `resource == Resource::"/api/chat"` parsed and then forbade
+    *every* write; `principal == User::"alice"` parsed and then permitted
+    everyone. Both narrow a policy, so ignoring them fails open. These, plus
+    `principal in`, `resource in`, `action in [...]`, and a bare `permit;` with no
+    scope triple (which parsed as "permit everything"), are now rejected — with a
+    400 from `POST /admin/policies` rather than a log line at startup nobody
+    reads. The module docstring had claimed `resource == Model::"gpt-4o"` was
+    supported; it never was.
+
+  65 tests across `test_cedar_policy.py`, the new `test_cedar_policy_lifecycle.py`
+  (the route → evaluator → persistence path end to end), `test_bootstrap.py` (the
+  shared-instance wiring and startup load), `test_admin_routes.py`, and
+  `test_e2e_starlette.py` (a read-only policy no longer 403s `/api/chat`). Three
+  pre-existing tests asserted the old behaviour and now assert the new semantics
+  rather than being deleted. README gained a
+  [Cedar authorization policies](README.md#cedar-authorization-policies) section:
+  the supported/unsupported clause table, how a decision is reached, why step 4
+  departs from textbook Cedar, that a `permit` grants nothing you didn't already
+  have, and a warning that an `ENFORCE` `forbid` on `write` can still lock you out
+  of the policy API — with both verified recovery routes.
+
 - **A Fargate deploy came up seeded with fictional tenants.** `infra/stack.py`
   set five environment variables on the task definition and not
   `AXON_LOAD_DEMO_DATA` — but absent is not neutral for that variable, because

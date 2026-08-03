@@ -887,6 +887,79 @@ class DynamoPersistence:
             logger.warning("Failed to load policy nodes from DynamoDB", exc_info=True)
             return []
 
+    # --- Cedar policy persistence ---
+    #
+    # Distinct from PolicyNode above, which is the cost/quota hierarchy. These are
+    # the Cedar authorization statements written through POST /admin/policies. The
+    # policy's ``name`` is its identity, matching that route's update-by-name
+    # behaviour, so re-submitting a name overwrites rather than duplicating.
+
+    @staticmethod
+    def serialize_cedar_policy(policy: dict) -> dict:
+        return {
+            "PK": f"CEDAR_POLICY#{policy['name']}",
+            "SK": "CONFIG",
+            "entity_type": "cedar_policy",
+            "name": policy["name"],
+            "description": policy.get("description", ""),
+            "policy_text": policy.get("policy_text", ""),
+            "mode": policy.get("mode", "LOG_ONLY"),
+        }
+
+    @staticmethod
+    def deserialize_cedar_policy(item: dict) -> dict:
+        return {
+            "name": item["name"],
+            "description": item.get("description", ""),
+            "policy_text": item.get("policy_text", ""),
+            # Defaulting to LOG_ONLY on a missing attribute keeps a malformed item
+            # from silently becoming enforcing.
+            "mode": item.get("mode", "LOG_ONLY"),
+        }
+
+    async def save_cedar_policy(self, policy: dict) -> None:
+        if not self._enabled:
+            return
+
+        def _put():
+            self._get_table().put_item(Item=self.serialize_cedar_policy(policy))
+
+        try:
+            await asyncio.to_thread(_put)
+        except Exception:
+            self._record_write_failure("cedar policy", policy.get("name", "?"))
+
+    async def load_all_cedar_policies(self) -> list[dict]:
+        if not self._enabled:
+            return []
+
+        def _scan():
+            from boto3.dynamodb.conditions import Attr
+
+            table = self._get_table()
+            items = []
+            response = table.scan(FilterExpression=Attr("entity_type").eq("cedar_policy"))
+            items.extend(response.get("Items", []))
+            while "LastEvaluatedKey" in response:
+                response = table.scan(
+                    FilterExpression=Attr("entity_type").eq("cedar_policy"),
+                    ExclusiveStartKey=response["LastEvaluatedKey"],
+                )
+                items.extend(response.get("Items", []))
+            return items
+
+        try:
+            raw_items = await asyncio.to_thread(_scan)
+            return [self.deserialize_cedar_policy(item) for item in raw_items]
+        except Exception:
+            # Returning [] rather than raising keeps a Dynamo outage from blocking
+            # startup. It does mean booting with no policies, which — because an
+            # ungoverned action is ALLOW — fails open on the Cedar layer while
+            # auth, admin RBAC, and quotas stay enforced. Logged at ERROR because
+            # that difference matters to whoever reads the boot log.
+            logger.error("Failed to load Cedar policies from DynamoDB", exc_info=True)
+            return []
+
     # --- SCIM identity (users + groups) ---
 
     @staticmethod

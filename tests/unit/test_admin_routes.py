@@ -35,6 +35,14 @@ from src.gateway.models import (
 
 # ── Helpers ──────────────────────────────────────────────────────────
 
+# Minimal statements for tests that only care about the route's bookkeeping.
+# Spelled out in full because `POST /admin/policies` validates the text: the
+# shorthand `permit;` these once used is not valid Cedar, and it parsed as
+# "permit everything" — the most permissive possible reading of a typo.
+PERMIT_ANY = "permit(principal, action, resource);"
+FORBID_ANY = "forbid(principal, action, resource);"
+
+
 def _make_app(admin_api: AdminAPI) -> Starlette:
     routes = create_admin_routes(admin_api)
     return Starlette(routes=routes)
@@ -176,7 +184,7 @@ def test_admin_api_with_initial_projects():
 
 def test_admin_api_with_initial_policies():
     """Verify AdminAPI accepts initial policies list."""
-    policies = [{"name": "test-policy", "description": "A test", "policy_text": "permit;", "mode": "LOG_ONLY"}]
+    policies = [{"name": "test-policy", "description": "A test", "policy_text": PERMIT_ANY, "mode": "LOG_ONLY"}]
     api = AdminAPI(
         cost_tracker=CostTracker(pricing_config={}),
         health_tracker=ProviderHealthTracker(),
@@ -470,34 +478,72 @@ class TestPolicyManagement:
 
     def test_create_policy(self, client):
         resp = client.post("/admin/policies", json={
-            "name": "allow-gpt4",
-            "description": "Allow GPT-4 access",
-            "policy_text": 'permit(principal, action, resource) when { resource.model == "gpt-4" };',
+            "name": "seniors-only",
+            "description": "Restrict writes to senior devs",
+            "policy_text": 'forbid(principal, action == Action::"write", resource) unless { principal.role == "senior" };',
             "mode": "ENFORCE",
         })
         assert resp.status_code == 201
         data = resp.json()
-        assert data["name"] == "allow-gpt4"
+        assert data["name"] == "seniors-only"
         assert data["status"] == "created"
 
     def test_create_policy_without_name_returns_400(self, client):
         resp = client.post("/admin/policies", json={
             "description": "Missing name",
-            "policy_text": "permit;",
+            "policy_text": PERMIT_ANY,
         })
         assert resp.status_code == 400
         assert "name" in resp.json()["error"]["message"].lower()
 
+    def test_unparseable_policy_text_returns_400(self, client):
+        """Rejected at the door rather than stored and skipped with a log line.
+
+        A statement the evaluator cannot parse is dropped at construction, and a
+        dropped forbid is indistinguishable from no policy at all — so the
+        operator believes a restriction is live when nothing enforces it.
+        """
+        resp = client.post("/admin/policies", json={
+            "name": "not-cedar",
+            "policy_text": "allow everyone to do everything",
+        })
+        assert resp.status_code == 400
+        assert "policy_text" in resp.json()["error"]["message"]
+        assert client.get("/admin/policies").json() == []
+
+    def test_resource_attribute_conditions_are_rejected(self, client):
+        """The parser understands `principal.<attr>` only.
+
+        `resource.model == "gpt-4"` looks like valid Cedar and reads like the
+        obvious way to restrict a model, so the rejection has to be explicit —
+        silently accepting it stores a policy that governs nothing. Per-model
+        restrictions go through the guardrail engine and the routing table
+        instead.
+        """
+        resp = client.post("/admin/policies", json={
+            "name": "gpt4-only",
+            "policy_text": 'permit(principal, action, resource) when { resource.model == "gpt-4" };',
+            "mode": "ENFORCE",
+        })
+        assert resp.status_code == 400
+        assert "principal" in resp.json()["error"]["message"]
+
+    def test_a_policy_with_no_text_is_accepted(self, client):
+        """`policy_text` is optional, so a placeholder can be created and filled
+        in later; only non-empty text is validated."""
+        resp = client.post("/admin/policies", json={"name": "placeholder"})
+        assert resp.status_code == 201
+
     def test_create_policy_with_existing_name_updates(self, client):
         client.post("/admin/policies", json={
             "name": "my-policy",
-            "policy_text": "permit;",
+            "policy_text": PERMIT_ANY,
             "mode": "LOG_ONLY",
         })
         # Update with same name
         resp = client.post("/admin/policies", json={
             "name": "my-policy",
-            "policy_text": "forbid;",
+            "policy_text": FORBID_ANY,
             "mode": "ENFORCE",
         })
         assert resp.status_code == 200
@@ -506,12 +552,12 @@ class TestPolicyManagement:
         # Verify only one policy exists with updated text
         policies = client.get("/admin/policies").json()
         assert len(policies) == 1
-        assert policies[0]["policy_text"] == "forbid;"
+        assert policies[0]["policy_text"] == FORBID_ANY
         assert policies[0]["mode"] == "ENFORCE"
 
     def test_list_policies_returns_created_policies(self, client):
-        client.post("/admin/policies", json={"name": "pol-1", "policy_text": "permit;"})
-        client.post("/admin/policies", json={"name": "pol-2", "policy_text": "forbid;"})
+        client.post("/admin/policies", json={"name": "pol-1", "policy_text": PERMIT_ANY})
+        client.post("/admin/policies", json={"name": "pol-2", "policy_text": FORBID_ANY})
 
         resp = client.get("/admin/policies")
         data = resp.json()

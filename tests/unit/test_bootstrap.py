@@ -85,6 +85,171 @@ class TestBuildStaletteApp:
         assert hasattr(app, "routes")
 
 
+class TestCedarWiring:
+    """The admin API and the auth middleware must share one evaluator instance.
+
+    `POST /admin/policies` recompiles the evaluator it holds. If bootstrap built a
+    second one for `AuthMiddleware`, the recompile would land on an object no
+    request consults and the policy would silently do nothing — the same
+    end-state as the pre-fix "needs a restart" bug, but harder to spot because the
+    route reports success and `GET /admin/policies` shows the policy.
+    """
+
+    def _services(self, app):
+        """The AdminAPI's evaluator and the AuthMiddleware's, from a built app."""
+        from src.gateway.admin.routes import AdminAPI
+        from src.gateway.middleware.auth import AuthMiddleware
+
+        admin_api = next(
+            route.endpoint.__self__
+            for route in app.routes
+            if getattr(route, "path", None) == "/admin/policies"
+            and isinstance(getattr(route.endpoint, "__self__", None), AdminAPI)
+        )
+        middleware_kwargs = next(
+            mw.kwargs for mw in app.user_middleware if mw.cls is AuthMiddleware
+        )
+        return admin_api._policy_service, middleware_kwargs["policy_service"]
+
+    def test_the_admin_api_and_auth_middleware_share_one_evaluator(
+        self, demo_app_config: AppConfig
+    ):
+        admin_service, middleware_service = self._services(
+            build_starlette_app(demo_app_config)
+        )
+        assert admin_service is not None
+        assert admin_service is middleware_service
+
+    def test_an_evaluator_exists_even_with_no_policies(
+        self, minimal_app_config: AppConfig
+    ):
+        """A clean install boots with zero policies. It still needs an evaluator,
+        or the first policy an operator adds has nothing to recompile.
+
+        Safe because an empty policy set governs no action, so wiring it changes
+        no decision — asserted below rather than argued.
+        """
+        app = build_starlette_app(minimal_app_config)
+        admin_service, middleware_service = self._services(app)
+        assert admin_service is not None
+        assert admin_service is middleware_service
+
+    def test_that_empty_evaluator_denies_nothing(self, minimal_app_config: AppConfig):
+        import asyncio
+
+        from src.gateway.models import AuthMethod, RequestContext
+
+        service, _ = self._services(build_starlette_app(minimal_app_config))
+        ctx = RequestContext(
+            user_id="u1",
+            project_id="p1",
+            roles=[],
+            scopes=[],
+            auth_method=AuthMethod.API_KEY,
+        )
+        for method in ("get", "post", "put", "patch", "delete"):
+            assert asyncio.run(service.evaluate(ctx, method, "/api/chat")) == "ALLOW", method
+
+
+class TestPersistedPoliciesAreLoadedAtStartup:
+    """The restart half of "a policy written over HTTP survives a restart".
+
+    `POST /admin/policies` writing to DynamoDB is worth nothing if boot does not
+    read it back — and the failure is silent, because a gateway with no policies
+    starts fine and just enforces nothing on the Cedar layer.
+    """
+
+    def _persistence(self, stored: list[dict]):
+        """Real DynamoPersistence with only the table boundary replaced, so
+        `deserialize_cedar_policy` is exercised on the way in."""
+        from boto3.dynamodb.conditions import Attr
+        from src.gateway.persistence import DynamoPersistence
+
+        cedar_filter = Attr("entity_type").eq("cedar_policy").get_expression()
+
+        class _Loading(DynamoPersistence):
+            def __init__(self) -> None:
+                super().__init__()
+                self._enabled = True
+
+            def _get_table(self):
+                class _Table:
+                    def scan(self, **kwargs):
+                        # Only the Cedar-policy scan yields anything; every other
+                        # entity_type sees an empty table. Compared on the parsed
+                        # expression because boto3's condition objects have no
+                        # useful repr and no equality.
+                        expr = kwargs.get("FilterExpression")
+                        match = expr is not None and expr.get_expression() == cedar_filter
+                        return {"Items": stored if match else []}
+
+                    def get_item(self, **kwargs):
+                        return {}
+
+                    def put_item(self, **kwargs):
+                        # Boot writes audit records; accepted and dropped so the
+                        # load path is what this test isolates.
+                        return {}
+
+                return _Table()
+
+        return _Loading()
+
+    def test_a_stored_policy_reaches_the_evaluator(self, minimal_app_config, monkeypatch):
+        import asyncio
+
+        from src.gateway import bootstrap as bootstrap_mod
+        from src.gateway.models import AuthMethod, RequestContext
+
+        stored = [{
+            "name": "no-writes",
+            "policy_text": 'forbid(principal, action == Action::"write", resource);',
+            "mode": "ENFORCE",
+            "entity_type": "cedar_policy",
+        }]
+        persistence = self._persistence(stored)
+        monkeypatch.setattr(bootstrap_mod, "DynamoPersistence", lambda *a, **k: persistence)
+
+        comp = build_gateway_components(minimal_app_config)
+        assert [p["name"] for p in comp.policies] == ["no-writes"]
+
+        from src.gateway.auth.cedar_policy import CedarPolicyService
+
+        ctx = RequestContext(
+            user_id="u1", project_id="p1", roles=[], scopes=[],
+            auth_method=AuthMethod.API_KEY,
+        )
+        service = CedarPolicyService(comp.policies)
+        assert asyncio.run(service.evaluate(ctx, "post", "/api/chat")) == "DENY"
+        assert asyncio.run(service.evaluate(ctx, "get", "/admin/overview")) == "ALLOW"
+
+    def test_a_persisted_policy_replaces_the_seeded_one_of_the_same_name(
+        self, demo_app_config, monkeypatch
+    ):
+        """Merged by name, not concatenated.
+
+        The demo seed ships `allow-all-write` as a permit. If an operator edits it
+        to a forbid, appending both would evaluate the stale permit alongside the
+        new forbid — and since forbid wins, the result would happen to look right
+        while the reverse edit (forbid to permit) would silently keep denying.
+        """
+        from src.gateway import bootstrap as bootstrap_mod
+
+        stored = [{
+            "name": "allow-all-write",
+            "policy_text": 'permit(principal, action == Action::"write", resource);',
+            "mode": "LOG_ONLY",
+            "entity_type": "cedar_policy",
+        }]
+        persistence = self._persistence(stored)
+        monkeypatch.setattr(bootstrap_mod, "DynamoPersistence", lambda *a, **k: persistence)
+
+        comp = build_gateway_components(demo_app_config)
+        matching = [p for p in comp.policies if p["name"] == "allow-all-write"]
+        assert len(matching) == 1, "seeded and persisted copies were both kept"
+        assert matching[0]["mode"] == "LOG_ONLY", "the persisted edit did not win"
+
+
 class TestBuildGatewayAgent:
     def test_returns_gateway_agent(self, minimal_app_config: AppConfig):
         agent = build_gateway_agent(minimal_app_config)
