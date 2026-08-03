@@ -400,6 +400,13 @@ DynamoDB persistence merges *on top of* the seed, so demo projects and anything
 you create coexist. Which is convenient in a sandbox and the reason a seeded
 environment is awkward to promote: see below.
 
+Two exceptions, both deliberate: **event destinations and the region topology
+replace the seed rather than merging with it**, because merging cannot express a
+deletion — see
+[What an admin write persists](#what-an-admin-write-persists-and-what-it-deliberately-doesnt).
+The practical effect in a demo environment is that once you add or remove a
+webhook through the admin API, the seeded destinations stop being re-applied.
+
 ### Turning the demo data off
 
 If you have already deployed and want the fictional tenants gone, setting
@@ -1144,17 +1151,57 @@ Request → Auth (OIDC/API Key) → Quota Enforcement (policy hierarchy)
 | `/admin/audit/stats` | GET | Audit statistics |
 | `/admin/audit/export` | GET | Export audit records |
 | `/admin/audit/security` | GET | Security-relevant events only |
-| `/admin/webhooks` | GET/POST | List or add event destinations |
-| `/admin/webhooks/{name}` | DELETE | Remove a destination |
+| `/admin/webhooks` | GET/POST | List or add event destinations. `POST` with an existing `name` replaces that destination and returns `200`; a new one returns `201`. Persisted when DynamoDB is on |
+| `/admin/webhooks/{name}` | DELETE | Remove a destination. Persisted, so the removal survives a restart — including when demo seeding would otherwise re-create it |
 | `/admin/webhooks/{name}/test` | POST | Send test event |
 | `/admin/semantic-cache` | GET | Semantic cache stats: entries, hits, misses, and how many candidates the literal guard rejected |
 | `/admin/semantic-cache` | DELETE | Invalidate entries — one project with `?project_id=`, all of them without |
 | `/admin/pii/preview` | POST | Show what redaction does to a given string: `{"text": "..."}` returns the redacted and re-injected forms. Add `"ner": true` for the entity-detection column (billable). Nothing is persisted |
 | `/admin/regions` | GET | Current topology |
+| `/admin/regions/config` | PUT | Update hub-level settings (`hub_region`, `data_residency_strict`, health-check and failover timings). Persisted |
+| `/admin/regions/spokes` | POST | Add a spoke. `409` if the region already has one. Persisted |
+| `/admin/regions/spokes/{region}` | PUT/DELETE | Update or remove a spoke. Persisted, so a drained region stays out after a restart |
 | `/admin/regions/health` | GET | Spoke health status |
 | `/admin/regions/health/check` | POST | Trigger health check |
 | `/admin/regions/failover` | POST | Force failover |
-| `/admin/regions/{region}/status` | PUT | Set spoke status |
+| `/admin/regions/{region}/status` | PUT | Set spoke status. **Not** persisted — see below |
+
+### What an admin write persists, and what it deliberately doesn't
+
+With `LLM_ROUTER_DYNAMODB_ENABLED=true`, an admin write takes effect immediately
+*and* survives a restart. Without it, every write is in-memory only and the
+process is the source of truth — which is fine for a single node and is why the
+routes don't require a table.
+
+Two rules are worth knowing because they are the difference between an endpoint
+that works and one that only looks like it does:
+
+**Deletions persist too, and they win over the seed.** Event destinations and the
+region topology are each stored as a *single* item holding the whole set, not a
+row per destination or spoke, and at startup that stored set **replaces** the
+seeded/`spokes.yaml` one rather than merging with it. A merge cannot express a
+deletion: a destination you removed through `DELETE /admin/webhooks` is simply
+absent from the stored set, so merging would leave the seeded copy in place and
+the destination would quietly resume receiving security events at the next
+deploy. The same argument applies to a spoke you drained. The consequence to be
+aware of: once you have written either set through the admin API, edits to
+`config/demo_seed.yaml` or `config/spokes.yaml` no longer show up — the stored
+set is the newer statement of intent. An empty stored set means "I removed
+everything", not "nothing is saved", and is honoured as such.
+
+**Health state is not configuration.** `PUT /admin/regions/{region}/status` and
+each spoke's `status` are excluded from persistence on purpose. Restoring a stale
+`unhealthy` would hold a recovered region out of rotation until the next probe,
+and a stale `healthy` would send traffic to a region that is still down. Spokes
+come back at their default and the first health check decides. To take a region
+out durably, remove it or set its weight to `0` — both of which persist.
+
+Failures are logged and swallowed rather than returned as a `500`: the in-memory
+change already happened and the caller cannot undo it. `last_write_error` on the
+persistence layer is what surfaces a dropped write to a health probe, and the
+"State survives a restart" row of the
+[production readiness checklist](#production-readiness-checklist) is what reports
+it.
 
 ### Two different things live under `/admin/policies`
 

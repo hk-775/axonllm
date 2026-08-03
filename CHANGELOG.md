@@ -280,6 +280,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   makes a third identical value look inevitable rather than assumed.
 
 ### Fixed
+- **Six admin write endpoints returned success and lost the change on the next
+  restart.** Each one mutated a shared in-memory object and never wrote to
+  DynamoDB. Because `GET` reads back that same object, the endpoint looked correct
+  for the life of the process — the write was gone only after a deploy, with
+  nothing in between to suggest it had failed:
+  - **`POST`/`DELETE /admin/projects/{id}/members`** — a missed call site, not a
+    missing feature: the two sibling handlers on the same object
+    (`add_project_model`/`remove_project_model`) persisted correctly, so
+    membership changes appeared to stick whenever a model edit followed them in
+    the same process and reverted whenever one didn't. Revocation is the direction
+    that matters — a member an operator had removed from a project regained access
+    at the next deploy. The duplicated persist block is now one `_persist_project`
+    helper shared by all four handlers, because the omission *is* the bug.
+  - **`POST`/`DELETE /admin/webhooks`** — event destinations had no persistence
+    support at all. Adding one produced an endpoint that reported success and then
+    silently stopped delivering security events at the next deploy; the failure
+    mode is an *absence* of alerts, which nothing observable distinguishes from
+    "no events occurred". `POST` also appended rather than replaced on a repeated
+    name, so a re-POST double-delivered every event to that destination and
+    remove-by-name then deleted only one of the pair; it now replaces and reports
+    `200 updated` vs `201 created`.
+  - **`POST`/`PUT`/`DELETE /admin/regions/spokes` and `PUT /admin/regions/config`**
+    — likewise unpersisted, so a region an operator had drained came back into
+    rotation on restart, and hub-level failover timings reverted to `spokes.yaml`.
+
+  New `event_destination` and `region_topology` entity types in `persistence.py`,
+  both stored as a **single item holding the whole set** rather than a row each —
+  verified necessary, not stylistic. With a row per destination, a *deletion* is
+  unrepresentable while demo seeding is on: the delete removes the row, the next
+  boot re-seeds the destination, and no row remains to record that an operator
+  removed it. A restart probe caught exactly that (a deleted `legacy-pagerduty`
+  came back and resumed receiving events) after the first cut of this fix, which
+  is why the startup load **replaces** the seeded set rather than merging by name.
+  An empty stored set means "everything was removed" and is honoured as such —
+  hence `load_event_destinations`/`load_region_topology` return `| None` rather
+  than a bare collection, and bootstrap tests `is not None`, not truthiness.
+
+  Spoke `status` and `PUT /admin/regions/{region}/status` are deliberately *not*
+  persisted: that is health-check state, and restoring a stale `unhealthy` would
+  hold a recovered region out of rotation while a stale `healthy` would route to a
+  region that is still down. Spokes come back at their default and the first probe
+  decides.
+
+  41 tests in the new `test_admin_writes_persistence.py`, driving the real routes
+  through the real serializers with only the boto3 boundary replaced, and
+  asserting the deletion direction for all three resources — an add can persist
+  while a delete silently reverts. Mutation testing reverted 21 individual pieces
+  of the fix; 18 were caught, and the 3 survivors are equivalent mutants (a stored
+  `"[]"` is a truthy string; rebinding `hub_config.spokes` is as visible as
+  mutating it, since the router and monitor hold the object). Write failures stay
+  logged-and-swallowed as elsewhere in the admin API — the in-memory change
+  already happened — with `last_write_error` surfacing the drop to a health probe.
+  README documents the replace-not-merge semantics, the deliberate
+  non-persistence of health state, and the four spoke routes that were missing
+  from the endpoint table entirely.
+
 - **The Cedar authorization layer was unusable in every direction at once:
   adding your first policy took the gateway offline, and no policy you wrote ever
   persisted or took effect.** Four defects compounding:

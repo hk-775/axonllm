@@ -960,6 +960,184 @@ class DynamoPersistence:
             logger.error("Failed to load Cedar policies from DynamoDB", exc_info=True)
             return []
 
+    # --- Event destinations (webhooks / SNS / CloudWatch) ---
+    #
+    # Written through POST and DELETE /admin/webhooks. A destination's ``name`` is
+    # its identity, matching the dispatcher's own remove-by-name behaviour.
+    #
+    # Stored as one item holding the whole set, not a row per destination —
+    # verified necessary, not stylistic. With a row each, a *deletion* is
+    # unrepresentable whenever demo seeding is on: the delete removes the row, the
+    # next boot re-seeds the destination, and there is no row left to say "an
+    # operator removed this". A deleted destination silently resumed receiving
+    # security events. The whole-set item makes the stored list authoritative, so
+    # a delete is a rewrite that survives.
+    #
+    # This is the same reasoning as the region topology below, and it also means
+    # "saved but empty" is distinguishable from "nothing saved" — hence the
+    # ``| None`` return rather than a bare list.
+
+    @staticmethod
+    def serialize_event_destinations(destinations: list[dict]) -> dict:
+        """Serialize the full destination set ({name, destination_type, ...} each)."""
+        return {
+            "PK": "EVENT_DESTINATIONS",
+            "SK": "CONFIG",
+            "entity_type": "event_destination",
+            # json.dumps rather than a native list of maps so `event_filter=None`
+            # (meaning "every event type") survives the round trip: DynamoDB drops
+            # empty/None attributes, which would make an unfiltered destination
+            # indistinguishable from one filtered to nothing.
+            "destinations": json.dumps([
+                {
+                    "name": d["name"],
+                    "destination_type": d.get("destination_type", "webhook"),
+                    "config": d.get("config", {}),
+                    "event_filter": d.get("event_filter"),
+                    "enabled": bool(d.get("enabled", True)),
+                }
+                for d in destinations
+            ]),
+        }
+
+    async def save_event_destinations(self, destinations: list[dict]) -> None:
+        """Write the whole destination set. Every add and delete rewrites it."""
+        if not self._enabled:
+            return
+
+        def _put():
+            self._get_table().put_item(
+                Item=self.serialize_event_destinations(destinations))
+
+        try:
+            await asyncio.to_thread(_put)
+        except Exception:
+            self._record_write_failure("event destinations", "set")
+
+    async def load_event_destinations(self) -> list[dict] | None:
+        """Return the stored destination set, or None if none was ever saved.
+
+        None means "fall back to seeded/config destinations"; ``[]`` means an
+        operator deliberately removed every destination and nothing should be
+        restored over the top.
+        """
+        if not self._enabled:
+            return None
+
+        def _get():
+            return self._get_table().get_item(
+                Key={"PK": "EVENT_DESTINATIONS", "SK": "CONFIG"}
+            ).get("Item")
+
+        try:
+            item = await asyncio.to_thread(_get)
+        except Exception:
+            # Booting on seed-only destinations means security events may be
+            # dispatched somewhere an operator had changed — the gateway serves
+            # traffic and the alerting is quietly wrong, so this is an ERROR.
+            logger.error("Failed to load event destinations from DynamoDB", exc_info=True)
+            return None
+        if not item:
+            return None
+        raw = item.get("destinations", "[]")
+        parsed = json.loads(raw) if isinstance(raw, str) else raw
+        return [
+            {
+                "name": d["name"],
+                "destination_type": d.get("destination_type", "webhook"),
+                "config": d.get("config", {}),
+                "event_filter": d.get("event_filter"),
+                "enabled": bool(d.get("enabled", True)),
+            }
+            for d in parsed
+        ]
+
+    # --- Multi-region topology (hub config + spokes) ---
+    #
+    # Written through PUT /admin/regions/config and the /admin/regions/spokes
+    # routes. Stored as one item rather than a row per spoke: the hub-level
+    # settings and the spoke list are edited as a unit, a spoke's
+    # ``failover_priority`` is only meaningful relative to its siblings, and a
+    # partial read of a topology would route traffic on a set of regions no
+    # operator configured.
+    #
+    # ``status`` is deliberately not persisted. It is health-check state, not
+    # configuration; restoring a stale UNHEALTHY would keep a recovered region out
+    # of rotation until the next probe, and a stale HEALTHY would send traffic to a
+    # region that is still down. Spokes come back at their dataclass default and
+    # the first health check corrects it.
+
+    @staticmethod
+    def serialize_region_topology(config) -> dict:
+        return {
+            "PK": "REGION_TOPOLOGY",
+            "SK": "CONFIG",
+            "entity_type": "region_topology",
+            "hub_region": config.hub_region,
+            "health_check_interval_seconds": config.health_check_interval_seconds,
+            "failover_threshold_consecutive": config.failover_threshold_consecutive,
+            "failover_cooldown_seconds": config.failover_cooldown_seconds,
+            "data_residency_strict": bool(config.data_residency_strict),
+            "spokes": json.dumps([
+                {
+                    "region": s.region,
+                    "role": s.role.value,
+                    "weight": s.weight,
+                    "endpoint": s.endpoint,
+                    "providers": s.providers,
+                    "models": s.models,
+                    "data_residency_zones": s.data_residency_zones,
+                    "health_check_url": s.health_check_url,
+                    "max_latency_ms": s.max_latency_ms,
+                    "failover_priority": s.failover_priority,
+                }
+                for s in config.spokes
+            ]),
+        }
+
+    async def save_region_topology(self, config) -> None:
+        if not self._enabled:
+            return
+
+        def _put():
+            self._get_table().put_item(Item=self.serialize_region_topology(config))
+
+        try:
+            await asyncio.to_thread(_put)
+        except Exception:
+            self._record_write_failure("region topology", config.hub_region)
+
+    async def load_region_topology(self) -> dict | None:
+        """Return the stored topology as a dict, or None if none was saved.
+
+        None and "saved but empty" are different states: the first means fall back
+        to the config file, the second means an operator removed every spoke.
+        """
+        if not self._enabled:
+            return None
+
+        def _get():
+            return self._get_table().get_item(
+                Key={"PK": "REGION_TOPOLOGY", "SK": "CONFIG"}
+            ).get("Item")
+
+        try:
+            item = await asyncio.to_thread(_get)
+        except Exception:
+            logger.error("Failed to load region topology from DynamoDB", exc_info=True)
+            return None
+        if not item:
+            return None
+        spokes_raw = item.get("spokes", "[]")
+        return {
+            "hub_region": item.get("hub_region", ""),
+            "health_check_interval_seconds": int(item.get("health_check_interval_seconds", 30)),
+            "failover_threshold_consecutive": int(item.get("failover_threshold_consecutive", 3)),
+            "failover_cooldown_seconds": int(item.get("failover_cooldown_seconds", 60)),
+            "data_residency_strict": bool(item.get("data_residency_strict", False)),
+            "spokes": json.loads(spokes_raw) if isinstance(spokes_raw, str) else spokes_raw,
+        }
+
     # --- SCIM identity (users + groups) ---
 
     @staticmethod

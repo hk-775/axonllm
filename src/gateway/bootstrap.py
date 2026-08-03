@@ -42,6 +42,7 @@ from src.gateway.efficiency_analyzer import EfficiencyAnalyzer
 from src.gateway.middleware.admin_rbac import AdminRBACMiddleware
 from src.gateway.middleware.auth import AuthMiddleware
 from src.gateway.multi_region.health_monitor import SpokeHealthMonitor
+from src.gateway.multi_region.region_config import HubConfig, SpokeConfig, SpokeRole
 from src.gateway.multi_region.region_router import RegionRouter
 from src.gateway.multi_region.spoke_loader import load_hub_config
 from src.gateway.quota_enforcer import QuotaEnforcer
@@ -272,9 +273,10 @@ def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComp
     # --- DynamoDB persisted state (merges on top of seed data) ---
     loaded_feedback: list = []
     if persistence.enabled:
-        loaded_projects, loaded_user_configs, loaded_records, loaded_feedback, loaded_policies = (
-            asyncio.run(_load_persisted_state(persistence))
-        )
+        (
+            loaded_projects, loaded_user_configs, loaded_records, loaded_feedback,
+            loaded_policies, loaded_destinations, loaded_topology,
+        ) = asyncio.run(_load_persisted_state(persistence))
         projects.update(loaded_projects)
         user_configs.update(loaded_user_configs)
         # Merge by name, matching POST /admin/policies' update-by-name identity: a
@@ -284,6 +286,8 @@ def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComp
         by_name = {p["name"]: p for p in policies}
         by_name.update({p["name"]: p for p in loaded_policies})
         policies = list(by_name.values())
+        _apply_persisted_infrastructure(
+            event_dispatcher, hub_config, loaded_destinations, loaded_topology)
         # Rehydrate via load_records so the running spend counters (which back
         # budget checks) are seeded from history, not just the record list.
         cost_tracker.load_records(loaded_records)
@@ -486,8 +490,11 @@ def build_starlette_app(app_config: AppConfig | None = None) -> Starlette:
     key_api = KeyManagementAPI(api_key_service=comp.api_key_service)
     policy_api = PolicyHierarchyAPI(resolver=comp.policy_resolver)
     audit_api = AuditAPI(audit_trail=comp.audit_trail)
-    webhook_api = WebhookAPI(dispatcher=comp.event_dispatcher)
-    region_api = RegionAPI(router=comp.region_router, monitor=comp.health_monitor)
+    webhook_api = WebhookAPI(
+        dispatcher=comp.event_dispatcher, persistence=comp.persistence)
+    region_api = RegionAPI(
+        router=comp.region_router, monitor=comp.health_monitor,
+        persistence=comp.persistence)
     quota_api = QuotaAPI(quota_enforcer=comp.quota_enforcer, policy_resolver=comp.policy_resolver)
     scim_api = ScimAPI(store=comp.scim_store)
     saml_api = SamlAPI(service=comp.saml_service)
@@ -799,16 +806,130 @@ def _apply_seed_data(
 
 
 async def _load_persisted_state(persistence: DynamoPersistence):
-    """Load projects, user configs, usage records, feedback, and Cedar policies."""
+    """Load projects, user configs, usage records, feedback, Cedar policies,
+    event destinations, and the region topology."""
     loaded_projects = await persistence.load_projects()
     loaded_user_configs = await persistence.load_user_configs()
     loaded_records = await persistence.load_usage_records()
     loaded_feedback = await persistence.load_feedback_records()
     loaded_policies = await persistence.load_all_cedar_policies()
+    loaded_destinations = await persistence.load_event_destinations()
+    loaded_topology = await persistence.load_region_topology()
     return (
         loaded_projects,
         loaded_user_configs,
         loaded_records,
         loaded_feedback,
         loaded_policies,
+        loaded_destinations,
+        loaded_topology,
     )
+
+
+def _apply_persisted_infrastructure(
+    dispatcher,
+    hub_config: HubConfig,
+    loaded_destinations: list[dict] | None,
+    loaded_topology: dict | None,
+) -> None:
+    """Apply persisted event destinations and region topology over the seed.
+
+    ``is not None``, not truthiness, in both cases: an empty stored set is a
+    deliberate operator state ("I removed every destination / every spoke"), and
+    ``[]`` is falsy — a truthiness check would treat that as "nothing was ever
+    saved" and silently restore the seed, which is exactly the resurrection this
+    persistence exists to prevent.
+
+    Extracted from the app factory so the distinction is testable without booting
+    the whole gateway.
+    """
+    if loaded_destinations is not None:
+        _apply_persisted_destinations(dispatcher, loaded_destinations)
+    if loaded_topology is not None:
+        _apply_persisted_topology(hub_config, loaded_topology)
+
+
+def _apply_persisted_destinations(dispatcher, loaded: list[dict]) -> None:
+    """Replace the seeded event destinations with the persisted set.
+
+    Replace, not merge. Merging by name looks safer but cannot express a
+    deletion: a destination removed through ``DELETE /admin/webhooks`` is absent
+    from the stored set, so a merge would leave the seeded copy in place and the
+    destination would silently resume receiving security events at the next boot
+    — verified, before this became a replace.
+
+    Reaching here at all means an operator has written the set through the admin
+    API, so the stored list is the newer statement of intent.
+    """
+    # `destinations` is a copy, so removing while iterating it is safe.
+    for existing in dispatcher.destinations:
+        dispatcher.remove_destination(existing.name)
+    for dest in loaded:
+        try:
+            dest_type = DestinationType(dest.get("destination_type", "webhook"))
+        except ValueError:
+            # A destination type this build doesn't know about — skip it rather
+            # than crash the gateway, matching how an unsupported stored Cedar
+            # policy is handled. Logged loudly because the events it was meant to
+            # receive now go nowhere.
+            logger.error(
+                "Skipping persisted event destination %s: unknown type %r",
+                dest.get("name"), dest.get("destination_type"),
+            )
+            continue
+        # remove-then-add rather than a bare add: the stored set is written from
+        # the dispatcher's own deduped list, but a hand-edited row shouldn't be
+        # able to install the same name twice and double-deliver every event.
+        dispatcher.remove_destination(dest["name"])
+        dispatcher.add_destination(EventDestination(
+            name=dest["name"],
+            destination_type=dest_type,
+            config=dest.get("config", {}),
+            event_filter=dest.get("event_filter"),
+            enabled=dest.get("enabled", True),
+        ))
+
+
+def _apply_persisted_topology(hub_config: HubConfig, loaded: dict) -> None:
+    """Replace the config-file topology with the persisted one, in place.
+
+    Mutates the caller's ``HubConfig`` rather than returning a new one:
+    ``RegionRouter`` and ``SpokeHealthMonitor`` are both already constructed
+    around this object by the time persisted state loads, and neither re-reads it,
+    so handing back a replacement would leave both routing on spokes.yaml.
+
+    Replace, not merge — unlike policies and destinations, the topology is stored
+    as a single item precisely because it is edited as a unit. Merging a stored
+    spoke list with spokes.yaml would resurrect every spoke an operator had
+    removed through the API, which is the bug this persistence is here to fix.
+    """
+    hub_config.hub_region = loaded["hub_region"] or hub_config.hub_region
+    hub_config.health_check_interval_seconds = loaded["health_check_interval_seconds"]
+    hub_config.failover_threshold_consecutive = loaded["failover_threshold_consecutive"]
+    hub_config.failover_cooldown_seconds = loaded["failover_cooldown_seconds"]
+    hub_config.data_residency_strict = loaded["data_residency_strict"]
+
+    spokes = []
+    for s in loaded.get("spokes", []):
+        try:
+            role = SpokeRole(s.get("role", "active"))
+        except ValueError:
+            logger.error(
+                "Skipping persisted spoke %s: unknown role %r",
+                s.get("region"), s.get("role"),
+            )
+            continue
+        spokes.append(SpokeConfig(
+            region=s["region"],
+            role=role,
+            weight=s.get("weight", 50),
+            endpoint=s.get("endpoint", ""),
+            providers=s.get("providers", []),
+            models=s.get("models", []),
+            data_residency_zones=s.get("data_residency_zones", []),
+            health_check_url=s.get("health_check_url", ""),
+            max_latency_ms=s.get("max_latency_ms", 5000),
+            failover_priority=s.get("failover_priority", 0),
+            # status left at the dataclass default — see serialize_region_topology.
+        ))
+    hub_config.spokes[:] = spokes
