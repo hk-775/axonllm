@@ -91,81 +91,139 @@ install paths — local or AWS, seeded or clean — and which flag decides.
 
 ## Quick Start
 
-Four paths, depending on where it runs and whether you want the seeded demo
-data. Pick one:
+**Two questions decide everything: where does it run, and do you want the demo
+data?**
 
-| | Where | Demo data | Go to |
-|---|-------|-----------|-------|
-| **1** | Local machine | No — empty gateway | [Local, clean](#1-local-clean) |
-| **2** | Local machine | Yes — fully seeded | [Local, seeded demo](#2-local-seeded-demo) |
-| **3** | AWS (enterprise) | No — empty gateway | [AWS, clean](#3-aws-clean) |
-| **4** | AWS (enterprise) | Yes — fully seeded | [AWS, seeded demo](#4-aws-seeded-demo) |
+```
+                      ┌─────────────────────────────┐
+                      │  Where are you installing?  │
+                      └──────────────┬──────────────┘
+                ┌────────────────────┴────────────────────┐
+                ▼                                         ▼
+           Your laptop                               AWS account
+                │                                         │
+       ┌────────┴────────┐                       ┌────────┴────────┐
+       ▼                 ▼                       ▼                 ▼
+     Empty           Full demo                 Empty           Full demo
+    gateway           seeded                  gateway           seeded
+       │                 │                       │                 │
+    PATH 1            PATH 2                  PATH 3            PATH 4
+   real work          a tour                production         a sandbox
+     5 min             5 min                  ~20 min           ~20 min
+```
 
-**Read this before choosing 3 or 4.** Demo data is opt-*out*, not opt-in, in the
-container: `serve_dashboard.py` is the `CMD`, and it defaults
-`AXON_LOAD_DEMO_DATA` to `true` when the variable is absent. The CDK stack sets
-it to `false` so a Fargate deploy is clean by default, but anything that starts
-the image without that variable — `docker compose up`, a hand-written task
-definition, App Runner — comes up with Acme Corp, three fictional users and 66
-fabricated usage records. Path 4 is what you get by turning it back on. If you
-deployed before the stack set it, see
-[Turning the demo data off](#turning-the-demo-data-off).
+| | Where | Demo data | Auth | Time | Go to |
+|---|-------|-----------|------|------|-------|
+| **1** | Laptop | No — empty | `LOG_ONLY` | 5 min | [Local, clean](#1-local-clean) |
+| **2** | Laptop | Yes — seeded | `LOG_ONLY` | 5 min | [Local, seeded demo](#2-local-seeded-demo) |
+| **3** | AWS Fargate | No — empty | `ENFORCE` | ~20 min | [AWS, clean](#3-aws-clean) |
+| **4** | AWS Fargate | Yes — seeded | `ENFORCE` | ~20 min | [AWS, seeded demo](#4-aws-seeded-demo) |
 
-Two flags carry most of the difference between the paths:
+**Not sure? Start with path 2**, click around, then throw it away and do path 1
+or 3 for real work. Nothing in path 2 persists unless you enable DynamoDB.
 
-| Flag | Effect |
-|------|--------|
-| `AXON_LOAD_DEMO_DATA` | Seeds `config/demo_seed.yaml`: projects, users, policy hierarchy, usage history, audit chain, webhooks. **Also** the gate on reading `.env` |
-| `AXON_AUTH_MODE` | `ENFORCE` (default) requires an `axon_` key on every request; `LOG_ONLY` does not. `serve_dashboard.py` defaults it to `LOG_ONLY` for local dev |
+Paths 1 and 3 leave you with an empty gateway, which then needs configuring —
+provider keys, projects, authentication, RBAC. That is
+[Configuring a clean install](#configuring-a-clean-install), further down.
+
+### What "demo data" actually means
+
+This is the difference, on the same dashboard page:
+
+**Clean install** — every tile zero. Nothing has happened yet, and the UI says so.
+
+![Clean install dashboard: all tiles zero](docs/images/dashboard-clean.png)
+
+**Seeded demo** — Acme Corp, 2 projects, 4 users, 73 requests, $1.27 of spend, a
+verifiable audit chain. **All of it fictional, and nothing on the page says so.**
+
+![Seeded demo dashboard: populated tiles](docs/images/dashboard-seeded.png)
+
+That second screenshot is why the flag matters: seeded data is indistinguishable
+from real usage, which makes it a good demo and a bad thing to leave running
+where someone might mistake it for a live tenant.
+
+### The two flags that drive all four paths
+
+| Flag | Default | What it does |
+|------|---------|--------------|
+| `AXON_LOAD_DEMO_DATA` | `true` in the container, `false` in code | Seeds `config/demo_seed.yaml`: projects, users, policy hierarchy, usage history, audit chain, webhooks. **Also** the gate on reading `.env` |
+| `AXON_AUTH_MODE` | `ENFORCE`, but `serve_dashboard.py` sets `LOG_ONLY` | `ENFORCE` requires an `axon_` key on every request; `LOG_ONLY` accepts anonymous requests and only logs what it would have denied |
+
+> **⚠️ Demo data is opt-*out* in the container, not opt-in.**
+> `serve_dashboard.py` is the Docker `CMD`, and it defaults
+> `AXON_LOAD_DEMO_DATA` to `true` when the variable is absent. The CDK stack sets
+> it to `false`, so **`./deploy-fargate.sh` is clean** — but anything else that
+> starts the image without the variable (`docker compose up`, a hand-written task
+> definition, App Runner) comes up seeded. If you deployed before the stack set
+> it, see [Turning the demo data off](#turning-the-demo-data-off).
 
 ### 1. Local, clean
 
-An empty gateway: no projects, no usage history, real provider calls. This is the
-closest local shape to production, and what you want if you are evaluating the
-routing or building against the API.
+An empty gateway: no projects, no usage history, real provider calls. The closest
+local shape to production, and what you want if you are evaluating the routing or
+building against the API.
+
+**Step 1 — install.**
 
 ```bash
 pip install -e ".[dev]"
 cp config/providers.yaml.example config/providers.yaml
+```
 
-export ANTHROPIC_API_KEY=sk-ant-...        # at least one provider, or
-export AWS_PROFILE=my-bedrock-profile      # just AWS creds for Bedrock
+**Step 2 — give it at least one provider.** Either an API key, or AWS credentials
+for Bedrock. A provider with no key is dropped from the routing table at startup,
+so with none of these set every model reports "no providers".
 
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...        # any one of these is enough
+export OPENAI_API_KEY=sk-...
+export AWS_PROFILE=my-bedrock-profile      # Bedrock needs no API key
+```
+
+**Step 3 — start it.**
+
+```bash
 AXON_LOAD_DEMO_DATA=false python serve_dashboard.py
 ```
 
-Open http://localhost:8000/admin/dashboard. Expect the tiles to read zero — that
-is the point. Auth is still `LOG_ONLY`, so requests work without a key:
+The `=false` is not optional-but-tidy — **omit it and you get path 2**, because
+the entrypoint defaults it to `true`. It also means `.env` is not read, which is
+why step 2 uses `export`.
+
+**Step 4 — check it.** Open http://localhost:8000/admin/dashboard. Every tile
+should read zero, as in [the screenshot above](#what-demo-data-actually-means).
+Auth is `LOG_ONLY` locally, so this works with no key:
 
 ```bash
 curl -sX POST http://localhost:8000/api/chat -H 'Content-Type: application/json' \
   -d '{"model":"claude-sonnet","messages":[{"role":"user","content":"Hello"}]}'
 ```
 
-`AXON_LOAD_DEMO_DATA=false` is explicit on purpose: omitting it entirely gets you
-path 2, because the dev entrypoint defaults it to `true`. Note that this also
-means `.env` is **not** read — export the keys you want, or set
-`AXON_LOAD_DEMO_DATA=true` and use the file.
-
-To create your own project instead of using a seeded one:
+**Step 5 — create a project**, since there are no seeded ones:
 
 ```bash
 curl -sX POST http://localhost:8000/admin/projects -H 'Content-Type: application/json' \
   -d '{"project_id":"my-project","name":"My Project","budget_limit":100.0}'
 ```
 
+**Next:** [Configuring a clean install](#configuring-a-clean-install) covers
+provider keys, projects, authentication, and RBAC in full.
+
 ### 2. Local, seeded demo
 
-Everything on, with data behind it — this is the path for a walkthrough, a demo,
-or working on the dashboard, because no page is empty.
+Everything on, with data behind it — the path for a walkthrough, a demo, or
+working on the dashboard, because no page is empty.
+
+**Step 1 — install.**
 
 ```bash
 pip install -e ".[dev]"
 cp config/providers.yaml.example config/providers.yaml
 ```
 
-Put provider keys in `.env` (gitignored) — see
-[Provider keys for a demo](#provider-keys-for-a-demo) for how the file is read:
+**Step 2 — put provider keys in `.env`** (gitignored). This path reads the file;
+path 1 does not. See [Provider keys for a demo](#provider-keys-for-a-demo) for why.
 
 ```bash
 # .env
@@ -174,7 +232,7 @@ ANTHROPIC_API_KEY=sk-ant-...
 AXON_SEMANTIC_CACHE=true
 ```
 
-Then:
+**Step 3 — start it with everything on.**
 
 ```bash
 AWS_PROFILE=my-bedrock-profile AWS_REGION=us-east-1 \
@@ -194,12 +252,15 @@ You get:
   the two demo projects are deliberately identical except for that one axis, so
   the Comprehend column has something to compare against.
 
-Check it came up whole:
+**Step 4 — check it came up whole.**
 
 ```bash
 curl -s localhost:8000/admin/overview          # 66 requests, 2 projects, 3 users
 curl -s localhost:8000/admin/semantic-cache    # "available": true
 ```
+
+Then open http://localhost:8000/admin/dashboard — it should look like the
+[seeded screenshot above](#what-demo-data-actually-means).
 
 `AXON_LOAD_DEMO_DATA=true` must be **explicit** here even though it is also the
 entrypoint default, because it is what unlocks reading `.env` — and
@@ -215,10 +276,34 @@ which the seeded `proj-alpha` does. On a clean install you set it per project.
 The enterprise install: Fargate behind an ALB, DynamoDB persistence, Secrets
 Manager, `ENFORCE` auth — and **no fabricated data**.
 
-```bash
-# First time only
-cd infra && pip install -r requirements.txt && cdk bootstrap && cd ..
+What the stack builds:
 
+```
+  Internet
+     │
+     ▼
+ ┌────────────┐     ┌────────────┐     ┌────────────────┐     ┌───────────────┐
+ │ CloudFront │────▶│    ALB     │────▶│  Fargate ×2    │────▶│   DynamoDB    │
+ │   HTTPS    │     │  sticky    │     │  auto-scales   │     │ axonllm-state │
+ │            │     │  sessions  │     │  2 → 10 tasks  │     │  (PK / SK)    │
+ └────────────┘     └────────────┘     └───────┬────────┘     └───────────────┘
+                                               │ reads at start
+                                               ▼
+                                       ┌────────────────┐
+                                       │ Secrets Manager│
+                                       │axonllm/api-keys│
+                                       └────────────────┘
+```
+
+**Step 1 — bootstrap CDK** (first time in this account/region only).
+
+```bash
+cd infra && pip install -r requirements.txt && cdk bootstrap && cd ..
+```
+
+**Step 2 — deploy.**
+
+```bash
 ./deploy-fargate.sh us-east-1
 ```
 
@@ -228,30 +313,50 @@ rather than omitted precisely because omitting it means demo data *on* (the
 container `CMD` supplies the default). `tests/unit/test_infra_stack_env.py`
 asserts it, along with `AXON_AUTH_MODE=ENFORCE`, for the same reason.
 
-To confirm what the running task actually has:
+**Step 3 — put your provider keys in Secrets Manager.** The stack creates the
+secret with empty values and wires two keys into the container; it cannot know
+yours.
+
+```bash
+aws secretsmanager put-secret-value --secret-id axonllm/api-keys --region us-east-1 \
+  --secret-string '{"ANTHROPIC_API_KEY":"sk-ant-...","OPENAI_API_KEY":"sk-..."}'
+
+# Then restart the tasks to pick it up — secrets are read at container start:
+aws ecs update-service --cluster axonllm --service axonllm \
+  --force-new-deployment --region us-east-1
+```
+
+For providers beyond Anthropic/OpenAI, add them to the `secrets={...}` block in
+`infra/stack.py` — not `environment`, which is plaintext in the task definition.
+The `.env` mechanism is deliberately inert here (see
+[Provider keys for a demo](#provider-keys-for-a-demo)).
+
+**Step 4 — verify what the running task actually has.**
 
 ```bash
 aws ecs describe-task-definition --task-definition axonllm --region us-east-1 \
   --query 'taskDefinition.containerDefinitions[0].environment'
 ```
 
-Provider keys come from Secrets Manager, wired by the stack. Add any beyond
-Anthropic/OpenAI to the `secrets={...}` block rather than `environment` — the
-`.env` mechanism is deliberately inert here (it never overwrites an existing
-variable, and is not read without the demo flag).
-
-Because auth is `ENFORCE`, mint a key before the first request. This works
-in-process, so there is no chicken-and-egg with admin credentials:
+**Step 5 — mint the first API key.** Auth is `ENFORCE`, so nothing works without
+one. This runs in-process against the same table, so there is no chicken-and-egg
+with admin credentials:
 
 ```bash
 LLM_ROUTER_DYNAMODB_ENABLED=true AXON_DYNAMODB_TABLE=axonllm-state \
-  axon issue-key --project my-project --name first-key
+AWS_DEFAULT_REGION=us-east-1 \
+  axon issue-key --project my-project --name first-key --scopes 'admin:*'
 # → axon_xxxxxxxx…   (shown once)
 ```
 
 It must point at the **same table the service uses** or the running server will
-not recognise the key; the CLI warns if persistence is off. Then work through the
-[Production Checklist](#production-checklist) — OIDC, budgets, TLS.
+not recognise the key; the CLI warns if persistence is off. `--scopes 'admin:*'`
+matters — without it the key cannot reach any `/admin/*` endpoint. See
+[Authentication and authorization](#authentication-and-authorization).
+
+**Next:** [Configuring a clean install](#configuring-a-clean-install) for
+projects, RBAC, and SSO, then the
+[Production Checklist](#production-checklist) for budgets and TLS.
 
 ### 4. AWS, seeded demo
 
@@ -348,22 +453,402 @@ keep that from happening:
 Startup logs the variable *names* it loaded, never their values. Set
 `AXON_DEV_ENV_FILE` to read a different path.
 
-### Get an API key
+## Configuring a clean install
 
-Under `ENFORCE`, every request needs an `axon_` key. Mint the first one from the
-CLI — this works in-process and does **not** require an existing admin credential
-(so there's no chicken-and-egg):
+Paths 1 and 3 give you an empty gateway. This section takes it from there to
+something that routes real traffic under real access control, in the order the
+dependencies actually run:
 
-```bash
-axon issue-key --project my-project --name my-first-key
-# → axon_xxxxxxxx…   (shown once — store it)
+```
+  1. Provider keys      →  the gateway can reach a model at all
+  2. Projects           →  requests have something to attribute cost to
+  3. API keys           →  callers can authenticate     (needs 2)
+  4. Auth mode          →  ENFORCE actually rejects     (needs 3, or you lock yourself out)
+  5. SSO / SCIM         →  humans log in via your IdP   (optional)
+  6. RBAC policies      →  who may do what              (needs roles from 3 or 5)
 ```
 
-For the key to be recognized by a running server, persistence must be enabled and
-pointed at the same table the server uses (`LLM_ROUTER_DYNAMODB_ENABLED=true`,
-`AXON_DYNAMODB_TABLE=…`); the CLI warns if it isn't. Pass the key as
-`Authorization: Bearer <key>` or `X-Api-Key: <key>`, or export `AXON_API_KEY` for
-the `axon chat` / `axon models` commands.
+Do them in that order. Step 4 before step 3 locks you out of your own gateway;
+step 6 before step 5 writes policies against roles nothing is producing yet.
+
+### 1. Where to put provider API keys
+
+Four mechanisms, in **precedence order** — the first one that has a value wins:
+
+| # | Mechanism | Scope | Use it for |
+|---|-----------|-------|------------|
+| 1 | **Environment variable** | Wherever the process runs | Production. Beats everything below |
+| 2 | **Secrets Manager** → container env | AWS deploys | Path 3/4. The stack wires it as an env var, so this *is* mechanism 1 |
+| 3 | **`api_key:` in `config/providers.yaml`** | That file | Local experiments. Never commit it |
+| 4 | **`.env` file** | Local, demo mode only | Path 2. Ignored unless `AXON_LOAD_DEMO_DATA=true` was set by you |
+
+The environment variable name per provider (from `src/gateway/provider_loader.py`):
+
+| Provider | Variable |
+|----------|----------|
+| Anthropic | `ANTHROPIC_API_KEY` |
+| OpenAI | `OPENAI_API_KEY` |
+| Azure OpenAI | `AZURE_OPENAI_API_KEY` |
+| Cohere | `COHERE_API_KEY` |
+| Google AI (Gemini) | `GOOGLE_AI_API_KEY` |
+| Vertex AI | `GCP_ACCESS_TOKEN` |
+| xAI | `XAI_API_KEY` |
+| Groq | `GROQ_API_KEY` |
+| Together | `TOGETHER_API_KEY` |
+| Fireworks | `FIREWORKS_API_KEY` |
+| AI21 | `AI21_API_KEY` |
+| **Bedrock / Bedrock Mantle** | **none** — uses the AWS credential chain (`AWS_PROFILE`, instance role, task role) |
+
+> **A provider with no key is dropped from the routing table at startup**, not
+> failed at request time. So a missing key does not present as "unauthorized" —
+> it presents as *"that model has no providers."* If a model looks unreachable,
+> check the key before the model id. `/admin/production-checklist` reports this
+> as **"Every routed provider has credentials."**
+
+**Locally:**
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...
+export AWS_PROFILE=my-bedrock-profile      # for Bedrock
+```
+
+**On AWS** — put them in the secret the stack created, then restart the tasks
+(secrets are read at container start, not re-read live):
+
+```bash
+aws secretsmanager put-secret-value --secret-id axonllm/api-keys --region us-east-1 \
+  --secret-string '{"ANTHROPIC_API_KEY":"sk-ant-...","OPENAI_API_KEY":"sk-..."}'
+
+aws ecs update-service --cluster axonllm --service axonllm \
+  --force-new-deployment --region us-east-1
+```
+
+To wire a provider the stack does not know about, add it to `secrets={...}` in
+`infra/stack.py` — **not** `environment`, which stores the value in plaintext in
+the task definition where anyone with `ecs:DescribeTaskDefinition` can read it.
+
+### 2. Create a project
+
+Nothing on a clean install has a project, and cost, quotas, guardrails and API
+keys all attribute to one. Only `name` is required.
+
+```bash
+curl -sX POST http://localhost:8000/admin/projects \
+  -H 'Content-Type: application/json' \
+  -d '{"project_id":"my-project","name":"My Project","budget_limit":100.0}'
+```
+
+Do this **before** switching to `ENFORCE` and no credential is needed — which is
+the whole reason for the ordering. Under `ENFORCE` this call needs an admin key,
+and an admin key needs a project to belong to. The way out of that loop is
+`axon issue-key`, which runs in-process and works regardless of auth mode; on an
+already-enforcing gateway, mint the key first and pass it here.
+
+### 3. Issue API keys (and the one flag that matters)
+
+```bash
+# A key for calling the gateway
+axon issue-key --project my-project --name app-key
+# → axon_xxxxxxxx…   (shown once — store it now)
+
+# A key that can also administer it
+axon issue-key --project my-project --name admin-key --scopes 'admin:*'
+```
+
+`--scopes` is comma-separated and **defaults to `chat`**. That default cannot
+reach any `/admin/*` endpoint under `ENFORCE` — verified:
+
+| Issued with | Effective scopes | `/api/chat` | `/admin/projects` |
+|-------------|------------------|-------------|-------------------|
+| *(default)* | `['chat']` | ✅ | ❌ 403 |
+| `--scopes 'admin:*'` | `['admin:*']` | ✅ | ✅ |
+| `--scopes 'admin:quotas'` | `['admin:quotas']` | ✅ | ❌ (but `/admin/quotas/*` ✅) |
+
+So **issue at least one `admin:*` key before switching to `ENFORCE`**, or the
+admin API becomes unreachable and you have to fall back to the CLI.
+
+Keys are stored as SHA-256 hashes; **the raw value is returned once and never
+persisted.** There is no "show key again" — rotate instead (`POST
+/admin/keys/{key_id}/rotate`), which revokes the old one and issues a replacement
+carrying the same project and scopes.
+
+For a key to work against a *running* server, the CLI must point at the same
+persistence the server uses:
+
+```bash
+LLM_ROUTER_DYNAMODB_ENABLED=true AXON_DYNAMODB_TABLE=axonllm-state \
+AWS_DEFAULT_REGION=us-east-1 \
+  axon issue-key --project my-project --name first-key --scopes 'admin:*'
+```
+
+The CLI warns when persistence is off. Without it the key lives in the CLI
+process's memory and dies with it — issued successfully, then rejected by the
+server, which is a confusing pair of outcomes to debug.
+
+Send it as either header, or export `AXON_API_KEY` for `axon chat` / `axon models`:
+
+```bash
+-H 'Authorization: Bearer axon_...'    # or
+-H 'X-Api-Key: axon_...'
+```
+
+### Authentication and authorization
+
+*Steps 4–6 of the sequence above.* Two independent layers: **authentication**
+establishes who the caller is, **authorization** decides what they may do. Both
+are governed by the single `AXON_AUTH_MODE` flag, which is why turning it on turns
+on both at once.
+
+```
+   Request
+      │
+      ▼
+ ┌─────────────────────────────────────────────────────────────┐
+ │ AuthMiddleware — first match wins                           │
+ │                                                             │
+ │   1. X-Amzn-Oidc-Data     →  ALB OIDC JWT (ES256)           │
+ │   2. Authorization: Bearer →  axon_… prefix ? API key       │
+ │                                           : OIDC JWT (JWKS) │
+ │   3. X-Api-Key            →  API key                        │
+ │   4. nothing              →  401 under ENFORCE              │
+ └──────────────────────────────┬──────────────────────────────┘
+                                │ RequestContext
+                                │ user_id, roles, scopes, project_id
+              ┌─────────────────┴─────────────────┐
+              ▼                                   ▼
+   ┌─────────────────────┐          ┌─────────────────────────┐
+   │  Cedar policies     │          │  AdminRBAC              │
+   │  every path         │          │  /admin/* only          │
+   │  default deny       │          │  needs 'admin' role     │
+   │  forbid > permit    │          │  or admin:<res> scope   │
+   └─────────────────────┘          └─────────────────────────┘
+```
+
+#### Auth modes
+
+| `AXON_AUTH_MODE` | Authentication | Admin RBAC | Cedar policies |
+|------------------|----------------|------------|----------------|
+| `ENFORCE` *(default)* | 401 without a valid credential | 403 without admin role/scope | 403 on `DENY` |
+| `LOG_ONLY` | Anonymous context, request proceeds | Logs the denial, proceeds | Logs the denial, proceeds |
+
+`serve_dashboard.py` sets `LOG_ONLY` when you have not, which is why local
+requests need no key. **Anything reachable from a network should run `ENFORCE`**;
+an unrecognized value falls back to `ENFORCE` rather than guessing, and `LOG_ONLY`
+logs a warning at startup.
+
+Verified against a clean `ENFORCE` instance:
+
+```
+GET  /health            → 200   (public)
+GET  /admin/dashboard   → 200   (public — the page; its data calls still 401)
+GET  /admin/overview    → 401   {"type":"authentication_error"}
+POST /api/chat          → 401
+GET  /admin/overview    → 401   with X-Api-Key: axon_bogus
+```
+
+The dashboard *page* is public by design — it is a static shell that fetches its
+data over the same authenticated endpoints, so it renders and then shows errors
+rather than serving anyone else's numbers.
+
+#### Admin RBAC
+
+A caller reaches `/admin/*` with **either** the `admin` role **or** a matching
+`admin:` scope:
+
+| Context | `/admin/projects` | `/admin/quotas/proj:x` |
+|---------|-------------------|------------------------|
+| `roles=['admin']` | ✅ | ✅ |
+| `scopes=['admin:*']` | ✅ | ✅ |
+| `scopes=['admin:quotas']` | ❌ | ✅ |
+| `roles=['service']` *(what an API key gets)* | ❌ | ❌ |
+| nothing | ❌ | ❌ |
+
+Scope granularity is one segment: `admin:<resource>` matches `/admin/<resource>/...`.
+Roles come from your IdP (OIDC `custom:roles`, SAML group attribute); scopes come
+from the API key. `/admin/static/*` and `/admin/dashboard` are always public.
+
+#### Cedar authorization policies
+
+Beyond admin RBAC, every path can be gated by Cedar-subset policies. Cedar
+semantics apply: **default deny, and any matching `forbid` beats every `permit`.**
+
+```bash
+curl -sX POST http://localhost:8000/admin/policies \
+  -H 'Content-Type: application/json' -H 'X-Api-Key: axon_your_admin_key' \
+  -d '{
+    "name": "readers-can-read",
+    "policy_text": "permit(principal, action == Action::\"read\", resource);",
+    "mode": "ENFORCE"
+  }'
+```
+
+HTTP verbs collapse to two actions: `GET`/`HEAD`/`OPTIONS` → `read`, and
+`POST`/`PUT`/`PATCH`/`DELETE` → `write`. Supported forms:
+
+```
+permit(principal, action == Action::"read", resource);
+permit(principal, action, resource) when { principal.project == "proj-alpha" };
+forbid(principal, action, resource) unless { principal.role == "senior" };
+```
+
+`principal.<attr>` resolves against the request context: `role` (special-cased so
+equality matches *any* role the caller holds), plus `project`, `tenant`, `user`,
+`email`, `business_unit` and `environment`. Comparisons are `==` and `!=`, joined
+with `&&`. Set `"mode": "LOG_ONLY"` on an individual policy to evaluate and log it
+without affecting the decision — the way to test a policy before it can lock
+anyone out.
+
+> **Two behaviours to know before relying on this.**
+>
+> 1. **A clean install has zero Cedar policies, and zero policies means no Cedar
+>    evaluation at all** — not default-deny. The middleware is constructed with
+>    `policy_service=None`, so every authenticated request passes this layer.
+>    Authentication and admin RBAC still apply; Cedar simply is not in the path
+>    until you add a policy. This is deliberate (a gateway that denied everything
+>    the moment it started would be unusable), but it means "default deny" is
+>    Cedar's rule *among the policies that exist*, not a property of a fresh install.
+> 2. **Policies are parsed once at startup.** `POST /admin/policies` stores a
+>    policy and `GET /admin/policies` will show it, but the running evaluator was
+>    built from the startup list — **the new policy does not take effect until the
+>    process restarts.** Confirmed: appending a `forbid(principal, action,
+>    resource)` to a live gateway leaves it answering `ALLOW`. Plan policy changes
+>    as deploys, and note the flip side: a policy that would lock you out also
+>    will not take hold until the restart, which is a chance to catch it.
+
+An unparseable policy is skipped with a warning rather than crashing startup —
+fail-closed for that statement, not for the gateway. A skipped `forbid` is a
+policy you believed was protecting something, so check the startup log after
+adding one.
+
+#### OIDC — for human logins and JWT-bearing services
+
+Two flavours, both handled by `AuthMiddleware`:
+
+**ALB OIDC** (paths 3 and 4). Attach an authentication action to the ALB listener;
+it validates against your IdP and injects a signed `X-Amzn-Oidc-Data` header. The
+gateway verifies the ES256 signature against the regional public key, fetched by
+`kid` from `public-keys.auth.elb.<region>.amazonaws.com`. Nothing to configure
+beyond the ALB itself — the region comes from `AWS_DEFAULT_REGION`. The trust here
+is the ALB's: only it can produce that signature, so **the listener rule is what
+decides who gets in**, and a gateway reachable directly (bypassing the ALB) is not
+covered by it.
+
+**Direct OIDC Bearer tokens** — set two variables and the gateway does JWKS
+discovery at `{issuer}/.well-known/openid-configuration`:
+
+```bash
+AXON_OIDC_ISSUER=https://your-tenant.okta.com/oauth2/default
+AXON_OIDC_AUDIENCE=api://axonllm
+```
+
+Signature and `exp` are always checked; `aud` and `iss` are checked **only when
+you set the corresponding variable**, so leaving `AXON_OIDC_AUDIENCE` empty
+accepts a correctly-signed token issued for a different application. Set both.
+JWKS is cached for an hour. Claims map to the request context as:
+
+| Context field | Default claim |
+|---------------|---------------|
+| `user_id` | `sub` |
+| `email` | `email` |
+| `roles` | `custom:roles` (string or array; comma-separated strings are split) |
+| `project_id` | `custom:project_id` |
+| `tenant_id` | `custom:tenant_id` |
+| `business_unit` | `custom:business_unit` |
+| `scopes` | `scope` (space-separated, per OAuth 2) |
+
+**`custom:roles` is what drives admin RBAC**, so grant admin access in your IdP by
+putting `admin` in that claim. Adjust the mapping via `OIDCConfig.claim_mappings`
+if your IdP names them differently.
+
+> Signature verification needs `python-jose`. Without it the gateway **refuses to
+> decode** rather than trusting an unverified token — so every OIDC request fails
+> closed, and the reason is logged at `ERROR`. It ships in `.[dev]`; check it is
+> present in your production image before turning OIDC on.
+
+#### SAML 2.0 SSO
+
+```bash
+AXON_SAML_SP_ENTITY_ID=https://axonllm.example.com/saml/metadata   # required
+AXON_SAML_IDP_SSO_URL=https://your-tenant.okta.com/app/.../sso/saml  # required
+AXON_SAML_IDP_CERT_FILE=/etc/axonllm/idp.crt   # required (or AXON_SAML_IDP_CERT inline)
+AXON_SAML_ACS_URL=https://axonllm.example.com/saml/acs
+AXON_SAML_IDP_ENTITY_ID=http://www.okta.com/exk1234
+```
+
+**SSO is enabled only once the first three are set** — SP entity id, IdP SSO URL,
+and the IdP certificate. Until then every `/saml/*` endpoint answers **503
+`sso_not_configured`** rather than opening, so a half-finished configuration fails
+closed. Set the other two as well: they go into the metadata your IdP consumes.
+
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /saml/metadata` | SP metadata XML — hand this to your IdP admin |
+| `GET /saml/login` | SP-initiated login, 302 to the IdP |
+| `POST /saml/acs` | Assertion Consumer Service (IdP POST binding) |
+
+Assertion signatures are verified in pure Python — no `xmlsec1` system
+dependency. Roles come from the `http://schemas.xmlsoap.org/claims/Group`
+attribute by default. `/saml/*` bypasses the normal auth chain, necessarily: the
+login flow cannot require a session it is in the process of creating.
+
+> **`POST /saml/acs` returns the resolved identity as JSON; it does not mint a
+> session cookie.** That is enough to verify your IdP mapping end-to-end, and it
+> is where you would integrate your own session layer for a browser SSO flow.
+
+#### SCIM 2.0 — automated user provisioning
+
+Set one token and point your IdP at `/scim/v2`:
+
+```bash
+AXON_SCIM_TOKEN=$(openssl rand -hex 32)
+```
+
+| Resource | Operations |
+|----------|------------|
+| `/scim/v2/Users` | GET (filter on `userName`, paginated), POST, PUT, **PATCH**, DELETE |
+| `/scim/v2/Groups` | GET (filtered, paginated), POST, PUT, DELETE |
+
+`PATCH /scim/v2/Users/{id}` is the one Okta and Entra ID reach for to deprovision
+(`active=false`), which is why Users has it and Groups does not. **`AXON_SCIM_TOKEN`
+unset means disabled — 503, not open** — and a wrong token is 401.
+
+Group membership resolves to roles: a user's effective roles are their own plus
+their groups', so `admin` on a group grants admin to its members.
+
+> **One integration gap to be aware of.** SCIM keeps the user/group directory and
+> resolves group→role on the SCIM read path, but the authentication chain reads
+> roles from the **JWT/SAML assertion**, not from the SCIM store. A user
+> provisioned into an admin group therefore gets admin only if your IdP also puts
+> `admin` in the token claim. In practice the IdP is the source of truth for both,
+> so configuring the group and the claim together is the normal setup — but
+> provisioning alone does not grant access.
+
+### Putting it together — a minimal production config
+
+```bash
+# Enforcement
+AXON_AUTH_MODE=ENFORCE
+AXON_LOAD_DEMO_DATA=false
+
+# Persistence (without this, everything is lost on restart)
+LLM_ROUTER_DYNAMODB_ENABLED=true
+AXON_DYNAMODB_TABLE=axonllm-state
+AWS_DEFAULT_REGION=us-east-1
+
+# At least one provider (prefer Secrets Manager over plaintext env)
+ANTHROPIC_API_KEY=sk-ant-...
+
+# Identity — OIDC for humans, SCIM for provisioning
+AXON_OIDC_ISSUER=https://your-tenant.okta.com/oauth2/default
+AXON_OIDC_AUDIENCE=api://axonllm
+AXON_SCIM_TOKEN=<32-byte random>
+```
+
+Then confirm it rather than trusting it: **`GET /admin/production-checklist`**
+checks exactly the states that serve traffic without complaining — unpriced
+models, retired model ids, missing credentials, `LOG_ONLY` auth, demo data,
+unreachable persistence. See
+[Production readiness checklist](#production-readiness-checklist).
 
 ### Try it
 
