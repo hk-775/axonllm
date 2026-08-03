@@ -280,6 +280,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   makes a third identical value look inevitable rather than assumed.
 
 ### Fixed
+- **Privilege escalation: a narrow admin scope could mint or steal a full admin
+  credential.** `AdminRBACMiddleware` authorizes on the first path segment, which
+  is the right granularity for most of the admin API and the wrong granularity for
+  the routes that hand out credentials. Two paths, both confirmed against the real
+  app rather than reasoned about:
+
+  - `admin:projects` reaches `POST /admin/projects/{id}/keys`, which passed the
+    request's `scopes` straight through to `APIKeyService.issue_key`. Asking for
+    `scopes=['admin:*']` returned `201` with a working superadmin key.
+  - `admin:keys` reaches `POST /admin/keys/{key_id}/rotate`. `rotate_key` copies
+    the *old* key's scopes onto the replacement and the handler returns the
+    replacement's raw value — so rotating a colleague's `admin:*` key handed over
+    admin access, revoked the victim's key as a side effect, and needed no
+    cooperation and no second project.
+
+  Also fixed alongside them: a project-scoped key could list, issue, revoke and
+  rotate keys in *other* projects, with `GET /admin/projects/{other}/keys`
+  returning their key ids and metadata.
+
+  The checks live in the handlers, not the middleware, because the middleware sees
+  only a path — whereas the decision needs the scopes the *body* asked for and the
+  project the *target key* belongs to. The rules: grant only admin scopes you
+  already hold, rotate only keys whose admin scopes you already hold, and stay
+  inside your own `project_id`. `admin:*` and the `admin` role are unrestricted;
+  non-admin scopes stay freely grantable, since the constraint is on escalating
+  admin authority rather than on delegating ordinary access. `LOG_ONLY` logs
+  instead of enforcing, because that mode exists to issue the first key before any
+  credential exists.
+
+  Ordering mattered in one place: `rotate_key` revokes before re-issuing, so a
+  check placed after the call would refuse the response having already destroyed
+  the credential — turning a blocked escalation into a denial of service. There is
+  a test for that specifically.
+
+  Found by sweeping all 63 admin routes with four real issued keys instead of
+  trusting `test_admin_rbac.py`, which passed throughout: it wires a fake auth
+  middleware around three mock routes, so it never exercised the real route table.
+  The new tests drive the real routes behind the real middleware pair. 17
+  mutations of the new guards: 15 caught, 1 an intended control, 1 a real gap (the
+  constructor's default mode was unpinned — a fail-open default nothing asserted),
+  now covered.
+
+  The same sweep found `POST /admin/policies/hierarchy` returning **500 on a
+  malformed body**: it read `body["node_id"]` / `body["node_type"]` directly and
+  caught only the `ValueError` from `set_node`, so a missing field raised
+  `KeyError`. Every sibling admin `POST` answers 400 for the same input; this one
+  now does too.
+
 - **Six admin write endpoints returned success and lost the change on the next
   restart.** Each one mutated a shared in-memory object and never wrote to
   DynamoDB. Because `GET` reads back that same object, the endpoint looked correct

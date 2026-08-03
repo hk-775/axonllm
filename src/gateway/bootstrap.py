@@ -487,7 +487,9 @@ def build_starlette_app(app_config: AppConfig | None = None) -> Starlette:
     )
 
     # Key, policy, audit, webhook, region, and quota admin APIs
-    key_api = KeyManagementAPI(api_key_service=comp.api_key_service)
+    key_api = KeyManagementAPI(
+        api_key_service=comp.api_key_service, mode=app_config.auth_mode
+    )
     policy_api = PolicyHierarchyAPI(resolver=comp.policy_resolver)
     audit_api = AuditAPI(audit_trail=comp.audit_trail)
     webhook_api = WebhookAPI(

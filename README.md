@@ -577,7 +577,10 @@ admin API becomes unreachable and you have to fall back to the CLI.
 Keys are stored as SHA-256 hashes; **the raw value is returned once and never
 persisted.** There is no "show key again" — rotate instead (`POST
 /admin/keys/{key_id}/rotate`), which revokes the old one and issues a replacement
-carrying the same project and scopes.
+carrying the same project and scopes. Because the replacement's raw value *is*
+returned, rotation is restricted: you may rotate a key only if you already hold
+its admin scopes, or hold `admin:*`. See
+[Admin RBAC](#admin-rbac) for why.
 
 For a key to work against a *running* server, the CLI must point at the same
 persistence the server uses:
@@ -673,6 +676,36 @@ A caller reaches `/admin/*` with **either** the `admin` role **or** a matching
 Scope granularity is one segment: `admin:<resource>` matches `/admin/<resource>/...`.
 Roles come from your IdP (OIDC `custom:roles`, SAML group attribute); scopes come
 from the API key. `/admin/static/*` and `/admin/dashboard` are always public.
+
+**Granularity is per resource, not per verb.** `admin:quotas` grants
+`GET /admin/quotas/{project_id}` *and* `POST /admin/quotas/{project_id}/reset` —
+there is no read-only admin scope. Grant `admin:<resource>` only where you would
+accept the holder writing to that resource.
+
+##### Why the key routes check more than the scope
+
+One consequence of per-segment matching needs its own rule, because the routes
+under it hand out credentials. `admin:projects` reaches
+`POST /admin/projects/{id}/keys`, and `admin:keys` reaches
+`POST /admin/keys/{key_id}/rotate` — so left to the middleware alone, either
+scope escalates to full admin: ask for `scopes=['admin:*']`, or rotate a
+colleague's `admin:*` key and read the replacement's raw value out of the
+response (rotation copies the old key's scopes). Both were reachable and are now
+blocked in the handlers, which is the only layer that can see the requested
+scopes and the target key's owner:
+
+| Caller | May issue a key with `admin:*` | May rotate another's `admin:*` key | May touch another project |
+|--------|-------------------------------|-----------------------------------|---------------------------|
+| `roles=['admin']` or `scopes=['admin:*']` | ✅ | ✅ | ✅ |
+| `scopes=['admin:projects']` | ❌ 403 | ❌ 403 | ❌ 403 |
+| `scopes=['admin:keys']` | ❌ 403 | ❌ 403 | ❌ 403 |
+
+The rules: a caller may grant only admin scopes it already holds, may rotate only
+keys whose admin scopes it already holds, and may not list, issue, revoke, or
+rotate outside its own `project_id`. Non-admin scopes (`chat`) stay freely
+grantable — the constraint is on escalating *admin* authority, not on delegating
+ordinary access. `LOG_ONLY` logs these denials instead of enforcing them, since
+that mode exists to issue the first key before any credential exists.
 
 #### Cedar policy layer
 

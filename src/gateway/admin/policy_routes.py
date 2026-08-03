@@ -73,6 +73,22 @@ class PolicyHierarchyAPI:
         """POST /admin/policies/hierarchy"""
         body = await request.json()
 
+        # Required fields, checked before construction: this handler only caught
+        # ValueError from set_node, so a body missing either key raised KeyError
+        # and surfaced to the caller as a 500. Every sibling admin POST returns
+        # 400 for the same input.
+        missing = [f for f in ("node_id", "node_type") if not body.get(f)]
+        if missing:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "error": {
+                        "type": "invalid_request",
+                        "message": "Field(s) required: " + ", ".join(missing),
+                    }
+                },
+            )
+
         node = PolicyNode(
             node_id=body["node_id"],
             node_type=body["node_type"],
