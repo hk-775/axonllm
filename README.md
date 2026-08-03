@@ -18,6 +18,11 @@ docker compose up
 # (or go straight to http://localhost:8000/admin/dashboard)
 ```
 
+This comes up **with the demo data seeded** (Acme Corp, 3 users, 66 usage
+records) and auth in `LOG_ONLY`, which is what you want for a first look and not
+what you want anywhere else. [Quick Start](#quick-start) covers the four
+install paths — local or AWS, seeded or clean — and which flag decides.
+
 ## Why AxonLLM?
 
 | Problem | AxonLLM Solution |
@@ -86,37 +91,237 @@ docker compose up
 
 ## Quick Start
 
-### Option 1: Docker (recommended)
+Four paths, depending on where it runs and whether you want the seeded demo
+data. Pick one:
 
-```bash
-cp config/providers.yaml.example config/providers.yaml
-# Edit config/providers.yaml with your API keys, or set env vars:
-export ANTHROPIC_API_KEY=sk-ant-...
-export OPENAI_API_KEY=sk-...
+| | Where | Demo data | Go to |
+|---|-------|-----------|-------|
+| **1** | Local machine | No — empty gateway | [Local, clean](#1-local-clean) |
+| **2** | Local machine | Yes — fully seeded | [Local, seeded demo](#2-local-seeded-demo) |
+| **3** | AWS (enterprise) | No — empty gateway | [AWS, clean](#3-aws-clean) |
+| **4** | AWS (enterprise) | Yes — fully seeded | [AWS, seeded demo](#4-aws-seeded-demo) |
 
-docker compose up
-```
+**Read this before choosing 3 or 4.** Demo data is opt-*out*, not opt-in, on the
+deployed path — `serve_dashboard.py` is the container `CMD` and it defaults
+`AXON_LOAD_DEMO_DATA` to `true` when the variable is absent, which the CDK stack
+does not set. A Fargate deploy therefore comes up with Acme Corp, three fictional
+users and 66 fabricated usage records unless you set it to `false` yourself.
+Path 3 does. See [Turning the demo data off](#turning-the-demo-data-off) for what
+that means if you have already deployed.
 
-### Option 2: Local Python
+Two flags carry most of the difference between the paths:
+
+| Flag | Effect |
+|------|--------|
+| `AXON_LOAD_DEMO_DATA` | Seeds `config/demo_seed.yaml`: projects, users, policy hierarchy, usage history, audit chain, webhooks. **Also** the gate on reading `.env` |
+| `AXON_AUTH_MODE` | `ENFORCE` (default) requires an `axon_` key on every request; `LOG_ONLY` does not. `serve_dashboard.py` defaults it to `LOG_ONLY` for local dev |
+
+### 1. Local, clean
+
+An empty gateway: no projects, no usage history, real provider calls. This is the
+closest local shape to production, and what you want if you are evaluating the
+routing or building against the API.
 
 ```bash
 pip install -e ".[dev]"
 cp config/providers.yaml.example config/providers.yaml
-AXON_LOAD_DEMO_DATA=true python serve_dashboard.py
+
+export ANTHROPIC_API_KEY=sk-ant-...        # at least one provider, or
+export AWS_PROFILE=my-bedrock-profile      # just AWS creds for Bedrock
+
+AXON_LOAD_DEMO_DATA=false python serve_dashboard.py
 ```
 
-Open http://localhost:8000 for the landing page, or
-http://localhost:8000/admin/dashboard to go straight to the dashboard.
+Open http://localhost:8000/admin/dashboard. Expect the tiles to read zero — that
+is the point. Auth is still `LOG_ONLY`, so requests work without a key:
 
-The dev server (`serve_dashboard.py`) runs in `LOG_ONLY` mode, so local requests
-work **without** an API key. Any non-dev deployment defaults to `ENFORCE` (see
-[Environment Variables](#environment-variables)) and requires one.
+```bash
+curl -sX POST http://localhost:8000/api/chat -H 'Content-Type: application/json' \
+  -d '{"model":"claude-sonnet","messages":[{"role":"user","content":"Hello"}]}'
+```
+
+`AXON_LOAD_DEMO_DATA=false` is explicit on purpose: omitting it entirely gets you
+path 2, because the dev entrypoint defaults it to `true`. Note that this also
+means `.env` is **not** read — export the keys you want, or set
+`AXON_LOAD_DEMO_DATA=true` and use the file.
+
+To create your own project instead of using a seeded one:
+
+```bash
+curl -sX POST http://localhost:8000/admin/projects -H 'Content-Type: application/json' \
+  -d '{"project_id":"my-project","name":"My Project","budget_limit":100.0}'
+```
+
+### 2. Local, seeded demo
+
+Everything on, with data behind it — this is the path for a walkthrough, a demo,
+or working on the dashboard, because no page is empty.
+
+```bash
+pip install -e ".[dev]"
+cp config/providers.yaml.example config/providers.yaml
+```
+
+Put provider keys in `.env` (gitignored) — see
+[Provider keys for a demo](#provider-keys-for-a-demo) for how the file is read:
+
+```bash
+# .env
+OPENAI_API_KEY=sk-...
+ANTHROPIC_API_KEY=sk-ant-...
+AXON_SEMANTIC_CACHE=true
+```
+
+Then:
+
+```bash
+AWS_PROFILE=my-bedrock-profile AWS_REGION=us-east-1 \
+AXON_LOAD_DEMO_DATA=true \
+AXON_PII_REDACTION_DEFAULT=true \
+python serve_dashboard.py
+```
+
+You get:
+
+* **Seeded state** — Acme Corp's org→BU→project hierarchy, 3 users, 66 usage
+  records spread over the last few hours, a verifiable audit chain, API key
+  records, webhook destinations.
+* **Semantic cache**, live. Needs Bedrock for Titan embeddings, which is why
+  `AWS_PROFILE` is set even if your traffic goes elsewhere.
+* **PII redaction** on by default, plus entity detection on `proj-beta` only —
+  the two demo projects are deliberately identical except for that one axis, so
+  the Comprehend column has something to compare against.
+
+Check it came up whole:
+
+```bash
+curl -s localhost:8000/admin/overview          # 66 requests, 2 projects, 3 users
+curl -s localhost:8000/admin/semantic-cache    # "available": true
+```
+
+`AXON_LOAD_DEMO_DATA=true` must be **explicit** here even though it is also the
+entrypoint default, because it is what unlocks reading `.env` — and
+`AXON_SEMANTIC_CACHE` lives there. Leaving it off silently produces a gateway
+with no embedder and no provider keys. Two separate behaviours ride on one
+variable; see [Provider keys for a demo](#provider-keys-for-a-demo).
+
+Semantic caching also needs the project to opt in (`semantic_cache_enabled`),
+which the seeded `proj-alpha` does. On a clean install you set it per project.
+
+### 3. AWS, clean
+
+The enterprise install: Fargate behind an ALB, DynamoDB persistence, Secrets
+Manager, `ENFORCE` auth — and **no fabricated data**.
+
+```bash
+# First time only
+cd infra && pip install -r requirements.txt && cdk bootstrap && cd ..
+
+./deploy-fargate.sh us-east-1
+```
+
+Then turn the demo seed off, which the stack does not do for you:
+
+```bash
+aws ecs describe-task-definition --task-definition axonllm --region us-east-1 \
+  --query 'taskDefinition.containerDefinitions[0].environment'
+# Add AXON_LOAD_DEMO_DATA=false to the task definition's environment, then:
+aws ecs update-service --cluster axonllm --service axonllm \
+  --force-new-deployment --region us-east-1
+```
+
+Cleaner still, set it in the stack so it is not a manual step every deploy —
+`infra/stack.py`, alongside `AXON_AUTH_MODE`:
+
+```python
+environment={
+    "AWS_DEFAULT_REGION": self.region,
+    "LLM_ROUTER_DYNAMODB_ENABLED": "true",
+    "AXON_DYNAMODB_TABLE": state_table.table_name,
+    "AXON_AUTH_MODE": "ENFORCE",
+    "AXON_SERVER_PORT": "8000",
+    "AXON_LOAD_DEMO_DATA": "false",   # ← the container CMD defaults this to true
+}
+```
+
+Provider keys come from Secrets Manager, wired by the stack. Add any beyond
+Anthropic/OpenAI to the `secrets={...}` block rather than `environment` — the
+`.env` mechanism is deliberately inert here (it never overwrites an existing
+variable, and is not read without the demo flag).
+
+Because auth is `ENFORCE`, mint a key before the first request. This works
+in-process, so there is no chicken-and-egg with admin credentials:
+
+```bash
+LLM_ROUTER_DYNAMODB_ENABLED=true AXON_DYNAMODB_TABLE=axonllm-state \
+  axon issue-key --project my-project --name first-key
+# → axon_xxxxxxxx…   (shown once)
+```
+
+It must point at the **same table the service uses** or the running server will
+not recognise the key; the CLI warns if persistence is off. Then work through the
+[Production Checklist](#production-checklist) — OIDC, budgets, TLS.
+
+### 4. AWS, seeded demo
+
+A deployed environment with the demo data, for a stakeholder walkthrough or a
+shared sandbox. **Not a production configuration** — see the warning below.
+
+```bash
+cd infra && pip install -r requirements.txt && cdk bootstrap && cd ..
+./deploy-fargate.sh us-east-1
+```
+
+That is the whole install: demo data is the container default, so path 4 is what
+you get by *not* doing path 3's extra step. To be explicit rather than relying on
+a default that may change, add to the task definition:
+
+```
+AXON_LOAD_DEMO_DATA=true
+AXON_SEMANTIC_CACHE=true          # optional; Titan embeddings, needs Bedrock access
+AXON_PII_REDACTION_DEFAULT=true   # optional; regex redaction on for every request
+```
+
+Auth stays `ENFORCE` (the stack sets it), so you still need a key — mint it as in
+path 3. Unlike local, there is no `LOG_ONLY` shortcut, and that is deliberate:
+nothing reachable from the internet should accept unauthenticated requests.
+
+> **Two things to know before showing this to anyone.**
+>
+> 1. **The data is fictional and does not say so.** Acme Corp, Alice/Bob/Carol,
+>    $1.26 of spend, an audit trail whose hash chain verifies. It is indistinguishable
+>    from real usage in the UI, which is what makes it a good demo and a bad
+>    thing to leave running where someone might mistake it for a live tenant.
+> 2. **Seeded API key records are not usable credentials.** Four keys appear on
+>    the API Keys page, including a revoked one, but issuance discards the raw
+>    value — only the hash is stored, exactly as for a real key. Nothing can
+>    authenticate as them.
+
+DynamoDB persistence merges *on top of* the seed, so demo projects and anything
+you create coexist. Which is convenient in a sandbox and the reason a seeded
+environment is awkward to promote: see below.
+
+### Turning the demo data off
+
+If you have already deployed and want the fictional tenants gone, setting
+`AXON_LOAD_DEMO_DATA=false` stops them being re-seeded on the next task start,
+but **does not delete what a previous run persisted to DynamoDB.** Seeded state
+that reached the table is indistinguishable from real state once written.
+
+For a deployment that has only ever run seeded, the honest reset is to empty the
+state table (or point `AXON_DYNAMODB_TABLE` at a fresh one) and redeploy with the
+flag set to `false`. Auditing row by row is not worth it — every seeded record
+was written through the same code path as a real one, which is precisely why the
+demo is convincing.
+
+Prefer separate deployments over converting one: an evaluation environment with
+demo data, and a clean install you never seeded.
 
 #### Provider keys for a demo
 
 Put your provider keys in a `.env` file in the project root and they are picked
-up automatically — but **only** when you set `AXON_LOAD_DEMO_DATA=true`
-explicitly, as the command above does:
+up automatically — but **only** when `AXON_LOAD_DEMO_DATA=true` is set in the
+environment, as [path 2](#2-local-seeded-demo) does:
 
 ```bash
 # .env (gitignored)
@@ -137,8 +342,11 @@ secrets come from the platform (ECS task definition, Secrets Manager, App Runner
 env), and a file that shadowed those would be near-impossible to debug. Two rules
 keep that from happening:
 
-- Without an explicit `AXON_LOAD_DEMO_DATA=true`, the file is never read — and
-  the container `CMD` doesn't set it.
+- Without `AXON_LOAD_DEMO_DATA=true` already in the environment, the file is
+  never read. The entrypoint *does* default that variable to `true` — but only
+  **after** the file-read step, so a container inheriting the default seeds demo
+  data without ever reading `.env`. The gate is whether an operator set it, not
+  what it ends up as.
 - **An existing environment variable always wins.** The file only fills in names
   that aren't already set, so injected secrets are never overridden.
 
