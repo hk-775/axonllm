@@ -106,6 +106,14 @@ class AxonLLMStack(Stack):
                     "AXON_DYNAMODB_TABLE": state_table.table_name,
                     "AXON_AUTH_MODE": "ENFORCE",
                     "AXON_SERVER_PORT": "8000",
+                    # Explicit "false" because the container CMD is
+                    # serve_dashboard.py, which defaults this to "true" when the
+                    # variable is absent. Omitting it here deploys Acme Corp,
+                    # three fictional users and 66 fabricated usage records to
+                    # Fargate — indistinguishable from real usage in the UI, and
+                    # merged into DynamoDB where they outlive the flag. For a
+                    # seeded demo deployment, flip this to "true" deliberately.
+                    "AXON_LOAD_DEMO_DATA": "false",
                 },
             ),
             public_load_balancer=True,
