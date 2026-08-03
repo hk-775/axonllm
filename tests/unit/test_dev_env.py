@@ -11,6 +11,8 @@ demo mode by default.
 
 from __future__ import annotations
 
+import os
+
 from src.gateway.dev_env import demo_env_requested, load_dev_env_file, parse_env_file
 
 _KEY = "OPENAI_API_KEY"
@@ -126,3 +128,54 @@ class TestParsing:
 
     def test_surrounding_whitespace_trimmed(self):
         assert parse_env_file("  A = 1  ") == {"A": "1"}
+
+
+class TestTheEntrypointDefaultsDemoDataOn:
+    """``serve_dashboard.py`` seeds demo data unless told otherwise.
+
+    This is the documented behaviour of the four install paths in the README, and
+    the one that surprises people: the Dockerfile ``CMD`` is this same entrypoint,
+    and ``infra/stack.py`` does not set ``AXON_LOAD_DEMO_DATA`` — so a Fargate
+    deploy comes up with Acme Corp, three fictional users and 66 fabricated usage
+    records unless the operator sets it to ``false``. A "clean install" path that
+    silently seeds a demo tenant is worse than one that fails, because the data is
+    indistinguishable from real usage in the UI.
+
+    Asserted here rather than left to the README because the safe-looking change
+    — dropping the default so a bare ``python serve_dashboard.py`` starts empty —
+    would flip every documented path at once, and nothing else would notice.
+    """
+
+    def test_a_bare_run_opts_into_demo_data(self, monkeypatch):
+        monkeypatch.delenv("AXON_LOAD_DEMO_DATA", raising=False)
+        monkeypatch.setattr("src.gateway.dev_env.load_dev_env_file", lambda *a, **k: [])
+
+        import serve_dashboard
+
+        serve_dashboard.build_app()
+        assert os.environ["AXON_LOAD_DEMO_DATA"] == "true"
+
+    def test_an_explicit_false_is_not_overridden(self, monkeypatch):
+        """The clean-install path (README path 1 and 3) depends on this."""
+        monkeypatch.setenv("AXON_LOAD_DEMO_DATA", "false")
+
+        import serve_dashboard
+
+        _, app_config = serve_dashboard.build_app()
+        assert os.environ["AXON_LOAD_DEMO_DATA"] == "false"
+        assert app_config.load_demo_data is False
+
+    def test_the_env_file_is_gated_on_the_operator_not_the_default(self, tmp_path, monkeypatch):
+        """The ordering that makes one flag mean two things.
+
+        ``load_dev_env_file()`` runs *before* the default is applied, so a
+        container inheriting the default seeds demo data and never reads ``.env``.
+        Both halves matter: it is why a deployed gateway cannot pick up stray
+        credentials from a file baked into the image, and why running locally
+        without setting the flag yourself leaves you with no provider keys.
+        """
+        monkeypatch.delenv("AXON_LOAD_DEMO_DATA", raising=False)
+        env: dict[str, str] = {}
+        assert load_dev_env_file(_write(tmp_path, f"{_KEY}=from-the-file"), env) == []
+        # ...and the entrypoint would then set the flag to "true" anyway.
+        assert demo_env_requested({"AXON_LOAD_DEMO_DATA": "true"}) is True
