@@ -101,13 +101,15 @@ data. Pick one:
 | **3** | AWS (enterprise) | No — empty gateway | [AWS, clean](#3-aws-clean) |
 | **4** | AWS (enterprise) | Yes — fully seeded | [AWS, seeded demo](#4-aws-seeded-demo) |
 
-**Read this before choosing 3 or 4.** Demo data is opt-*out*, not opt-in, on the
-deployed path — `serve_dashboard.py` is the container `CMD` and it defaults
-`AXON_LOAD_DEMO_DATA` to `true` when the variable is absent, which the CDK stack
-does not set. A Fargate deploy therefore comes up with Acme Corp, three fictional
-users and 66 fabricated usage records unless you set it to `false` yourself.
-Path 3 does. See [Turning the demo data off](#turning-the-demo-data-off) for what
-that means if you have already deployed.
+**Read this before choosing 3 or 4.** Demo data is opt-*out*, not opt-in, in the
+container: `serve_dashboard.py` is the `CMD`, and it defaults
+`AXON_LOAD_DEMO_DATA` to `true` when the variable is absent. The CDK stack sets
+it to `false` so a Fargate deploy is clean by default, but anything that starts
+the image without that variable — `docker compose up`, a hand-written task
+definition, App Runner — comes up with Acme Corp, three fictional users and 66
+fabricated usage records. Path 4 is what you get by turning it back on. If you
+deployed before the stack set it, see
+[Turning the demo data off](#turning-the-demo-data-off).
 
 Two flags carry most of the difference between the paths:
 
@@ -220,28 +222,17 @@ cd infra && pip install -r requirements.txt && cdk bootstrap && cd ..
 ./deploy-fargate.sh us-east-1
 ```
 
-Then turn the demo seed off, which the stack does not do for you:
+That is the whole install. The stack sets `AXON_LOAD_DEMO_DATA=false` in the task
+definition, so there is no post-deploy step to remember — the value is explicit
+rather than omitted precisely because omitting it means demo data *on* (the
+container `CMD` supplies the default). `tests/unit/test_infra_stack_env.py`
+asserts it, along with `AXON_AUTH_MODE=ENFORCE`, for the same reason.
+
+To confirm what the running task actually has:
 
 ```bash
 aws ecs describe-task-definition --task-definition axonllm --region us-east-1 \
   --query 'taskDefinition.containerDefinitions[0].environment'
-# Add AXON_LOAD_DEMO_DATA=false to the task definition's environment, then:
-aws ecs update-service --cluster axonllm --service axonllm \
-  --force-new-deployment --region us-east-1
-```
-
-Cleaner still, set it in the stack so it is not a manual step every deploy —
-`infra/stack.py`, alongside `AXON_AUTH_MODE`:
-
-```python
-environment={
-    "AWS_DEFAULT_REGION": self.region,
-    "LLM_ROUTER_DYNAMODB_ENABLED": "true",
-    "AXON_DYNAMODB_TABLE": state_table.table_name,
-    "AXON_AUTH_MODE": "ENFORCE",
-    "AXON_SERVER_PORT": "8000",
-    "AXON_LOAD_DEMO_DATA": "false",   # ← the container CMD defaults this to true
-}
 ```
 
 Provider keys come from Secrets Manager, wired by the stack. Add any beyond
@@ -267,19 +258,22 @@ not recognise the key; the CLI warns if persistence is off. Then work through th
 A deployed environment with the demo data, for a stakeholder walkthrough or a
 shared sandbox. **Not a production configuration** — see the warning below.
 
+Same install as path 3, with the seed turned back on. In `infra/stack.py`:
+
+```python
+"AXON_LOAD_DEMO_DATA": "true",     # ← the stack ships "false"; see path 3
+"AXON_SEMANTIC_CACHE": "true",     # optional; Titan embeddings, needs Bedrock access
+"AXON_PII_REDACTION_DEFAULT": "true",  # optional; regex redaction on every request
+```
+
+`tests/unit/test_infra_stack_env.py` asserts the shipped `false`, so it will fail
+— which is the point: a deployment that seeds fictional tenants should be a
+deliberate edit, not a default. Update the test alongside the stack if this is
+your standing configuration. Then:
+
 ```bash
 cd infra && pip install -r requirements.txt && cdk bootstrap && cd ..
 ./deploy-fargate.sh us-east-1
-```
-
-That is the whole install: demo data is the container default, so path 4 is what
-you get by *not* doing path 3's extra step. To be explicit rather than relying on
-a default that may change, add to the task definition:
-
-```
-AXON_LOAD_DEMO_DATA=true
-AXON_SEMANTIC_CACHE=true          # optional; Titan embeddings, needs Bedrock access
-AXON_PII_REDACTION_DEFAULT=true   # optional; regex redaction on for every request
 ```
 
 Auth stays `ENFORCE` (the stack sets it), so you still need a key — mint it as in
@@ -304,9 +298,10 @@ environment is awkward to promote: see below.
 ### Turning the demo data off
 
 If you have already deployed and want the fictional tenants gone, setting
-`AXON_LOAD_DEMO_DATA=false` stops them being re-seeded on the next task start,
-but **does not delete what a previous run persisted to DynamoDB.** Seeded state
-that reached the table is indistinguishable from real state once written.
+`AXON_LOAD_DEMO_DATA=false` stops them being re-seeded on the next task start —
+redeploying the current stack does that much for you — but it **does not delete
+what a previous run persisted to DynamoDB.** Seeded state that reached the table
+is indistinguishable from real state once written.
 
 For a deployment that has only ever run seeded, the honest reset is to empty the
 state table (or point `AXON_DYNAMODB_TABLE` at a fresh one) and redeploy with the

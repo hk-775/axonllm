@@ -233,6 +233,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   makes a third identical value look inevitable rather than assumed.
 
 ### Fixed
+- **A Fargate deploy came up seeded with fictional tenants.** `infra/stack.py`
+  set five environment variables on the task definition and not
+  `AXON_LOAD_DEMO_DATA` — but absent is not neutral for that variable, because
+  the container `CMD` is `serve_dashboard.py`, which defaults it to `true`. Every
+  enterprise install therefore started with Acme Corp, three fictional users and
+  66 fabricated usage records, merged into the same DynamoDB table as real state
+  and indistinguishable from it in the UI. Worse than a visible failure: the
+  gateway looked like it was already carrying traffic. The stack now sets
+  `"false"` explicitly, and `tests/unit/test_infra_stack_env.py` asserts it —
+  along with `AXON_AUTH_MODE=ENFORCE`, which has the same property (dropping it
+  would open the deployment rather than fall back to the safe value). Turning it
+  back on for a deployed demo is now the deliberate edit; README path 4 covers
+  it. Note that this stops re-seeding, not deletion: rows a previous run
+  persisted survive the flag.
+
 - **Four `UsageRecord` fields never survived a DynamoDB round trip, and one of
   them came back claiming success.** `serialize_usage_record` wrote 14 of the
   dataclass's 18 fields; `cache_creation_tokens`, `latency_ms`, `status` and
