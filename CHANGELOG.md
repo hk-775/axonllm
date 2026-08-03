@@ -32,14 +32,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `roles=["service"]`, which `AdminRBACMiddleware` rejects. So the admin API is
     unreachable after switching to `ENFORCE` unless an `admin:*` key was issued
     first — now called out as ordering, with the verified allow/deny matrix.
-  - **A clean install has zero Cedar policies, and zero policies means no Cedar
-    evaluation at all** — the middleware is constructed with
-    `policy_service=None`. "Default deny" is Cedar's rule among the policies that
-    exist, not a property of a fresh install, which is the opposite of what a
-    reader assumes from the phrase.
-  - **`POST /admin/policies` does not take effect until restart.** Policies are
-    parsed once at construction, so the endpoint stores a policy that `GET` will
-    show and the evaluator will not apply.
+  - **A clean install has zero Cedar policies, and zero policies denies
+    nothing** — "default deny" is Cedar's rule among the policies that exist, not
+    a property of a fresh install, which is the opposite of what a reader assumes
+    from the phrase. (As documented here it was `policy_service=None` on an empty
+    set; the Cedar fix below replaces that with an always-wired evaluator that
+    governs no action, which is the same outcome for a clean install and a
+    different one once you add your first policy.)
   - **SCIM group→role resolution does not feed the auth chain.** `roles_for_user`
     is only read on the SCIM path; roles for authorization come from the JWT or
     SAML assertion, so provisioning a user into an admin group grants nothing

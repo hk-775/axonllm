@@ -619,7 +619,7 @@ on both at once.
    ┌─────────────────────┐          ┌─────────────────────────┐
    │  Cedar policies     │          │  AdminRBAC              │
    │  every path         │          │  /admin/* only          │
-   │  default deny       │          │  needs 'admin' role     │
+   │  opt-in per action  │          │  needs 'admin' role     │
    │  forbid > permit    │          │  or admin:<res> scope   │
    └─────────────────────┘          └─────────────────────────┘
 ```
@@ -628,7 +628,7 @@ on both at once.
 
 | `AXON_AUTH_MODE` | Authentication | Admin RBAC | Cedar policies |
 |------------------|----------------|------------|----------------|
-| `ENFORCE` *(default)* | 401 without a valid credential | 403 without admin role/scope | 403 on `DENY` |
+| `ENFORCE` *(default)* | 401 without a valid credential | 403 without admin role/scope | 403 on `DENY`, for actions a policy governs |
 | `LOG_ONLY` | Anonymous context, request proceeds | Logs the denial, proceeds | Logs the denial, proceeds |
 
 `serve_dashboard.py` sets `LOG_ONLY` when you have not, which is why local
@@ -667,58 +667,26 @@ Scope granularity is one segment: `admin:<resource>` matches `/admin/<resource>/
 Roles come from your IdP (OIDC `custom:roles`, SAML group attribute); scopes come
 from the API key. `/admin/static/*` and `/admin/dashboard` are always public.
 
-#### Cedar authorization policies
+#### Cedar policy layer
 
-Beyond admin RBAC, every path can be gated by Cedar-subset policies. Cedar
-semantics apply: **default deny, and any matching `forbid` beats every `permit`.**
-
-```bash
-curl -sX POST http://localhost:8000/admin/policies \
-  -H 'Content-Type: application/json' -H 'X-Api-Key: axon_your_admin_key' \
-  -d '{
-    "name": "readers-can-read",
-    "policy_text": "permit(principal, action == Action::\"read\", resource);",
-    "mode": "ENFORCE"
-  }'
-```
-
-HTTP verbs collapse to two actions: `GET`/`HEAD`/`OPTIONS` → `read`, and
-`POST`/`PUT`/`PATCH`/`DELETE` → `write`. Supported forms:
+Beyond admin RBAC, every path can be gated by Cedar-subset `permit`/`forbid`
+statements you `POST` to `/admin/policies`. HTTP verbs collapse to two actions:
+`GET`/`HEAD`/`OPTIONS` → `read`, and `POST`/`PUT`/`PATCH`/`DELETE` → `write`.
 
 ```
-permit(principal, action == Action::"read", resource);
-permit(principal, action, resource) when { principal.project == "proj-alpha" };
-forbid(principal, action, resource) unless { principal.role == "senior" };
+forbid(principal, action == Action::"write", resource) unless { principal.role == "senior" };
 ```
 
-`principal.<attr>` resolves against the request context: `role` (special-cased so
-equality matches *any* role the caller holds), plus `project`, `tenant`, `user`,
-`email`, `business_unit` and `environment`. Comparisons are `==` and `!=`, joined
-with `&&`. Set `"mode": "LOG_ONLY"` on an individual policy to evaluate and log it
-without affecting the decision — the way to test a policy before it can lock
-anyone out.
+The layer is **opt-in per action**: a policy governs only the action it names, and
+an action no policy mentions is left to authentication, admin RBAC and quota. So a
+clean install with no policies denies nothing here, and a `permit` on its own
+grants nothing you didn't already have — to restrict, write a `forbid` or a
+conditional `permit`.
 
-> **Two behaviours to know before relying on this.**
->
-> 1. **A clean install has zero Cedar policies, and zero policies means no Cedar
->    evaluation at all** — not default-deny. The middleware is constructed with
->    `policy_service=None`, so every authenticated request passes this layer.
->    Authentication and admin RBAC still apply; Cedar simply is not in the path
->    until you add a policy. This is deliberate (a gateway that denied everything
->    the moment it started would be unusable), but it means "default deny" is
->    Cedar's rule *among the policies that exist*, not a property of a fresh install.
-> 2. **Policies are parsed once at startup.** `POST /admin/policies` stores a
->    policy and `GET /admin/policies` will show it, but the running evaluator was
->    built from the startup list — **the new policy does not take effect until the
->    process restarts.** Confirmed: appending a `forbid(principal, action,
->    resource)` to a live gateway leaves it answering `ALLOW`. Plan policy changes
->    as deploys, and note the flip side: a policy that would lock you out also
->    will not take hold until the restart, which is a chance to catch it.
-
-An unparseable policy is skipped with a warning rather than crashing startup —
-fail-closed for that statement, not for the gateway. A skipped `forbid` is a
-policy you believed was protecting something, so check the startup log after
-adding one.
+Full reference — the supported clause table, how a decision is reached, and how to
+recover if a `forbid` locks you out of the policy API — is in
+**[Cedar authorization policies](#cedar-authorization-policies)** under the admin
+API section.
 
 #### OIDC — for human logins and JWT-bearing services
 
@@ -1233,7 +1201,15 @@ engine, and understands:
 | Principal | the bare `principal` | `principal == User::"alice"`, `principal in Group::"eng"` |
 | Action | `action == Action::"read"` / `Action::"write"`, or bare `action` | `action in [...]` |
 | Resource | the bare `resource` | `resource == Resource::"/api/chat"`, `resource in ...` |
-| Condition | `when { ... }` / `unless { ... }` over `principal.role`, `principal.project`, `principal.tenant`, `principal.user`, compared with `==` or `!=` to a quoted string, joined by `&&` | anything on `resource.*` or `context.*` |
+| Condition | `when { ... }` / `unless { ... }` over `principal.<attr>` (below), compared with `==` or `!=` to a quoted string, joined by `&&` | anything on `resource.*` or `context.*` |
+
+`principal.<attr>` resolves against the request context: `role` (special-cased so
+equality matches *any* role the caller holds), plus `project`, `tenant`, `user`,
+`email`, `business_unit` and `environment`. An attribute that maps to no context
+field never matches, and a misspelled one is *not* an error — the statement parses,
+governs its action, and then matches nobody. On a `permit` that is a lockout of
+everyone: verified, `principal.rôle == "senior"` denies a caller who genuinely
+holds `senior`. Trial in `LOG_ONLY` and read the logs before enforcing.
 
 `GET`/`HEAD`/`OPTIONS` map to `read`; `POST`/`PUT`/`PATCH`/`DELETE` map to
 `write`. **Everything in the right-hand column is a 400**, not a stored policy
@@ -1296,6 +1272,10 @@ Two more caveats worth knowing before you rely on this layer:
 * **Policies are not versioned and there is no delete endpoint.** A `POST`
   overwrites by name; to remove a policy, drop its `CEDAR_POLICY#<name>` item
   from the table and restart.
+* **At startup, an unsupported stored policy is skipped with a warning** rather
+  than crashing the gateway — the 400 above only guards the endpoint, so a policy
+  written before a parser change can still be dropped on boot. A skipped `forbid`
+  is a policy you believed was protecting something, so check the startup log.
 
 ## Configuration
 
