@@ -135,11 +135,14 @@ class TestTheEntrypointDefaultsDemoDataOn:
 
     This is the documented behaviour of the four install paths in the README, and
     the one that surprises people: the Dockerfile ``CMD`` is this same entrypoint,
-    and ``infra/stack.py`` does not set ``AXON_LOAD_DEMO_DATA`` — so a Fargate
-    deploy comes up with Acme Corp, three fictional users and 66 fabricated usage
-    records unless the operator sets it to ``false``. A "clean install" path that
-    silently seeds a demo tenant is worse than one that fails, because the data is
-    indistinguishable from real usage in the UI.
+    so *any* container started without the variable comes up with Acme Corp,
+    three fictional users and 66 fabricated usage records — `docker compose up`,
+    a hand-written task definition, App Runner. A "clean install" that silently
+    seeds a demo tenant is worse than one that fails, because the data is
+    indistinguishable from real usage in the UI. ``infra/stack.py`` neutralises
+    the default for the Fargate path only, asserted in
+    ``test_infra_stack_env.py``; this class asserts the default it is
+    neutralising.
 
     Asserted here rather than left to the README because the safe-looking change
     — dropping the default so a bare ``python serve_dashboard.py`` starts empty —
