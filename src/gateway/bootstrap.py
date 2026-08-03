@@ -272,11 +272,18 @@ def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComp
     # --- DynamoDB persisted state (merges on top of seed data) ---
     loaded_feedback: list = []
     if persistence.enabled:
-        loaded_projects, loaded_user_configs, loaded_records, loaded_feedback = (
+        loaded_projects, loaded_user_configs, loaded_records, loaded_feedback, loaded_policies = (
             asyncio.run(_load_persisted_state(persistence))
         )
         projects.update(loaded_projects)
         user_configs.update(loaded_user_configs)
+        # Merge by name, matching POST /admin/policies' update-by-name identity: a
+        # persisted policy replaces the seeded one it shares a name with rather
+        # than being evaluated alongside it, which for a permit/forbid pair would
+        # otherwise silently resolve to DENY.
+        by_name = {p["name"]: p for p in policies}
+        by_name.update({p["name"]: p for p in loaded_policies})
+        policies = list(by_name.values())
         # Rehydrate via load_records so the running spend counters (which back
         # budget checks) are seeded from history, not just the record list.
         cost_tracker.load_records(loaded_records)
@@ -438,6 +445,15 @@ def build_starlette_app(app_config: AppConfig | None = None) -> Starlette:
 
     comp = build_gateway_components(app_config)
 
+    # Built before the admin API and wired unchanged into both, so a policy
+    # written through POST /admin/policies recompiles the evaluator the auth
+    # middleware is already using. Always constructed, even for an empty policy
+    # set: the previous `if comp.policies else None` meant a gateway that booted
+    # with no policies had no evaluator to recompile, so the first policy an
+    # operator added did nothing until a restart. An empty set governs no action,
+    # so wiring it changes no decision.
+    cedar_service = CedarPolicyService(comp.policies)
+
     admin_api = AdminAPI(
         cost_tracker=comp.cost_tracker,
         health_tracker=comp.health_tracker,
@@ -463,6 +479,7 @@ def build_starlette_app(app_config: AppConfig | None = None) -> Starlette:
         # reports the live counters and DELETE clears the cache requests are
         # actually served from.
         semantic_cache=comp.semantic_cache,
+        policy_service=cedar_service,
     )
 
     # Key, policy, audit, webhook, region, and quota admin APIs
@@ -537,7 +554,7 @@ def build_starlette_app(app_config: AppConfig | None = None) -> Starlette:
         AuthMiddleware,
         oidc_service=comp.oidc_service,
         api_key_service=comp.api_key_service,
-        policy_service=CedarPolicyService(comp.policies) if comp.policies else None,
+        policy_service=cedar_service,
         mode=app_config.auth_mode,
     )
 
@@ -782,9 +799,16 @@ def _apply_seed_data(
 
 
 async def _load_persisted_state(persistence: DynamoPersistence):
-    """Load projects, user configs, usage records, and feedback from DynamoDB."""
+    """Load projects, user configs, usage records, feedback, and Cedar policies."""
     loaded_projects = await persistence.load_projects()
     loaded_user_configs = await persistence.load_user_configs()
     loaded_records = await persistence.load_usage_records()
     loaded_feedback = await persistence.load_feedback_records()
-    return loaded_projects, loaded_user_configs, loaded_records, loaded_feedback
+    loaded_policies = await persistence.load_all_cedar_policies()
+    return (
+        loaded_projects,
+        loaded_user_configs,
+        loaded_records,
+        loaded_feedback,
+        loaded_policies,
+    )

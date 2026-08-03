@@ -409,9 +409,30 @@ class TestCedarPolicyE2E:
         client, key = _cedar_app([_WRITE_PERMIT])
         assert self._post(client, key).status_code == 200
 
-    def test_denied_when_no_permit_matches(self):
-        # Only a read permit; a POST (write) has no matching permit -> 403.
+    def test_a_read_only_policy_does_not_403_the_chat_route(self):
+        """The bug this file would have caught: a policy that says nothing about
+        writes must not take the gateway's main endpoint offline.
+
+        See `CedarPolicyService`'s docstring for why deny is scoped per action.
+        A write the policy set *does* govern but does not permit is still a 403 —
+        `test_denied_when_a_governing_policy_excludes_the_caller` below.
+        """
         client, key = _cedar_app([_READ_PERMIT])
+        assert self._post(client, key).status_code == 200
+
+    def test_denied_when_a_governing_policy_excludes_the_caller(self):
+        """Default-deny within a governed action, through the full stack: `write`
+        is governed by a permit whose condition the "service" principal fails, so
+        no permit matches and the request is a 403."""
+        permit_admins_only = {
+            "name": "admins-write",
+            "policy_text": (
+                'permit(principal, action == Action::"write", resource) '
+                'when { principal.role == "admin" };'
+            ),
+            "mode": "ENFORCE",
+        }
+        client, key = _cedar_app([permit_admins_only])
         assert self._post(client, key).status_code == 403
 
     def test_forbid_overrides_permit(self):

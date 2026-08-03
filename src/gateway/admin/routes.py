@@ -108,6 +108,7 @@ def _is_servable_site_path(inside: pathlib.PurePath) -> bool:
 from src.gateway.admin.catalog_drift import audit_catalog, render_catalog_drift_page
 from src.gateway.admin.pricing_drift import audit_pricing, render_drift_page
 from src.gateway.admin.production_checklist import render_checklist_page, run_checklist
+from src.gateway.auth.cedar_policy import CedarPolicyService, parse_policy
 from src.gateway.config import AppConfig
 from src.gateway.cost_tracker import CostTracker
 from src.gateway.efficiency_analyzer import EfficiencyAnalyzer
@@ -235,12 +236,16 @@ class AdminAPI:
         provider_configs: dict[str, ProviderConfig] | None = None,
         api_key_service: object | None = None,
         semantic_cache: object | None = None,
+        policy_service: CedarPolicyService | None = None,
     ) -> None:
         self.cost_tracker = cost_tracker
         self.health_tracker = health_tracker
         self.model_registry = model_registry
         self.projects: dict[str, Project] = projects or {}
         self.policies: list[dict] = policies or []
+        # The live evaluator, so POST /admin/policies can recompile it. None when
+        # no Cedar service is wired (auth middleware built without one).
+        self._policy_service = policy_service
         self._user_configs: dict[str, dict] = user_configs or {}
         self._config_path = config_path
         self._persistence = persistence
@@ -771,7 +776,7 @@ class AdminAPI:
     # ------------------------------------------------------------------
 
     async def create_policy(self, request: Request) -> JSONResponse:
-        """Store a new Cedar policy."""
+        """Store a new Cedar policy, persist it, and apply it to live traffic."""
         body = await request.json()
 
         name = body.get("name")
@@ -781,21 +786,53 @@ class AdminAPI:
                 status_code=400,
             )
 
+        policy_text = body.get("policy_text", "")
+        # Reject text the evaluator cannot parse instead of accepting it and
+        # skipping it with a log line at startup. A policy silently dropped is
+        # indistinguishable from one that permits everything, and the operator
+        # who wrote it has already moved on.
+        if policy_text and parse_policy(policy_text) is None:
+            return JSONResponse(
+                {"error": {
+                    "type": "invalid_request",
+                    "message": (
+                        "Field 'policy_text' is not a supported Cedar statement. "
+                        "Expected permit(...) or forbid(...), optionally with a "
+                        "when/unless clause whose conditions compare principal "
+                        "attributes (role, project, tenant, user) to a quoted "
+                        'string, e.g. permit(principal, action == Action::"read", '
+                        "resource); or forbid(principal, action, resource) unless "
+                        '{ principal.role == "senior" };'
+                    ),
+                }},
+                status_code=400,
+            )
+
         policy = {
             "name": name,
             "description": body.get("description", ""),
-            "policy_text": body.get("policy_text", ""),
+            "policy_text": policy_text,
             "mode": body.get("mode", "LOG_ONLY"),
         }
 
         # Update existing policy with the same name, or append
+        status, code = "created", 201
         for i, existing in enumerate(self.policies):
             if existing["name"] == name:
                 self.policies[i] = policy
-                return JSONResponse({"name": name, "status": "updated"})
+                status, code = "updated", 200
+                break
+        else:
+            self.policies.append(policy)
 
-        self.policies.append(policy)
-        return JSONResponse({"name": name, "status": "created"}, status_code=201)
+        if self._persistence is not None:
+            await self._persistence.save_cedar_policy(policy)
+        # Statements are compiled once, so without this the policy sits in the
+        # list without affecting a single request until the process restarts.
+        if self._policy_service is not None:
+            self._policy_service.reload(self.policies)
+
+        return JSONResponse({"name": name, "status": status}, status_code=code)
 
     # ------------------------------------------------------------------
     # GET /admin/health
