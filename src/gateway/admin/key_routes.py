@@ -28,6 +28,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
+from src.gateway.middleware.admin_rbac import scope_implies
 from src.gateway.models import RequestContext
 
 if TYPE_CHECKING:
@@ -57,16 +58,20 @@ def _is_superadmin(ctx: RequestContext | None) -> bool:
 def _may_grant(ctx: RequestContext | None, requested: list[str]) -> str | None:
     """Return a refusal reason if the caller cannot grant ``requested``.
 
-    A caller may grant a scope only if it holds that exact scope itself, or is a
-    superadmin. Non-admin scopes (``chat`` and friends) are freely grantable —
-    the concern is escalation of *admin* authority, not handing out ordinary
-    gateway access.
+    A caller may grant an admin scope only if something it holds already implies
+    it — so ``admin:projects`` can hand out the narrower ``admin:projects:read``
+    but not ``admin:quotas`` or ``admin:*``. Non-admin scopes (``chat`` and
+    friends) are freely grantable: the concern is escalation of *admin* authority,
+    not handing out ordinary gateway access.
     """
     if _is_superadmin(ctx):
         return None
-    held = set(ctx.scopes) if ctx else set()
+    held = ctx.scopes if ctx else []
     escalating = [
-        s for s in requested if s.startswith("admin:") and s not in held
+        s
+        for s in requested
+        if s.startswith("admin:")
+        and not any(scope_implies(h, s) for h in held)
     ]
     if escalating:
         return (

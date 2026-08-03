@@ -143,7 +143,13 @@ def main():
     p_key = sub.add_parser("issue-key", help="Mint an API key (in-process; works under ENFORCE)")
     p_key.add_argument("-P", "--project", default="default", help="Project ID to scope the key to")
     p_key.add_argument("-n", "--name", default="cli-issued", help="Human-readable key name")
-    p_key.add_argument("-s", "--scopes", default="chat", help="Comma-separated scopes (default: chat)")
+    p_key.add_argument(
+        "-s", "--scopes", default="chat",
+        help="Comma-separated scopes (default: chat). Admin scopes take an "
+             "optional access level: 'admin:quotas:read' for read-only, "
+             "'admin:quotas:write' or bare 'admin:quotas' for both, "
+             "'admin:*' for everything, 'admin:*:read' to read everything",
+    )
 
     # chat
     p_chat = sub.add_parser("chat", help="Send a chat message")
