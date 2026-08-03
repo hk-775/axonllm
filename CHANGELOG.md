@@ -8,6 +8,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **A startup guide that answers "what do I do after it's running?"** The four
+  install paths were already documented, but three of them ended at a gateway
+  with no provider keys, no projects and no way in — and the README's only
+  configuration advice was a `.env` file that is silently ignored outside demo
+  mode. `README.md` now leads with a decision tree and a path table (auth mode
+  and time-to-first-call per path), and each path is numbered steps ending in a
+  link to the new **Configuring a clean install** section: where provider keys go
+  in precedence order (env var → Secrets Manager → `providers.yaml` → `.env`), the
+  per-provider variable names, creating a project, and issuing keys.
+  `docs/images/dashboard-clean.png` and `dashboard-seeded.png` show the stat band
+  of each so "did the demo data load?" is answerable at a glance rather than by
+  reading the flag back.
+
+  The AWS path gained the step that was missing entirely: putting keys into the
+  `axonllm/api-keys` secret the stack creates, and forcing a new deployment,
+  because secrets are read at container start.
+
+- **Documented authentication and authorization end to end**, including four
+  behaviours that were true but written down nowhere:
+  - **An API key issued with default scopes cannot reach `/admin/*`.**
+    `axon issue-key` defaults to `--scopes chat`, and an API-key context carries
+    `roles=["service"]`, which `AdminRBACMiddleware` rejects. So the admin API is
+    unreachable after switching to `ENFORCE` unless an `admin:*` key was issued
+    first — now called out as ordering, with the verified allow/deny matrix.
+  - **A clean install has zero Cedar policies, and zero policies means no Cedar
+    evaluation at all** — the middleware is constructed with
+    `policy_service=None`. "Default deny" is Cedar's rule among the policies that
+    exist, not a property of a fresh install, which is the opposite of what a
+    reader assumes from the phrase.
+  - **`POST /admin/policies` does not take effect until restart.** Policies are
+    parsed once at construction, so the endpoint stores a policy that `GET` will
+    show and the evaluator will not apply.
+  - **SCIM group→role resolution does not feed the auth chain.** `roles_for_user`
+    is only read on the SCIM path; roles for authorization come from the JWT or
+    SAML assertion, so provisioning a user into an admin group grants nothing
+    unless the IdP also puts `admin` in the claim.
+  - **`aud` and `iss` on a direct OIDC Bearer token are checked only when
+    `AXON_OIDC_AUDIENCE` / `AXON_OIDC_ISSUER` are set.** Signature and `exp` are
+    unconditional, but an empty audience means a correctly-signed token minted for
+    a *different* application is accepted — the confused-deputy shape. The README
+    now says to set both rather than treating them as optional tuning.
+
+  Also documented: the four-step credential precedence in `AuthMiddleware` (as a
+  diagram), `ENFORCE` vs `LOG_ONLY` per layer, the OIDC claim mapping table and
+  the `python-jose` fail-closed behaviour, SAML's five variables and the fact that
+  `/saml/acs` returns JSON rather than minting a session, SCIM's fail-closed 503,
+  and a minimal production environment block.
+
 - **Tool calling (function calling) pass-through across every provider.**
   `ChatCompletionRequest` now carries `tools` and `tool_choice`, and each adapter
   translates them into its provider's own dialect in both directions:

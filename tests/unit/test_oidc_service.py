@@ -141,6 +141,79 @@ class TestValidateOIDCJWT:
         assert result is None
 
 
+class TestUnconfiguredAudienceAndIssuerAreNotChecked:
+    """The `if self._config.audience and ...` guards, asserted as behaviour.
+
+    A token that verifies cryptographically but was minted for a *different*
+    application is accepted when `AXON_OIDC_AUDIENCE` is empty — the
+    confused-deputy shape, and the reason the README says to set both variables
+    rather than treating them as optional tuning. Pinned here so the guard is a
+    documented default rather than an accident, and so tightening it (checking
+    `aud` unconditionally) is a deliberate change that fails a test naming the
+    behaviour it alters.
+    """
+
+    def _accepting_service(self, **overrides) -> OIDCService:
+        svc = OIDCService(config=OIDCConfig(alb_region="us-east-1", **overrides))
+        # A key must resolve for validation to reach the aud/iss checks at all;
+        # _verify_and_decode is stubbed because signature verification is the
+        # separate concern asserted above.
+        svc._jwks_cache = {"keys": [{"kid": "k1", "kty": "RSA"}]}
+        svc._jwks_fetched_at = time.time()
+        return svc
+
+    def _token(self, **claims) -> str:
+        payload = {"sub": "user-1", "exp": int(time.time()) + 3600, **claims}
+        return _make_jwt({"alg": "RS256", "kid": "k1"}, payload)
+
+    def test_empty_audience_accepts_a_token_for_another_application(self, monkeypatch):
+        service = self._accepting_service(issuer="https://issuer.example.com")
+        monkeypatch.setattr(
+            service,
+            "_verify_and_decode",
+            lambda token, key, algorithms: json.loads(
+                base64.urlsafe_b64decode(token.split(".")[1] + "==")
+            ),
+        )
+        token = self._token(iss="https://issuer.example.com", aud="some-other-app")
+
+        ctx = asyncio.run(service.validate_oidc_jwt(token))
+        assert ctx is not None, (
+            "with AXON_OIDC_AUDIENCE unset, aud is not checked — if this now "
+            "rejects, the README's 'checked only when you set it' is out of date"
+        )
+        assert ctx.user_id == "user-1"
+
+    def test_empty_issuer_accepts_a_token_from_another_idp(self, monkeypatch):
+        service = self._accepting_service(audience="axonllm-app")
+        monkeypatch.setattr(
+            service,
+            "_verify_and_decode",
+            lambda token, key, algorithms: json.loads(
+                base64.urlsafe_b64decode(token.split(".")[1] + "==")
+            ),
+        )
+        token = self._token(iss="https://attacker.example.com", aud="axonllm-app")
+
+        assert asyncio.run(service.validate_oidc_jwt(token)) is not None
+
+    def test_expiry_is_checked_regardless(self, monkeypatch):
+        """The one claim with no opt-out, so an unconfigured deploy is not
+        indefinitely replayable."""
+        service = self._accepting_service()
+        monkeypatch.setattr(
+            service,
+            "_verify_and_decode",
+            lambda token, key, algorithms: json.loads(
+                base64.urlsafe_b64decode(token.split(".")[1] + "==")
+            ),
+        )
+        expired = _make_jwt(
+            {"alg": "RS256", "kid": "k1"}, {"sub": "user-1", "exp": int(time.time()) - 1}
+        )
+        assert asyncio.run(service.validate_oidc_jwt(expired)) is None
+
+
 class TestJWKSCache:
     def test_cache_used_within_ttl(self, service):
         service._jwks_cache = {"keys": [{"kid": "k1"}]}
