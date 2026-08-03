@@ -577,6 +577,31 @@ class AdminAPI:
     # POST /admin/projects/{id}/members
     # ------------------------------------------------------------------
 
+    async def _persist_project(self, project) -> None:
+        """Write a mutated project back to DynamoDB, if persistence is on.
+
+        Every route that changes a field of ``Project`` has to call this. The
+        object in ``self.projects`` is shared, so mutating it updates what ``GET``
+        returns whether or not the write happens — which is why forgetting the
+        call produces an endpoint that looks like it worked and loses the change
+        on the next restart. Extracted rather than repeated so the omission is
+        harder to make: ``add_member``/``remove_member`` were missing it while the
+        two model handlers below had it, on the same object.
+
+        A failure is logged and swallowed, matching the rest of the admin API: the
+        in-memory change already succeeded, and ``last_write_error`` on the
+        persistence layer is what surfaces the drop to a health probe.
+        """
+        if self._persistence is not None and self._persistence.enabled:
+            try:
+                await self._persistence.save_project(project)
+            except Exception:
+                logger.warning(
+                    "Failed to persist project %s to DynamoDB",
+                    project.project_id,
+                    exc_info=True,
+                )
+
     async def add_member(self, request: Request) -> JSONResponse:
         """Add a user to a project."""
         project_id = request.path_params["id"]
@@ -595,6 +620,7 @@ class AdminAPI:
             )
         if user_id not in project.members:
             project.members.append(user_id)
+            await self._persist_project(project)
         return JSONResponse({"project_id": project_id, "user_id": user_id, "status": "added"})
 
     # ------------------------------------------------------------------
@@ -613,6 +639,10 @@ class AdminAPI:
             )
         if user_id in project.members:
             project.members.remove(user_id)
+            # Revoking access is the direction that matters: without this the
+            # removal reverted on the next restart, silently restoring a member
+            # an operator had deliberately taken off the project.
+            await self._persist_project(project)
             return JSONResponse({"project_id": project_id, "user_id": user_id, "status": "removed"})
         return JSONResponse(
             {"error": {"type": "not_found", "message": f"User '{user_id}' is not a member of project '{project_id}'"}},
@@ -1078,16 +1108,7 @@ class AdminAPI:
         if model not in project.allowed_models:
             project.allowed_models.append(model)
 
-        # Persist to DynamoDB if enabled
-        if self._persistence is not None and self._persistence.enabled:
-            try:
-                await self._persistence.save_project(project)
-            except Exception:
-                logger.warning(
-                    "Failed to persist project %s to DynamoDB",
-                    project_id,
-                    exc_info=True,
-                )
+        await self._persist_project(project)
 
         return JSONResponse({
             "project_id": project_id,
@@ -1119,16 +1140,7 @@ class AdminAPI:
 
         project.allowed_models.remove(model_name)
 
-        # Persist to DynamoDB if enabled
-        if self._persistence is not None and self._persistence.enabled:
-            try:
-                await self._persistence.save_project(project)
-            except Exception:
-                logger.warning(
-                    "Failed to persist project %s to DynamoDB",
-                    project_id,
-                    exc_info=True,
-                )
+        await self._persist_project(project)
 
         return JSONResponse({
             "project_id": project_id,

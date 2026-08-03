@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 from starlette.requests import Request
@@ -13,14 +14,49 @@ from src.gateway.multi_region.region_config import SpokeConfig, SpokeRole
 if TYPE_CHECKING:
     from src.gateway.multi_region.health_monitor import SpokeHealthMonitor
     from src.gateway.multi_region.region_router import RegionRouter
+    from src.gateway.persistence import DynamoPersistence
+
+logger = logging.getLogger(__name__)
 
 
 class RegionAPI:
-    """Admin API for multi-region topology management."""
+    """Admin API for multi-region topology management.
 
-    def __init__(self, router: RegionRouter, monitor: SpokeHealthMonitor) -> None:
+    Topology edits are persisted so they survive a restart. Without that, adding
+    or removing a spoke through this API reverted at the next deploy — quietly
+    restoring a region an operator had taken out of rotation, or dropping one they
+    had added, while the endpoint reported success either way.
+
+    Only configuration is written. Spoke *health* is not: see
+    ``serialize_region_topology`` for why restoring a stale status is worse than
+    re-probing.
+    """
+
+    def __init__(
+        self,
+        router: RegionRouter,
+        monitor: SpokeHealthMonitor,
+        persistence: DynamoPersistence | None = None,
+    ) -> None:
         self.router = router
         self.monitor = monitor
+        self._persistence = persistence
+
+    async def _persist_topology(self) -> None:
+        """Write the whole topology back. Called by every mutating route.
+
+        One item covers hub settings and all spokes, so each edit rewrites the
+        set — see the comment on ``serialize_region_topology`` for why the
+        topology is stored as a unit rather than a row per spoke.
+        """
+        if self._persistence is None or not self._persistence.enabled:
+            return
+        try:
+            await self._persistence.save_region_topology(self.router.config)
+        except Exception:
+            logger.warning(
+                "Failed to persist region topology to DynamoDB", exc_info=True
+            )
 
     async def get_topology(self, request: Request) -> JSONResponse:
         """GET /admin/regions — full topology view."""
@@ -94,7 +130,14 @@ class RegionAPI:
         })
 
     async def mark_spoke_status(self, request: Request) -> JSONResponse:
-        """PUT /admin/regions/{region}/status — manually override spoke status."""
+        """PUT /admin/regions/{region}/status — manually override spoke status.
+
+        Deliberately not persisted. The override is health state, and the next
+        health check overwrites it anyway — writing it would mean a restart could
+        restore an UNHEALTHY that is no longer true, holding a recovered region
+        out of rotation. To take a region out durably, remove or reweight the
+        spoke.
+        """
         region = request.path_params["region"]
         body = await request.json()
         new_status = body.get("status", "")
@@ -167,6 +210,7 @@ class RegionAPI:
             failover_priority=body.get("failover_priority", len(self.router.config.spokes)),
         )
         self.router.config.spokes.append(spoke)
+        await self._persist_topology()
         return JSONResponse(status_code=201, content={"message": f"Spoke '{region}' added", "region": region})
 
     async def remove_spoke(self, request: Request) -> JSONResponse:
@@ -177,6 +221,10 @@ class RegionAPI:
             return JSONResponse(status_code=404, content={"error": f"Spoke '{region}' not found"})
 
         self.router.config.spokes.remove(spoke)
+        # Removal is the direction that matters: without the write the spoke
+        # came back at the next restart, sending traffic to a region an operator
+        # had deliberately taken out of the topology.
+        await self._persist_topology()
         return JSONResponse(content={"message": f"Spoke '{region}' removed"})
 
     async def update_spoke(self, request: Request) -> JSONResponse:
@@ -203,6 +251,7 @@ class RegionAPI:
         if "models" in body:
             spoke.models = body["models"]
 
+        await self._persist_topology()
         return JSONResponse(content={"message": f"Spoke '{region}' updated", "spoke": {
             "region": spoke.region, "role": spoke.role.value, "weight": spoke.weight,
             "data_residency_zones": spoke.data_residency_zones,
@@ -224,6 +273,7 @@ class RegionAPI:
         if "failover_cooldown_seconds" in body:
             config.failover_cooldown_seconds = int(body["failover_cooldown_seconds"])
 
+        await self._persist_topology()
         return JSONResponse(content={"message": "Topology config updated", "mode": self._detect_mode(config)})
 
     def _detect_mode(self, config) -> str:

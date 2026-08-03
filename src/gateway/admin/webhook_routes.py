@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 from starlette.requests import Request
@@ -11,14 +12,29 @@ from starlette.routing import Route
 from src.gateway.security.event_dispatcher import DestinationType, EventDestination
 
 if TYPE_CHECKING:
+    from src.gateway.persistence import DynamoPersistence
     from src.gateway.security.event_dispatcher import EventDispatcher
+
+logger = logging.getLogger(__name__)
 
 
 class WebhookAPI:
-    """Manage event dispatch destinations."""
+    """Manage event dispatch destinations.
 
-    def __init__(self, dispatcher: EventDispatcher) -> None:
+    Destinations are persisted so they survive a restart. Without that, adding a
+    destination through this API produced an endpoint that reported success and
+    then silently stopped delivering security events at the next deploy — the
+    failure mode is an absence of alerts, which nothing observable distinguishes
+    from "no events occurred".
+    """
+
+    def __init__(
+        self,
+        dispatcher: EventDispatcher,
+        persistence: DynamoPersistence | None = None,
+    ) -> None:
         self.dispatcher = dispatcher
+        self._persistence = persistence
 
     async def list_destinations(self, request: Request) -> JSONResponse:
         """GET /admin/webhooks"""
@@ -62,17 +78,52 @@ class WebhookAPI:
             enabled=body.get("enabled", True),
         )
 
+        # Replace an existing destination of the same name rather than appending a
+        # second one: the dispatcher sends to every match, so a re-POST would
+        # otherwise double-deliver every event, and remove-by-name would delete
+        # only one of the pair.
+        existed = self.dispatcher.remove_destination(name)
         self.dispatcher.add_destination(dest)
+        await self._persist()
 
         return JSONResponse(
-            status_code=201,
+            status_code=200 if existed else 201,
             content={
                 "name": dest.name,
                 "type": dest.destination_type.value,
                 "enabled": dest.enabled,
                 "event_filter": dest.event_filter,
+                "status": "updated" if existed else "created",
             },
         )
+
+    async def _persist(self) -> None:
+        """Write the dispatcher's whole destination list back.
+
+        The set is one stored item, so an add and a delete are the same
+        operation — see the comment on ``save_event_destinations`` for why a row
+        per destination could not express a deletion at all.
+
+        A failure is logged and swallowed, matching the rest of the admin API: the
+        in-memory change already took effect, and ``last_write_error`` on the
+        persistence layer is what surfaces the drop to a health probe.
+        """
+        if self._persistence is None or not self._persistence.enabled:
+            return
+        try:
+            await self._persistence.save_event_destinations([
+                {
+                    "name": d.name,
+                    "destination_type": d.destination_type.value,
+                    "config": d.config,
+                    "event_filter": d.event_filter,
+                    "enabled": d.enabled,
+                }
+                for d in self.dispatcher.destinations
+            ])
+        except Exception:
+            logger.warning(
+                "Failed to persist event destinations to DynamoDB", exc_info=True)
 
     async def remove_destination(self, request: Request) -> JSONResponse:
         """DELETE /admin/webhooks/{name}"""
@@ -81,6 +132,11 @@ class WebhookAPI:
 
         if not removed:
             return JSONResponse(status_code=404, content={"error": f"Destination '{name}' not found"})
+
+        # Rewrite the remaining set rather than deleting a row: the stored list is
+        # authoritative at startup, which is what stops a removed destination from
+        # being re-created by demo/config seeding and quietly resuming delivery.
+        await self._persist()
 
         return JSONResponse(content={"status": "removed", "name": name})
 
