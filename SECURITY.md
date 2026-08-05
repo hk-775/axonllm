@@ -10,12 +10,12 @@ Instead, use GitHub's private vulnerability reporting: the **Security** tab →
 **Report a vulnerability**. That keeps the report private to the maintainers
 until a fix ships, and it needs no third-party service.
 
-> **Maintainers:** private reporting must be switched on for this to work
-> (Settings → Code security → Private vulnerability reporting). Until it is, the
-> Security tab offers no reporting form and this page names a channel that does
-> not exist. An earlier version of this file listed `security@axonllm.dev`; that
-> domain has no DNS record, so mail to it bounced silently — which is worse than
-> no address at all, because a reporter believes they have disclosed.
+This project deliberately publishes no security email address. An earlier version
+of this file listed `security@axonllm.dev`, a domain with no DNS record, so mail
+to it bounced silently — worse than naming no address at all, because a reporter
+believes they have disclosed when nobody has received anything. Private
+vulnerability reporting has no such failure mode: it is delivered in GitHub, so
+it cannot be misaddressed, and you can see your own report.
 
 Include:
 - Description of the vulnerability
