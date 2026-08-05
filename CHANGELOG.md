@@ -390,6 +390,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   traffic".
 
 ### Fixed
+- **A conduct report was directed to a public issue.** `CODE_OF_CONDUCT.md` asked
+  for harassment to be "reported to the project maintainers privately, by opening
+  a GitHub issue marked for maintainer attention" — but issues are public,
+  including to the person being reported, so following the instruction exposed the
+  reporter in the act of asking for privacy. Both this file and `SECURITY.md` now
+  point at GitHub's private vulnerability reporting form, the only channel on the
+  repository that is private to maintainers by construction. Neither file names an
+  email address: the previous `security@axonllm.dev` and `conduct@axonllm.dev` sat
+  on a domain with no DNS record, so reports bounced silently and the sender
+  believed they had disclosed.
 - **Privilege escalation: a narrow admin scope could mint or steal a full admin
   credential.** `AdminRBACMiddleware` authorizes on the first path segment, which
   is the right granularity for most of the admin API and the wrong granularity for

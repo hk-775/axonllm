@@ -42,13 +42,20 @@ an individual is officially representing the community in public spaces.
 ## Enforcement
 
 Instances of abusive, harassing, or otherwise unacceptable behavior may be
-reported to the project maintainers privately, by opening a GitHub issue marked
-for maintainer attention or by contacting a maintainer directly through their
-GitHub profile.
+reported privately to the maintainers using GitHub's **Report a vulnerability**
+form on the Security tab. That form is not only for vulnerabilities — it is the
+one channel on this repository that is private to the maintainers by
+construction, so it is the right place for a conduct report too. Alternatively,
+contact a maintainer directly through their GitHub profile.
 
-> **Maintainers:** this should name a monitored address before the repository is
-> made public. It previously read `conduct@axonllm.dev`, a domain with no DNS
-> record, so any report sent there bounced.
+**Do not open a GitHub issue to report a conduct concern.** Issues are public,
+including to the person being reported. An earlier version of this file suggested
+opening one "marked for maintainer attention", which would have exposed the
+reporter in the act of asking for privacy.
+
+This project publishes no conduct email address on purpose: the previous
+`conduct@axonllm.dev` pointed at a domain with no DNS record, so reports sent
+there bounced and no one was told.
 
 All complaints will be reviewed and investigated promptly and fairly.
 
