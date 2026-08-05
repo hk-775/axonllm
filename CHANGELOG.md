@@ -8,6 +8,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Read-only admin scopes.** Admin scopes named a resource and nothing else, so
+  `admin:quotas` granted `GET /admin/quotas/{project_id}` *and*
+  `POST /admin/quotas/{project_id}/reset`. "Let support look at quotas without
+  being able to wipe a usage counter" was not expressible — the only choices were
+  read+write or nothing. Scopes now take an optional access level:
+
+  | Scope | Grants |
+  |-------|--------|
+  | `admin:*` | everything |
+  | `admin:*:read` | reads on every resource, writes on none |
+  | `admin:quotas` | reads **and** writes (unchanged) |
+  | `admin:quotas:read` | reads only |
+  | `admin:quotas:write` | reads and writes |
+
+  A bare `admin:<resource>` still means both, so **no already-issued key changes
+  meaning on deploy** — the suffix narrows and is never required to keep what you
+  had. `:write` implies read, because an operator who can reset a quota can
+  already see the value being reset and separating them would only produce keys
+  that mutate blind. An unrecognised suffix (`admin:quotas:raed`) matches no
+  resource and grants nothing, rather than falling back to a resource-wide grant.
+
+  **Read and write are classified by effect, not by HTTP method**, which turned
+  out to matter: four admin `POST`s are named like inspections and mutate anyway.
+  `quotas/simulate` runs the real enforcer, whose rate-limit check *appends a
+  timestamp* and so consumes the project's RPM budget; `regions/health/check`
+  updates spoke status and thereby changes where traffic routes; `regions/route`
+  exercises the live router; `webhooks/{name}/test` sends a real HTTP request to
+  an external host. Classifying by method would have let a nominally read-only
+  credential exhaust a rate limit or ping an outside endpoint. `POST
+  /admin/pii/preview` is the one non-`GET` that persists nothing, so `:read`
+  reaches it.
+
+  The key-issuance guard learned the same vocabulary, so a caller can delegate a
+  *narrower* slice of its own authority: `admin:projects` may issue
+  `admin:projects:read`, but not `admin:*` and not another resource. Note that
+  `admin:projects:read` cannot issue keys at all — issuance is a write to
+  `projects`, refused a layer earlier by RBAC.
+
+  Verified on the real app across all 63 admin route/method pairs: `admin:*`
+  unchanged at 34 reads + 29 writes, `admin:*:read` at 34 reads and **zero** of 29
+  writes. 19 mutations of the new logic: 18 caught, 1 an intended control. Three
+  of those initially survived — removing a by-effect override left the path
+  classified as a write anyway via the method fallback, so the outcome assertions
+  could not tell the two apart; the tests now pin the override itself.
+
 - **A startup guide that answers "what do I do after it's running?"** The four
   install paths were already documented, but three of them ended at a gateway
   with no provider keys, no projects and no way in — and the README's only

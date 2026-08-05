@@ -197,6 +197,80 @@ class TestRotatingSomeoneElsesKey:
         assert resp.status_code == 201
 
 
+class TestDelegatingANarrowerScope:
+    """A caller may hand out a subset of its own authority, and nothing more.
+
+    Exact string comparison would have refused even this, which is the one
+    delegation that cannot escalate anything: `admin:projects` giving out
+    `admin:projects:read`.
+    """
+
+    async def test_a_read_write_holder_may_issue_the_read_only_version(self, service):
+        _, raw = await _issue(service, ["admin:projects"])
+        client = _client(service)
+
+        resp = client.post(
+            "/admin/projects/p1/keys",
+            headers={"X-Api-Key": raw},
+            json={"name": "viewer", "scopes": ["admin:projects:read"]},
+        )
+
+        assert resp.status_code == 201
+        assert resp.json()["scopes"] == ["admin:projects:read"]
+
+    async def test_it_still_cannot_reach_the_wildcard(self, service):
+        _, raw = await _issue(service, ["admin:projects"])
+        client = _client(service)
+
+        resp = client.post(
+            "/admin/projects/p1/keys",
+            headers={"X-Api-Key": raw},
+            json={"name": "root", "scopes": ["admin:*"]},
+        )
+
+        assert resp.status_code == 403
+
+    async def test_it_cannot_grant_a_sideways_resource(self, service):
+        _, raw = await _issue(service, ["admin:projects"])
+        client = _client(service)
+
+        resp = client.post(
+            "/admin/projects/p1/keys",
+            headers={"X-Api-Key": raw},
+            json={"name": "quotas", "scopes": ["admin:quotas:read"]},
+        )
+
+        assert resp.status_code == 403
+
+    async def test_a_read_only_scope_cannot_issue_keys_at_all(self, service):
+        """Not the delegation rules — RBAC refuses this one layer earlier.
+
+        Issuing a key is a *write* to `projects`, so `admin:projects:read` never
+        reaches the handler. Worth pinning because it is the natural question
+        ("can a read-only key mint another read-only key?") and the answer comes
+        from a different layer than the rest of this file.
+        """
+        _, raw = await _issue(service, ["admin:projects:read"])
+        client = _client(service)
+
+        resp = client.post(
+            "/admin/projects/p1/keys",
+            headers={"X-Api-Key": raw},
+            json={"name": "peer", "scopes": ["admin:projects:read"]},
+        )
+
+        assert resp.status_code == 403
+
+    async def test_but_a_read_only_scope_can_list_keys(self, service):
+        """The contrast: reading the key list is exactly what :read is for."""
+        _, raw = await _issue(service, ["admin:projects:read"])
+        client = _client(service)
+
+        assert client.get(
+            "/admin/projects/p1/keys", headers={"X-Api-Key": raw}
+        ).status_code == 200
+
+
 class TestCrossProjectAccess:
     """A project-scoped credential should stay inside its project."""
 

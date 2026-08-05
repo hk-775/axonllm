@@ -690,22 +690,59 @@ rather than serving anyone else's numbers.
 A caller reaches `/admin/*` with **either** the `admin` role **or** a matching
 `admin:` scope:
 
-| Context | `/admin/projects` | `/admin/quotas/proj:x` |
-|---------|-------------------|------------------------|
-| `roles=['admin']` | ✅ | ✅ |
-| `scopes=['admin:*']` | ✅ | ✅ |
-| `scopes=['admin:quotas']` | ❌ | ✅ |
-| `roles=['service']` *(what an API key gets)* | ❌ | ❌ |
-| nothing | ❌ | ❌ |
+| Context | `GET /admin/projects` | `GET /admin/quotas/proj:x` | `POST /admin/quotas/proj:x/reset` |
+|---------|----------------------|---------------------------|-----------------------------------|
+| `roles=['admin']` | ✅ | ✅ | ✅ |
+| `scopes=['admin:*']` | ✅ | ✅ | ✅ |
+| `scopes=['admin:*:read']` | ✅ | ✅ | ❌ |
+| `scopes=['admin:quotas']` | ❌ | ✅ | ✅ |
+| `scopes=['admin:quotas:read']` | ❌ | ✅ | ❌ |
+| `roles=['service']` *(what an API key gets)* | ❌ | ❌ | ❌ |
+| nothing | ❌ | ❌ | ❌ |
 
 Scope granularity is one segment: `admin:<resource>` matches `/admin/<resource>/...`.
 Roles come from your IdP (OIDC `custom:roles`, SAML group attribute); scopes come
 from the API key. `/admin/static/*` and `/admin/dashboard` are always public.
 
-**Granularity is per resource, not per verb.** `admin:quotas` grants
-`GET /admin/quotas/{project_id}` *and* `POST /admin/quotas/{project_id}/reset` —
-there is no read-only admin scope. Grant `admin:<resource>` only where you would
-accept the holder writing to that resource.
+##### Read-only vs read-write
+
+An admin scope may carry an access level:
+
+| Scope | Grants |
+|-------|--------|
+| `admin:*` | everything |
+| `admin:*:read` | reads on every resource, writes on none |
+| `admin:quotas` | reads **and** writes on `/admin/quotas/*` |
+| `admin:quotas:read` | reads on `/admin/quotas/*` only |
+| `admin:quotas:write` | reads and writes on `/admin/quotas/*` |
+
+A bare `admin:<resource>` means read **and** write, so scopes issued before
+`:read` existed keep exactly the access they had — the suffix narrows, it never
+downgrades. `:write` implies read: an operator who can reset a quota can already
+see the value being reset, and separating them would only produce keys that
+mutate blind. An unrecognised suffix (`admin:quotas:raed`) matches no resource and
+so grants nothing, rather than falling back to a resource-wide grant.
+
+So a support or finance viewer gets:
+
+```bash
+axon issue-key --project my-project --name support-readonly --scopes 'admin:*:read'
+```
+
+**Read and write are classified by effect, not by HTTP method.** Four admin
+`POST`s are named like inspections and mutate anyway, so a `:read` scope is
+refused all four:
+
+| Route | Why it counts as a write |
+|-------|--------------------------|
+| `POST /admin/quotas/simulate` | runs the real enforcer, whose rate-limit check **consumes** the project's RPM budget |
+| `POST /admin/regions/health/check` | updates spoke status, which changes where traffic routes |
+| `POST /admin/regions/route` | exercises the live router |
+| `POST /admin/webhooks/{name}/test` | sends a real HTTP request to an external endpoint |
+
+`POST /admin/pii/preview` is the one non-`GET` that persists nothing, so `:read`
+does reach it. Had these been classified by method, a nominally read-only
+credential could have exhausted a rate limit or pinged an outside host.
 
 ##### Why the key routes check more than the scope
 
@@ -725,12 +762,21 @@ scopes and the target key's owner:
 | `scopes=['admin:projects']` | ❌ 403 | ❌ 403 | ❌ 403 |
 | `scopes=['admin:keys']` | ❌ 403 | ❌ 403 | ❌ 403 |
 
-The rules: a caller may grant only admin scopes it already holds, may rotate only
-keys whose admin scopes it already holds, and may not list, issue, revoke, or
+The rules: a caller may grant only admin authority it already holds, may rotate
+only keys whose admin scopes it already holds, and may not list, issue, revoke, or
 rotate outside its own `project_id`. Non-admin scopes (`chat`) stay freely
 grantable — the constraint is on escalating *admin* authority, not on delegating
 ordinary access. `LOG_ONLY` logs these denials instead of enforcing them, since
 that mode exists to issue the first key before any credential exists.
+
+"Authority it already holds" accounts for access levels, so delegating a
+*narrower* slice of your own scope works: a holder of `admin:projects` can issue
+`admin:projects:read`, but not `admin:*` and not a scope for a resource it lacks.
+
+Note that `admin:projects:read` cannot issue keys **at all** — issuance is a write
+to `projects`, so a read-only scope is refused by RBAC before the delegation rules
+are consulted. Read-only credentials are for looking, including at
+`GET /admin/projects/{id}/keys`; minting one requires write access.
 
 #### Cedar policy layer
 
