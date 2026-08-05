@@ -39,8 +39,17 @@ otel = [
 saml = [
     "signxml>=3.2",
 ]
+# OIDC JWT signature verification. Without it OIDCService logs an error and
+# declines to verify rather than trusting an unverified token — safe, but it
+# means SSO does not work, so this is required for any OIDC deployment.
+oidc = [
+    "python-jose[cryptography]>=3.3",
+]
 dev = [
     "hypothesis>=6.100.0",
+    # Floor is deliberately low for library consumers; the pinned version CI and
+    # local dev actually resolve to lives in uv.lock. Install with `uv sync`, not
+    # bare pip, or you get this floor.
     "httpx>=0.25.0",
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
@@ -49,6 +58,8 @@ dev = [
     "opentelemetry-exporter-otlp-proto-http>=1.20",
     # so CI exercises SAML signature verification
     "signxml>=3.2",
+    # so CI exercises OIDC JWT signature verification
+    "python-jose[cryptography]>=3.3",
 ]
 
 [project.scripts]

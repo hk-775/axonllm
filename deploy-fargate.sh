@@ -6,10 +6,10 @@
 #   - Docker running
 #   - AWS CLI configured
 #   - Node.js installed (for CDK)
-#   - pip install aws-cdk-lib constructs
+#   - uv installed (https://docs.astral.sh/uv/)
 #
 # Before first deploy:
-#   1. cd infra && pip install -r requirements.txt
+#   1. cd infra && uv pip install -r requirements.txt
 #   2. cdk bootstrap aws://ACCOUNT_ID/REGION
 #
 # After deploy, set your API keys in Secrets Manager:
@@ -29,12 +29,10 @@ cd "$(dirname "$0")/infra"
 # Install CDK dependencies if needed
 if [ ! -d ".venv" ]; then
     echo "==> Setting up CDK virtual environment..."
-    python3 -m venv .venv
-    source .venv/bin/activate
-    pip install -q -r requirements.txt
-else
-    source .venv/bin/activate
+    uv venv .venv
+    uv pip install -q --python .venv -r requirements.txt
 fi
+source .venv/bin/activate
 
 # Synthesize and deploy
 echo "==> Running cdk deploy..."

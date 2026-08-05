@@ -8,18 +8,38 @@ If you discover a potential security issue, please report it responsibly via the
 
 ## Development Setup
 
+We use [uv](https://docs.astral.sh/uv/). Install it if you haven't:
+
 ```bash
-pip install -e ".[dev]"   # installs the package (import path: src.gateway) + test deps
+curl -LsSf https://astral.sh/uv/install.sh | sh    # macOS / Linux
+```
+
+Then:
+
+```bash
+uv sync --extra dev   # creates .venv/, installs the package (import path: src.gateway) + test deps
 ```
 
 Runtime deps (`uvicorn`, `boto3`, …) are declared in `pyproject.toml` and installed
-by the line above — no separate install needed.
+by the line above — no separate install needed. Versions come from the committed
+`uv.lock`, so your environment matches CI exactly.
+
+Avoid bare `pip install -e ".[dev]"`: outside an activated virtualenv it installs
+into your system Python and resolves to dependency *floors* (`httpx>=0.25.0` →
+httpx 0.25.2), which can break unrelated packages in that environment.
+
+If you change dependencies in `pyproject.toml`, run `uv lock` and commit the
+updated `uv.lock` with your change. CI runs `uv lock --check` and will fail if the
+lockfile is out of sync.
 
 ## Running Tests
 
 ```bash
-pytest tests/ -x -q
+uv run pytest tests/ -x -q
 ```
+
+`uv run` syncs the environment before running, so this works without activating
+the virtualenv.
 
 The test suite includes both unit tests and Hypothesis property-based tests.
 
