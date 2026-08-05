@@ -50,10 +50,21 @@ class AxonLLMStack(Stack):
         # policies, feedback, and audit records. The table name here MUST match the
         # AXON_DYNAMODB_TABLE env var passed to the container below, and the key
         # schema MUST be PK (HASH) / SK (RANGE), both String.
+        # RETAIN plus a fixed physical name makes the stack un-redeployable: after
+        # a `cdk destroy`, the table survives on purpose (it holds every project,
+        # key and audit record) but nothing owns it, so the next deploy fails
+        # early with "Resource of type 'AWS::DynamoDB::Table' with identifier
+        # 'axonllm-state' already exists" and creates nothing at all.
+        #
+        # `-c table_name=…` is the way out that does not touch the retained data:
+        # deploy against a new table and the old one stays exactly as it was, to
+        # be inspected, migrated, or deleted deliberately. Deleting a table that
+        # RETAIN went out of its way to preserve should be a decision, not a step
+        # in a redeploy.
         state_table = dynamodb.Table(
             self,
             "StateTable",
-            table_name="axonllm-state",
+            table_name=self.node.try_get_context("table_name") or "axonllm-state",
             partition_key=dynamodb.Attribute(name="PK", type=dynamodb.AttributeType.STRING),
             sort_key=dynamodb.Attribute(name="SK", type=dynamodb.AttributeType.STRING),
             billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
