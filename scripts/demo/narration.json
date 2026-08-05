@@ -1,5 +1,5 @@
 {
-  "_comment": "Customer-facing narration, v2. Numbers here must match what the seeded gateway actually renders — 66 requests, $1.26, 1.4s average latency, 9 models with traffic, 8 of 49 unpriced mappings. Checked against the live API before recording, not written from memory.",
+  "_comment": "Customer-facing narration, v2. Numbers here must match what the seeded gateway actually renders — 66 requests, $1.26, 1.4s average latency, 9 models with traffic, 6 of 49 unpriced mappings. Checked against the live API before recording, not written from memory.",
   "voice": "Matthew",
   "engine": "neural",
   "_engine_note": "<emphasis> is unsupported on the neural engine (InvalidSsmlException); phrasing comes from <break> and sentence shape instead.",
@@ -64,8 +64,8 @@
     {
       "id": "09-pricing",
       "surface": "dashboard",
-      "ssml": "<speak>And this page is the one worth showing a sceptic. <break time=\"450ms\"/>Eight of forty-nine provider mappings have no price attached. Requests routed to them bill at zero, so budgets and quota alerts quietly under-count. <break time=\"400ms\"/>Nothing errors — the gateway simply tells you, instead of letting it stay hidden.</speak>",
-      "text": "And this page is the one worth showing a sceptic. Eight of 49 provider mappings have no price attached; requests routed to them bill at zero, so budgets and quota alerts quietly under-count. Nothing errors — the gateway simply tells you, instead of letting it stay hidden.",
+      "ssml": "<speak>And this page is the one worth showing a sceptic. <break time=\"450ms\"/>Six of forty-nine provider mappings have no price attached. Requests routed to them bill at zero, so budgets and quota alerts quietly under-count. <break time=\"400ms\"/>Nothing errors — the gateway simply tells you, instead of letting it stay hidden.</speak>",
+      "text": "And this page is the one worth showing a sceptic. Six of 49 provider mappings have no price attached; requests routed to them bill at zero, so budgets and quota alerts quietly under-count. Nothing errors — the gateway simply tells you, instead of letting it stay hidden.",
       "duration": 15.94
     },
     {

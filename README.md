@@ -48,10 +48,17 @@ install paths — local or AWS, seeded or clean — and which flag decides.
 - **Data residency** — strict mode filters spokes by zone to keep data in-region
 
 ### Security & Compliance
-- **PII redaction** — per-policy-node, regex-based detection (email, SSN, credit card, phone, IP, AWS account, medical record). Redacts before LLM sees the prompt, re-injects in the response.
-- **Prompt injection detection** — pattern-scored heuristics (role override, extraction, delimiter escape, encoded payloads). Configurable blocking threshold.
+- **PII redaction** — per-policy-node, regex-based detection across 10 types (email, SSN, credit card, phone, IPv4, IPv6, AWS account id, medical record, IBAN, passport). Redacts before the LLM sees the prompt, re-injects in the response. The type list is a policy choice per node, not a fixed default — `aws_account_id` matches any bare 12-digit number and `passport` any letter followed by 6–9 digits, so both fire on ordinary identifiers and are usually left off.
+- **Named-entity redaction (opt-in)** — adds AWS Comprehend detection for the shapeless types regex cannot match: names, addresses, ages. Per-node via `pii_ner_enabled`, and billed per request (~$0.0001/100 chars, often more than the model's own input tokens), so it is off by default. Fails open: a Comprehend error leaves the regex types redacted and reports the failure rather than blocking the request.
+- **Prompt injection detection** — pattern-scored heuristics (role override, system-prompt extraction, delimiter escape, base64-encoded payloads). Blocking threshold configurable, defaults to 0.7.
 - **Immutable audit trail** — SHA-256 hash chain, DynamoDB persistence, tamper detection
 - **Event dispatcher** — webhook, AWS SNS, CloudWatch Logs. Fire-and-forget on security events.
+
+### Caching & Cost Reduction
+- **Exact response cache** — SHA-256 of the request, per-project TTL.
+- **Semantic cache (opt-in)** — serves a cached answer to a *reworded* question, tried only after the exact key misses. Off unless a project enables it, because a false hit returns a confident wrong answer with nothing to indicate it was substituted. Guarded four ways: a 0.90 cosine threshold (set for its distance from the highest-scoring *different*-question pair at 0.7476, not for a target hit rate), exact agreement on literal tokens so `17*23` never matches `17*24`, polar-axis comparison so "enable" never matches "disable", and skipping non-zero temperature, tool calls and streaming outright. Needs Bedrock for Titan embeddings.
+- **Token efficiency analytics** — flags waste, recommends cheaper models, scores prompt quality.
+- **Semantic efficiency engine** — prompt-complexity scoring and model right-sizing, output-utilization analysis (are responses truncated or ignored?), prompt-compression detection, and per-user historical pattern learning. Surfaces on the Efficiency page.
 
 ### Governance & Cost Control
 - **Policy hierarchy** — org → business unit → project → environment. Child inherits and can only tighten.
@@ -63,33 +70,49 @@ install paths — local or AWS, seeded or clean — and which flag decides.
 - **Multi-strategy auth** — ALB OIDC JWT, Bearer token (OIDC or API key), X-Api-Key header
 - **SAML 2.0 SSO** — SP-initiated login + ACS with pure-Python signed-assertion verification (no xmlsec1 system dependency)
 - **SCIM 2.0 provisioning** — `/scim/v2/Users` + `/scim/v2/Groups` for IdP-driven joiner/mover/leaver (Okta, Entra ID, …)
-- **API key management** — issue, rotate, revoke, scope-restricted keys
+- **API key management** — issue, rotate, revoke, with optional expiry
 - **Admin RBAC** — admin endpoints require `admin` role or `admin:*` scope (ENFORCE mode)
 
+> **Key scopes constrain `/admin/*`, not `/v1/*`.** Scopes are carried on the
+> request context and enforced by admin RBAC, but nothing consults them on the
+> data plane: a key issued `["models:read"]` — or `[]` — can still call
+> `/v1/chat/completions` and spend money. What actually bounds a key is its
+> project's `allowed_models` and budget. Keys also default to no expiry, and
+> rotation carries the old expiry through, so revocation is the only thing that
+> reliably stops one. Both are reported by the
+> [readiness checklist](#observability); treat a scope string as a label, not a
+> capability boundary.
+
 ### Observability
-- **Admin dashboard** — Sandbox, Overview, Traces, Efficiency, Audit Log, Models, Projects, Users, API Keys, Policies, Quotas, Regions, Webhooks, Health, Configuration, Architecture, Pricing, Readiness
+- **Admin dashboard** — 20 pages in four groups. *Observe:* Overview, Traces, Efficiency, Audit Log. *Configure:* Models, Projects, Users, API Keys. *Govern:* Policies, Hierarchy, Quotas, Regions, Webhooks. *System:* Health, Configuration, Architecture, Pricing, Catalogue, Readiness. Plus Sandbox, a live playground that issues real requests through the gateway.
 - **Pricing coverage check** — flags models with no configured price, which bill at $0.00 and so silently under-count budgets. Reported at startup and on `/admin/pricing-drift`.
-- **Production readiness checklist** — six checks for misconfigurations that serve traffic without raising anything: unpriced models, model ids the provider no longer lists (including aliases that answer 200 while serving a different model), missing credentials, `LOG_ONLY` auth, demo data, unreachable persistence. On `/admin/production-checklist`, production only.
-- **Token efficiency analytics** — detect waste, recommend cheaper models, score prompt quality
+- **Production readiness checklist** — seven checks for misconfigurations that serve traffic without raising anything: unpriced models, model ids the provider no longer lists (including aliases that answer 200 while serving a different model), missing credentials, `LOG_ONLY` auth, demo data, unreachable persistence, and API keys that never expire or carry scopes nothing enforces. On `/admin/production-checklist`, production only.
+- **Catalogue drift detection** — `models.yaml` decides what the router can dispatch to; `catalog.yaml` describes what those models are. They are edited independently and nothing cross-checks them, so drift is invisible because neither file is wrong on its own terms. Reports catalogue entries no mapping can reach, routed models with no capability description (which return `[]` — a silent "no" to "does this do vision", worse than a gap), and traffic naming models the registry does not list. On `/admin/catalog-drift`.
 - **Streaming** — SSE streaming for all providers with PII re-injection
+- **Trace forwarding** — each completed request can be forwarded as a trace event to an external control plane over HTTP or an in-process sink. Best-effort: a slow or absent collector never slows or fails a request.
 
 ## Supported Providers
 
+Status means what has been *observed*, not what exists in the tree — every row
+below has a complete adapter. **Verified** is a live completion through the
+gateway. **Untested** means no credential was available to try it, which is not
+evidence of a defect and not evidence against one.
+
 | Provider | Auth | Status |
 |----------|------|--------|
-| AWS Bedrock | AWS credentials (automatic) | Working |
-| AWS Bedrock Mantle | AWS credentials (automatic) | Working |
-| Anthropic | API key | Working |
-| OpenAI | API key | Working |
-| Azure OpenAI | API key | Adapter ready |
-| Google Vertex AI | GCP service account | Adapter ready |
-| Google AI (Gemini) | API key | Adapter ready |
-| Cohere | API key | Adapter ready |
-| AI21 | API key | Adapter ready |
-| Fireworks | API key | Adapter ready |
-| Groq | API key | Adapter ready |
-| Together | API key | Adapter ready |
-| xAI | API key | Adapter ready |
+| AWS Bedrock | AWS credentials (automatic) | Verified |
+| AWS Bedrock Mantle | AWS credentials (automatic) | Verified |
+| Anthropic | API key | Verified |
+| OpenAI | API key | Verified |
+| xAI | API key | Verified |
+| Together | API key | Verified |
+| Fireworks | API key | Verified |
+| Google AI (Gemini) | API key | Adapter ready — request timed out |
+| AI21 | API key | Adapter ready — untested (no credential) |
+| Groq | API key | Adapter ready — untested (no credential) |
+| Azure OpenAI | API key | Adapter ready — untested (no credential) |
+| Google Vertex AI | GCP service account | Adapter ready — untested (no credential) |
+| Cohere | API key | Adapter ready — untested (no credential) |
 
 ## Quick Start
 
@@ -370,7 +393,7 @@ with admin credentials:
 ```bash
 LLM_ROUTER_DYNAMODB_ENABLED=true AXON_DYNAMODB_TABLE=axonllm-state \
 AWS_DEFAULT_REGION=us-east-1 \
-  axon issue-key --project my-project --name first-key --scopes 'admin:*'
+  uv run axon issue-key --project my-project --name first-key --scopes 'admin:*'
 # → axon_xxxxxxxx…   (shown once)
 ```
 
@@ -576,15 +599,20 @@ and an admin key needs a project to belong to. The way out of that loop is
 `axon issue-key`, which runs in-process and works regardless of auth mode; on an
 already-enforcing gateway, mint the key first and pass it here.
 
+> `uv sync` installs the `axon` console script into `.venv/bin`, which is **not**
+> on `PATH` — a bare `axon` gives `command not found`. Every invocation below is
+> written `uv run axon`, which works from the repo root without activating
+> anything. If you would rather type `axon`, `source .venv/bin/activate` first.
+
 ### 3. Issue API keys (and the one flag that matters)
 
 ```bash
 # A key for calling the gateway
-axon issue-key --project my-project --name app-key
+uv run axon issue-key --project my-project --name app-key
 # → axon_xxxxxxxx…   (shown once — store it now)
 
 # A key that can also administer it
-axon issue-key --project my-project --name admin-key --scopes 'admin:*'
+uv run axon issue-key --project my-project --name admin-key --scopes 'admin:*'
 ```
 
 `--scopes` is comma-separated and **defaults to `chat`**. That default cannot
@@ -613,14 +641,15 @@ persistence the server uses:
 ```bash
 LLM_ROUTER_DYNAMODB_ENABLED=true AXON_DYNAMODB_TABLE=axonllm-state \
 AWS_DEFAULT_REGION=us-east-1 \
-  axon issue-key --project my-project --name first-key --scopes 'admin:*'
+  uv run axon issue-key --project my-project --name first-key --scopes 'admin:*'
 ```
 
 The CLI warns when persistence is off. Without it the key lives in the CLI
 process's memory and dies with it — issued successfully, then rejected by the
 server, which is a confusing pair of outcomes to debug.
 
-Send it as either header, or export `AXON_API_KEY` for `axon chat` / `axon models`:
+Send it as either header, or export `AXON_API_KEY` for `uv run axon chat` /
+`uv run axon models`:
 
 ```bash
 -H 'Authorization: Bearer axon_...'    # or
@@ -690,8 +719,8 @@ rather than serving anyone else's numbers.
 A caller reaches `/admin/*` with **either** the `admin` role **or** a matching
 `admin:` scope:
 
-| Context | `GET /admin/projects` | `GET /admin/quotas/proj:x` | `POST /admin/quotas/proj:x/reset` |
-|---------|----------------------|---------------------------|-----------------------------------|
+| Context | `GET /admin/projects` | `GET /admin/quotas/{project_id}` | `POST /admin/quotas/{project_id}/reset` |
+|---------|----------------------|---------------------------------|----------------------------------------|
 | `roles=['admin']` | ✅ | ✅ | ✅ |
 | `scopes=['admin:*']` | ✅ | ✅ | ✅ |
 | `scopes=['admin:*:read']` | ✅ | ✅ | ❌ |
@@ -926,7 +955,7 @@ AXON_SCIM_TOKEN=<32-byte random>
 Then confirm it rather than trusting it: **`GET /admin/production-checklist`**
 checks exactly the states that serve traffic without complaining — unpriced
 models, retired model ids, missing credentials, `LOG_ONLY` auth, demo data,
-unreachable persistence. See
+unreachable persistence, and non-expiring keys. See
 [Production readiness checklist](#production-readiness-checklist).
 
 ### Try it
@@ -944,16 +973,23 @@ curl -X POST http://localhost:8000/api/chat \
   -H 'X-Api-Key: axon_your_key_here' \
   -d '{"model": "ensemble:quality", "messages": [{"role": "user", "content": "Explain CRDTs"}]}'
 
-# Check quota state
-curl http://localhost:8000/admin/quotas/proj:my-project \
+# Check quota state — the path takes the bare project id, not a prefixed node id
+curl http://localhost:8000/admin/quotas/my-project \
   -H 'X-Api-Key: axon_admin_key'
 
 # Simulate a request against quota enforcement
 curl -X POST http://localhost:8000/admin/quotas/simulate \
   -H 'Content-Type: application/json' \
   -H 'X-Api-Key: axon_admin_key' \
-  -d '{"project_id": "proj:ml", "model": "claude-opus", "estimated_cost": 0.05}'
+  -d '{"project_id": "my-project", "model": "claude-opus", "estimated_cost": 0.05}'
 ```
+
+> **An unknown project id is `200`, not `404`.** `/admin/quotas/{project_id}`
+> resolves the hierarchy for whatever id you pass; an id with no node returns
+> every limit as `null`, which reads identically to "a project with no limits
+> configured". So `/admin/quotas/proj:my-project` answers 200 with nulls while
+> `/admin/quotas/my-project` answers 200 with the real numbers. Check that a
+> limit you set is actually in the response before concluding there is none.
 
 ### OpenAI-compatible endpoint — drop-in `base_url` swap
 
@@ -1574,6 +1610,7 @@ traffic":
 | API authentication is enforced | `AXON_AUTH_MODE=LOG_ONLY` | Requests are served *and* logged as denied |
 | Demo seed data is not loaded | `AXON_LOAD_DEMO_DATA` is unset or true | `serve_dashboard.py` — the container `CMD` — defaults it to `true` |
 | State survives a restart | DynamoDB is disabled or unreachable | Writes are swallowed by design, so billing data vanishes silently |
+| Issued API keys are scoped and expire | A key carries no expiry, or scopes that nothing on the data plane enforces | Both read like capability boundaries. **WARN, not FAIL** — there is no "enforce scopes" flag to set, and a non-expiring service-account key with a revocation process is a defensible choice. The value is saying so before an incident rather than while working out what a leaked key could reach |
 
 The model-id check is the one that goes out to the network. It asks each
 configured provider what it currently serves and diffs that against
@@ -1633,11 +1670,21 @@ presets:
 ```
 org:acme (rate_limit_rpm=1000, budget=$50k, allowed_models=[claude-opus, claude-sonnet])
   └── bu:engineering (budget=$20k)
-        └── proj:ml-team (budget=$5k, rate_limit_rpm=200)
-              └── env:prod (rate_limit_rpm=100)
+        └── ml-team (budget=$5k, rate_limit_rpm=200)
+              └── ml-team:prod (rate_limit_rpm=100)
 ```
 
 Child nodes inherit from parents. Rules: budget uses MIN (tightest wins), rate limit uses MIN, allowed models uses INTERSECTION, PII redaction uses OR (once enabled, can't disable), PII types uses UNION (children add stricter types).
+
+**Node ids are not free-form.** A *project* node's id must be the project id
+itself — `ml-team`, not `proj:ml-team` — because the resolver is entered by
+project id and a mismatch resolves to an empty ancestry with every limit `null`.
+An *environment* node's id must be `{project_id}:{environment}`, which is the key
+the resolver constructs from the `env` query parameter. The `org:`/`bu:` prefixes
+above are only convention: nothing is entered by those ids, so they can be
+anything as long as each child's `parent_id` matches. Verified against the seeded
+tree, which resolves `proj-alpha` → `org:acme > bu:platform > proj-alpha` and
+`proj-alpha?env=prod` → `… > proj-alpha:prod` (rpm 1000 → 600).
 
 ## Testing
 
@@ -1646,7 +1693,7 @@ uv sync --extra dev
 uv run pytest tests/ -x -q
 ```
 
-2177 tests including unit, integration, end-to-end, and Hypothesis property-based tests.
+2259 tests including unit, integration, end-to-end, and Hypothesis property-based tests.
 
 ## Deployment
 

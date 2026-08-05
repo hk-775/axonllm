@@ -20,10 +20,9 @@ happening, and the second matters more than the first:
    always wins. Even if this were invoked in production by mistake, injected
    credentials take precedence and the file is inert.
 
-Hand-rolled rather than ``python-dotenv`` on purpose: ``Dockerfile`` installs a
-hardcoded package list rather than the project's own dependencies, so a new
-entry in ``pyproject.toml`` would not reach the image and a module-scope import
-of it would crash the container on startup.
+Hand-rolled rather than ``python-dotenv``: the whole parser is a few dozen lines
+for a file format this narrow, and a demo-only convenience does not justify a
+runtime dependency that ships in every production image.
 """
 
 from __future__ import annotations

@@ -150,7 +150,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   loaded, never their values.
 
 - **Production readiness checklist on `/admin/production-checklist`, with a live
-  provider model-availability check.** Six checks, each covering a state the
+  provider model-availability check.** Seven checks, each covering a state the
   gateway serves traffic in without complaint — the config is wrong in a way no
   request surfaces:
   - **Pinned model ids still exist at their providers** (new). `config/models.yaml`
@@ -183,6 +183,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **State survives a restart.** DynamoDB writes are swallowed by design — a
     provider call should not 500 because Dynamo hiccuped — so an unreachable
     table loses every billing record with no request-visible symptom.
+  - **Issued API keys are scoped and expire.** WARN, not FAIL, because neither
+    half is something the operator can fix by flipping a setting. *Scopes are not
+    enforced on the data plane*: `AuthMiddleware` puts them on the request
+    context and `admin_rbac` reads them for `/admin/*`, but nothing consults them
+    on `/v1/*` — a key issued `["models:read"]`, and a key issued `[]`, both call
+    `/v1/chat/completions` and spend money, so a scope string reads like a
+    capability boundary while being documentation. What actually constrains a key
+    is its project's `allowed_models` and budget. *And `expires_at` defaults to
+    none*: there is no maximum age and no rotation reminder, and `rotate_key`
+    carries the old expiry through, so rotating a non-expiring key yields another
+    one and revocation is the only thing that reliably stops a key.
 
   Three properties the checklist is built around. **A check that could not run
   reports UNKNOWN, never PASS** — collapsing those is how an expired credential
@@ -311,18 +322,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     id is right and there is no number to put. Kept and left unpriced; the earlier
     claim that 3.1 Pro Preview replaced it was wrong.
 
-  **8 mappings remain unpriced, all for reasons that survive checking:** the five
+  **6 mappings remain unpriced, all for reasons that survive checking:** the five
   `bedrock-mantle` `openai.gpt-5.x` ids (`gpt-5.4`, `-5.6-luna` and `-5.6-terra`
   are published only in `us-gov-east-1`/`us-gov-west-1` at $3.30/$19.80 per MTok;
-  `gpt-5.5` and `-5.6-sol` appear under none of the four Bedrock service codes),
-  `gemini-3-pro-preview` above, and the two `fireworks` ids — which are the one
-  honest unknown here, since there is no `FIREWORKS_API_KEY` in the environment
-  and the models endpoint requires one, so they could not be probed either way.
-  They are kept rather than removed on that basis: "could not check" is not
-  evidence an id is wrong, and deleting a working model is worse than leaving one
-  on the drift report. Fireworks stays unpriced for the same reason a guess would
-  be tempting — `gpt-oss-120b` is $0.15/$0.60 on both Bedrock and Together, which
-  makes a third identical value look inevitable rather than assumed.
+  `gpt-5.5` and `-5.6-sol` appear under none of the four Bedrock service codes)
+  and `gemini-3-pro-preview` above. They are kept rather than removed: "no
+  published rate" is not evidence an id is wrong, and deleting a working model is
+  worse than leaving one on the drift report.
+
+  The two `fireworks` ids **are** priced, contrary to an earlier note here that
+  said Fireworks published no per-model table and left them unpriced on that
+  basis. That was wrong: the aggregate `/pricing` page shows tiers only for
+  embeddings, but each serverless text model carries its own input/cached/output
+  rate on its own `fireworks.ai/models` page, which is where the rates in
+  `config/pricing.yaml` come from.
+
+- **Semantic caching, so a reworded question can be served its earlier answer.**
+  It runs only after the exact key has missed, so the cheap path stays cheap, and
+  it is off unless *both* the gateway (`AXON_SEMANTIC_CACHE`) and the project opt
+  in — a project flag alone cannot turn on a feature that calls Bedrock Titan for
+  an embedding on every miss. Three things make a false hit unlikely enough to
+  ship: a **0.90 cosine threshold**, chosen for its distance from the
+  highest-scoring *different*-question pair on the calibration set (0.7476) rather
+  than for its hit rate; a **literal-token guard**, so two prompts that differ on
+  a number, an identifier or a quoted string never match however close the vectors
+  are; and **skipping the cache entirely** for streaming, tool-carrying and
+  non-zero-temperature requests, where a reused answer is wrong by construction.
+  `GET`/`DELETE /admin/semantic-cache` report and clear it.
+
+- **The literal guard compares polar words by axis, not by set difference.** It
+  used to block whenever two prompts contained *different* polar words, which
+  conflated "disable" vs "enable" (different questions — block, correct) with "on"
+  vs "enable" (one question, two phrasings — block, wrong). The second is the
+  common case, since a paraphrase almost never reuses the same polar vocabulary,
+  so the guard rejected most of the hits the embedding existed to find. It was
+  also unsafe in the other direction: with only uninflected forms listed and no
+  notion of which word opposes which, "which types are included" and "which types
+  are excluded" passed as agreeing. `_POLAR_AXES` now groups opposites into seven
+  axes and blocks only across the same axis, with `_ONE_SIDED_BLOCKS` naming the
+  axes where a lone word decides on its own. On a 45-pair labelled corpus,
+  must-block went 24/26 → 26/26 and must-allow 6/19 → 17/19.
+
+- **Optional entity detection for PII a regex cannot match.** `PII_PATTERNS` has
+  no name pattern, because a name has no shape — which is why a name survived
+  redaction while an SSN did not. AWS Comprehend now supplies name, address and
+  age detection when `pii_ner_enabled` is set. It is off by default and priced
+  per call (~$0.0001 per 100 characters), and it **fails open**: if boto3 is
+  absent or the call errors, the regex redactions still apply rather than the
+  request failing. `POST /admin/pii/preview` shows the before/after directly,
+  which is the only way to see redaction without the model's own refusal
+  behaviour confounding the result.
+
+- **Catalogue drift report on `/admin/catalog-drift`.** `models.yaml` decides what
+  the router can dispatch to; `catalog.yaml` describes what those models *are*.
+  The two are edited independently, nothing checked them against each other, and
+  neither is wrong on its own terms — so the drift is invisible. Three
+  consequences, none of which raises anything: the catalogue answers for models no
+  mapping can reach (offered in the picker, then unselectable); routed mappings
+  with no metadata return `capabilities: []`, so "does this model do vision" is
+  answered *no* rather than *unknown*; and a usage record can name a model
+  `models.yaml` never declared, since records carry the resolved provider. That
+  third case is why this is a page and not a lint rule — only the join against
+  recorded usage catches a model being called but never declared, and only usage
+  distinguishes "populate metadata for 46 models" from "for the 9 carrying
+  traffic".
 
 ### Fixed
 - **Privilege escalation: a narrow admin scope could mint or steal a full admin
@@ -372,6 +435,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   caught only the `ValueError` from `set_node`, so a missing field raised
   `KeyError`. Every sibling admin `POST` answers 400 for the same input; this one
   now does too.
+- **The documented quickstart could break the host Python.** The README opened
+  with `pip install -e ".[dev]"` and no virtualenv step, so outside an activated
+  venv it installed into whatever Python was on `PATH` — and because the extras
+  declare floors rather than pins, it resolved *down*: `httpx>=0.25.0` yielded
+  httpx 0.25.2, old enough to break unrelated packages sharing that environment.
+  The repo already committed a `uv.lock` and a uv-created `.venv`; nothing
+  mentioned it. Every install path is now `uv`, which cannot make this mistake,
+  and CI additionally runs `uv lock --check` so the lockfile cannot silently drift
+  from `pyproject.toml`. Three latent problems surfaced while testing the paths
+  end to end: `deploy-fargate.sh` only sourced the venv in its `else` branch, so
+  the *first* run of a fresh checkout deployed with it inactive; the Dockerfile
+  installed six hand-listed unpinned packages that had drifted from
+  `requirements.txt` (which itself omitted `uvicorn`); and `python-jose` was
+  imported by the OIDC path but declared in no extra, so JWT verification
+  fail-closed on a complete install — it now has an `oidc` extra.
+
+- **The exact-match response cache never wrote, so every lookup was a miss.**
+  `cache_manager.put` had no call sites at all: the pipeline read the cache at
+  step 9 and nothing ever populated it, which meant the per-project
+  `cache_enabled` flag bought precisely nothing while appearing to be on. Step
+  15.5 now writes, and its placement is deliberate — *after* response guardrails
+  and PII re-injection, so a later hit cannot bypass either, and after the
+  streaming return, so only complete responses are stored.
+
+- **Two models routing round-robin advanced the same counter.** `Router`
+  instantiates one `RoundRobinStrategy` and reuses it across every model, but the
+  strategy tracked a single global `_index` — so each model skipped providers
+  instead of cycling its own mappings in order. With two 3-provider models
+  interleaving, each saw 0, 2, 1, 0 rather than 0, 1, 2. The cursor is now keyed
+  per provider set, including `model_id` so two models fronted by the same
+  providers stay independent, and sorted so config ordering cannot fork it.
+  Single-model deployments were unaffected.
+
+- **Provider response ids collapsed traces and under-reported spend.** The agent
+  generated a unique `request_id`, then overwrote it with `response.id` before
+  building the `UsageRecord` — and provider ids are not guaranteed unique per
+  call: all three Bedrock Mantle routes fall back to a constant
+  `"mantle-response"` when the upstream response carries no id. Two things key off
+  that value. Trace and span ids hash from it, so every affected Mantle request
+  produced an identical `trace_id`/`span_id` and a backend keyed on those saw one
+  span retransmitted rather than N calls — which is why Mantle traffic went
+  missing from traces. And `cost_tracker.load_records` de-dupes by it, so on
+  restart-rehydration five persisted records became one. The DynamoDB PK is
+  `USAGE#{request_id}`, so those rows also shared a partition key, separated only
+  by the timestamp SK. The gateway's own id is now kept and the provider's carried
+  alongside as `provider_request_id` — persisted, exported on the trace event, and
+  set as an OTLP attribute only when the provider supplied one. The audit trail
+  already used the gateway id, so audit and usage rows now agree for a given
+  request instead of disagreeing. The client-facing response `id` is unchanged: it
+  still returns the provider's, so the API contract holds.
 
 - **Six admin write endpoints returned success and lost the change on the next
   restart.** Each one mutated a shared in-memory object and never wrote to

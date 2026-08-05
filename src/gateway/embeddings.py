@@ -5,11 +5,9 @@ cache only needs ``embed(text) -> vector`` and a protocol keeps the tests off
 the network.
 
 Titan rather than a local model: ``boto3`` is already a dependency and the
-gateway already talks to Bedrock, whereas sentence-transformers would pull in
-torch. That matters more than usual here — the Dockerfile installs a hardcoded
-package list rather than the project's own dependencies, so a new entry in
-``pyproject.toml`` never reaches the image and would fail at import time in the
-container while working locally.
+gateway already talks to Bedrock, whereas sentence-transformers pulls in torch —
+a multi-hundred-megabyte addition to an image that is otherwise a slim Python
+base, for a vector the gateway can fetch over a call it already makes.
 """
 
 from __future__ import annotations
