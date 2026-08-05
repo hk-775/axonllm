@@ -42,7 +42,13 @@ an individual is officially representing the community in public spaces.
 ## Enforcement
 
 Instances of abusive, harassing, or otherwise unacceptable behavior may be
-reported to the project maintainers at **conduct@axonllm.dev**.
+reported to the project maintainers privately, by opening a GitHub issue marked
+for maintainer attention or by contacting a maintainer directly through their
+GitHub profile.
+
+> **Maintainers:** this should name a monitored address before the repository is
+> made public. It previously read `conduct@axonllm.dev`, a domain with no DNS
+> record, so any report sent there bounced.
 
 All complaints will be reviewed and investigated promptly and fairly.
 

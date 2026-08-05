@@ -301,7 +301,7 @@ class SmartRoutingStrategy(RoutingStrategyBase):
         distinction matters: 0.0 means "free" and would make an unpriced model
         the cheapest possible candidate, so a model would win for being
         *unmeasured* rather than for being cheap. That is not a hypothetical:
-        13 of the 48 provider entries in the shipped config are unpriced because
+        6 of the 49 provider entries in the shipped config are unpriced because
         the provider publishes no rate for the id, and scoring the general task
         type that way hands it to claude-haiku (benchmark 78) over
         claude-sonnet (90).

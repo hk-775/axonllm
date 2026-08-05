@@ -48,10 +48,17 @@ install paths — local or AWS, seeded or clean — and which flag decides.
 - **Data residency** — strict mode filters spokes by zone to keep data in-region
 
 ### Security & Compliance
-- **PII redaction** — per-policy-node, regex-based detection (email, SSN, credit card, phone, IP, AWS account, medical record). Redacts before LLM sees the prompt, re-injects in the response.
-- **Prompt injection detection** — pattern-scored heuristics (role override, extraction, delimiter escape, encoded payloads). Configurable blocking threshold.
+- **PII redaction** — per-policy-node, regex-based detection across 10 types (email, SSN, credit card, phone, IPv4, IPv6, AWS account id, medical record, IBAN, passport). Redacts before the LLM sees the prompt, re-injects in the response. The type list is a policy choice per node, not a fixed default — `aws_account_id` matches any bare 12-digit number and `passport` any letter followed by 6–9 digits, so both fire on ordinary identifiers and are usually left off.
+- **Named-entity redaction (opt-in)** — adds AWS Comprehend detection for the shapeless types regex cannot match: names, addresses, ages. Per-node via `pii_ner_enabled`, and billed per request (~$0.0001/100 chars, often more than the model's own input tokens), so it is off by default. Fails open: a Comprehend error leaves the regex types redacted and reports the failure rather than blocking the request.
+- **Prompt injection detection** — pattern-scored heuristics (role override, system-prompt extraction, delimiter escape, base64-encoded payloads). Blocking threshold configurable, defaults to 0.7.
 - **Immutable audit trail** — SHA-256 hash chain, DynamoDB persistence, tamper detection
 - **Event dispatcher** — webhook, AWS SNS, CloudWatch Logs. Fire-and-forget on security events.
+
+### Caching & Cost Reduction
+- **Exact response cache** — SHA-256 of the request, per-project TTL.
+- **Semantic cache (opt-in)** — serves a cached answer to a *reworded* question, tried only after the exact key misses. Off unless a project enables it, because a false hit returns a confident wrong answer with nothing to indicate it was substituted. Guarded four ways: a 0.90 cosine threshold (set for its distance from the highest-scoring *different*-question pair at 0.7476, not for a target hit rate), exact agreement on literal tokens so `17*23` never matches `17*24`, polar-axis comparison so "enable" never matches "disable", and skipping non-zero temperature, tool calls and streaming outright. Needs Bedrock for Titan embeddings.
+- **Token efficiency analytics** — flags waste, recommends cheaper models, scores prompt quality.
+- **Semantic efficiency engine** — prompt-complexity scoring and model right-sizing, output-utilization analysis (are responses truncated or ignored?), prompt-compression detection, and per-user historical pattern learning. Surfaces on the Efficiency page.
 
 ### Governance & Cost Control
 - **Policy hierarchy** — org → business unit → project → environment. Child inherits and can only tighten.
@@ -63,33 +70,49 @@ install paths — local or AWS, seeded or clean — and which flag decides.
 - **Multi-strategy auth** — ALB OIDC JWT, Bearer token (OIDC or API key), X-Api-Key header
 - **SAML 2.0 SSO** — SP-initiated login + ACS with pure-Python signed-assertion verification (no xmlsec1 system dependency)
 - **SCIM 2.0 provisioning** — `/scim/v2/Users` + `/scim/v2/Groups` for IdP-driven joiner/mover/leaver (Okta, Entra ID, …)
-- **API key management** — issue, rotate, revoke, scope-restricted keys
+- **API key management** — issue, rotate, revoke, with optional expiry
 - **Admin RBAC** — admin endpoints require `admin` role or `admin:*` scope (ENFORCE mode)
 
+> **Key scopes constrain `/admin/*`, not `/v1/*`.** Scopes are carried on the
+> request context and enforced by admin RBAC, but nothing consults them on the
+> data plane: a key issued `["models:read"]` — or `[]` — can still call
+> `/v1/chat/completions` and spend money. What actually bounds a key is its
+> project's `allowed_models` and budget. Keys also default to no expiry, and
+> rotation carries the old expiry through, so revocation is the only thing that
+> reliably stops one. Both are reported by the
+> [readiness checklist](#observability); treat a scope string as a label, not a
+> capability boundary.
+
 ### Observability
-- **Admin dashboard** — Sandbox, Overview, Traces, Efficiency, Audit Log, Models, Projects, Users, API Keys, Policies, Quotas, Regions, Webhooks, Health, Configuration, Architecture, Pricing, Readiness
+- **Admin dashboard** — 20 pages in four groups. *Observe:* Overview, Traces, Efficiency, Audit Log. *Configure:* Models, Projects, Users, API Keys. *Govern:* Policies, Hierarchy, Quotas, Regions, Webhooks. *System:* Health, Configuration, Architecture, Pricing, Catalogue, Readiness. Plus Sandbox, a live playground that issues real requests through the gateway.
 - **Pricing coverage check** — flags models with no configured price, which bill at $0.00 and so silently under-count budgets. Reported at startup and on `/admin/pricing-drift`.
-- **Production readiness checklist** — six checks for misconfigurations that serve traffic without raising anything: unpriced models, model ids the provider no longer lists (including aliases that answer 200 while serving a different model), missing credentials, `LOG_ONLY` auth, demo data, unreachable persistence. On `/admin/production-checklist`, production only.
-- **Token efficiency analytics** — detect waste, recommend cheaper models, score prompt quality
+- **Production readiness checklist** — seven checks for misconfigurations that serve traffic without raising anything: unpriced models, model ids the provider no longer lists (including aliases that answer 200 while serving a different model), missing credentials, `LOG_ONLY` auth, demo data, unreachable persistence, and API keys that never expire or carry scopes nothing enforces. On `/admin/production-checklist`, production only.
+- **Catalogue drift detection** — `models.yaml` decides what the router can dispatch to; `catalog.yaml` describes what those models are. They are edited independently and nothing cross-checks them, so drift is invisible because neither file is wrong on its own terms. Reports catalogue entries no mapping can reach, routed models with no capability description (which return `[]` — a silent "no" to "does this do vision", worse than a gap), and traffic naming models the registry does not list. On `/admin/catalog-drift`.
 - **Streaming** — SSE streaming for all providers with PII re-injection
+- **Trace forwarding** — each completed request can be forwarded as a trace event to an external control plane over HTTP or an in-process sink. Best-effort: a slow or absent collector never slows or fails a request.
 
 ## Supported Providers
 
+Status means what has been *observed*, not what exists in the tree — every row
+below has a complete adapter. **Verified** is a live completion through the
+gateway. **Untested** means no credential was available to try it, which is not
+evidence of a defect and not evidence against one.
+
 | Provider | Auth | Status |
 |----------|------|--------|
-| AWS Bedrock | AWS credentials (automatic) | Working |
-| AWS Bedrock Mantle | AWS credentials (automatic) | Working |
-| Anthropic | API key | Working |
-| OpenAI | API key | Working |
-| Azure OpenAI | API key | Adapter ready |
-| Google Vertex AI | GCP service account | Adapter ready |
-| Google AI (Gemini) | API key | Adapter ready |
-| Cohere | API key | Adapter ready |
-| AI21 | API key | Adapter ready |
-| Fireworks | API key | Adapter ready |
-| Groq | API key | Adapter ready |
-| Together | API key | Adapter ready |
-| xAI | API key | Adapter ready |
+| AWS Bedrock | AWS credentials (automatic) | Verified |
+| AWS Bedrock Mantle | AWS credentials (automatic) | Verified |
+| Anthropic | API key | Verified |
+| OpenAI | API key | Verified |
+| xAI | API key | Verified |
+| Together | API key | Verified |
+| Fireworks | API key | Verified |
+| Google AI (Gemini) | API key | Adapter ready — request timed out |
+| AI21 | API key | Adapter ready — untested (no credential) |
+| Groq | API key | Adapter ready — untested (no credential) |
+| Azure OpenAI | API key | Adapter ready — untested (no credential) |
+| Google Vertex AI | GCP service account | Adapter ready — untested (no credential) |
+| Cohere | API key | Adapter ready — untested (no credential) |
 
 ## Quick Start
 
