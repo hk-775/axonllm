@@ -150,11 +150,67 @@ class TestTheResourcesTheDocsAddressByName:
             f"an unset {keyword} makes CDK generate a name that command cannot resolve"
         )
 
-    def test_the_table_and_secret_keep_the_names_the_docs_use(self):
-        """`axonllm-state` and `axonllm/api-keys` appear in the docs verbatim.
+    def test_the_secret_keeps_the_name_the_docs_use(self):
+        """`axonllm/api-keys` appears in the docs verbatim.
 
-        These were already explicit; asserted so they stay that way, for the same
-        reason as the three above.
+        Already explicit; asserted so it stays that way, for the same reason as
+        the three above.
         """
-        assert _keyword_literals("table_name") == ["axonllm-state"]
         assert _keyword_literals("secret_name") == ["axonllm/api-keys"]
+
+    def test_the_table_name_defaults_to_the_documented_one_but_is_overridable(self):
+        """`axonllm-state` stays the default, and `-c table_name=` can replace it.
+
+        Both halves matter. The default is what `axon issue-key` is documented
+        against, so it cannot drift. The override exists because RETAIN plus a
+        fixed name makes the stack un-redeployable after a destroy: the table
+        survives unowned, and the next deploy fails on "already exists" before
+        creating anything. Asserted as an override rather than a literal so a
+        future edit cannot quietly hardcode it back.
+        """
+        source = _STACK.read_text(encoding="utf-8")
+        assert 'try_get_context("table_name")' in source, (
+            "table_name must be overridable — a hardcoded RETAIN table cannot be redeployed"
+        )
+        assert '"axonllm-state"' in source, "the documented default must survive"
+
+
+class TestTheCdkAppFindsItsDependencies:
+    """`cdk.json` must name the venv interpreter, not a bare `python3`.
+
+    `aws-cdk-lib` lives in `infra/.venv` — deliberately not a root dependency,
+    since nothing at runtime imports it. So `"app": "python3 app.py"` resolved to
+    whatever `python3` was on PATH, which does not see that venv, and every CDK
+    command died with `ModuleNotFoundError: No module named 'aws_cdk'` *after*
+    printing enough banner output to bury the cause.
+
+    This is the third instance of one pattern in this repo: `deploy-fargate.sh`
+    activated the venv first and worked, so the script was fine while the
+    documented command was broken. Asserted here because the unit suite cannot
+    run `cdk` itself (no Node toolchain, and `aws-cdk-lib` is not a test
+    dependency), which is precisely why the bug reached a release.
+    """
+
+    _CDK_JSON = _STACK.parent / "cdk.json"
+
+    def test_the_app_command_uses_the_venv_interpreter(self):
+        import json
+
+        app = json.loads(self._CDK_JSON.read_text(encoding="utf-8"))["app"]
+        assert app.startswith(".venv/bin/python"), (
+            f'cdk.json "app" is {app!r}; a bare python3 cannot import aws_cdk, '
+            "which is installed in infra/.venv"
+        )
+
+    def test_the_interpreter_path_is_relative_to_cdk_json(self):
+        """The CDK CLI runs `app` with cdk.json's directory as cwd.
+
+        An absolute path would be machine-specific and a `infra/`-prefixed one
+        would resolve to `infra/infra/.venv` — both break for everyone but the
+        author, and neither shows up until someone else clones the repo.
+        """
+        import json
+
+        app = json.loads(self._CDK_JSON.read_text(encoding="utf-8"))["app"]
+        assert not app.startswith("/"), "must be relative — an absolute path is machine-specific"
+        assert "infra/.venv" not in app, "cwd is already infra/; this would be infra/infra/.venv"

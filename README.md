@@ -481,6 +481,45 @@ demo is convincing.
 Prefer separate deployments over converting one: an evaluation environment with
 demo data, and a clean install you never seeded.
 
+### Tearing down, and redeploying afterwards
+
+```bash
+cd infra && npx cdk destroy && cd ..
+```
+
+That removes everything hourly — Fargate tasks, ALB, CloudFront, and the NAT
+gateway, which is the line item worth caring about. Two resources deliberately
+outlive it, and they behave differently:
+
+| Resource | Policy | After destroy |
+|----------|--------|---------------|
+| `axonllm-state` (DynamoDB) | `RETAIN` | **Survives**, holding every project, key, and audit record |
+| `axonllm/api-keys` (Secrets Manager) | `Delete` | **Gone** — provider keys must be set again |
+
+> **A destroy makes the next deploy fail, and it fails before creating
+> anything.** The retained table keeps its physical name but is no longer owned by
+> the stack, so CloudFormation refuses to create one that already exists:
+>
+> ```
+> Resource of type 'AWS::DynamoDB::Table' with identifier 'axonllm-state'
+> already exists
+> ```
+>
+> Nothing is half-built when this happens — the change set fails validation, so
+> there is no partial stack to clean up beyond the empty `REVIEW_IN_PROGRESS`
+> shell (`aws cloudformation delete-stack --stack-name AxonLLMStack`).
+>
+> Deploy against a different table rather than deleting the old one:
+>
+> ```bash
+> ./deploy-fargate.sh us-east-1   # after: cd infra && npx cdk deploy -c table_name=axonllm-state-2
+> ```
+>
+> The retained table is then untouched — inspect it, migrate from it, or delete it
+> deliberately. Reattaching to it instead (`cdk import`) is the other option, and
+> the right one if that data is the deployment's real state. What you should not
+> do reflexively is delete a table that `RETAIN` went out of its way to preserve.
+
 #### Provider keys for a demo
 
 Put your provider keys in a `.env` file in the project root and they are picked
