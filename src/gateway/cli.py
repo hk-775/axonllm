@@ -8,6 +8,24 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent.parent
 
 
+def _failure_hint(exc: Exception, port: int) -> str:
+    """Explain a failed CLI request in terms of what actually went wrong.
+
+    "Is the server running?" was printed for every exception, including 401 and
+    403 — which are proof that it *is* running and only the credential is
+    missing. Sending someone to restart a healthy gateway is worse than saying
+    nothing, so the auth codes get their own message.
+    """
+    status = getattr(exc, "code", None)
+    if status in (401, 403):
+        return (
+            f"The gateway on port {port} answered {status}, so it is running and "
+            "enforcing auth. Pass -k/--api-key or set AXON_API_KEY. Mint a key "
+            "with: uv run axon issue-key --project <id> --name cli"
+        )
+    return f"Is the server running on port {port}? Try: uv run axon serve"
+
+
 def cmd_demo(args):
     """Start the server and generate real traffic for a live demo."""
     script = ROOT / "scripts" / "demo.sh"
@@ -97,7 +115,7 @@ def cmd_chat(args):
                 print(f"\n\033[2m{usage.get('total_tokens', 0)} tokens\033[0m")
     except Exception as e:
         print(f"Error: {e}")
-        print("Is the server running? Try: axon serve")
+        print(_failure_hint(e, args.port))
         sys.exit(1)
 
 
@@ -120,7 +138,7 @@ def cmd_models(args):
                 strategy = m.get("routing_strategy", "")
                 print(f"  {m['name']:<28} {providers:<20} ({strategy})")
     except Exception as e:
-        print(f"Error: {e}\nIs the server running? Try: axon serve")
+        print(f"Error: {e}\n{_failure_hint(e, args.port)}")
         sys.exit(1)
 
 

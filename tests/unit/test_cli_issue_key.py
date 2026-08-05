@@ -71,3 +71,50 @@ class TestIssueKey:
         out = capsys.readouterr().out
         assert "axon_" in out
         assert "p1" in out
+
+
+class TestFailureHint:
+    """A failed CLI request should name the actual cause.
+
+    Every exception used to print "Is the server running? Try: axon serve" —
+    including 401/403, which prove the server *is* running and only the
+    credential is absent. And the bare `axon` in the hint does not resolve after
+    `uv sync`, since the console script lands in `.venv/bin` and that is not on
+    PATH.
+    """
+
+    def test_auth_codes_say_the_server_is_up(self):
+        from urllib.error import HTTPError
+
+        from src.gateway import cli
+
+        for status in (401, 403):
+            err = HTTPError("http://localhost:8000/api/models", status, "denied", {}, None)
+            hint = cli._failure_hint(err, 8000)
+            assert "is running" in hint
+            assert "AXON_API_KEY" in hint
+            assert "Is the server running" not in hint
+
+    def test_connection_failure_still_suggests_starting_it(self):
+        from src.gateway import cli
+
+        hint = cli._failure_hint(OSError("Connection refused"), 8123)
+        assert "8123" in hint
+        assert "Is the server running" in hint
+
+    def test_hints_never_suggest_a_bare_axon(self):
+        from urllib.error import HTTPError
+
+        from src.gateway import cli
+
+        hints = [
+            cli._failure_hint(OSError("Connection refused"), 8000),
+            cli._failure_hint(
+                HTTPError("http://localhost:8000/api/models", 401, "denied", {}, None), 8000
+            ),
+        ]
+        for hint in hints:
+            # `axon` may appear, but only ever as `uv run axon`.
+            for idx in range(len(hint)):
+                if hint.startswith("axon", idx):
+                    assert hint[max(0, idx - 7):idx] == "uv run "

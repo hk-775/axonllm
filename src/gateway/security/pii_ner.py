@@ -13,13 +13,10 @@ replacement: Comprehend missed ``10.0.0.7`` in "Deploy to 10.0.0.7 using the
 deploy_key", which the ``ip_address`` pattern catches trivially. Structured
 tokens belong to the regexes; shapeless ones belong here.
 
-Backend choice — Comprehend rather than spaCy/Presidio — is a deployment
-constraint plus an accuracy one. The Dockerfile installs a hardcoded package
-list rather than the project's own dependencies, so a new ``pyproject.toml``
-entry never reaches the image (the same trap that forced Titan over
-sentence-transformers for the semantic cache). ``boto3`` is already there.
-Measured against the alternative: spaCy's ``en_core_web_sm`` adds ~148MB and
-1.35s of process start, and tags ``Jenkins``, ``Django`` and ``UserService`` as
+Backend choice — Comprehend rather than spaCy/Presidio — is an image-size
+constraint plus an accuracy one. ``boto3`` is already a dependency, so this
+backend costs the image nothing; spaCy's ``en_core_web_sm`` adds ~148MB and 1.35s
+of process start, and tags ``Jenkins``, ``Django`` and ``UserService`` as
 PERSON/ORG — false positives on precisely the developer prompts this gateway
 serves. Comprehend returns a typed, calibrated set on the same input.
 

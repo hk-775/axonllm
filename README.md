@@ -393,7 +393,7 @@ with admin credentials:
 ```bash
 LLM_ROUTER_DYNAMODB_ENABLED=true AXON_DYNAMODB_TABLE=axonllm-state \
 AWS_DEFAULT_REGION=us-east-1 \
-  axon issue-key --project my-project --name first-key --scopes 'admin:*'
+  uv run axon issue-key --project my-project --name first-key --scopes 'admin:*'
 # → axon_xxxxxxxx…   (shown once)
 ```
 
@@ -599,15 +599,20 @@ and an admin key needs a project to belong to. The way out of that loop is
 `axon issue-key`, which runs in-process and works regardless of auth mode; on an
 already-enforcing gateway, mint the key first and pass it here.
 
+> `uv sync` installs the `axon` console script into `.venv/bin`, which is **not**
+> on `PATH` — a bare `axon` gives `command not found`. Every invocation below is
+> written `uv run axon`, which works from the repo root without activating
+> anything. If you would rather type `axon`, `source .venv/bin/activate` first.
+
 ### 3. Issue API keys (and the one flag that matters)
 
 ```bash
 # A key for calling the gateway
-axon issue-key --project my-project --name app-key
+uv run axon issue-key --project my-project --name app-key
 # → axon_xxxxxxxx…   (shown once — store it now)
 
 # A key that can also administer it
-axon issue-key --project my-project --name admin-key --scopes 'admin:*'
+uv run axon issue-key --project my-project --name admin-key --scopes 'admin:*'
 ```
 
 `--scopes` is comma-separated and **defaults to `chat`**. That default cannot
@@ -636,14 +641,15 @@ persistence the server uses:
 ```bash
 LLM_ROUTER_DYNAMODB_ENABLED=true AXON_DYNAMODB_TABLE=axonllm-state \
 AWS_DEFAULT_REGION=us-east-1 \
-  axon issue-key --project my-project --name first-key --scopes 'admin:*'
+  uv run axon issue-key --project my-project --name first-key --scopes 'admin:*'
 ```
 
 The CLI warns when persistence is off. Without it the key lives in the CLI
 process's memory and dies with it — issued successfully, then rejected by the
 server, which is a confusing pair of outcomes to debug.
 
-Send it as either header, or export `AXON_API_KEY` for `axon chat` / `axon models`:
+Send it as either header, or export `AXON_API_KEY` for `uv run axon chat` /
+`uv run axon models`:
 
 ```bash
 -H 'Authorization: Bearer axon_...'    # or
@@ -713,8 +719,8 @@ rather than serving anyone else's numbers.
 A caller reaches `/admin/*` with **either** the `admin` role **or** a matching
 `admin:` scope:
 
-| Context | `GET /admin/projects` | `GET /admin/quotas/proj:x` | `POST /admin/quotas/proj:x/reset` |
-|---------|----------------------|---------------------------|-----------------------------------|
+| Context | `GET /admin/projects` | `GET /admin/quotas/{project_id}` | `POST /admin/quotas/{project_id}/reset` |
+|---------|----------------------|---------------------------------|----------------------------------------|
 | `roles=['admin']` | ✅ | ✅ | ✅ |
 | `scopes=['admin:*']` | ✅ | ✅ | ✅ |
 | `scopes=['admin:*:read']` | ✅ | ✅ | ❌ |
@@ -949,7 +955,7 @@ AXON_SCIM_TOKEN=<32-byte random>
 Then confirm it rather than trusting it: **`GET /admin/production-checklist`**
 checks exactly the states that serve traffic without complaining — unpriced
 models, retired model ids, missing credentials, `LOG_ONLY` auth, demo data,
-unreachable persistence. See
+unreachable persistence, and non-expiring keys. See
 [Production readiness checklist](#production-readiness-checklist).
 
 ### Try it
@@ -967,16 +973,23 @@ curl -X POST http://localhost:8000/api/chat \
   -H 'X-Api-Key: axon_your_key_here' \
   -d '{"model": "ensemble:quality", "messages": [{"role": "user", "content": "Explain CRDTs"}]}'
 
-# Check quota state
-curl http://localhost:8000/admin/quotas/proj:my-project \
+# Check quota state — the path takes the bare project id, not a prefixed node id
+curl http://localhost:8000/admin/quotas/my-project \
   -H 'X-Api-Key: axon_admin_key'
 
 # Simulate a request against quota enforcement
 curl -X POST http://localhost:8000/admin/quotas/simulate \
   -H 'Content-Type: application/json' \
   -H 'X-Api-Key: axon_admin_key' \
-  -d '{"project_id": "proj:ml", "model": "claude-opus", "estimated_cost": 0.05}'
+  -d '{"project_id": "my-project", "model": "claude-opus", "estimated_cost": 0.05}'
 ```
+
+> **An unknown project id is `200`, not `404`.** `/admin/quotas/{project_id}`
+> resolves the hierarchy for whatever id you pass; an id with no node returns
+> every limit as `null`, which reads identically to "a project with no limits
+> configured". So `/admin/quotas/proj:my-project` answers 200 with nulls while
+> `/admin/quotas/my-project` answers 200 with the real numbers. Check that a
+> limit you set is actually in the response before concluding there is none.
 
 ### OpenAI-compatible endpoint — drop-in `base_url` swap
 
@@ -1597,6 +1610,7 @@ traffic":
 | API authentication is enforced | `AXON_AUTH_MODE=LOG_ONLY` | Requests are served *and* logged as denied |
 | Demo seed data is not loaded | `AXON_LOAD_DEMO_DATA` is unset or true | `serve_dashboard.py` — the container `CMD` — defaults it to `true` |
 | State survives a restart | DynamoDB is disabled or unreachable | Writes are swallowed by design, so billing data vanishes silently |
+| Issued API keys are scoped and expire | A key carries no expiry, or scopes that nothing on the data plane enforces | Both read like capability boundaries. **WARN, not FAIL** — there is no "enforce scopes" flag to set, and a non-expiring service-account key with a revocation process is a defensible choice. The value is saying so before an incident rather than while working out what a leaked key could reach |
 
 The model-id check is the one that goes out to the network. It asks each
 configured provider what it currently serves and diffs that against
@@ -1656,11 +1670,21 @@ presets:
 ```
 org:acme (rate_limit_rpm=1000, budget=$50k, allowed_models=[claude-opus, claude-sonnet])
   └── bu:engineering (budget=$20k)
-        └── proj:ml-team (budget=$5k, rate_limit_rpm=200)
-              └── env:prod (rate_limit_rpm=100)
+        └── ml-team (budget=$5k, rate_limit_rpm=200)
+              └── ml-team:prod (rate_limit_rpm=100)
 ```
 
 Child nodes inherit from parents. Rules: budget uses MIN (tightest wins), rate limit uses MIN, allowed models uses INTERSECTION, PII redaction uses OR (once enabled, can't disable), PII types uses UNION (children add stricter types).
+
+**Node ids are not free-form.** A *project* node's id must be the project id
+itself — `ml-team`, not `proj:ml-team` — because the resolver is entered by
+project id and a mismatch resolves to an empty ancestry with every limit `null`.
+An *environment* node's id must be `{project_id}:{environment}`, which is the key
+the resolver constructs from the `env` query parameter. The `org:`/`bu:` prefixes
+above are only convention: nothing is entered by those ids, so they can be
+anything as long as each child's `parent_id` matches. Verified against the seeded
+tree, which resolves `proj-alpha` → `org:acme > bu:platform > proj-alpha` and
+`proj-alpha?env=prod` → `… > proj-alpha:prod` (rpm 1000 → 600).
 
 ## Testing
 
@@ -1669,7 +1693,7 @@ uv sync --extra dev
 uv run pytest tests/ -x -q
 ```
 
-2177 tests including unit, integration, end-to-end, and Hypothesis property-based tests.
+2259 tests including unit, integration, end-to-end, and Hypothesis property-based tests.
 
 ## Deployment
 

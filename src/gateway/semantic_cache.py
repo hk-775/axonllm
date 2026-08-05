@@ -385,10 +385,9 @@ def extract_literals(text: str) -> PromptLiterals:
 def cosine_similarity(a: list[float], b: list[float]) -> float:
     """Cosine similarity, or 0.0 when either vector is degenerate.
 
-    Hand-rolled rather than numpy: numpy is not a dependency, and the Dockerfile
-    installs a hardcoded package list, so adding one to pyproject.toml would not
-    reach the image. Over a 1024-dim vector this is fast enough next to the
-    network call it avoids.
+    Hand-rolled rather than numpy: numpy is not a dependency, and one function
+    over a 1024-dim vector is not worth adding a compiled one for — this is fast
+    enough next to the network call it avoids.
     """
     if len(a) != len(b):
         # Different embedding models, or a model change mid-process. Not
