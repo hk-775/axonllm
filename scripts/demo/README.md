@@ -15,10 +15,10 @@ them.
 
 - AWS credentials that can call Polly (`aws sts get-caller-identity`)
 - `ffmpeg` and `ffprobe`
-- `pip install websocket-client boto3`
+- `uv pip install websocket-client boto3` (or run these scripts under `uv run --with websocket-client --with boto3`)
 - Google Chrome at the path in `record.py`
 - A gateway serving **seeded demo data**:
-  `AXON_LOAD_DEMO_DATA=true python serve_dashboard.py`
+  `AXON_LOAD_DEMO_DATA=true uv run python serve_dashboard.py`
 
 That last one matters more than it looks. The narration names the numbers on the
 pages being filmed — 66 requests, $1.26, 8 of 49 unpriced mappings — so filming a

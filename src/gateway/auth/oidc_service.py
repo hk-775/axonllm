@@ -137,7 +137,7 @@ class OIDCService:
         except ImportError:
             logger.error(
                 "python-jose is not installed — JWT signature verification unavailable. "
-                "Install it with: pip install python-jose[cryptography]"
+                "Install it with: uv sync --extra oidc"
             )
             return None
 

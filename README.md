@@ -11,12 +11,14 @@ One API, any provider. Smart routing picks the best model for each prompt. Ensem
 ```bash
 git clone https://github.com/axonllm/axonllm.git
 cd axonllm
-cp config/providers.yaml.example config/providers.yaml
+cp -n config/providers.yaml.example config/providers.yaml
 # Add at least one API key (or just use Bedrock with AWS credentials)
-docker compose up
+docker compose up          # needs the Docker daemon running
 # Open http://localhost:8000 — the landing page, with the dashboard one click away
 # (or go straight to http://localhost:8000/admin/dashboard)
 ```
+
+No Docker? Use [path 1 or 2](#quick-start) below, which need only Python and uv.
 
 This comes up **with the demo data seeded** (Acme Corp, 3 users, 66 usage
 records) and auth in `LOG_ONLY`, which is what you want for a first look and not
@@ -126,6 +128,23 @@ Paths 1 and 3 leave you with an empty gateway, which then needs configuring —
 provider keys, projects, authentication, RBAC. That is
 [Configuring a clean install](#configuring-a-clean-install), further down.
 
+### Prerequisites
+
+Python 3.11+ and [uv](https://docs.astral.sh/uv/). If you don't have uv:
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh    # macOS / Linux
+```
+
+Every install path below uses `uv run`, which creates `.venv/` on first use and
+installs from the committed `uv.lock` — so the versions you get are the versions
+CI tested, and nothing touches your system Python.
+
+> **Do not use bare `pip install -e ".[dev]"`.** Outside an activated virtualenv
+> it installs into whatever Python is on your `PATH` and resolves dependencies to
+> their *floors* — `httpx>=0.25.0` yields httpx 0.25.2, which is old enough to
+> break unrelated packages sharing that environment. `uv run` cannot do this.
+
 ### What "demo data" actually means
 
 This is the difference, on the same dashboard page:
@@ -134,7 +153,7 @@ This is the difference, on the same dashboard page:
 
 ![Clean install dashboard: all tiles zero](docs/images/dashboard-clean.png)
 
-**Seeded demo** — Acme Corp, 2 projects, 4 users, 73 requests, $1.27 of spend, a
+**Seeded demo** — Acme Corp, 2 projects, 3 users, 66 requests, $1.26 of spend, a
 verifiable audit chain. **All of it fictional, and nothing on the page says so.**
 
 ![Seeded demo dashboard: populated tiles](docs/images/dashboard-seeded.png)
@@ -167,9 +186,12 @@ building against the API.
 **Step 1 — install.**
 
 ```bash
-pip install -e ".[dev]"
-cp config/providers.yaml.example config/providers.yaml
+uv sync --extra dev
+cp -n config/providers.yaml.example config/providers.yaml
 ```
+
+`cp -n` will not clobber a `providers.yaml` you have already customised; drop the
+`-n` only if you mean to reset it.
 
 **Step 2 — give it at least one provider.** Either an API key, or AWS credentials
 for Bedrock. A provider with no key is dropped from the routing table at startup,
@@ -181,10 +203,13 @@ export OPENAI_API_KEY=sk-...
 export AWS_PROFILE=my-bedrock-profile      # Bedrock needs no API key
 ```
 
+If your shell already has working AWS credentials (`AWS_PROFILE`, SSO, or an
+instance role), Bedrock picks them up and you can skip this step entirely.
+
 **Step 3 — start it.**
 
 ```bash
-AXON_LOAD_DEMO_DATA=false python serve_dashboard.py
+AXON_LOAD_DEMO_DATA=false uv run python serve_dashboard.py
 ```
 
 The `=false` is not optional-but-tidy — **omit it and you get path 2**, because
@@ -218,8 +243,8 @@ working on the dashboard, because no page is empty.
 **Step 1 — install.**
 
 ```bash
-pip install -e ".[dev]"
-cp config/providers.yaml.example config/providers.yaml
+uv sync --extra dev
+cp -n config/providers.yaml.example config/providers.yaml
 ```
 
 **Step 2 — put provider keys in `.env`** (gitignored). This path reads the file;
@@ -238,7 +263,7 @@ AXON_SEMANTIC_CACHE=true
 AWS_PROFILE=my-bedrock-profile AWS_REGION=us-east-1 \
 AXON_LOAD_DEMO_DATA=true \
 AXON_PII_REDACTION_DEFAULT=true \
-python serve_dashboard.py
+uv run python serve_dashboard.py
 ```
 
 You get:
@@ -298,7 +323,7 @@ What the stack builds:
 **Step 1 — bootstrap CDK** (first time in this account/region only).
 
 ```bash
-cd infra && pip install -r requirements.txt && cdk bootstrap && cd ..
+cd infra && uv pip install -r requirements.txt && cdk bootstrap && cd ..
 ```
 
 **Step 2 — deploy.**
@@ -377,7 +402,7 @@ deliberate edit, not a default. Update the test alongside the stack if this is
 your standing configuration. Then:
 
 ```bash
-cd infra && pip install -r requirements.txt && cdk bootstrap && cd ..
+cd infra && uv pip install -r requirements.txt && cdk bootstrap && cd ..
 ./deploy-fargate.sh us-east-1
 ```
 
@@ -1571,11 +1596,11 @@ Child nodes inherit from parents. Rules: budget uses MIN (tightest wins), rate l
 ## Testing
 
 ```bash
-pip install -e ".[dev]"
-pytest tests/ -x -q
+uv sync --extra dev
+uv run pytest tests/ -x -q
 ```
 
-1457 tests including unit, integration, end-to-end, and Hypothesis property-based tests.
+2177 tests including unit, integration, end-to-end, and Hypothesis property-based tests.
 
 ## Deployment
 
@@ -1597,7 +1622,7 @@ Prerequisites:
 - AWS CLI configured with appropriate permissions
 - Docker running
 - Node.js installed (for CDK CLI)
-- First-time: `cd infra && pip install -r requirements.txt && cdk bootstrap`
+- First-time: `cd infra && uv pip install -r requirements.txt && cdk bootstrap`
 
 ### AWS App Runner (simpler, less control)
 
@@ -1643,7 +1668,7 @@ deployments (with neither of the following, it's a no-op).
    ```bash
    OSTIARI_TRACES_URL=http://control-plane:8000/api/traces/ingest \
    OSTIARI_GATEWAY_ID=axon-prod-1 \
-   python serve_dashboard.py
+   uv run python serve_dashboard.py
    ```
 
 2. **In-process** — when co-located in the same process, the embedding host registers

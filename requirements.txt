@@ -1,6 +1,15 @@
+# For the Amazon Bedrock AgentCore deploy path only (`agentcore configure` /
+# `agentcore launch`), whose image build reads requirements.txt rather than
+# pyproject.toml. Adds bedrock-agentcore, which agentcore_agent.py imports and
+# the rest of the gateway does not need.
+#
+# Everything else — local dev, Docker, Fargate — resolves from pyproject.toml
+# via uv.lock. Add runtime dependencies to pyproject.toml; mirror them here only
+# if the AgentCore image needs them too.
 bedrock-agentcore
 pyyaml>=6.0
 tiktoken>=0.7.0
 starlette>=0.37.0
 aiohttp>=3.9.0
 boto3>=1.34.0
+uvicorn[standard]>=0.27.0

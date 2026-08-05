@@ -26,15 +26,19 @@ if ! command -v cdk >/dev/null 2>&1; then
     exit 1
 fi
 
-if [[ ! -d .venv ]]; then
-    echo "==> creating virtualenv"
-    python3 -m venv .venv
+if ! command -v uv >/dev/null 2>&1; then
+    echo "error: uv not found. curl -LsSf https://astral.sh/uv/install.sh | sh" >&2
+    exit 1
 fi
 
+if [[ ! -d .venv ]]; then
+    echo "==> creating virtualenv"
+    uv venv .venv
+fi
+
+uv pip install --quiet --python .venv aws-cdk-lib 'constructs>=10.0.0'
 # shellcheck source=/dev/null
 source .venv/bin/activate
-python3 -m pip install --quiet --upgrade pip
-python3 -m pip install --quiet aws-cdk-lib 'constructs>=10.0.0'
 
 CONTEXT=()
 if [[ -n "$DOMAIN" ]]; then
