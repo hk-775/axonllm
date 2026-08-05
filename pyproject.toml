@@ -1,6 +1,6 @@
 [project]
 name = "axon-llm"
-version = "0.1.0"
+version = "0.2.0"
 description = "AxonLLM — The neural control plane for enterprise LLMs"
 requires-python = ">=3.11"
 license = "MIT-0"
