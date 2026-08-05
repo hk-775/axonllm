@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-05
+
 ### Added
 - **Read-only admin scopes.** Admin scopes named a resource and nothing else, so
   `admin:quotas` granted `GET /admin/quotas/{project_id}` *and*
