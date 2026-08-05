@@ -204,3 +204,59 @@ class TestSetNodeValidation:
         _run(resolver.set_node(child))  # should not raise
 
         assert "proj:y" in resolver._nodes
+
+
+class TestCreateNodeRejectsAMalformedBody:
+    """A missing required field is a 400, not a 500.
+
+    `create_node` read `body["node_id"]` / `body["node_type"]` directly and
+    caught only the `ValueError` that `set_node` raises, so a partial body raised
+    `KeyError` and reached the client as a 500. Every sibling admin POST
+    (`/admin/projects`, `/admin/models`, `/admin/webhooks`,
+    `/admin/regions/spokes`) answers 400 for the same input — this route was the
+    only one that didn't, and it is reachable by any `admin:*` holder.
+    """
+
+    @pytest.fixture
+    def client(self, resolver):
+        from starlette.applications import Starlette
+        from starlette.testclient import TestClient
+
+        from src.gateway.admin.policy_routes import (
+            PolicyHierarchyAPI,
+            create_policy_hierarchy_routes,
+        )
+
+        app = Starlette(
+            routes=create_policy_hierarchy_routes(PolicyHierarchyAPI(resolver=resolver))
+        )
+        # raise_server_exceptions=False so an unhandled exception shows up as the
+        # 500 a real client would see, rather than failing the test as a raise.
+        return TestClient(app, raise_server_exceptions=False)
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            pytest.param({}, id="empty"),
+            pytest.param({"node_type": "org"}, id="no-node_id"),
+            pytest.param({"node_id": "org:x"}, id="no-node_type"),
+            pytest.param({"node_id": "", "node_type": "org"}, id="blank-node_id"),
+        ],
+    )
+    def test_a_missing_required_field_is_a_400(self, client, body):
+        resp = client.post("/admin/policies/hierarchy", json=body)
+
+        assert resp.status_code == 400, (
+            f"body={body} produced {resp.status_code}; an incomplete request from "
+            "an authorized admin should not read as a server fault"
+        )
+        assert "message" in resp.json()["error"]
+
+    def test_a_complete_body_still_creates_the_node(self, client):
+        resp = client.post(
+            "/admin/policies/hierarchy",
+            json={"node_id": "org:x", "node_type": "org", "limits": {}},
+        )
+
+        assert resp.status_code == 201
+        assert resp.json()["node_id"] == "org:x"
