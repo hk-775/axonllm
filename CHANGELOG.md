@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **The AWS deploy paths could not be followed as written.** Paths 3 and 4 were
+  the two install paths never executed end to end, and all four steps that touch
+  the CLI were wrong. Found by running them, not by reading:
+
+  - **`uv pip install -r requirements.txt` fails on a fresh clone** with "No
+    virtual environment found" — `infra/` has no `.venv` until something creates
+    one. An earlier local check passed only because a previous run had left one
+    behind, which is exactly how this survived review.
+  - **`cdk bootstrap` is `command not found`.** The CDK CLI is an npm package and
+    nothing in the repo installs it globally. `deploy-fargate.sh` had it right
+    (`npx cdk`) while the documented command did not — the same shape as the bare
+    `axon` bug: the script works, the instruction doesn't.
+  - **`--cluster axonllm --service axonllm` and `--task-definition axonllm` all
+    resolved to nothing.** The stack never set a physical name, so CDK generated
+    `AxonLLMStack-ClusterEB0386A7-rSJKGJp9AqGt` and friends. Verified against a
+    live deployment: the cluster returned `MISSING` and `describe-task-definition`
+    raised `ClientException`. Steps 3 and 4 — putting provider keys in place and
+    checking what the task actually has — were unrunnable, which meant a
+    successful deploy still had no way to reach a working gateway.
+
+  The stack now names the cluster, service and task-definition family `axonllm`,
+  matching what the docs already told you to type. Four tests pin those names to
+  the documented commands, because the failure is invisible from either side
+  alone: the stack deploys, the docs read correctly, and they only disagree once
+  someone runs step 3.
+
+  The step-1 line also noted as optional, since `deploy-fargate.sh` creates the
+  venv and installs requirements itself; only `cdk bootstrap` is genuine
+  first-time setup.
+
 ## [0.2.0] - 2026-08-05
 
 ### Added

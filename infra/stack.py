@@ -62,10 +62,22 @@ class AxonLLMStack(Stack):
         )
 
         # --- ECS Cluster ---
+        # cluster_name is explicit because every post-deploy instruction in the
+        # README addresses the cluster by name (`--cluster axonllm`). Left unset,
+        # CDK generates something like AxonLLMStack-ClusterEB0386A7-rSJKGJp9AqGt,
+        # and the documented commands fail with a MISSING cluster — verified
+        # against a real deployment. Naming resources you have to type is worth
+        # the tradeoff below.
+        #
+        # The tradeoff: a physical name blocks CloudFormation from doing a
+        # replacement update (two clusters cannot share a name), so a change that
+        # requires replacing the cluster now fails instead of silently rebuilding
+        # it. For a singleton deployment that is the safer failure.
         cluster = ecs.Cluster(
             self,
             "Cluster",
             vpc=vpc,
+            cluster_name="axonllm",
             container_insights_v2=ecs.ContainerInsights.ENABLED,
         )
 
@@ -85,9 +97,14 @@ class AxonLLMStack(Stack):
             cpu=1024,
             memory_limit_mib=2048,
             desired_count=2,
+            # Named for the same reason as the cluster: `--service axonllm` and
+            # `--task-definition axonllm` appear in the README's post-deploy
+            # steps, and both failed against a real deployment before this.
+            service_name="axonllm",
             task_image_options=ecs_patterns.ApplicationLoadBalancedTaskImageOptions(
                 image=ecs.ContainerImage.from_docker_image_asset(image),
                 container_port=8000,
+                family="axonllm",
                 log_driver=ecs.LogDrivers.aws_logs(
                     stream_prefix="axonllm",
                     log_retention=logs.RetentionDays.ONE_MONTH,

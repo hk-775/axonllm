@@ -9,8 +9,12 @@
 #   - uv installed (https://docs.astral.sh/uv/)
 #
 # Before first deploy:
-#   1. cd infra && uv pip install -r requirements.txt
-#   2. cdk bootstrap aws://ACCOUNT_ID/REGION
+#   1. cd infra && npx cdk bootstrap aws://ACCOUNT_ID/REGION
+#
+# That is the only prerequisite step. This script creates infra/.venv and installs
+# requirements.txt itself (see below), so there is nothing to pip-install by hand.
+# Use `npx cdk`, not `cdk` — the CLI is an npm package and nothing installs it
+# globally.
 #
 # After deploy, set your API keys in Secrets Manager:
 #   aws secretsmanager put-secret-value \

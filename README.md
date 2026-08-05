@@ -346,8 +346,17 @@ What the stack builds:
 **Step 1 — bootstrap CDK** (first time in this account/region only).
 
 ```bash
-cd infra && uv pip install -r requirements.txt && cdk bootstrap && cd ..
+cd infra && uv venv && uv pip install -r requirements.txt && npx cdk bootstrap && cd ..
 ```
+
+> Three details that each break this line if changed. **`uv venv` first** — `uv pip
+> install` refuses to run without a virtualenv ("No virtual environment found"),
+> and `infra/` has none on a fresh clone. **`npx cdk`, not `cdk`** — the CDK CLI is
+> an npm package that nothing here installs globally, so a bare `cdk` gives
+> `command not found`; `npx` fetches it on first use, which is why that call takes
+> a minute. And this whole step is optional: `deploy-fargate.sh` creates the venv
+> and installs the requirements itself. Only `cdk bootstrap` is genuinely
+> first-time-per-account/region setup.
 
 **Step 2 — deploy.**
 
@@ -425,7 +434,7 @@ deliberate edit, not a default. Update the test alongside the stack if this is
 your standing configuration. Then:
 
 ```bash
-cd infra && uv pip install -r requirements.txt && cdk bootstrap && cd ..
+cd infra && uv venv && uv pip install -r requirements.txt && npx cdk bootstrap && cd ..
 ./deploy-fargate.sh us-east-1
 ```
 
@@ -1715,7 +1724,9 @@ Prerequisites:
 - AWS CLI configured with appropriate permissions
 - Docker running
 - Node.js installed (for CDK CLI)
-- First-time: `cd infra && uv pip install -r requirements.txt && cdk bootstrap`
+- First-time: `cd infra && uv venv && uv pip install -r requirements.txt && npx cdk bootstrap`
+  (`uv venv` first — `uv pip install` refuses without one; `npx cdk` because the
+  CDK CLI is not installed globally)
 
 ### AWS App Runner (simpler, less control)
 
