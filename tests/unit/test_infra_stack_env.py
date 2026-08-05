@@ -105,3 +105,56 @@ class TestTheTaskDefinitionEnvironment:
             and isinstance(node.value, ast.Constant)
         ]
         assert ports == [8000]
+
+
+def _keyword_literals(name: str) -> list[str]:
+    """Every `name="literal"` keyword argument in the CDK stack."""
+    tree = ast.parse(_STACK.read_text(encoding="utf-8"))
+    return [
+        node.value.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.keyword)
+        and node.arg == name
+        and isinstance(node.value, ast.Constant)
+    ]
+
+
+class TestTheResourcesTheDocsAddressByName:
+    """Physical names for the resources the README tells you to type.
+
+    Every post-deploy instruction addresses these by name — `--cluster axonllm`,
+    `--service axonllm`, `--task-definition axonllm`. CDK does not assign a
+    physical name unless asked, so all three were previously synthesized as
+    something like `AxonLLMStack-ClusterEB0386A7-rSJKGJp9AqGt`, and every
+    documented command failed against a real deployment: the cluster came back
+    `MISSING` and `describe-task-definition` raised `ClientException`.
+
+    Asserted here rather than left to review because the failure is invisible from
+    both sides — the stack deploys perfectly, the docs read perfectly, and they
+    only disagree once someone runs step 3 on a live environment. If a name here
+    changes, the README changes with it.
+    """
+
+    @pytest.mark.parametrize(
+        ("keyword", "doc_flag"),
+        [
+            ("cluster_name", "--cluster axonllm"),
+            ("service_name", "--service axonllm"),
+            ("family", "--task-definition axonllm"),
+        ],
+    )
+    def test_the_name_the_readme_uses_is_pinned(self, keyword, doc_flag):
+        names = _keyword_literals(keyword)
+        assert names == ["axonllm"], (
+            f"{keyword} must be 'axonllm' — the README documents `{doc_flag}`, and "
+            f"an unset {keyword} makes CDK generate a name that command cannot resolve"
+        )
+
+    def test_the_table_and_secret_keep_the_names_the_docs_use(self):
+        """`axonllm-state` and `axonllm/api-keys` appear in the docs verbatim.
+
+        These were already explicit; asserted so they stay that way, for the same
+        reason as the three above.
+        """
+        assert _keyword_literals("table_name") == ["axonllm-state"]
+        assert _keyword_literals("secret_name") == ["axonllm/api-keys"]
