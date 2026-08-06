@@ -364,6 +364,14 @@ cd infra && uv venv && uv pip install -r requirements.txt && npx cdk bootstrap &
 ./deploy-fargate.sh us-east-1
 ```
 
+CDK pauses partway to show the IAM roles and security-group rules it is about to
+create and asks you to confirm. That prompt needs a terminal, so in CI the deploy
+fails outright with `Stack includes security-sensitive updates, but terminal (TTY)
+is not attached`; pass `--yes` (or set `CI=true`) to skip it once you have
+reviewed the change with `cd infra && npx cdk diff`. Valid AWS credentials do not
+substitute for that review — they settle whether the calls *can* succeed, not
+whether you meant to grant those particular permissions.
+
 That is the whole install. The stack sets `AXON_LOAD_DEMO_DATA=false` in the task
 definition, so there is no post-deploy step to remember — the value is explicit
 rather than omitted precisely because omitting it means demo data *on* (the
@@ -410,6 +418,28 @@ It must point at the **same table the service uses** or the running server will
 not recognise the key; the CLI warns if persistence is off. `--scopes 'admin:*'`
 matters — without it the key cannot reach any `/admin/*` endpoint. See
 [Authentication and authorization](#authentication-and-authorization).
+
+**Step 6 — create the project the key is scoped to.** `issue-key` does **not**
+create it, and the missing project is easy to overlook because nothing fails:
+`/api/chat` returns `200`, spend is recorded, and the only symptoms are that
+`my-project` is absent from `GET /admin/projects` and its `budget_limit` is
+`null`, so **spend accrues with no cap and no alert**. Replace `$ALB` with the URL
+the deploy printed:
+
+```bash
+curl -sX POST "$ALB/admin/projects" \
+  -H "Authorization: Bearer axon_xxxxxxxx…" \
+  -H 'Content-Type: application/json' \
+  -d '{"project_id":"my-project","name":"My Project","budget_limit":100.0}'
+```
+
+This ordering is deliberate rather than an oversight: a project id **scopes** a
+key rather than referring to a record (it bounds which project's data the key may
+reach), so `issue-key` can mint the first credential before any project exists —
+which is the only reason the bootstrap works under `ENFORCE` at all. On paths 1
+and 2 the ordering is reversed, because auth is `PERMISSIVE` and
+[Create a project](#2-create-a-project) needs no credential. The CLI prints a
+reminder when it mints a key for a project it cannot find.
 
 **Next:** [Configuring a clean install](#configuring-a-clean-install) for
 projects, RBAC, and SSO, then the
@@ -1787,7 +1817,7 @@ uv sync --extra dev
 uv run pytest tests/ -x -q
 ```
 
-2321 tests including unit, integration, end-to-end, and Hypothesis property-based tests.
+2324 tests including unit, integration, end-to-end, and Hypothesis property-based tests.
 
 ## Deployment
 
