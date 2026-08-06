@@ -8,6 +8,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **Admin state was per-task, so the answer depended on which instance replied.**
+  Found on the live two-task deployment while testing the documented steps:
+  `POST /admin/projects` returned `201`, and ten identical authenticated
+  `GET /admin/projects` requests then returned the project six times and `[]`
+  four times. The project was in DynamoDB the whole time — `AdminRouter.projects`
+  is hydrated once at startup and per process, so the task that served the write
+  knew about it and the other never would until it restarted. `infra/stack.py`
+  ships `desired_count=2` and scales to 10, so this was the default configuration
+  rather than an edge case.
+
+  - **Projects now read through to DynamoDB on a local miss** (`_get_project`),
+    and the list endpoint merges the stored set with local state
+    (`_all_projects`), matching what `APIKeyService` already did for keys — which
+    is why authentication never showed this bug while project reads did. The
+    merge keeps locally-known objects, because the mutation handlers change the
+    resolved object in place and replacing it would discard an in-flight edit.
+  - **Key revocations now reach the other instances.** `revoke_key` cleared only
+    the cache of the instance that served the request — the one instance needing
+    no help — so a revoked key stayed valid elsewhere for up to the 300 s cache
+    TTL. `invalidate_cache()` existed for exactly this and nothing called it.
+    Revocation now bumps a counter in the table that each instance polls at most
+    every 5 s, cutting that window from 300 s to 5 s. A failed poll degrades to
+    the old TTL rather than clearing the cache on every request.
+
+  Covered by `tests/unit/test_multi_instance_admin_state.py` (15 tests), each
+  verified to fail against the unfixed code. Two of those tests initially passed
+  against the bug because the test double returned the same object it stored, so
+  revocation propagated through shared object identity in a way DynamoDB never
+  would; the double now serializes on write and read.
+
+### Known limitations
+- **Budget enforcement is per-instance, so a `budget_limit` is per-instance.**
+  Usage records all reach DynamoDB, so reporting is fleet-wide and correct, but
+  `check_budget` compares against a counter the local process accumulated and
+  nothing sums the fleet on the request path. With `desired_count=2` a `$100` cap
+  admits roughly `$200`. Documented in the README rather than silently fixed:
+  enforcing it fleet-wide needs an atomic counter in DynamoDB on the hot path,
+  which is a larger change than the visibility fixes above. Divide the cap by
+  `desired_count`, or run a single task where it has to be exact.
+
 - **The AWS deploy paths could not be followed as written.** Paths 3 and 4 were
   the two install paths never executed end to end, and all four steps that touch
   the CLI were wrong. Found by running them, not by reading:

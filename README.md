@@ -1391,6 +1391,38 @@ persistence layer is what surfaces a dropped write to a health probe, and the
 [production readiness checklist](#production-readiness-checklist) is what reports
 it.
 
+### What is shared between instances, and what still isn't
+
+`infra/stack.py` runs `desired_count=2` and auto-scales to 10, so more than one
+gateway behind the load balancer is the default rather than an advanced setup.
+Some state is read through to DynamoDB per request and some is held per process,
+and the difference decides whether the answer you get depends on which task the
+ALB happened to pick.
+
+| State | Shared across instances | How |
+|-------|------------------------|-----|
+| API keys | ✅ | Read through to DynamoDB, cached for 5 min |
+| Key revocations | ✅ | A revocation counter in the table, polled every 5 s |
+| Projects | ✅ | Startup hydration plus a read-through on a local miss |
+| Usage/cost **records** | ✅ | Every record is written to the table |
+| Budget **enforcement** | ❌ | Counted per process — see below |
+| Provider health, caches | ❌ | Per-process by design; each instance probes for itself |
+
+**Budget enforcement is per-instance, so a cap is per-instance.** Usage records
+all reach DynamoDB, so reporting and the dashboard are whole-fleet and correct.
+But `check_budget` compares against a counter this process accumulated, and
+nothing sums the fleet before allowing a request — so with two tasks a
+`budget_limit` of `$100` admits roughly `$200` of spend before either instance
+believes it is over, and with ten it is roughly `$1000`. Treat `budget_limit` as
+a per-instance limit and divide by `desired_count`, or keep `desired_count=1`
+where the cap has to be exact. This is a known limitation rather than a
+deliberate design: enforcing it fleet-wide needs an atomic counter in the table
+on the request path, which is a different change from the visibility fixes above.
+
+Anything marked per-process above is worth knowing before debugging a "flapping"
+admin response. A value that alternates between two answers on identical
+requests is usually two instances disagreeing, not a race inside one of them.
+
 ### Two different things live under `/admin/policies`
 
 They share a URL prefix and nothing else, which is worth knowing before you call
@@ -1741,7 +1773,7 @@ uv sync --extra dev
 uv run pytest tests/ -x -q
 ```
 
-2259 tests including unit, integration, end-to-end, and Hypothesis property-based tests.
+2281 tests including unit, integration, end-to-end, and Hypothesis property-based tests.
 
 ## Deployment
 

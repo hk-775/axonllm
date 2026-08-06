@@ -314,7 +314,7 @@ class AdminAPI:
     async def list_projects(self, request: Request) -> JSONResponse:
         """List all projects with spend, budget utilization, and request counts."""
         result = []
-        for project in self.projects.values():
+        for project in (await self._all_projects()).values():
             budget_status = await self.cost_tracker.check_budget(project.project_id)
             records = [
                 r for r in self.cost_tracker._records
@@ -342,7 +342,7 @@ class AdminAPI:
     async def get_project(self, request: Request) -> JSONResponse:
         """Project detail with users, usage breakdown, and config."""
         project_id = request.path_params["id"]
-        project = self.projects.get(project_id)
+        project = await self._get_project(project_id)
         if project is None:
             return JSONResponse(
                 {"error": {"type": "not_found", "message": f"Project '{project_id}' not found"}},
@@ -498,7 +498,7 @@ class AdminAPI:
     async def update_project(self, request: Request) -> JSONResponse:
         """Update project config (hot-reload, no restart)."""
         project_id = request.path_params["id"]
-        project = self.projects.get(project_id)
+        project = await self._get_project(project_id)
         if project is None:
             return JSONResponse(
                 {"error": {"type": "not_found", "message": f"Project '{project_id}' not found"}},
@@ -577,6 +577,63 @@ class AdminAPI:
     # POST /admin/projects/{id}/members
     # ------------------------------------------------------------------
 
+    async def _get_project(self, project_id: str):
+        """Resolve a project by id, reading through to DynamoDB on a miss.
+
+        ``self.projects`` is hydrated once at startup and is per-process, so with
+        more than one instance behind a load balancer — which is the shipped
+        default, ``desired_count=2`` in ``infra/stack.py``, auto-scaling to 10 —
+        a project created through ``POST /admin/projects`` on one task is
+        invisible to every other task until it restarts. Verified against a live
+        two-task deployment: ten identical authenticated ``GET`` requests
+        returned the project six times and ``[]`` four times, decided purely by
+        which task the ALB picked.
+
+        The read-through mirrors what ``APIKeyService`` already does for keys,
+        which is why authentication never exhibited this bug while project reads
+        did.
+
+        The resolved project is inserted into ``self.projects`` rather than
+        returned detached, and that is load-bearing: ``update_project``,
+        ``add_member`` and the model handlers all mutate the returned object in
+        place and rely on the dict holding the same reference (see
+        ``_persist_project``). Returning a copy would make those writes apply to
+        an object nothing else can see, turning a visible bug into a silent one.
+        """
+        project = self.projects.get(project_id)
+        if project is not None:
+            return project
+        if self._persistence is None or not self._persistence.enabled:
+            return None
+        project = await self._persistence.get_project(project_id)
+        if project is not None:
+            self.projects[project_id] = project
+        return project
+
+    async def _all_projects(self) -> dict:
+        """Every project, including ones created by another instance.
+
+        The list endpoint cannot read through on a miss the way ``_get_project``
+        does — there is no id to miss on, and an empty local dict is
+        indistinguishable from an empty table. So it re-scans and merges.
+
+        Locally-known objects win over the scanned copy on purpose: a request
+        that is mid-mutation holds a reference to the dict's object, and
+        replacing it here would discard an in-flight change that has not been
+        persisted yet. The scan only contributes projects this instance has never
+        seen.
+        """
+        if self._persistence is None or not self._persistence.enabled:
+            return self.projects
+        try:
+            stored = await self._persistence.load_projects()
+        except Exception:
+            logger.warning("Failed to list projects from DynamoDB", exc_info=True)
+            return self.projects
+        for project_id, project in stored.items():
+            self.projects.setdefault(project_id, project)
+        return self.projects
+
     async def _persist_project(self, project) -> None:
         """Write a mutated project back to DynamoDB, if persistence is on.
 
@@ -605,7 +662,7 @@ class AdminAPI:
     async def add_member(self, request: Request) -> JSONResponse:
         """Add a user to a project."""
         project_id = request.path_params["id"]
-        project = self.projects.get(project_id)
+        project = await self._get_project(project_id)
         if project is None:
             return JSONResponse(
                 {"error": {"type": "not_found", "message": f"Project '{project_id}' not found"}},
@@ -631,7 +688,7 @@ class AdminAPI:
         """Remove a user from a project."""
         project_id = request.path_params["id"]
         user_id = request.path_params["user_id"]
-        project = self.projects.get(project_id)
+        project = await self._get_project(project_id)
         if project is None:
             return JSONResponse(
                 {"error": {"type": "not_found", "message": f"Project '{project_id}' not found"}},
@@ -1069,7 +1126,7 @@ class AdminAPI:
     async def list_project_models(self, request: Request) -> JSONResponse:
         """Return the allowed models for a project."""
         project_id = request.path_params["id"]
-        project = self.projects.get(project_id)
+        project = await self._get_project(project_id)
         if project is None:
             return JSONResponse(
                 {"error": {"type": "not_found", "message": f"Project '{project_id}' not found"}},
@@ -1087,7 +1144,7 @@ class AdminAPI:
     async def add_project_model(self, request: Request) -> JSONResponse:
         """Add a model to a project's allowed_models list."""
         project_id = request.path_params["id"]
-        project = self.projects.get(project_id)
+        project = await self._get_project(project_id)
         if project is None:
             return JSONResponse(
                 {"error": {"type": "not_found", "message": f"Project '{project_id}' not found"}},
@@ -1125,7 +1182,7 @@ class AdminAPI:
         """Remove a model from a project's allowed_models list."""
         project_id = request.path_params["id"]
         model_name = request.path_params["model_name"]
-        project = self.projects.get(project_id)
+        project = await self._get_project(project_id)
         if project is None:
             return JSONResponse(
                 {"error": {"type": "not_found", "message": f"Project '{project_id}' not found"}},
@@ -1556,7 +1613,7 @@ class AdminAPI:
                 status_code=501,
             )
 
-        project = self.projects.get(project_id)
+        project = await self._get_project(project_id)
         if project is None:
             return JSONResponse(
                 {"error": {"type": "not_found", "message": f"Project '{project_id}' not found"}},
@@ -1877,7 +1934,7 @@ class AdminAPI:
             provider_configs=self._provider_configs,
             persistence=self._persistence,
             api_key_service=self._api_key_service,
-            project_ids=list(self.projects),
+            project_ids=list(await self._all_projects()),
         )
         return HTMLResponse(
             render_checklist_page(report, embed=_is_embedded(request))
@@ -1906,7 +1963,9 @@ class AdminAPI:
             })
 
         opted_in = sorted(
-            p.project_id for p in self.projects.values() if p.semantic_cache_enabled
+            p.project_id
+            for p in (await self._all_projects()).values()
+            if p.semantic_cache_enabled
         )
         return JSONResponse({
             "available": cache.enabled,

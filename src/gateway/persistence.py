@@ -500,6 +500,36 @@ class DynamoPersistence:
         except Exception:
             self._record_write_failure("project", project.project_id)
 
+    async def get_project(self, project_id: str) -> Project | None:
+        """Read a single project by id.
+
+        A point read rather than a filtered scan: the caller is resolving one
+        `{id}` path parameter, and `load_projects()` scans the whole table to
+        answer it. Used by `AdminRouter` to resolve a project another instance
+        created, which its startup-hydrated dict cannot know about.
+
+        Returns None both for "no such project" and for a read failure — the
+        caller renders either as `404`. A transient DynamoDB error therefore
+        reads as a missing project, which is the same behaviour the rest of the
+        admin API already has for a dropped read, and is why the exception is
+        logged rather than swallowed silently.
+        """
+        if not self._enabled:
+            return None
+
+        def _get():
+            table = self._get_table()
+            resp = table.get_item(Key={"PK": f"PROJECT#{project_id}", "SK": "PROJECT"})
+            return resp.get("Item")
+
+        try:
+            item = await asyncio.to_thread(_get)
+            if item:
+                return self.deserialize_project(self._convert_decimals_to_native(item))
+        except Exception:
+            logger.warning("Failed to load project %s from DynamoDB", project_id, exc_info=True)
+        return None
+
     async def load_projects(self) -> dict[str, Project]:
         """Scan DynamoDB for all projects and deserialize them."""
         if not self._enabled:
@@ -792,6 +822,69 @@ class DynamoPersistence:
 
     async def update_api_key(self, key: APIKey) -> None:
         await self.save_api_key(key)
+
+    # --- Cross-instance revocation signal ---
+    #
+    # A revocation has to reach instances that are holding the key in their own
+    # validation cache, and there is no message bus here to push it to them. So
+    # instead of broadcasting, one counter in the table is bumped on every
+    # revocation and each instance polls it cheaply: a changed value means "some
+    # key you may be caching was revoked", and the instance drops its cache.
+    #
+    # Deliberately a single counter rather than a per-key tombstone. It costs one
+    # small point read per instance per poll interval no matter how many keys
+    # exist, and the false positive it can produce — clearing cache entries for
+    # keys that were not the revoked one — costs a DynamoDB read on their next
+    # use. Getting revocation wrong in the other direction leaves a key that an
+    # operator revoked still working.
+
+    async def bump_revocation_epoch(self) -> None:
+        """Signal that a key was revoked. Called on the revoking instance."""
+        if not self._enabled:
+            return
+
+        def _bump():
+            table = self._get_table()
+            table.update_item(
+                Key={"PK": "REVOCATION", "SK": "EPOCH"},
+                UpdateExpression="ADD epoch :one",
+                ExpressionAttributeValues={":one": 1},
+            )
+
+        try:
+            await asyncio.to_thread(_bump)
+        except Exception:
+            # Logged, not raised: the revocation itself already persisted, and
+            # failing the request would tell the operator the revocation did not
+            # happen when it did. Other instances fall back to CACHE_TTL_SECONDS.
+            self._record_write_failure("revocation_epoch", "EPOCH")
+
+    async def get_revocation_epoch(self) -> int | None:
+        """Current revocation counter, or None if it could not be read.
+
+        None is distinct from 0: 0 means "no revocation has ever happened", while
+        None means the read failed and the caller should keep whatever it already
+        believed rather than treat the epoch as reset.
+        """
+        if not self._enabled:
+            return None
+
+        def _get():
+            table = self._get_table()
+            resp = table.get_item(
+                Key={"PK": "REVOCATION", "SK": "EPOCH"},
+                ConsistentRead=True,
+            )
+            return resp.get("Item")
+
+        try:
+            item = await asyncio.to_thread(_get)
+            if item is None:
+                return 0
+            return int(item.get("epoch", 0))
+        except Exception:
+            logger.warning("Failed to read revocation epoch", exc_info=True)
+            return None
 
     # --- PolicyNode persistence ---
 

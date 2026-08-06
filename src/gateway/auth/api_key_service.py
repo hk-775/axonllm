@@ -18,6 +18,13 @@ PREFIX = "axon_"
 
 CACHE_TTL_SECONDS = 300
 
+# How often an instance checks whether another instance revoked a key. This is
+# the actual upper bound on how long a revoked key keeps working elsewhere;
+# CACHE_TTL_SECONDS is only the bound when the epoch check is unavailable (no
+# persistence, or the read failed). Five seconds of one small point read per
+# instance, against 300 seconds of a revoked credential still being accepted.
+REVOCATION_POLL_SECONDS = 5
+
 
 class APIKeyService:
     """Manages the lifecycle of project-scoped API keys.
@@ -35,6 +42,12 @@ class APIKeyService:
         # revoked, or rotated. When persistence is enabled this stays empty and
         # DynamoDB remains the single source of truth.
         self._memory_store: dict[str, APIKey] = {}
+        # Last revocation epoch this instance saw, and when it last looked. None
+        # means "never successfully read", which is why the first check adopts
+        # whatever it finds rather than treating a non-zero epoch as a change and
+        # clearing a cache it only just built.
+        self._revocation_epoch: int | None = None
+        self._revocation_checked_at: float = 0.0
 
     @property
     def _in_memory(self) -> bool:
@@ -78,12 +91,49 @@ class APIKeyService:
         self._cache[key_hash] = (key, time.time())
         return key, raw_key
 
+    async def _check_revocations(self) -> None:
+        """Drop the local cache if another instance has revoked a key.
+
+        ``revoke_key`` clears the cache on the instance that served the request,
+        which is the only instance that needs no help. Every other instance kept
+        serving the revoked key until its own entry aged out — up to
+        ``CACHE_TTL_SECONDS`` of a credential an operator had deliberately
+        revoked. With the shipped ``desired_count=2`` that was the common case,
+        not an edge one.
+
+        Polled here rather than pushed because there is no bus between instances,
+        and checked at most every ``REVOCATION_POLL_SECONDS`` so the cost is one
+        small point read per interval instead of one per request — the cache
+        exists to keep DynamoDB off the hot path, and reading the epoch every
+        request would give that back.
+
+        A failed read leaves the epoch untouched, so behaviour degrades to the
+        TTL rather than to clearing the cache on every request.
+        """
+        if self._in_memory:
+            return
+        now = time.time()
+        if now - self._revocation_checked_at < REVOCATION_POLL_SECONDS:
+            return
+        self._revocation_checked_at = now
+        epoch = await self._persistence.get_revocation_epoch()
+        if epoch is None:
+            return
+        if self._revocation_epoch is None:
+            self._revocation_epoch = epoch
+            return
+        if epoch != self._revocation_epoch:
+            self._revocation_epoch = epoch
+            self._cache.clear()
+
     async def validate_key(self, raw_key: str) -> APIKey | None:
         """Validate a raw API key. Returns the key record or None."""
         if not raw_key.startswith(PREFIX):
             return None
 
         key_hash = self.hash_key(raw_key)
+
+        await self._check_revocations()
 
         entry = self._cache.get(key_hash)
         if entry is not None:
@@ -126,6 +176,9 @@ class APIKeyService:
         await self._persistence.update_api_key(key)
 
         self._cache.pop(key.key_hash, None)
+        # Tell the other instances. Without this the key stays valid on every
+        # instance except this one until their cache entries expire.
+        await self._persistence.bump_revocation_epoch()
         return True
 
     def invalidate_cache(self) -> None:
