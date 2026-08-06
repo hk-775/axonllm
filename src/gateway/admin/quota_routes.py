@@ -30,7 +30,11 @@ class QuotaAPI:
         environment = request.query_params.get("env")
 
         policy = await self.resolver.resolve(project_id, environment)
-        current_spend = self.enforcer.get_spend(project_id)
+        # Read through to the shared counter rather than this instance's own: an
+        # operator checking a budget cannot tell which task answered, and a task
+        # that has not served this project since starting would report $0 for a
+        # project the fleet is already blocking.
+        current_spend = await self.enforcer.current_spend(project_id)
 
         return JSONResponse(content={
             "project_id": project_id,
@@ -61,8 +65,26 @@ class QuotaAPI:
     async def reset_spend(self, request: Request) -> JSONResponse:
         """POST /admin/quotas/{project_id}/reset — reset spend counter (billing cycle)."""
         project_id = request.path_params["project_id"]
-        old_spend = self.enforcer.get_spend(project_id)
-        self.enforcer.reset_spend(project_id)
+        old_spend = await self.enforcer.current_spend(project_id)
+        fleet_wide = await self.enforcer.reset_spend(project_id)
+        if not fleet_wide:
+            # 503, not 200: the shared counter still holds the old total, so every
+            # other instance keeps blocking the project. Reporting "reset" here
+            # would tell an operator their unblock worked when the next request
+            # will still be refused.
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "project_id": project_id,
+                    "previous_spend": round(old_spend, 4),
+                    "current_spend": round(old_spend, 4),
+                    "status": "reset_failed",
+                    "detail": (
+                        "Local spend was cleared but the shared counter could not be "
+                        "reset, so other instances still hold the old total. Retry."
+                    ),
+                },
+            )
         return JSONResponse(content={
             "project_id": project_id,
             "previous_spend": round(old_spend, 4),

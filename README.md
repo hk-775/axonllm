@@ -1405,19 +1405,33 @@ ALB happened to pick.
 | Key revocations | ✅ | A revocation counter in the table, polled every 5 s |
 | Projects | ✅ | Startup hydration plus a read-through on a local miss |
 | Usage/cost **records** | ✅ | Every record is written to the table |
-| Budget **enforcement** | ❌ | Counted per process — see below |
+| Budget **enforcement** | ✅ | Atomic counter in the table — see below |
+| Rate limits (policy RPM) | ❌ | Per-process window; divide `rate_limit_rpm` by `desired_count` |
 | Provider health, caches | ❌ | Per-process by design; each instance probes for itself |
 
-**Budget enforcement is per-instance, so a cap is per-instance.** Usage records
-all reach DynamoDB, so reporting and the dashboard are whole-fleet and correct.
-But `check_budget` compares against a counter this process accumulated, and
-nothing sums the fleet before allowing a request — so with two tasks a
-`budget_limit` of `$100` admits roughly `$200` of spend before either instance
-believes it is over, and with ten it is roughly `$1000`. Treat `budget_limit` as
-a per-instance limit and divide by `desired_count`, or keep `desired_count=1`
-where the cap has to be exact. This is a known limitation rather than a
-deliberate design: enforcing it fleet-wide needs an atomic counter in the table
-on the request path, which is a different change from the visibility fixes above.
+**Budget enforcement is fleet-wide.** A `budget_limit` of `$100` is `$100` across
+the whole deployment, not per task. Spend goes into a DynamoDB counter with an
+atomic `ADD`, and because `ADD` returns the post-update value, the instance
+recording spend learns the fleet total from a write it was already making — no
+extra read on the request path and no lost updates when two tasks bill at once.
+Before deciding, an instance refreshes that figure if its copy is more than two
+seconds old, so a task that has not served a project recently still enforces
+against what everyone else has spent.
+
+Two caveats worth stating plainly. First, the two-second refresh window bounds
+overshoot rather than eliminating it: a limit can be exceeded by whatever the
+fleet bills within one window, which is a few cents at typical rates but is not
+zero. Making it exact would mean a consistent read on every proxied call. Second,
+if DynamoDB is unreachable the counter update fails and enforcement degrades to
+per-process — the old behaviour — rather than to unlimited; watch
+`last_write_error` in `/health` for that.
+
+**Rate limits are still per-process**, both the hierarchy's `rate_limit_rpm` and
+`SlidingWindowRateLimiter`, so those do need dividing by `desired_count`: two
+tasks each admit the configured RPM. Unlike spend, a sliding window is not a
+running total — sharing it means a read on every request rather than a counter
+folded into a write the request was already making, so it is left per-process
+for now.
 
 Anything marked per-process above is worth knowing before debugging a "flapping"
 admin response. A value that alternates between two answers on identical
@@ -1773,7 +1787,7 @@ uv sync --extra dev
 uv run pytest tests/ -x -q
 ```
 
-2281 tests including unit, integration, end-to-end, and Hypothesis property-based tests.
+2317 tests including unit, integration, end-to-end, and Hypothesis property-based tests.
 
 ## Deployment
 

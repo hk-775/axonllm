@@ -886,6 +886,109 @@ class DynamoPersistence:
             logger.warning("Failed to read revocation epoch", exc_info=True)
             return None
 
+    # --- Fleet-wide spend counters ---
+    #
+    # Budget enforcement compares spend against a limit, so the spend it reads has
+    # to be the whole fleet's. Every instance accumulating its own counter meant a
+    # $100 limit admitted roughly $100 *per task* — ~$200 with the shipped
+    # desired_count=2, ~$1000 once auto-scaling reached 10 — because no instance
+    # ever saw more than its own share.
+    #
+    # DynamoDB's ADD is atomic and returns the post-update value, which is the
+    # whole trick here: the instance that records spend learns the fleet total as
+    # a side effect of a write it was already making. No extra read, no lock
+    # across instances, and no lost update when two tasks bill at once.
+
+    async def add_spend(self, scope: str, ident: str, cost: float) -> float | None:
+        """Atomically add to a spend counter and return the new fleet-wide total.
+
+        ``scope`` is ``"project"`` or ``"user"``; ``ident`` the id within it.
+
+        Returns None if the counter could not be updated, which the caller must
+        treat as "no fleet total available" and fall back to its local figure —
+        not as zero, which would read as a reset budget and let every request
+        through.
+        """
+        if not self._enabled:
+            return None
+
+        def _add():
+            table = self._get_table()
+            resp = table.update_item(
+                Key={"PK": f"SPEND#{scope}#{ident}", "SK": "TOTAL"},
+                UpdateExpression="ADD #s :c",
+                ExpressionAttributeNames={"#s": "spend"},
+                ExpressionAttributeValues={":c": Decimal(str(cost))},
+                ReturnValues="UPDATED_NEW",
+            )
+            return resp.get("Attributes", {}).get("spend")
+
+        try:
+            total = await asyncio.to_thread(_add)
+            return float(total) if total is not None else None
+        except Exception:
+            # Logged and surfaced through last_write_error rather than raised: a
+            # provider call should not 500 because the counter write failed, and
+            # the caller degrades to its local total.
+            self._record_write_failure(f"spend_{scope}", ident)
+            return None
+
+    async def get_spend(self, scope: str, ident: str) -> float | None:
+        """Read a fleet-wide spend counter, or None if it could not be read.
+
+        Used to seed an instance at startup and to answer admin reads. Not called
+        per request — `add_spend` already returns the total the request path
+        needs.
+
+        None is distinct from 0.0: 0.0 means the counter exists and nothing has
+        been spent, while None means the read failed and the caller should keep
+        whatever total it already had.
+        """
+        if not self._enabled:
+            return None
+
+        def _get():
+            table = self._get_table()
+            resp = table.get_item(
+                Key={"PK": f"SPEND#{scope}#{ident}", "SK": "TOTAL"},
+                ConsistentRead=True,
+            )
+            return resp.get("Item")
+
+        try:
+            item = await asyncio.to_thread(_get)
+            if item is None:
+                return 0.0
+            return float(item.get("spend", 0))
+        except Exception:
+            logger.warning("Failed to read %s spend for %s", scope, ident, exc_info=True)
+            return None
+
+    async def reset_spend(self, scope: str, ident: str) -> bool:
+        """Zero a fleet-wide spend counter. Returns whether it succeeded.
+
+        Deletes the item rather than writing 0, so `ADD` recreates it on the next
+        charge — the same end state with one fewer value to keep consistent.
+
+        Unlike the writes above this reports failure to the caller: a reset is an
+        explicit operator action through `POST /admin/quotas/{id}/reset`, and
+        reporting success for a counter that is still at its old value would tell
+        an operator a project was unblocked when it is still blocked.
+        """
+        if not self._enabled:
+            return False
+
+        def _delete():
+            table = self._get_table()
+            table.delete_item(Key={"PK": f"SPEND#{scope}#{ident}", "SK": "TOTAL"})
+
+        try:
+            await asyncio.to_thread(_delete)
+            return True
+        except Exception:
+            self._record_write_failure(f"spend_reset_{scope}", ident)
+            return False
+
     # --- PolicyNode persistence ---
 
     @staticmethod

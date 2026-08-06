@@ -38,15 +38,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   revocation propagated through shared object identity in a way DynamoDB never
   would; the double now serializes on write and read.
 
+- **Budget enforcement was per-instance, so a `budget_limit` was per-instance.**
+  The second half of the same defect, and the expensive half: usage records all
+  reached DynamoDB so reporting was fleet-wide and correct, but `check_budget`
+  compared against a counter only the local process had contributed to. With the
+  shipped `desired_count=2` a `$100` cap admitted roughly `$200`, and fully
+  scaled out roughly `$1000`. Nothing looked wrong from either task — each
+  enforced its limit correctly against its own share.
+
+  - **Spend now lives in a DynamoDB counter updated with an atomic `ADD`.**
+    Because `ADD` returns the post-update value, the instance recording spend
+    learns the fleet total from a write it was already making: no extra read on
+    the request path, no cross-instance lock, and no lost update when two tasks
+    bill simultaneously. The shared write is deliberately outside the per-project
+    lock — holding a lock across a network round trip would cap a project at
+    roughly one request per round trip, and `ADD` needs no help being atomic.
+  - **`QuotaEnforcer` was the gate that mattered**, not `CostTracker`.
+    `CostTracker.check_budget` fills in the `BudgetStatus` on the response;
+    `QuotaEnforcer.check_budget` is what returns `allowed=False` and refuses the
+    request. Both were per-process and both are now fleet-wide, but only the
+    latter was an overspend. They keep separate counter keys because both record
+    the same cost on the same request, so sharing one key would double every
+    charge and fail a budget at half its limit.
+  - **`enforce_all` refreshes a stale figure before deciding.** Adopting the
+    total on write is not enough on its own: an instance that has not billed a
+    project since starting still held its own `$0` and would admit one request
+    per instance against an exhausted budget, again after every deploy. The
+    refresh is rate-limited to 2 s, which bounds the overshoot to what the fleet
+    can bill in that window rather than eliminating it — the alternative is a
+    consistent read on every proxied call.
+  - **Startup seeds both counters** from the shared totals, and does so *after*
+    `load_records` and by replacing rather than adding: every persisted record
+    was already folded into the shared counter when first billed, so summing
+    history on top would inflate a project's spend on every restart.
+  - **`POST /admin/quotas/{id}/reset` clears the shared counter** and answers
+    `503` if it could not, rather than reporting a reset that leaves every other
+    instance still blocking the project. `GET /admin/quotas/{id}` reads through
+    for the same reason — an operator cannot tell which task answered.
+  - **Demo-seed spend stays local** (`share=False`). Every instance fabricates
+    the same seed at startup and `ADD` is not idempotent, so sharing it would
+    multiply demo figures by the instance count and again on every restart.
+
+  A failed counter update degrades to per-instance enforcement — the previous
+  behaviour — rather than to unlimited, and a failed read never reads as `$0`.
+  Covered by `tests/unit/test_multi_instance_budget.py` (30 tests) plus route and
+  bootstrap coverage; 20 of 21 mutations to the new logic are killed, the survivor
+  being an equivalent mutant that the "never move the counter backwards" guard
+  makes unobservable.
+
 ### Known limitations
-- **Budget enforcement is per-instance, so a `budget_limit` is per-instance.**
-  Usage records all reach DynamoDB, so reporting is fleet-wide and correct, but
-  `check_budget` compares against a counter the local process accumulated and
-  nothing sums the fleet on the request path. With `desired_count=2` a `$100` cap
-  admits roughly `$200`. Documented in the README rather than silently fixed:
-  enforcing it fleet-wide needs an atomic counter in DynamoDB on the hot path,
-  which is a larger change than the visibility fixes above. Divide the cap by
-  `desired_count`, or run a single task where it has to be exact.
+- **Rate limits are still per-process.** Both the hierarchy's `rate_limit_rpm`
+  and `SlidingWindowRateLimiter` keep their sliding windows in memory, so each
+  task admits the configured RPM independently — divide by `desired_count`.
+  Unlike spend, a sliding window is not a running total, so it cannot ride along
+  on a write the request was already making; sharing it means a read per request.
 
 - **The AWS deploy paths could not be followed as written.** Paths 3 and 4 were
   the two install paths never executed end to end, and all four steps that touch

@@ -55,7 +55,7 @@ class TestBudgetAlerts:
         assert 0.8 in alerts
 
         alerts.clear()
-        enforcer.reset_spend("proj-1")
+        _run(enforcer.reset_spend("proj-1"))
         _run(enforcer.record_spend("proj-1", 85.0, budget_limit=100.0))
         assert 0.8 in alerts
 

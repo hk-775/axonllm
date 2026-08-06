@@ -181,6 +181,37 @@ class CostTracker:
         if usage.user_id:
             self._user_spend[usage.user_id] += usage.cost
 
+    async def _bump_spend_fleet_wide(self, usage: UsageRecord) -> None:
+        """Add this record's cost to the shared counters and adopt the totals.
+
+        The local counters are per-process, so on their own they make a budget
+        limit a *per-instance* limit: with the shipped ``desired_count=2`` a $100
+        cap admitted roughly $200, because neither task ever saw the other's
+        spend. Usage records were always written to DynamoDB — reporting was
+        fleet-wide and correct — but enforcement read a number only this process
+        had contributed to.
+
+        The atomic ``ADD`` returns the post-update total, so the instance learns
+        the fleet figure from a write it is already making rather than from an
+        extra read on the request path. Whatever comes back replaces the local
+        counter, which also repairs drift: an instance that missed writes while
+        DynamoDB was unreachable snaps back to the true total on its next
+        success rather than staying permanently low.
+
+        A failed counter update leaves the local total in place, so enforcement
+        degrades to per-instance — the old behaviour — instead of to unlimited.
+        """
+        if self._persistence is None or not self._persistence.enabled:
+            return
+        if usage.project_id:
+            total = await self._persistence.add_spend("project", usage.project_id, usage.cost)
+            if total is not None:
+                self._project_spend[usage.project_id] = total
+        if usage.user_id:
+            total = await self._persistence.add_spend("user", usage.user_id, usage.cost)
+            if total is not None:
+                self._user_spend[usage.user_id] = total
+
     def load_records(self, records: list[UsageRecord]) -> None:
         """Rehydrate the in-memory store from persisted usage records.
 
@@ -197,8 +228,44 @@ class CostTracker:
             existing.add(rec.request_id)
             self._bump_spend(rec)
 
-    async def record_usage(self, usage: UsageRecord) -> None:
-        """Persist a usage record to the in-memory store."""
+    async def adopt_fleet_spend(self, project_ids, user_ids=()) -> None:
+        """Replace local spend counters with the shared fleet-wide totals.
+
+        Called once at startup, after ``load_records``. Both steps are needed and
+        neither replaces the other: ``load_records`` sums the records this
+        instance can see, which is what makes budgets survive a restart when
+        persistence is off, while the shared counters are the figure enforcement
+        must actually compare against.
+
+        The totals are *replaced*, not added to. Adding would double-count —
+        every record summed by ``load_records`` was already folded into the
+        shared counter when it was first billed, so the two overlap completely
+        rather than complementing each other.
+
+        A counter that cannot be read leaves the local sum untouched, so a
+        DynamoDB problem at startup degrades to per-instance enforcement rather
+        than to a project that looks like it has spent nothing.
+        """
+        if self._persistence is None or not self._persistence.enabled:
+            return
+        for project_id in project_ids:
+            total = await self._persistence.get_spend("project", project_id)
+            if total is not None:
+                self._project_spend[project_id] = total
+        for user_id in user_ids:
+            total = await self._persistence.get_spend("user", user_id)
+            if total is not None:
+                self._user_spend[user_id] = total
+
+    async def record_usage(self, usage: UsageRecord, *, share: bool = True) -> None:
+        """Persist a usage record to the in-memory store.
+
+        ``share=False`` records the cost locally without adding it to the shared
+        fleet-wide counter. Used by the demo seed: every instance applies the
+        same seed file at startup, so the fabricated spend is already consistent
+        across the fleet, and ``ADD`` is not idempotent — sharing it would
+        multiply demo spend by the instance count and again by every restart.
+        """
         self._records.append(usage)
         # Counters are authoritative for budgets, so update them BEFORE any
         # trimming — trimming the record list must not lose spend.
@@ -216,6 +283,14 @@ class CostTracker:
                     usage.request_id,
                     exc_info=True,
                 )
+
+        # Fold this cost into the shared counters and adopt the fleet totals, so
+        # the next budget check compares against every instance's spend rather
+        # than only this process's. Kept separate from the record write above
+        # because the two fail independently: a dropped record costs a row of
+        # history, a dropped counter update costs budget accuracy.
+        if share:
+            await self._bump_spend_fleet_wide(usage)
 
     # ------------------------------------------------------------------
     # Token estimation

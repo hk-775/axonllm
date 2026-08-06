@@ -250,6 +250,131 @@ class TestPersistedPoliciesAreLoadedAtStartup:
         assert matching[0]["mode"] == "LOG_ONLY", "the persisted edit did not win"
 
 
+class TestSpendCountersAtStartup:
+    """Budget enforcement is fleet-wide, which makes boot order load-bearing.
+
+    Spend lives in a shared DynamoDB counter, so a starting instance has to adopt
+    the fleet total — and must not add its own view of history on top of a counter
+    that already contains it, or write fabricated demo spend into it.
+    """
+
+    def _persistence(self, spend: dict[str, float], writes: list):
+        """Real DynamoPersistence with only the table boundary replaced."""
+        from src.gateway.persistence import DynamoPersistence
+
+        class _Counters(DynamoPersistence):
+            def __init__(self) -> None:
+                super().__init__()
+                self._enabled = True
+
+            def _get_table(self):
+                class _Table:
+                    def scan(self, **kwargs):
+                        return {"Items": []}
+
+                    def get_item(self, **kwargs):
+                        pk = kwargs["Key"]["PK"]
+                        if pk.startswith("SPEND#") and pk in spend:
+                            from decimal import Decimal
+                            return {"Item": {"spend": Decimal(str(spend[pk]))}}
+                        return {}
+
+                    def put_item(self, **kwargs):
+                        return {}
+
+                    def update_item(self, **kwargs):
+                        writes.append(kwargs["Key"]["PK"])
+                        return {"Attributes": {"spend": 0}}
+
+                return _Table()
+
+        return _Counters()
+
+    def test_the_enforcer_adopts_the_fleet_total(self, minimal_app_config, monkeypatch):
+        """A booting task must not believe every project has spent nothing.
+
+        Without this, the first request to each new task after a deploy is
+        admitted against a budget the fleet had already exhausted — and
+        `GET /admin/quotas` reports $0 for a project that is over its limit.
+        """
+        from src.gateway import bootstrap as bootstrap_mod
+
+        persistence = self._persistence({"SPEND#quota#proj-alpha": 4200.0}, [])
+        monkeypatch.setattr(bootstrap_mod, "DynamoPersistence", lambda *a, **k: persistence)
+        monkeypatch.setattr(
+            bootstrap_mod, "_load_persisted_state",
+            _loads(({"proj-alpha": _project("proj-alpha")}, {}, [], [], [], [], None)),
+        )
+
+        comp = build_gateway_components(minimal_app_config)
+        assert comp.quota_enforcer.get_spend("proj-alpha") == 4200.0, (
+            "started up believing a project with $4200 of fleet spend had spent nothing"
+        )
+
+    def test_persisted_history_is_not_added_to_the_counter(self, minimal_app_config, monkeypatch):
+        """`load_records` sums records the shared counter already includes.
+
+        Adding rather than replacing would inflate a project's spend by its whole
+        history on every single restart.
+        """
+        from datetime import datetime, timezone
+
+        from src.gateway import bootstrap as bootstrap_mod
+        from src.gateway.models import UsageRecord
+
+        record = UsageRecord(
+            request_id="r1", project_id="proj-alpha", user_id="u1",
+            provider="anthropic", model="claude-sonnet-4",
+            prompt_tokens=1, completion_tokens=1, total_tokens=2, cost=30.0,
+            timestamp=datetime.now(timezone.utc),
+        )
+        persistence = self._persistence({"SPEND#project#proj-alpha": 30.0}, [])
+        monkeypatch.setattr(bootstrap_mod, "DynamoPersistence", lambda *a, **k: persistence)
+        monkeypatch.setattr(
+            bootstrap_mod, "_load_persisted_state", _loads(({}, {}, [record], [], [], [], None)),
+        )
+
+        comp = build_gateway_components(minimal_app_config)
+        assert comp.cost_tracker._project_spend["proj-alpha"] == 30.0, (
+            "added persisted history to a shared counter that already contained it"
+        )
+
+    def test_demo_spend_is_never_written_to_the_shared_counter(
+        self, demo_app_config, monkeypatch
+    ):
+        """Every instance fabricates the same seed, and ADD is not idempotent.
+
+        Sharing it would multiply demo spend by the instance count and again on
+        every restart, until a demo gateway refused its own seeded projects.
+        """
+        from src.gateway import bootstrap as bootstrap_mod
+
+        writes: list = []
+        persistence = self._persistence({}, writes)
+        monkeypatch.setattr(bootstrap_mod, "DynamoPersistence", lambda *a, **k: persistence)
+
+        comp = build_gateway_components(demo_app_config)
+        assert comp.cost_tracker._records, "expected the seed to have been applied"
+        assert [w for w in writes if w.startswith("SPEND#")] == [], (
+            "wrote fabricated demo spend into the shared budget counter"
+        )
+
+
+def _loads(result):
+    """Stand in for the async `_load_persisted_state`, which boot awaits."""
+
+    async def _load(_persistence):
+        return result
+
+    return _load
+
+
+def _project(project_id: str):
+    from src.gateway.models import Project
+
+    return Project(project_id=project_id, name=project_id)
+
+
 class TestBuildGatewayAgent:
     def test_returns_gateway_agent(self, minimal_app_config: AppConfig):
         agent = build_gateway_agent(minimal_app_config)
