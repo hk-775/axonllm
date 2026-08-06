@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-08-05
+
+Bug fixes only. Everything here was found by running what the documentation said
+to run, or by watching a live two-task deployment disagree with itself — not by
+reading the code.
+
+One externally visible behaviour change worth noting before upgrading:
+`POST /admin/quotas/{project_id}/reset` now answers `503` when it could not clear
+the shared spend counter, where it previously always answered `200`. Callers that
+treat any non-`200` as fatal will see failures they did not see before; those
+failures were previously silent lies.
+
 ### Fixed
 - **Admin state was per-task, so the answer depended on which instance replied.**
   Found on the live two-task deployment while testing the documented steps:
