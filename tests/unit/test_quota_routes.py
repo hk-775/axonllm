@@ -126,6 +126,83 @@ class TestResetSpend:
         assert resp.json()["current_spend"] == 0.0
         assert enforcer.get_spend("proj:ml") == 0.0
 
+    def test_a_failed_shared_reset_is_not_reported_as_done(self):
+        """503, not 200, when the shared counter kept its old total.
+
+        Spend is fleet-wide, so a reset that only cleared this process leaves
+        every other instance still refusing the project. Answering "reset" would
+        send an operator away believing they had unblocked it.
+        """
+        class _CounterDown:
+            enabled = True
+
+            async def add_spend(self, scope, ident, cost):
+                return 1000.0
+
+            async def get_spend(self, scope, ident):
+                return 1000.0
+
+            async def reset_spend(self, scope, ident):
+                return False
+
+        enforcer = QuotaEnforcer(persistence=_CounterDown())
+        resolver = PolicyHierarchyResolver(persistence=FakePersistence(), cache_ttl_seconds=0)
+        client = TestClient(Starlette(routes=create_quota_routes(
+            QuotaAPI(quota_enforcer=enforcer, policy_resolver=resolver))))
+
+        resp = client.post("/admin/quotas/proj:ml/reset")
+        assert resp.status_code == 503, "claimed success while the fleet counter was unchanged"
+        body = resp.json()
+        assert body["status"] == "reset_failed"
+        assert body["current_spend"] == 1000.0, "reported $0 for a counter still holding $1000"
+
+    def test_the_reported_spend_comes_from_the_shared_counter(self):
+        """`previous_spend` must be the fleet figure, not this process's share.
+
+        An instance that never served the project holds $0 locally, so a reset
+        would report "previous_spend: 0" for a project that had spent thousands.
+        """
+        class _Counter:
+            enabled = True
+
+            async def get_spend(self, scope, ident):
+                return 250.0
+
+            async def reset_spend(self, scope, ident):
+                return True
+
+        enforcer = QuotaEnforcer(persistence=_Counter())
+        resolver = PolicyHierarchyResolver(persistence=FakePersistence(), cache_ttl_seconds=0)
+        client = TestClient(Starlette(routes=create_quota_routes(
+            QuotaAPI(quota_enforcer=enforcer, policy_resolver=resolver))))
+
+        assert enforcer.get_spend("proj:ml") == 0.0  # this process served nothing
+        resp = client.post("/admin/quotas/proj:ml/reset")
+        assert resp.json()["previous_spend"] == 250.0
+
+    def test_a_quota_read_reflects_another_instance(self):
+        """`GET /admin/quotas/{id}` must not depend on which task answers."""
+        class _Counter:
+            enabled = True
+
+            async def get_spend(self, scope, ident):
+                return 4200.0
+
+        enforcer = QuotaEnforcer(persistence=_Counter())
+        persistence = FakePersistence()
+        resolver = PolicyHierarchyResolver(persistence=persistence, cache_ttl_seconds=0)
+        _run(persistence.save_policy_node(PolicyNode(
+            "proj:ml", "project", None, "ML", limits={"budget_limit": 5000.0})))
+        _run(resolver.load_nodes())
+        client = TestClient(Starlette(routes=create_quota_routes(
+            QuotaAPI(quota_enforcer=enforcer, policy_resolver=resolver))))
+
+        usage = client.get("/admin/quotas/proj:ml").json()["usage"]
+        assert usage["current_spend"] == 4200.0, (
+            "reported this instance's $0 for a project the fleet has spent $4200 on"
+        )
+        assert usage["budget_remaining"] == 800.0
+
 
 class TestSimulateRequest:
     def test_allowed_request(self, setup):

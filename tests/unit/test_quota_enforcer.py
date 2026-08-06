@@ -211,7 +211,7 @@ class TestSpendTracking:
 
     def test_reset(self, enforcer):
         _run(enforcer.record_spend("proj-1", 100.0))
-        enforcer.reset_spend("proj-1")
+        _run(enforcer.reset_spend("proj-1"))
         assert enforcer.get_spend("proj-1") == 0.0
 
     def test_isolated_projects(self, enforcer):

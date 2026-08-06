@@ -1391,6 +1391,52 @@ persistence layer is what surfaces a dropped write to a health probe, and the
 [production readiness checklist](#production-readiness-checklist) is what reports
 it.
 
+### What is shared between instances, and what still isn't
+
+`infra/stack.py` runs `desired_count=2` and auto-scales to 10, so more than one
+gateway behind the load balancer is the default rather than an advanced setup.
+Some state is read through to DynamoDB per request and some is held per process,
+and the difference decides whether the answer you get depends on which task the
+ALB happened to pick.
+
+| State | Shared across instances | How |
+|-------|------------------------|-----|
+| API keys | ✅ | Read through to DynamoDB, cached for 5 min |
+| Key revocations | ✅ | A revocation counter in the table, polled every 5 s |
+| Projects | ✅ | Startup hydration plus a read-through on a local miss |
+| Usage/cost **records** | ✅ | Every record is written to the table |
+| Budget **enforcement** | ✅ | Atomic counter in the table — see below |
+| Rate limits (policy RPM) | ❌ | Per-process window; divide `rate_limit_rpm` by `desired_count` |
+| Provider health, caches | ❌ | Per-process by design; each instance probes for itself |
+
+**Budget enforcement is fleet-wide.** A `budget_limit` of `$100` is `$100` across
+the whole deployment, not per task. Spend goes into a DynamoDB counter with an
+atomic `ADD`, and because `ADD` returns the post-update value, the instance
+recording spend learns the fleet total from a write it was already making — no
+extra read on the request path and no lost updates when two tasks bill at once.
+Before deciding, an instance refreshes that figure if its copy is more than two
+seconds old, so a task that has not served a project recently still enforces
+against what everyone else has spent.
+
+Two caveats worth stating plainly. First, the two-second refresh window bounds
+overshoot rather than eliminating it: a limit can be exceeded by whatever the
+fleet bills within one window, which is a few cents at typical rates but is not
+zero. Making it exact would mean a consistent read on every proxied call. Second,
+if DynamoDB is unreachable the counter update fails and enforcement degrades to
+per-process — the old behaviour — rather than to unlimited; watch
+`last_write_error` in `/health` for that.
+
+**Rate limits are still per-process**, both the hierarchy's `rate_limit_rpm` and
+`SlidingWindowRateLimiter`, so those do need dividing by `desired_count`: two
+tasks each admit the configured RPM. Unlike spend, a sliding window is not a
+running total — sharing it means a read on every request rather than a counter
+folded into a write the request was already making, so it is left per-process
+for now.
+
+Anything marked per-process above is worth knowing before debugging a "flapping"
+admin response. A value that alternates between two answers on identical
+requests is usually two instances disagreeing, not a race inside one of them.
+
 ### Two different things live under `/admin/policies`
 
 They share a URL prefix and nothing else, which is worth knowing before you call
@@ -1741,7 +1787,7 @@ uv sync --extra dev
 uv run pytest tests/ -x -q
 ```
 
-2259 tests including unit, integration, end-to-end, and Hypothesis property-based tests.
+2317 tests including unit, integration, end-to-end, and Hypothesis property-based tests.
 
 ## Deployment
 

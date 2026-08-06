@@ -188,7 +188,10 @@ def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComp
         asyncio.run(policy_resolver.load_nodes())
 
     # --- Quota enforcement ---
-    quota_enforcer = QuotaEnforcer()
+    # Persistence-backed so budget enforcement is fleet-wide: this enforcer's
+    # check_budget is what blocks requests, and a per-process counter made a
+    # single budget limit apply once per instance.
+    quota_enforcer = QuotaEnforcer(persistence=persistence)
 
     # --- Multi-region ---
     # Load a real hub/spoke topology from spokes.yaml when present; otherwise a
@@ -291,6 +294,23 @@ def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComp
         # Rehydrate via load_records so the running spend counters (which back
         # budget checks) are seeded from history, not just the record list.
         cost_tracker.load_records(loaded_records)
+        # Then overwrite those sums with the shared fleet-wide totals. Summing
+        # local records is only right for a single instance; this instance's view
+        # of history is whatever load_usage_records returned, while the counter is
+        # what every instance has actually charged. Ordered after load_records
+        # because it replaces rather than adds.
+        #
+        # Both trackers are seeded: cost_tracker backs the reported budget status,
+        # quota_enforcer backs the block. Without the latter, the first request
+        # after a deploy is admitted against a budget the fleet already exhausted.
+        spend_project_ids = set(projects) | {
+            r.project_id for r in loaded_records if r.project_id
+        }
+        asyncio.run(cost_tracker.adopt_fleet_spend(
+            spend_project_ids,
+            {r.user_id for r in loaded_records if r.user_id},
+        ))
+        asyncio.run(quota_enforcer.adopt_fleet_spend(spend_project_ids))
 
     # --- Smart routing components ---
     leaderboard = ModelLeaderboard()
@@ -721,14 +741,20 @@ def _apply_seed_data(
                 latency_ms=float(s.get("latency_ms", 0.0)),
                 cached_tokens=s.get("cached_tokens", 0),
                 cache_creation_tokens=s.get("cache_creation_tokens", 0),
-            ))
+            ), share=False)
             # Mirror spend into the quota enforcer so /admin/quotas reflects
             # seeded usage (enforcer tracks spend separately from cost_tracker).
+            #
+            # share=False on both: every instance applies this same seed file at
+            # startup, so the fabricated spend is already fleet-consistent, and
+            # the shared counter uses an atomic ADD — sharing it would multiply
+            # demo spend by the instance count and again on every restart.
             await quota_enforcer.record_spend(
                 s["project_id"],
                 s.get("cost", 0.0),
                 budget_limit=projects[s["project_id"]].budget_limit
                 if s["project_id"] in projects else None,
+                share=False,
             )
 
     asyncio.run(_seed_usage())

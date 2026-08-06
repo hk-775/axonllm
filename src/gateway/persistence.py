@@ -500,6 +500,36 @@ class DynamoPersistence:
         except Exception:
             self._record_write_failure("project", project.project_id)
 
+    async def get_project(self, project_id: str) -> Project | None:
+        """Read a single project by id.
+
+        A point read rather than a filtered scan: the caller is resolving one
+        `{id}` path parameter, and `load_projects()` scans the whole table to
+        answer it. Used by `AdminRouter` to resolve a project another instance
+        created, which its startup-hydrated dict cannot know about.
+
+        Returns None both for "no such project" and for a read failure — the
+        caller renders either as `404`. A transient DynamoDB error therefore
+        reads as a missing project, which is the same behaviour the rest of the
+        admin API already has for a dropped read, and is why the exception is
+        logged rather than swallowed silently.
+        """
+        if not self._enabled:
+            return None
+
+        def _get():
+            table = self._get_table()
+            resp = table.get_item(Key={"PK": f"PROJECT#{project_id}", "SK": "PROJECT"})
+            return resp.get("Item")
+
+        try:
+            item = await asyncio.to_thread(_get)
+            if item:
+                return self.deserialize_project(self._convert_decimals_to_native(item))
+        except Exception:
+            logger.warning("Failed to load project %s from DynamoDB", project_id, exc_info=True)
+        return None
+
     async def load_projects(self) -> dict[str, Project]:
         """Scan DynamoDB for all projects and deserialize them."""
         if not self._enabled:
@@ -792,6 +822,172 @@ class DynamoPersistence:
 
     async def update_api_key(self, key: APIKey) -> None:
         await self.save_api_key(key)
+
+    # --- Cross-instance revocation signal ---
+    #
+    # A revocation has to reach instances that are holding the key in their own
+    # validation cache, and there is no message bus here to push it to them. So
+    # instead of broadcasting, one counter in the table is bumped on every
+    # revocation and each instance polls it cheaply: a changed value means "some
+    # key you may be caching was revoked", and the instance drops its cache.
+    #
+    # Deliberately a single counter rather than a per-key tombstone. It costs one
+    # small point read per instance per poll interval no matter how many keys
+    # exist, and the false positive it can produce — clearing cache entries for
+    # keys that were not the revoked one — costs a DynamoDB read on their next
+    # use. Getting revocation wrong in the other direction leaves a key that an
+    # operator revoked still working.
+
+    async def bump_revocation_epoch(self) -> None:
+        """Signal that a key was revoked. Called on the revoking instance."""
+        if not self._enabled:
+            return
+
+        def _bump():
+            table = self._get_table()
+            table.update_item(
+                Key={"PK": "REVOCATION", "SK": "EPOCH"},
+                UpdateExpression="ADD epoch :one",
+                ExpressionAttributeValues={":one": 1},
+            )
+
+        try:
+            await asyncio.to_thread(_bump)
+        except Exception:
+            # Logged, not raised: the revocation itself already persisted, and
+            # failing the request would tell the operator the revocation did not
+            # happen when it did. Other instances fall back to CACHE_TTL_SECONDS.
+            self._record_write_failure("revocation_epoch", "EPOCH")
+
+    async def get_revocation_epoch(self) -> int | None:
+        """Current revocation counter, or None if it could not be read.
+
+        None is distinct from 0: 0 means "no revocation has ever happened", while
+        None means the read failed and the caller should keep whatever it already
+        believed rather than treat the epoch as reset.
+        """
+        if not self._enabled:
+            return None
+
+        def _get():
+            table = self._get_table()
+            resp = table.get_item(
+                Key={"PK": "REVOCATION", "SK": "EPOCH"},
+                ConsistentRead=True,
+            )
+            return resp.get("Item")
+
+        try:
+            item = await asyncio.to_thread(_get)
+            if item is None:
+                return 0
+            return int(item.get("epoch", 0))
+        except Exception:
+            logger.warning("Failed to read revocation epoch", exc_info=True)
+            return None
+
+    # --- Fleet-wide spend counters ---
+    #
+    # Budget enforcement compares spend against a limit, so the spend it reads has
+    # to be the whole fleet's. Every instance accumulating its own counter meant a
+    # $100 limit admitted roughly $100 *per task* — ~$200 with the shipped
+    # desired_count=2, ~$1000 once auto-scaling reached 10 — because no instance
+    # ever saw more than its own share.
+    #
+    # DynamoDB's ADD is atomic and returns the post-update value, which is the
+    # whole trick here: the instance that records spend learns the fleet total as
+    # a side effect of a write it was already making. No extra read, no lock
+    # across instances, and no lost update when two tasks bill at once.
+
+    async def add_spend(self, scope: str, ident: str, cost: float) -> float | None:
+        """Atomically add to a spend counter and return the new fleet-wide total.
+
+        ``scope`` is ``"project"`` or ``"user"``; ``ident`` the id within it.
+
+        Returns None if the counter could not be updated, which the caller must
+        treat as "no fleet total available" and fall back to its local figure —
+        not as zero, which would read as a reset budget and let every request
+        through.
+        """
+        if not self._enabled:
+            return None
+
+        def _add():
+            table = self._get_table()
+            resp = table.update_item(
+                Key={"PK": f"SPEND#{scope}#{ident}", "SK": "TOTAL"},
+                UpdateExpression="ADD #s :c",
+                ExpressionAttributeNames={"#s": "spend"},
+                ExpressionAttributeValues={":c": Decimal(str(cost))},
+                ReturnValues="UPDATED_NEW",
+            )
+            return resp.get("Attributes", {}).get("spend")
+
+        try:
+            total = await asyncio.to_thread(_add)
+            return float(total) if total is not None else None
+        except Exception:
+            # Logged and surfaced through last_write_error rather than raised: a
+            # provider call should not 500 because the counter write failed, and
+            # the caller degrades to its local total.
+            self._record_write_failure(f"spend_{scope}", ident)
+            return None
+
+    async def get_spend(self, scope: str, ident: str) -> float | None:
+        """Read a fleet-wide spend counter, or None if it could not be read.
+
+        Used to seed an instance at startup and to answer admin reads. Not called
+        per request — `add_spend` already returns the total the request path
+        needs.
+
+        None is distinct from 0.0: 0.0 means the counter exists and nothing has
+        been spent, while None means the read failed and the caller should keep
+        whatever total it already had.
+        """
+        if not self._enabled:
+            return None
+
+        def _get():
+            table = self._get_table()
+            resp = table.get_item(
+                Key={"PK": f"SPEND#{scope}#{ident}", "SK": "TOTAL"},
+                ConsistentRead=True,
+            )
+            return resp.get("Item")
+
+        try:
+            item = await asyncio.to_thread(_get)
+            if item is None:
+                return 0.0
+            return float(item.get("spend", 0))
+        except Exception:
+            logger.warning("Failed to read %s spend for %s", scope, ident, exc_info=True)
+            return None
+
+    async def reset_spend(self, scope: str, ident: str) -> bool:
+        """Zero a fleet-wide spend counter. Returns whether it succeeded.
+
+        Deletes the item rather than writing 0, so `ADD` recreates it on the next
+        charge — the same end state with one fewer value to keep consistent.
+
+        Unlike the writes above this reports failure to the caller: a reset is an
+        explicit operator action through `POST /admin/quotas/{id}/reset`, and
+        reporting success for a counter that is still at its old value would tell
+        an operator a project was unblocked when it is still blocked.
+        """
+        if not self._enabled:
+            return False
+
+        def _delete():
+            table = self._get_table()
+            table.delete_item(Key={"PK": f"SPEND#{scope}#{ident}", "SK": "TOTAL"})
+
+        try:
+            await asyncio.to_thread(_delete)
+            return True
+        except Exception:
+            self._record_write_failure(f"spend_reset_{scope}", ident)
+            return False
 
     # --- PolicyNode persistence ---
 

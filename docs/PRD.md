@@ -905,11 +905,21 @@ Single-table design using composite keys:
 | SCIM Group | `SCIM#GROUP#{id}` | `SCIM_GROUP` | SCIM-provisioned group |
 | Event Destinations | `EVENT_DESTINATIONS` | `CONFIG` | The whole destination set in one item |
 | Region Topology | `REGION_TOPOLOGY` | `CONFIG` | The whole spoke topology in one item |
+| Revocation Epoch | `REVOCATION` | `EPOCH` | One counter bumped on every key revocation, polled by each instance so a revoked key stops working fleet-wide |
+| Spend Counter | `SPEND#{scope}#{id}` | `TOTAL` | Fleet-wide spend, so a budget limit is a limit across every instance rather than per instance |
 
-The last two are deliberately single items holding an entire set rather than a row
-per member: a row per destination cannot express a *deletion* without a
-read-diff-write, which is how a repeated `POST /admin/webhooks` came to
-double-deliver every event before it was fixed.
+`EVENT_DESTINATIONS` and `REGION_TOPOLOGY` are deliberately single items holding
+an entire set rather than a row per member: a row per destination cannot express a
+*deletion* without a read-diff-write, which is how a repeated
+`POST /admin/webhooks` came to double-deliver every event before it was fixed.
+
+The last two exist because per-process state answers differently depending on
+which task the load balancer picked. Both are updated with an atomic `ADD` rather
+than a read-modify-write, and the spend counter's `ADD` returns the post-update
+total, so an instance learns the fleet figure from a write it was already making
+instead of paying for a read on the request path. `{scope}` is `quota` for the
+enforcing counter, `project`/`user` for the reported ones — separate keys because
+both are charged on the same request and one key would double every cost.
 
 All writes are fire-and-forget with a warning log on failure — a provider call
 should not 500 because DynamoDB hiccuped. The consequence is that an unreachable

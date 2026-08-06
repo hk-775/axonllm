@@ -8,6 +8,91 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **Admin state was per-task, so the answer depended on which instance replied.**
+  Found on the live two-task deployment while testing the documented steps:
+  `POST /admin/projects` returned `201`, and ten identical authenticated
+  `GET /admin/projects` requests then returned the project six times and `[]`
+  four times. The project was in DynamoDB the whole time — `AdminRouter.projects`
+  is hydrated once at startup and per process, so the task that served the write
+  knew about it and the other never would until it restarted. `infra/stack.py`
+  ships `desired_count=2` and scales to 10, so this was the default configuration
+  rather than an edge case.
+
+  - **Projects now read through to DynamoDB on a local miss** (`_get_project`),
+    and the list endpoint merges the stored set with local state
+    (`_all_projects`), matching what `APIKeyService` already did for keys — which
+    is why authentication never showed this bug while project reads did. The
+    merge keeps locally-known objects, because the mutation handlers change the
+    resolved object in place and replacing it would discard an in-flight edit.
+  - **Key revocations now reach the other instances.** `revoke_key` cleared only
+    the cache of the instance that served the request — the one instance needing
+    no help — so a revoked key stayed valid elsewhere for up to the 300 s cache
+    TTL. `invalidate_cache()` existed for exactly this and nothing called it.
+    Revocation now bumps a counter in the table that each instance polls at most
+    every 5 s, cutting that window from 300 s to 5 s. A failed poll degrades to
+    the old TTL rather than clearing the cache on every request.
+
+  Covered by `tests/unit/test_multi_instance_admin_state.py` (15 tests), each
+  verified to fail against the unfixed code. Two of those tests initially passed
+  against the bug because the test double returned the same object it stored, so
+  revocation propagated through shared object identity in a way DynamoDB never
+  would; the double now serializes on write and read.
+
+- **Budget enforcement was per-instance, so a `budget_limit` was per-instance.**
+  The second half of the same defect, and the expensive half: usage records all
+  reached DynamoDB so reporting was fleet-wide and correct, but `check_budget`
+  compared against a counter only the local process had contributed to. With the
+  shipped `desired_count=2` a `$100` cap admitted roughly `$200`, and fully
+  scaled out roughly `$1000`. Nothing looked wrong from either task — each
+  enforced its limit correctly against its own share.
+
+  - **Spend now lives in a DynamoDB counter updated with an atomic `ADD`.**
+    Because `ADD` returns the post-update value, the instance recording spend
+    learns the fleet total from a write it was already making: no extra read on
+    the request path, no cross-instance lock, and no lost update when two tasks
+    bill simultaneously. The shared write is deliberately outside the per-project
+    lock — holding a lock across a network round trip would cap a project at
+    roughly one request per round trip, and `ADD` needs no help being atomic.
+  - **`QuotaEnforcer` was the gate that mattered**, not `CostTracker`.
+    `CostTracker.check_budget` fills in the `BudgetStatus` on the response;
+    `QuotaEnforcer.check_budget` is what returns `allowed=False` and refuses the
+    request. Both were per-process and both are now fleet-wide, but only the
+    latter was an overspend. They keep separate counter keys because both record
+    the same cost on the same request, so sharing one key would double every
+    charge and fail a budget at half its limit.
+  - **`enforce_all` refreshes a stale figure before deciding.** Adopting the
+    total on write is not enough on its own: an instance that has not billed a
+    project since starting still held its own `$0` and would admit one request
+    per instance against an exhausted budget, again after every deploy. The
+    refresh is rate-limited to 2 s, which bounds the overshoot to what the fleet
+    can bill in that window rather than eliminating it — the alternative is a
+    consistent read on every proxied call.
+  - **Startup seeds both counters** from the shared totals, and does so *after*
+    `load_records` and by replacing rather than adding: every persisted record
+    was already folded into the shared counter when first billed, so summing
+    history on top would inflate a project's spend on every restart.
+  - **`POST /admin/quotas/{id}/reset` clears the shared counter** and answers
+    `503` if it could not, rather than reporting a reset that leaves every other
+    instance still blocking the project. `GET /admin/quotas/{id}` reads through
+    for the same reason — an operator cannot tell which task answered.
+  - **Demo-seed spend stays local** (`share=False`). Every instance fabricates
+    the same seed at startup and `ADD` is not idempotent, so sharing it would
+    multiply demo figures by the instance count and again on every restart.
+
+  A failed counter update degrades to per-instance enforcement — the previous
+  behaviour — rather than to unlimited, and a failed read never reads as `$0`.
+  Covered by `tests/unit/test_multi_instance_budget.py` (30 tests) plus route and
+  bootstrap coverage; 20 of 21 mutations to the new logic are killed, the survivor
+  being an equivalent mutant that the "never move the counter backwards" guard
+  makes unobservable.
+
+### Known limitations
+- **Rate limits are still per-process.** Both the hierarchy's `rate_limit_rpm`
+  and `SlidingWindowRateLimiter` keep their sliding windows in memory, so each
+  task admits the configured RPM independently — divide by `desired_count`.
+  Unlike spend, a sliding window is not a running total, so it cannot ride along
+  on a write the request was already making; sharing it means a read per request.
+
 - **The AWS deploy paths could not be followed as written.** Paths 3 and 4 were
   the two install paths never executed end to end, and all four steps that touch
   the CLI were wrong. Found by running them, not by reading:

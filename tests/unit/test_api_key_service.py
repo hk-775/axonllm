@@ -16,6 +16,10 @@ class FakePersistence:
         self._keys: dict[str, APIKey] = {}
         self._hash_index: dict[str, str] = {}
         self._enabled = True
+        # Cross-instance revocation counter. Modelled here because the service
+        # reads it on every validate_key and bumps it on every revoke, so a
+        # double without it makes those paths raise rather than exercise them.
+        self.epoch = 0
 
     @property
     def enabled(self):
@@ -39,6 +43,12 @@ class FakePersistence:
 
     async def update_api_key(self, key: APIKey) -> None:
         self._keys[key.key_id] = key
+
+    async def bump_revocation_epoch(self) -> None:
+        self.epoch += 1
+
+    async def get_revocation_epoch(self) -> int | None:
+        return self.epoch
 
 
 @pytest.fixture
