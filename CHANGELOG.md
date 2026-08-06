@@ -9,20 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation
 
-- **Corrected the shared-state table: usage aggregates are not fleet-wide on the
-  read path.** The table claimed "Usage/cost records ✅ shared — every record is
-  written to the table", which is true of the write and false of the read. On a
-  live two-task deployment `GET /admin/overview` alternated `total_cost` between
-  `0.000132` and `0` on identical authenticated requests, because
-  `/admin/overview`, `/admin/usage`, `/admin/usage/export` and the
-  `request_count`/`current_spend` fields of `/admin/projects` aggregate an
-  in-memory list hydrated from DynamoDB once at startup. Nothing is lost — the
-  records and the fleet-wide budget counter are both correct in the table — but
-  an operator reading those endpoints on a multi-task deployment gets whichever
-  task the load balancer picked. The row is now split into write and read, and
-  names `GET /admin/quotas/{project_id}` as the endpoint that does read through
-  (stable across 8 polls on the same deployment). Found by following the
-  documented AWS install and polling one endpoint.
+- **Documented how admin aggregates read on a multi-instance deployment**, now
+  that they are fleet-wide (see Fixed). The shared-state table previously claimed
+  "Usage/cost records ✅ shared", which was true of the write and false of the
+  read; it now describes the two sources separately — costs exact from the shared
+  counter, counts refreshed on a 10-second window — and states the
+  `MAX_RECORDS` ceiling that makes count-based aggregates under-report on a busy
+  fleet while cost figures stay correct.
 - **A `docker compose` port clash on 8000 is now avoidable and explained.** The
   host port was the only value in `docker-compose.yml` not parameterised, and the
   clash is silent rather than fatal: Docker binds `::` while a local
@@ -37,6 +30,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Admin reads reported one task's numbers as the whole fleet's.** Every admin
+  aggregate summed `CostTracker._records` — an in-memory list hydrated from
+  DynamoDB once at startup and afterwards grown only by requests that instance
+  served. Behind the shipped `desired_count=2` that made each answer a function of
+  which task the load balancer picked: `GET /admin/overview` alternated
+  `total_cost` between `0.000132` and `0` on identical authenticated requests
+  after a single chat call. Nothing was ever lost — the records and the budget
+  counter were both correct in the table — but an operator would reasonably
+  conclude their own client was broken.
+
+  Fixed with two sources rather than one, because only money has a cheap exact
+  one. Costs (`current_spend` on `/admin/projects` and `/admin/users`,
+  `total_cost` on `/admin/users/{id}`) now read the shared `SPEND#` counter that
+  budget enforcement already uses: one `GetItem`, exact, and immune to record
+  trimming — a dashboard figure that disagreed with the limit someone was
+  throttled on was its own class of confusion. Counts and per-model/user
+  breakdowns have no such counter, so they re-read the usage records, rate-limited
+  to one refresh per 10 seconds per instance because that read is a paged scan
+  whose cost grows with history and the dashboard's traces panel polls every 3
+  seconds. Net effect: costs are exact, counts are at most 10 seconds behind, and
+  both agree across instances.
+
+  Covers `/admin/overview`, `/admin/usage`, `/admin/usage/export`,
+  `/admin/projects`, `/admin/projects/{id}`, `/admin/users`, `/admin/users/{id}`,
+  `/admin/models`, `/admin/traces`, `/admin/catalog-drift` and the efficiency
+  endpoints — wider than the four originally reported, since `list_users`,
+  `list_models`, `traces` and the efficiency analyzer read the same list the same
+  way. `request_count` and `total_requests` are now fleet-wide too, which the
+  previous release documented as impossible without new storage; re-reading the
+  records turned out to be enough, so no new counter was added.
+
+  The refresh deliberately does **not** touch the spend counters, which is the one
+  thing separating it from `load_records`: `_bump_spend_fleet_wide` already
+  *replaces* each counter with the shared fleet total, so folding the fleet's
+  records in on top would count other instances twice and start refusing requests
+  under a budget the project had not reached. `/admin/traces` also now sorts by
+  timestamp instead of slicing the list tail, because a fleet-wide merge appends
+  other instances' records in scan order and the tail stops meaning "recent".
 - **The landing page 404s in the container.** The Dockerfile never copied
   `site/`, so `GET /` returned a stub on every containerised deployment while
   working locally — including `docker compose up`, which is the first thing the

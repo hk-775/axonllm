@@ -228,6 +228,93 @@ class CostTracker:
             existing.add(rec.request_id)
             self._bump_spend(rec)
 
+    async def fleet_spend(self, scope: str, ident: str) -> float | None:
+        """Fleet-wide spend for one project/user, read from the shared counter.
+
+        The exact figure, with no dependence on the record list: the counter is a
+        single item that every instance ``ADD``s to as it bills, so one read gets
+        the whole fleet's spend. Cheap enough to do per admin request — one
+        ``GetItem``, versus the paged scan ``sync_records_from_store`` needs — and
+        unlike summing records it has no ceiling, so it stays right after
+        ``MAX_RECORDS`` trimming has discarded old history.
+
+        ``scope`` is ``"project"`` or ``"user"``, matching the shared counter keys.
+
+        The local counter is updated with what comes back, so a subsequent budget
+        check on this instance benefits too. Returns None when there is no shared
+        counter to read or it cannot be read, which callers must treat as "use the
+        local figure" rather than as zero — a project that has spent money must
+        never report $0 because DynamoDB was briefly unavailable.
+        """
+        if self._persistence is None or not self._persistence.enabled:
+            return None
+        try:
+            total = await self._persistence.get_spend(scope, ident)
+        except Exception:
+            logger.warning(
+                "Failed to read shared %s spend for %s; falling back to local",
+                scope, ident, exc_info=True,
+            )
+            return None
+        if total is None:
+            return None
+        if scope == "project":
+            self._project_spend[ident] = total
+        elif scope == "user":
+            self._user_spend[ident] = total
+        return total
+
+    async def sync_records_from_store(self) -> bool:
+        """Re-read persisted usage records so aggregates cover the whole fleet.
+
+        Admin aggregates sum ``_records``, which only ever contains what *this*
+        process served plus what was loaded at startup. On a multi-instance
+        deployment that makes every count and total depend on which task the load
+        balancer picked: a two-task Fargate deployment returned ``total_cost`` of
+        ``0.000132`` and ``0`` on alternating identical requests.
+
+        Deliberately does NOT touch the spend counters, which is the one thing
+        separating this from ``load_records``. ``_bump_spend_fleet_wide`` already
+        *replaces* each counter with the shared fleet-wide total, so that total
+        already includes every instance's spend. Folding these records in on top
+        would count the other instances twice and start rejecting requests under a
+        budget the project has not reached. Budget enforcement reads the shared
+        counter and must keep owning that number; this method only widens the
+        history that reporting can see.
+
+        Returns whether the refresh happened, so a caller can tell "synced" from
+        "persistence is off, these numbers are one instance's" rather than
+        guessing.
+        """
+        if self._persistence is None or not self._persistence.enabled:
+            return False
+        try:
+            records = await self._persistence.load_usage_records()
+        except Exception:
+            logger.warning(
+                "Failed to refresh usage records for admin read; "
+                "aggregates cover this instance only",
+                exc_info=True,
+            )
+            return False
+
+        # De-dupe against what is already here rather than replacing the list:
+        # records this instance served since the last refresh are not in the
+        # store yet if their write failed, and dropping them would make a
+        # refresh lose data that the un-refreshed path would have shown.
+        existing = {r.request_id for r in self._records}
+        for rec in records:
+            if rec.request_id not in existing:
+                self._records.append(rec)
+                existing.add(rec.request_id)
+
+        # Same trim as record_usage, for the same reason: the list is bounded, and
+        # a fleet-wide refresh is exactly how it gets big fastest. Spend counters
+        # are untouched above, so trimming cannot cost budget accuracy here.
+        if len(self._records) > self.MAX_RECORDS:
+            self._records = self._records[-(self.MAX_RECORDS // 2):]
+        return True
+
     async def adopt_fleet_spend(self, project_ids, user_ids=()) -> None:
         """Replace local spend counters with the shared fleet-wide totals.
 

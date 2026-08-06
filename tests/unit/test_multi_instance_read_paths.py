@@ -1,36 +1,83 @@
-"""Which admin reads survive a second instance, and which the docs promise do.
+"""Admin reads describe the fleet, not whichever task the balancer picked.
 
-Found by running the documented AWS install and then polling one endpoint: on a
+Found by running the documented AWS install and polling one endpoint: on a
 two-task Fargate deployment ``GET /admin/overview`` alternated ``total_cost``
 between ``0.000132`` and ``0`` on identical authenticated requests. Both answers
-were honest — the record was written to DynamoDB, but each task aggregates an
-in-memory list that is hydrated once at startup, so only the task that served the
-chat counted it. The README's shared-state table said "Usage/cost records ✅
-shared", which is true of the write and not of the read.
+were honest — the record was written to DynamoDB, but each task aggregated an
+in-memory list hydrated once at startup, so only the task that served the chat
+counted it.
 
-Nothing in the existing suite could catch that: every other test drives a single
-``AdminAPI`` against one ``CostTracker``, which is a one-instance fleet by
-construction. So these tests build *two* trackers over one persistence layer —
-the shape the deployment actually has — and assert which endpoints agree.
+#86 documented that divergence and pinned it. This file now pins the fix, so the
+tests that asserted "these disagree" are gone rather than inverted: the condition
+they described is no longer the intended behaviour, and leaving them as xfail
+would imply the divergence is still a state we ship.
 
-They pin current behaviour rather than the behaviour we want. If someone adds a
-read-through and ``overview`` starts agreeing across instances, the test named
-for the divergence fails and points at the README row to update. That is the
-intent: the docs and the code should not be able to drift apart quietly again.
+Two sources, deliberately not one — the split is the design and the tests are
+arranged to catch a regression that collapses it:
+
+* **money** reads the shared ``SPEND#`` counter per call, so it is exact,
+  unaffected by the sync window, and survives ``MAX_RECORDS`` trimming.
+* **counts and per-model/user aggregates** have no shared counter, so they come
+  from a refreshed record list, rate-limited by ``USAGE_SYNC_TTL_SECONDS``.
+
+The trackers here are two objects over one fake table, because "two processes,
+one store" is the whole condition; a single instance cannot exhibit any of this.
 """
 
 from __future__ import annotations
 
+import asyncio
 import re
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
+from src.gateway.admin.routes import AdminAPI
 from src.gateway.cost_tracker import CostTracker
-from src.gateway.models import UsageRecord
+from src.gateway.models import Project, TokenPricing, UsageRecord
 
 _README = Path(__file__).resolve().parents[2] / "README.md"
+
+
+def _run(coro):
+    return asyncio.run(coro)
+
+
+class SharedStore:
+    """One table shared by every instance in a test, standing in for DynamoDB.
+
+    ``load_usage_records`` returns records written by *any* instance, which is
+    what the real scan does and what makes the fleet-wide read possible.
+    ``scans`` counts them so the TTL can be asserted on rather than assumed.
+    """
+
+    def __init__(self) -> None:
+        self.enabled = True
+        self.records: list[UsageRecord] = []
+        self.totals: dict[tuple[str, str], float] = {}
+        self.scans = 0
+        self.spend_reads = 0
+
+    async def save_usage_record(self, record) -> None:
+        self.records.append(record)
+
+    async def load_usage_records(self) -> list[UsageRecord]:
+        self.scans += 1
+        return list(self.records)
+
+    async def add_spend(self, scope: str, ident: str, cost: float) -> float | None:
+        total = self.totals.get((scope, ident), 0.0) + cost
+        self.totals[(scope, ident)] = total
+        return total
+
+    async def get_spend(self, scope: str, ident: str) -> float | None:
+        self.spend_reads += 1
+        return self.totals.get((scope, ident))
+
+    # AdminAPI._all_projects scans for projects created by another instance.
+    async def load_projects(self) -> dict:
+        return {}
 
 
 def _record(**kw) -> UsageRecord:
@@ -51,87 +98,330 @@ def _record(**kw) -> UsageRecord:
     return UsageRecord(**defaults)
 
 
-class TestTwoInstancesDisagreeOnUsageAggregates:
-    """The live symptom, reproduced without AWS."""
+def _tracker(store) -> CostTracker:
+    return CostTracker(
+        pricing_config={"anthropic": {"claude-sonnet": TokenPricing(
+            prompt_token_cost=0.003, completion_token_cost=0.015)}},
+        persistence=store,
+    )
 
-    def test_a_record_billed_on_one_instance_is_invisible_to_the_other(self):
-        """This is the flapping ``total_cost`` in one assertion.
 
-        ``overview`` sums ``_records``, so instance B — which never served the
-        request — sums an empty list. No error, no warning, just a different
-        number depending on which task the load balancer picked.
+def _admin(tracker, store, projects=None) -> AdminAPI:
+    """An AdminAPI over one tracker, with only what these endpoints touch."""
+    return AdminAPI(
+        cost_tracker=tracker,
+        health_tracker=None,
+        model_registry=None,
+        projects=projects or {},
+        persistence=store,
+    )
+
+
+class TestOneRecordIsVisibleFromEveryInstance:
+    """The live symptom, reproduced without AWS — and now fixed."""
+
+    def test_a_record_billed_on_one_instance_is_counted_by_the_other(self):
+        """This is the flapping ``total_cost``, now stable.
+
+        Task A serves the request; task B never sees it in-process. B's
+        ``/admin/overview`` must still report it, because the record is in the
+        store and the read goes there.
         """
-        task_a = CostTracker(pricing_config={})
-        task_b = CostTracker(pricing_config={})
-        task_a._records.append(_record())
+        store = SharedStore()
+        task_a, task_b = _tracker(store), _tracker(store)
+        _run(task_a.record_usage(_record()))
 
-        assert sum(r.cost for r in task_a._records) == pytest.approx(0.000132)
-        assert sum(r.cost for r in task_b._records) == 0.0, (
-            "if this now agrees, a read-through was added — update the "
-            "shared-state table in the README"
+        body = _run(_admin(task_b, store).overview(None))
+        payload = _json(body)
+        assert payload["total_cost"] == pytest.approx(0.000132)
+        assert payload["total_requests"] == 1
+
+    def test_both_instances_report_the_same_totals(self):
+        """Neither task is privileged: the answer must not depend on the route.
+
+        Asserting equality rather than a literal, since the defect was
+        *disagreement* — two instances that are both wrong in the same way would
+        at least not mislead an operator into blaming their client.
+        """
+        store = SharedStore()
+        task_a, task_b = _tracker(store), _tracker(store)
+        _run(task_a.record_usage(_record(request_id="r_a", cost=0.01)))
+        _run(task_b.record_usage(_record(request_id="r_b", cost=0.02)))
+
+        a = _json(_run(_admin(task_a, store).overview(None)))
+        b = _json(_json_reset(store, task_b, _admin(task_b, store)))
+        assert a["total_cost"] == pytest.approx(b["total_cost"])
+        assert a["total_requests"] == b["total_requests"] == 2
+
+    def test_request_counts_converge_too(self):
+        """``total_requests`` has no shared counter, so it relies on the sync.
+
+        Worth its own test: cost could be right via the counter while counts stay
+        per-instance, which is the half-fix this is meant to rule out.
+        """
+        store = SharedStore()
+        task_a, task_b = _tracker(store), _tracker(store)
+        for i in range(3):
+            _run(task_a.record_usage(_record(request_id=f"r{i}")))
+
+        assert _json(_run(_admin(task_b, store).overview(None)))["total_requests"] == 3
+
+
+class TestMoneyDoesNotDependOnTheSyncWindow:
+    """Cost reads the shared counter, so it is exact rather than TTL-fresh."""
+
+    def test_project_spend_comes_from_the_counter_not_the_records(self):
+        """The records are deliberately withheld from the store here.
+
+        Only the counter has the spend, so a ``current_spend`` that is right can
+        only have come from the counter — this fails if someone "simplifies" the
+        cost path into summing records.
+        """
+        store = SharedStore()
+        tracker = _tracker(store)
+        store.totals[("project", "my-project")] = 4.25
+
+        api = _admin(tracker, store, {"my-project": Project(
+            project_id="my-project", name="Mine", budget_limit=10.0)})
+        row = _json(_run(api.list_projects(None)))[0]
+        assert row["current_spend"] == pytest.approx(4.25)
+        assert row["budget_utilization_pct"] == pytest.approx(42.5)
+
+    def test_spend_survives_record_trimming(self):
+        """The ceiling that makes summing records wrong even when it is fresh.
+
+        ``record_usage`` trims to ``MAX_RECORDS // 2`` past the cap, so on a busy
+        deployment the oldest history is simply gone. A summed total then
+        under-reports permanently; the counter does not.
+        """
+        store = SharedStore()
+        tracker = _tracker(store)
+        tracker.MAX_RECORDS = 4
+        for i in range(6):
+            _run(tracker.record_usage(_record(request_id=f"r{i}", cost=1.0)))
+
+        assert len(tracker._records) <= 4, "trim did not happen; test proves nothing"
+        api = _admin(tracker, store, {"my-project": Project(
+            project_id="my-project", name="Mine", budget_limit=100.0)})
+        row = _json(_run(api.list_projects(None)))[0]
+        assert row["current_spend"] == pytest.approx(6.0), (
+            "spend was summed from the trimmed record list rather than read "
+            "from the shared counter"
         )
 
-    def test_request_counts_diverge_the_same_way(self):
-        """``total_requests`` and ``request_count`` have no shared counter at all.
+    def test_an_unreadable_counter_falls_back_rather_than_reporting_zero(self):
+        """A DynamoDB blip must not make a spending project look free.
 
-        Worth separating from cost: spend has a fleet-wide DynamoDB counter that
-        *could* back a read-through, so cost is fixable without new storage.
-        A request count has no such counter, which is why the README says it
-        under-reports rather than promising a fix.
+        Reporting $0 for a project at its limit is the one failure mode worse
+        than staleness, because it invites raising a budget that is already spent.
         """
-        task_a = CostTracker(pricing_config={})
-        task_b = CostTracker(pricing_config={})
-        task_a._records.append(_record())
-        assert len(task_a._records) == 1
-        assert len(task_b._records) == 0
+        store = SharedStore()
+
+        async def boom(scope, ident):
+            raise RuntimeError("dynamo down")
+
+        store.get_spend = boom
+        tracker = _tracker(store)
+        tracker._project_spend["my-project"] = 7.5
+
+        api = _admin(tracker, store, {"my-project": Project(
+            project_id="my-project", name="Mine", budget_limit=10.0)})
+        row = _json(_run(api.list_projects(None)))[0]
+        assert row["current_spend"] == pytest.approx(7.5)
 
 
-class TestTheReadmeDescribesThisHonestly:
-    """The defect was a docs claim as much as a code one.
+class TestTheSyncIsRateLimited:
+    """The scan is paged and grows with history; the dashboard polls every 3s."""
 
-    A reader who believed the old table would conclude their client was broken,
-    which is worse than the divergence itself.
-    """
+    def test_repeated_reads_within_the_window_scan_once(self):
+        store = SharedStore()
+        api = _admin(_tracker(store), store)
+        for _ in range(5):
+            _run(api.overview(None))
+        assert store.scans == 1, f"expected one scan inside the TTL, got {store.scans}"
 
-    def test_the_write_and_the_read_are_listed_separately(self):
-        table = _README.read_text(encoding="utf-8")
-        assert "Usage/cost records — **the write**" in table
-        assert "Usage/cost records — **the admin read**" in table
+    def test_the_window_expiring_allows_another_scan(self):
+        """Drives the clock by moving the recorded timestamp, not by sleeping."""
+        store = SharedStore()
+        api = _admin(_tracker(store), store)
+        _run(api.overview(None))
+        api._last_usage_sync -= api.USAGE_SYNC_TTL_SECONDS + 1
+        _run(api.overview(None))
+        assert store.scans == 2
 
-    def test_the_read_row_is_not_marked_shared(self):
-        """Guards the specific wording that was wrong.
+    def test_a_failed_sync_is_retried_on_the_next_read(self):
+        """The clock advances only on success.
 
-        The old row was ``| Usage/cost **records** | ✅ |``. If a ✅ reappears on
-        the admin-read row, the table is making the claim that the live
-        deployment disproved.
+        Otherwise one failure would serve one-instance numbers for a full TTL
+        after the store recovered, which is the original bug on a timer.
         """
+        store = SharedStore()
+        calls = {"n": 0}
+
+        async def flaky():
+            calls["n"] += 1
+            raise RuntimeError("scan failed")
+
+        store.load_usage_records = flaky
+        api = _admin(_tracker(store), store)
+        _run(api.overview(None))
+        _run(api.overview(None))
+        assert calls["n"] == 2, "a failed sync was cached as though it succeeded"
+
+    def test_the_first_read_always_syncs(self):
+        """Guards the ``-inf`` sentinel.
+
+        ``time.monotonic()`` has an arbitrary origin and can be near zero early
+        in a process, so a ``0`` sentinel would skip the very first sync — the
+        one an operator is most likely to be looking at after a deploy.
+        """
+        store = SharedStore()
+        api = _admin(_tracker(store), store)
+        assert api._last_usage_sync == float("-inf")
+        _run(api.overview(None))
+        assert store.scans == 1
+
+
+class TestTheSyncDoesNotCorruptBudgets:
+    """The trap in this fix: refreshing must not re-count other instances' spend."""
+
+    def test_syncing_leaves_the_spend_counters_alone(self):
+        """``load_records`` bumps counters; the sync must not.
+
+        ``_bump_spend_fleet_wide`` already *replaced* the local counter with the
+        fleet total, so folding the fleet's records in again would double-count
+        and start refusing requests under a budget the project has not reached.
+        """
+        store = SharedStore()
+        task_a, task_b = _tracker(store), _tracker(store)
+        _run(task_a.record_usage(_record(request_id="r_a", cost=1.0)))
+        _run(task_b.record_usage(_record(request_id="r_b", cost=1.0)))
+
+        # B billed $1 and adopted the $2 fleet total from the shared counter.
+        assert task_b._project_spend["my-project"] == pytest.approx(2.0)
+
+        _run(task_b.sync_records_from_store())
+        assert task_b._project_spend["my-project"] == pytest.approx(2.0), (
+            "the sync folded fleet records into the counter on top of the fleet "
+            "total it already held — budgets will now block early"
+        )
+
+    def test_budget_checks_still_see_the_fleet_total(self):
+        """The counter stays authoritative for enforcement after a sync."""
+        store = SharedStore()
+        task_a, task_b = _tracker(store), _tracker(store)
+        task_b.register_project("my-project", budget_limit=5.0)
+        _run(task_a.record_usage(_record(request_id="r_a", cost=3.0)))
+        _run(task_b.record_usage(_record(request_id="r_b", cost=1.0)))
+        _run(task_b.sync_records_from_store())
+
+        status = _run(task_b.check_budget("my-project"))
+        assert status.current_spend == pytest.approx(4.0)
+
+    def test_locally_served_records_are_not_lost_by_a_sync(self):
+        """A record whose store write failed must survive the refresh.
+
+        The sync merges rather than replaces, so a dropped write degrades to
+        "visible on one instance" instead of vanishing from the instance that
+        served it.
+        """
+        store = SharedStore()
+
+        async def drop(record):
+            pass
+
+        store.save_usage_record = drop
+        tracker = _tracker(store)
+        _run(tracker.record_usage(_record(request_id="only_here")))
+        _run(tracker.sync_records_from_store())
+        assert [r.request_id for r in tracker._records] == ["only_here"]
+
+    def test_a_record_is_not_counted_twice_across_syncs(self):
+        store = SharedStore()
+        tracker = _tracker(store)
+        _run(tracker.record_usage(_record()))
+        for _ in range(3):
+            _run(tracker.sync_records_from_store())
+        assert len(tracker._records) == 1
+
+
+class TestTracesStayChronological:
+    """Ordering, because the fleet-wide list no longer arrives sorted."""
+
+    def test_the_newest_request_is_first_even_when_the_scan_is_unordered(self):
+        """A scan returns rows in arbitrary order.
+
+        Within one process the record list was chronological, so ``records[-limit:]``
+        meant "recent" for free. That assumption dies with the merge — the tail
+        becomes whatever the scan happened to return last, presented as recent.
+        """
+        store = SharedStore()
+        base = datetime(2026, 8, 6, 12, 0, tzinfo=UTC)
+        store.records = [
+            _record(request_id="middle", timestamp=base + timedelta(minutes=5)),
+            _record(request_id="newest", timestamp=base + timedelta(minutes=9)),
+            _record(request_id="oldest", timestamp=base),
+        ]
+        api = _admin(_tracker(store), store)
+        traces = _json(_run(api.traces(_FakeRequest())))["traces"]
+        assert [t["request_id"] for t in traces] == ["newest", "middle", "oldest"]
+
+    def test_the_limit_keeps_the_newest_not_an_arbitrary_slice(self):
+        store = SharedStore()
+        base = datetime(2026, 8, 6, 12, 0, tzinfo=UTC)
+        store.records = [
+            _record(request_id=f"r{i}", timestamp=base + timedelta(minutes=i))
+            for i in (3, 0, 4, 1, 2)
+        ]
+        api = _admin(_tracker(store), store)
+        traces = _json(_run(api.traces(_FakeRequest({"limit": "2"}))))["traces"]
+        assert [t["request_id"] for t in traces] == ["r4", "r3"]
+
+    def test_an_undated_record_does_not_sort_as_newest(self):
+        """A missing timestamp must not float to the top of a live view, and must
+        not raise by comparing None to a datetime."""
+        store = SharedStore()
+        store.records = [
+            _record(request_id="dated", timestamp=datetime(2026, 8, 6, tzinfo=UTC)),
+            _record(request_id="undated", timestamp=None),
+        ]
+        api = _admin(_tracker(store), store)
+        traces = _json(_run(api.traces(_FakeRequest())))["traces"]
+        assert traces[0]["request_id"] == "dated"
+
+
+class TestPersistenceOffIsUnchanged:
+    """Single-instance and no-DynamoDB deployments must not pay for any of this."""
+
+    def test_no_persistence_means_no_sync_and_local_numbers(self):
+        tracker = CostTracker(pricing_config={})
+        _run(tracker.record_usage(_record()))
+        payload = _json(_run(_admin(tracker, None).overview(None)))
+        assert payload["total_cost"] == pytest.approx(0.000132)
+
+    def test_sync_reports_that_it_did_not_run(self):
+        """The bool is the caller's way to tell "fleet-wide" from "this instance"."""
+        assert _run(CostTracker(pricing_config={}).sync_records_from_store()) is False
+
+
+class TestTheReadmeDescribesTheFix:
+    """The defect was a docs claim as much as a code one."""
+
+    def test_the_admin_read_row_is_no_longer_marked_unshared(self):
         for line in _README.read_text(encoding="utf-8").splitlines():
             if "the admin read" in line:
-                assert "❌" in line and "✅" not in line, f"read row claims shared: {line}"
-                break
-        else:
-            pytest.fail("the admin-read row is gone — did the table get rewritten?")
+                assert "✅" in line, f"read row still claims per-instance: {line}"
+                return
+        pytest.fail("the admin-read row is gone — did the table get rewritten?")
 
-    def test_the_endpoint_that_does_read_through_is_named(self):
-        """An adopter needs the working alternative, not just the caveat.
-
-        ``/admin/quotas/{project_id}`` reads the shared spend counter per call
-        and was stable across 8 polls on the live two-task deployment, so it is
-        the answer to "then what should I query?".
-        """
+    def test_the_staleness_window_is_documented(self):
+        """An operator needs to know the counts can be seconds behind."""
         text = _README.read_text(encoding="utf-8")
-        section = text[text.index("Usage aggregates are per-process") :][:1600]
-        assert "/admin/quotas/" in section
+        assert re.search(r"10\s*s(econd)?", text)
 
 
 class TestTheComposeHostPortIsOverridable:
-    """A clash on 8000 is silent, so the override has to be discoverable.
-
-    Docker binds ``::`` and a local ``serve_dashboard.py`` binds ``0.0.0.0``;
-    both start, then ``localhost`` resolves to ``::1`` first and the container
-    answers for the gateway started by hand. Observed while running the
-    documented compose and path-1 instructions at the same time.
-    """
+    """Kept from #86: a clash on 8000 is silent, so the override must be findable."""
 
     def test_the_host_port_is_parameterised(self):
         compose = (_README.parent / "docker-compose.yml").read_text(encoding="utf-8")
@@ -141,10 +431,31 @@ class TestTheComposeHostPortIsOverridable:
         )
 
     def test_the_container_port_stays_8000(self):
-        """The right-hand side must not move: AXON_SERVER_PORT and the
-        healthcheck URL are both fixed at 8000 inside the container."""
         compose = (_README.parent / "docker-compose.yml").read_text(encoding="utf-8")
         assert "urlopen('http://localhost:8000/health')" in compose
 
     def test_the_readme_shows_how(self):
         assert "AXON_HOST_PORT=8002 docker compose up" in _README.read_text(encoding="utf-8")
+
+
+# ----------------------------------------------------------------------
+# Helpers
+# ----------------------------------------------------------------------
+
+
+class _FakeRequest:
+    """Just the query_params these handlers read."""
+
+    def __init__(self, params: dict | None = None) -> None:
+        self.query_params = params or {}
+
+
+def _json(response):
+    """Decode a JSONResponse body."""
+    import json
+    return json.loads(response.body)
+
+
+def _json_reset(store, tracker, api):
+    """Read ``overview`` from a second instance without its own TTL interfering."""
+    return _run(api.overview(None))
