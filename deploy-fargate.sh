@@ -1,6 +1,17 @@
 #!/bin/bash
 # Deploy AxonLLM to ECS Fargate via CDK
-# Usage: ./deploy-fargate.sh [region]
+# Usage: ./deploy-fargate.sh [region] [--yes]
+#
+# --yes skips CDK's approval prompt for security-sensitive changes (IAM roles,
+# security group rules). Without it the script cannot run unattended at all: CDK
+# needs a terminal to ask, so in CI it fails with "Stack includes
+# security-sensitive updates, but terminal (TTY) is not attached". Setting CI=true
+# has the same effect, which is what most CI providers export already.
+#
+# Only pass --yes when you have reviewed the diff (`cd infra && npx cdk diff`)
+# and accept the IAM and network grants it lists. The prompt is a consent gate,
+# not an authentication one — your AWS credentials being valid is a separate
+# question from whether you meant to create those specific roles.
 #
 # Prerequisites:
 #   - Docker running
@@ -23,9 +34,37 @@
 
 set -euo pipefail
 
-REGION="${1:-us-east-1}"
+REGION=""
+# CI=true means no human is watching, so prompting would only hang or crash.
+ASSUME_YES="${CI:-false}"
+
+for arg in "$@"; do
+    case "$arg" in
+        --yes|-y) ASSUME_YES=true ;;
+        -*) echo "Unknown option: $arg" >&2; exit 2 ;;
+        *)
+            if [ -n "$REGION" ]; then
+                echo "Unexpected argument: $arg (region already set to $REGION)" >&2
+                exit 2
+            fi
+            REGION="$arg"
+            ;;
+    esac
+done
+REGION="${REGION:-us-east-1}"
+
+# "broadening" still prompts, and only when a change widens IAM or network
+# access; "never" prompts for nothing. Anything else CDK would reject.
+if [ "$ASSUME_YES" = true ]; then
+    APPROVAL=never
+else
+    APPROVAL=broadening
+fi
 
 echo "==> Deploying AxonLLM to ECS Fargate in ${REGION}..."
+if [ "$APPROVAL" = never ]; then
+    echo "    Approval prompts disabled (--yes or CI=true)."
+fi
 echo ""
 
 cd "$(dirname "$0")/infra"
@@ -42,7 +81,7 @@ source .venv/bin/activate
 echo "==> Running cdk deploy..."
 npx cdk deploy \
     --context region="$REGION" \
-    --require-approval broadening \
+    --require-approval "$APPROVAL" \
     --outputs-file outputs.json
 
 echo ""
