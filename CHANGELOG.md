@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation
+
+- **Corrected the shared-state table: usage aggregates are not fleet-wide on the
+  read path.** The table claimed "Usage/cost records ✅ shared — every record is
+  written to the table", which is true of the write and false of the read. On a
+  live two-task deployment `GET /admin/overview` alternated `total_cost` between
+  `0.000132` and `0` on identical authenticated requests, because
+  `/admin/overview`, `/admin/usage`, `/admin/usage/export` and the
+  `request_count`/`current_spend` fields of `/admin/projects` aggregate an
+  in-memory list hydrated from DynamoDB once at startup. Nothing is lost — the
+  records and the fleet-wide budget counter are both correct in the table — but
+  an operator reading those endpoints on a multi-task deployment gets whichever
+  task the load balancer picked. The row is now split into write and read, and
+  names `GET /admin/quotas/{project_id}` as the endpoint that does read through
+  (stable across 8 polls on the same deployment). Found by following the
+  documented AWS install and polling one endpoint.
+- **A `docker compose` port clash on 8000 is now avoidable and explained.** The
+  host port was the only value in `docker-compose.yml` not parameterised, and the
+  clash is silent rather than fatal: Docker binds `::` while a local
+  `serve_dashboard.py` binds `0.0.0.0`, so both start, `localhost` resolves to
+  `::1` first, and the container answers for the gateway started by hand. Now
+  `${AXON_HOST_PORT:-8000}`, documented next to the quickstart command.
+- **Stated a minimum Node version for the CDK deploy.** The prerequisite said
+  only "Node.js installed". On Node 18 every `cdk` call prints a ten-line
+  end-of-life banner that reads like a failure and buries the real output, and
+  the bundled AWS SDK warns it will require Node 22 from January 2027. Now
+  documents 20+, preferring 22 or 24.
+
 ### Fixed
 
 - **The landing page 404s in the container.** The Dockerfile never copied

@@ -18,6 +18,12 @@ docker compose up          # needs the Docker daemon running
 # (or go straight to http://localhost:8000/admin/dashboard)
 ```
 
+Already running something on 8000? `AXON_HOST_PORT=8002 docker compose up`. Worth
+knowing because the clash does not announce itself: Docker binds `::` while a
+local `serve_dashboard.py` binds `0.0.0.0`, so both start, and `localhost` then
+resolves to `::1` first — the container answers and the gateway you started by
+hand goes quietly unreachable.
+
 No Docker? Use [path 1 or 2](#quick-start) below, which need only Python and uv.
 
 This comes up **with the demo data seeded** (Acme Corp, 3 users, 66 usage
@@ -1434,10 +1440,35 @@ ALB happened to pick.
 | API keys | ✅ | Read through to DynamoDB, cached for 5 min |
 | Key revocations | ✅ | A revocation counter in the table, polled every 5 s |
 | Projects | ✅ | Startup hydration plus a read-through on a local miss |
-| Usage/cost **records** | ✅ | Every record is written to the table |
+| Usage/cost records — **the write** | ✅ | Every record goes to the table, so nothing is lost |
+| Usage/cost records — **the admin read** | ❌ | Hydrated at startup only; see below |
 | Budget **enforcement** | ✅ | Atomic counter in the table — see below |
 | Rate limits (policy RPM) | ❌ | Per-process window; divide `rate_limit_rpm` by `desired_count` |
 | Provider health, caches | ❌ | Per-process by design; each instance probes for itself |
+
+**Usage aggregates are per-process on the read path**, and this is the one entry
+above most likely to be mistaken for a bug in your own client. Every usage record
+*is* written to DynamoDB — nothing is lost, and budget enforcement below uses a
+separate counter that is genuinely fleet-wide. But `GET /admin/overview`,
+`/admin/usage`, `/admin/usage/export` and the `request_count`/`current_spend`
+fields of `/admin/projects` all aggregate an in-memory list that is loaded from
+the table **once at startup** and afterwards only grows with the requests that
+instance happened to serve. So on a two-task deployment:
+
+```
+$ for i in 1 2 3 4; do curl -s $ALB/admin/overview -H "$AUTH" | jq .total_cost; done
+0.000132
+0
+0.000132
+0            # one chat request; each task reports only what it served
+```
+
+Both answers are "correct" for the instance that gave them. The reliable readings
+today are `GET /admin/quotas/{project_id}`, which reads the shared counter on
+every call and is stable, and the table itself. For a scripted export, either
+scan the `USAGE#` items directly or run against a single task.
+`request_count` and `total_requests` have no equivalent shared counter, so they
+under-report on any deployment with more than one task.
 
 **Budget enforcement is fleet-wide.** A `budget_limit` of `$100` is `$100` across
 the whole deployment, not per task. Spend goes into a DynamoDB counter with an
@@ -1817,7 +1848,7 @@ uv sync --extra dev
 uv run pytest tests/ -x -q
 ```
 
-2324 tests including unit, integration, end-to-end, and Hypothesis property-based tests.
+2332 tests including unit, integration, end-to-end, and Hypothesis property-based tests.
 
 ## Deployment
 
@@ -1838,7 +1869,10 @@ This deploys AxonLLM as a Fargate service (via CDK) with:
 Prerequisites:
 - AWS CLI configured with appropriate permissions
 - Docker running
-- Node.js installed (for CDK CLI)
+- Node.js **20 or newer** (for the CDK CLI; 22 or 24 preferred). Node 18 still
+  deploys, but every `cdk` call prints a ten-line end-of-life banner that reads
+  like a failure and buries the real output — and the bundled AWS SDK warns it
+  will require Node 22 from January 2027
 - First-time: `cd infra && uv venv && uv pip install -r requirements.txt && npx cdk bootstrap`
   (`uv venv` first — `uv pip install` refuses without one; `npx cdk` because the
   CDK CLI is not installed globally)

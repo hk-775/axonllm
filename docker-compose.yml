@@ -2,7 +2,12 @@ services:
   axonllm:
     build: .
     ports:
-      - "8000:8000"
+      # Host port is overridable because a clash here does not look like one.
+      # Docker binds :: and a local `uv run python serve_dashboard.py` binds
+      # 0.0.0.0, so both "succeed" — then localhost resolves to ::1 first and the
+      # container silently answers for the gateway you started by hand. The
+      # container port stays 8000 to match AXON_SERVER_PORT and the healthcheck.
+      - "${AXON_HOST_PORT:-8000}:8000"
     environment:
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
