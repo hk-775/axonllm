@@ -26,8 +26,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `SITE_ASSET_TYPES` and `infra` is not in `SITE_ASSET_DIRS` — so this is
   defence in depth rather than a disclosure fix.
 
+- **`deploy-fargate.sh` could not run unattended.** The approval mode was
+  hardcoded to `broadening`, and CDK needs a terminal to ask, so any CI
+  invocation died with `Stack includes security-sensitive updates, but terminal
+  (TTY) is not attached` — the script had no way to succeed there at all. It now
+  accepts `--yes` and honours `CI=true`. The default is unchanged: an
+  interactive run still prompts before widening IAM or network access, because
+  having valid AWS credentials is a different question from having agreed to
+  those specific grants.
+
 ### Added
 
+- **The AWS install skipped creating the project.** Path 3 of the Quick Start
+  minted a key scoped to `my-project` and never created it, and nothing failed:
+  `/api/chat` answered `200`, spend was recorded, and the only symptoms were the
+  project's absence from `GET /admin/projects` and a `null` `budget_limit` — so
+  spend accrued uncapped. Found by following the documented steps on a live
+  deployment and then noticing the project was not there. Added as Step 6, and
+  `axon issue-key` now prints a note when it mints a key for a project that does
+  not exist. The ordering itself is deliberate and unchanged: a project id
+  scopes a key rather than referencing a record, which is what lets the first
+  credential be minted before any project exists.
 - `tests/unit/test_container_packaging.py` — asserts the Dockerfile copies every
   directory a request handler reads from, derived from the handler source so a
   new one cannot be silently omitted. This class of defect was invisible to the

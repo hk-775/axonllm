@@ -73,6 +73,63 @@ class TestIssueKey:
         assert "p1" in out
 
 
+class TestMissingProjectNote:
+    """A key minted for a project that does not exist should say so.
+
+    `issue-key` deliberately does not create the project — a project id scopes a
+    key rather than referencing a record, and requiring the record would restore
+    the bootstrap deadlock this command exists to break. But the silence was its
+    own trap: the key works, chat succeeds, spend accrues, and the project is
+    absent from /admin/projects with no budget_limit, so nothing is capped and
+    nothing says why. Observed live before this note existed.
+    """
+
+    @staticmethod
+    def _run(monkeypatch, *, enabled, project=None):
+        """Drive the real handler with persistence stubbed at the class level."""
+        from src.gateway import cli
+        from src.gateway.persistence import DynamoPersistence
+
+        monkeypatch.setattr(DynamoPersistence, "enabled", property(lambda self: enabled))
+
+        async def _get_project(self, project_id):
+            return project
+
+        monkeypatch.setattr(DynamoPersistence, "get_project", _get_project)
+
+        async def _noop(self):
+            return None
+
+        monkeypatch.setattr(DynamoPersistence, "create_table_if_not_exists", _noop)
+        cli.cmd_issue_key(SimpleNamespace(project="ghost", name="n", scopes="chat"))
+
+    def test_notes_the_absence_and_shows_how_to_fix_it(self, capsys, monkeypatch):
+        self._run(monkeypatch, enabled=True, project=None)
+        captured = capsys.readouterr()
+        # The key is still printed: the note is advisory, not a refusal.
+        assert "axon_" in captured.out
+        assert "no project 'ghost' was found" in captured.err
+        assert "budget" in captured.err
+        # Must be actionable, not just a complaint.
+        assert "/admin/projects" in captured.err
+
+    def test_stays_quiet_when_the_project_exists(self, capsys, monkeypatch):
+        self._run(monkeypatch, enabled=True, project=object())
+        captured = capsys.readouterr()
+        assert "axon_" in captured.out
+        assert "no project" not in captured.err
+
+    def test_defers_to_the_persistence_warning_when_disabled(self, capsys, monkeypatch):
+        """With persistence off, every project reads as missing — the absence is
+        meaningless and the existing "NOT persisted" warning is the real problem.
+        Printing both would bury it under a note about a project that could not
+        have been read in the first place."""
+        self._run(monkeypatch, enabled=False)
+        captured = capsys.readouterr()
+        assert "NOT persisted" in captured.err
+        assert "no project" not in captured.err
+
+
 class TestFailureHint:
     """A failed CLI request should name the actual cause.
 
