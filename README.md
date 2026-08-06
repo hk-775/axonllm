@@ -1787,7 +1787,7 @@ uv sync --extra dev
 uv run pytest tests/ -x -q
 ```
 
-2317 tests including unit, integration, end-to-end, and Hypothesis property-based tests.
+2321 tests including unit, integration, end-to-end, and Hypothesis property-based tests.
 
 ## Deployment
 

@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The landing page 404s in the container.** The Dockerfile never copied
+  `site/`, so `GET /` returned a stub on every containerised deployment while
+  working locally — including `docker compose up`, which is the first thing the
+  README tells a new user to run. Found by running that instruction against a
+  fresh clone rather than by reading the code. The handler is written to degrade
+  to a 404 with a pointer to the dashboard (correct for a pip install, where
+  `site/` is genuinely absent), which is why nothing logged an error and every
+  route test stayed green: they all read from the repo working tree, where the
+  directory always exists.
+- **`site/infra/` is now excluded from the build context.** The existing
+  `infra/` line in `.dockerignore` is anchored to the build root and does not
+  match the nested path, so a plain `COPY site/ site/` ships the landing page's
+  CDK app into the runtime image. Verified by building it, not assumed. The
+  asset handler already refused to serve it — `.py` is not in
+  `SITE_ASSET_TYPES` and `infra` is not in `SITE_ASSET_DIRS` — so this is
+  defence in depth rather than a disclosure fix.
+
+### Added
+
+- `tests/unit/test_container_packaging.py` — asserts the Dockerfile copies every
+  directory a request handler reads from, derived from the handler source so a
+  new one cannot be silently omitted. This class of defect was invisible to the
+  whole existing suite: nothing ran against the built image.
+
+### Repository
+
+- Every GitHub URL now points at `AxonLLM/axonllm`, the canonical public home.
+  Seven links in `site/index.html` and `site/architecture.html` pointed at a
+  different repository carrying the same description, so "View the source" on
+  the public landing page sent visitors somewhere else entirely.
+
 ## [0.2.1] - 2026-08-05
 
 Bug fixes only. Everything here was found by running what the documentation said
