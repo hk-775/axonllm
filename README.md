@@ -1,6 +1,6 @@
 # AxonLLM
 
-[![CI](https://github.com/axonllm/axonllm/actions/workflows/ci.yml/badge.svg)](https://github.com/axonllm/axonllm/actions/workflows/ci.yml)
+[![CI](https://github.com/AxonLLM/axonllm/actions/workflows/ci.yml/badge.svg)](https://github.com/AxonLLM/axonllm/actions/workflows/ci.yml)
 [![License: MIT-0](https://img.shields.io/badge/License-MIT--0-blue.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
 
@@ -9,7 +9,7 @@
 One API, any provider. Smart routing picks the best model for each prompt. Ensemble mode dispatches to multiple models and synthesizes a better answer. Policy-driven security, PII redaction, quota enforcement, and multi-region failover — all in one place.
 
 ```bash
-git clone https://github.com/axonllm/axonllm.git
+git clone https://github.com/AxonLLM/axonllm.git
 cd axonllm
 cp -n config/providers.yaml.example config/providers.yaml
 # Add at least one API key (or just use Bedrock with AWS credentials)
@@ -1787,7 +1787,7 @@ uv sync --extra dev
 uv run pytest tests/ -x -q
 ```
 
-2317 tests including unit, integration, end-to-end, and Hypothesis property-based tests.
+2321 tests including unit, integration, end-to-end, and Hypothesis property-based tests.
 
 ## Deployment
 

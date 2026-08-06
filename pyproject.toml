@@ -22,10 +22,10 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/axonllm/axonllm"
-Repository = "https://github.com/axonllm/axonllm"
-Issues = "https://github.com/axonllm/axonllm/issues"
-Documentation = "https://github.com/axonllm/axonllm#readme"
+Homepage = "https://github.com/AxonLLM/axonllm"
+Repository = "https://github.com/AxonLLM/axonllm"
+Issues = "https://github.com/AxonLLM/axonllm/issues"
+Documentation = "https://github.com/AxonLLM/axonllm#readme"
 
 [project.optional-dependencies]
 # Native OTLP span export (standalone observability). Opt-in at deploy time

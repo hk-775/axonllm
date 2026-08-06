@@ -22,6 +22,13 @@ COPY serve_dashboard.py .
 COPY agentcore_agent.py .
 COPY scripts/ scripts/
 
+# The landing page and its sibling pages. Without this the gateway's root path
+# 404s in the container while working locally, and README's first instruction
+# ("docker compose up", then open localhost:8000) lands on a stub. The handler
+# degrades rather than raising, so nothing else breaks — which is exactly why
+# the gap was invisible. site/infra is excluded in .dockerignore.
+COPY site/ site/
+
 RUN uv sync --frozen --no-dev
 
 EXPOSE 8000

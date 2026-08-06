@@ -7,5 +7,12 @@ tests
 __pycache__
 *.pyc
 infra/
+# Anchored to the build root, so the line above does NOT cover site/infra —
+# verified, not assumed. The gateway serves site/ (see COPY in the Dockerfile),
+# and site/infra holds the landing page's own CDK app, which no runtime image
+# needs. The HTTP handler already refuses it twice over (`.py` is not in
+# SITE_ASSET_TYPES and `infra` is not in SITE_ASSET_DIRS); keeping it out of the
+# image means not relying on those checks to protect something never shipped.
+site/infra/
 *.docx
 *.pdf
