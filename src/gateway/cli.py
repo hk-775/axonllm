@@ -49,6 +49,11 @@ def cmd_issue_key(args):
     Solves the bootstrap chicken-and-egg: under ENFORCE, POST /admin/projects/{id}/keys
     itself requires an admin credential, so there's no way to get the *first* key over
     HTTP. This mints one via APIKeyService against the same persistence the server uses.
+
+    --project is an authorization scope, not a foreign key: it bounds what the key
+    may reach (see key_routes.issue_key), and the project record itself need not
+    exist. Requiring one would reintroduce the very bootstrap problem this command
+    solves. So a missing project is legal, and this only says so — see below.
     """
     import asyncio
 
@@ -69,9 +74,25 @@ def cmd_issue_key(args):
             scopes=[s.strip() for s in scopes if s.strip()],
             created_by="cli",
         )
-        return raw_key
+        # Checked after minting, never before: this is a note, not a precondition,
+        # and a failed read must not cost anyone their key. get_project() returns
+        # None for a transient DynamoDB error as well as for a genuine absence,
+        # which is why the note below is worded as a suggestion.
+        project_exists = await persistence.get_project(args.project) is not None
+        return raw_key, project_exists
 
-    raw_key = asyncio.run(_issue())
+    raw_key, project_exists = asyncio.run(_issue())
+    if persistence.enabled and not project_exists:
+        print(
+            f"\033[33mNote:\033[0m no project '{args.project}' was found. The key still "
+            "works — a project id scopes a key rather than pointing at a record — but "
+            "until the project exists it will not appear in /admin/projects and has no "
+            "budget_limit, so its spend accrues unbudgeted. Create it with:\n"
+            f"  curl -X POST localhost:8000/admin/projects -H 'Content-Type: application/json' \\\n"
+            f"    -d '{{\"project_id\": \"{args.project}\", \"name\": \"{args.project}\", "
+            '"budget_limit": 100.0}\'',
+            file=sys.stderr,
+        )
     if not persistence.enabled:
         print(
             "\033[33mWarning:\033[0m LLM_ROUTER_DYNAMODB_ENABLED is not 'true', so this key was "
