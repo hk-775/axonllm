@@ -16,7 +16,8 @@
 # Prerequisites:
 #   - Docker running
 #   - AWS CLI configured
-#   - Node.js installed (for CDK)
+#   - Node.js 20+ (for CDK; 22 or 24 preferred). 18 works but every cdk call
+#     prints an end-of-life banner that looks like an error and hides the output.
 #   - uv installed (https://docs.astral.sh/uv/)
 #
 # Before first deploy:
