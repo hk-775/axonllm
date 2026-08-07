@@ -1441,34 +1441,43 @@ ALB happened to pick.
 | Key revocations | ✅ | A revocation counter in the table, polled every 5 s |
 | Projects | ✅ | Startup hydration plus a read-through on a local miss |
 | Usage/cost records — **the write** | ✅ | Every record goes to the table, so nothing is lost |
-| Usage/cost records — **the admin read** | ❌ | Hydrated at startup only; see below |
+| Usage/cost records — **the admin read** | ✅ | Costs read the shared counter; counts refresh from the table every 10 s — see below |
 | Budget **enforcement** | ✅ | Atomic counter in the table — see below |
 | Rate limits (policy RPM) | ❌ | Per-process window; divide `rate_limit_rpm` by `desired_count` |
 | Provider health, caches | ❌ | Per-process by design; each instance probes for itself |
 
-**Usage aggregates are per-process on the read path**, and this is the one entry
-above most likely to be mistaken for a bug in your own client. Every usage record
-*is* written to DynamoDB — nothing is lost, and budget enforcement below uses a
-separate counter that is genuinely fleet-wide. But `GET /admin/overview`,
-`/admin/usage`, `/admin/usage/export` and the `request_count`/`current_spend`
-fields of `/admin/projects` all aggregate an in-memory list that is loaded from
-the table **once at startup** and afterwards only grows with the requests that
-instance happened to serve. So on a two-task deployment:
+**Usage aggregates read fleet-wide, from two different sources.** Until v0.2.1
+they did not: every admin aggregate summed an in-memory list loaded once at
+startup, so `GET /admin/overview` on a two-task deployment alternated between
+`0.000132` and `0` on identical requests, depending on which task the ALB picked.
+Nothing was ever lost — the records were in the table — but the read never went
+there.
 
-```
-$ for i in 1 2 3 4; do curl -s $ALB/admin/overview -H "$AUTH" | jq .total_cost; done
-0.000132
-0
-0.000132
-0            # one chat request; each task reports only what it served
-```
+Costs and counts are fixed differently, because only one of them has a cheap
+exact source:
 
-Both answers are "correct" for the instance that gave them. The reliable readings
-today are `GET /admin/quotas/{project_id}`, which reads the shared counter on
-every call and is stable, and the table itself. For a scripted export, either
-scan the `USAGE#` items directly or run against a single task.
-`request_count` and `total_requests` have no equivalent shared counter, so they
-under-report on any deployment with more than one task.
+- **Money** — `current_spend` on `/admin/projects` and `/admin/users`, and
+  `total_cost` on `/admin/users/{id}` — is read from the same shared `SPEND#`
+  counter that budget enforcement uses. One `GetItem` per call, so it is exact,
+  never stale, and unaffected by record trimming. A dashboard figure that
+  disagreed with the limit someone was throttled on was its own class of support
+  ticket.
+- **Counts and per-model/user breakdowns** — `total_requests`, `request_count`,
+  token totals, `/admin/traces`, `/admin/models` — have no shared counter, so
+  they come from re-reading the usage records. That read is a paged scan whose
+  cost grows with your history, and the dashboard's traces panel polls every 3 s,
+  so it is rate-limited to **at most one refresh every 10 seconds** per instance.
+
+The practical consequence: **costs are exact, counts can be up to 10 seconds
+behind.** Both agree across instances, which is the property that was missing.
+If you need a count that is exact to the request, scan the `USAGE#` items
+directly. `GET /admin/quotas/{project_id}` remains the narrowest read for spend
+alone.
+
+One ceiling to know about: each instance keeps at most `MAX_RECORDS` (100,000)
+usage records in memory and trims the oldest half past that, so count-based
+aggregates under-report once a busy deployment crosses it. Cost figures do not —
+that is a second reason they read the counter rather than the records.
 
 **Budget enforcement is fleet-wide.** A `budget_limit` of `$100` is `$100` across
 the whole deployment, not per task. Spend goes into a DynamoDB counter with an

@@ -11,10 +11,13 @@ Provides Starlette routes for:
 
 from __future__ import annotations
 
+import asyncio
 import csv
+import heapq
 import io
 import logging
 import pathlib
+import time
 import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING
@@ -110,7 +113,7 @@ from src.gateway.admin.pricing_drift import audit_pricing, render_drift_page
 from src.gateway.admin.production_checklist import render_checklist_page, run_checklist
 from src.gateway.auth.cedar_policy import CedarPolicyService, parse_policy
 from src.gateway.config import AppConfig
-from src.gateway.cost_tracker import CostTracker
+from src.gateway.cost_tracker import _EPOCH, CostTracker
 from src.gateway.efficiency_analyzer import EfficiencyAnalyzer
 from src.gateway.health_tracker import ProviderHealthTracker
 from src.gateway.model_registry import ModelRegistry
@@ -217,6 +220,22 @@ PROVIDER_MODEL_CATALOG = {
 class AdminAPI:
     """Holds references to gateway components and exposes admin route handlers."""
 
+    # How long a fleet-wide usage refresh is reused before the next admin read
+    # pays for another one.
+    #
+    # Chosen against the dashboard's own behaviour, not picked round: the traces
+    # panel polls every 3s (see static/index.html), so an uncached read-through
+    # would scan the usage table ~20 times a minute per open tab, forever. The
+    # refresh is a paged scan whose cost grows with total history — ~53 sequential
+    # 1MB round-trips at 100k records, about 1.4s — so per-request refreshing
+    # degrades into a dashboard that is slower the longer the gateway has run.
+    #
+    # A ceiling of one scan per 10s makes that cost independent of both poll rate
+    # and tab count, and 10s is already finer than the 3s panel can show a human
+    # anything meaningful about. Money does not depend on this window at all:
+    # ``_fleet_spend`` reads the shared counter per call.
+    USAGE_SYNC_TTL_SECONDS = 10.0
+
     def __init__(
         self,
         cost_tracker: CostTracker,
@@ -279,6 +298,72 @@ class AdminAPI:
         # did not wire one; the endpoint then reports it as unavailable, which is
         # distinguishable from a wired cache with no hits.
         self._semantic_cache = semantic_cache
+        # Monotonic timestamp of the last fleet-wide usage refresh. Negative
+        # infinity rather than 0 so the first admin read always refreshes:
+        # time.monotonic() has an arbitrary origin and can legitimately be near 0
+        # early in the process, which with a 0 sentinel would skip the first sync.
+        self._last_usage_sync = float("-inf")
+        # The in-flight refresh, if any, so concurrent admin reads await one scan
+        # instead of each starting their own. Without this the TTL check below is
+        # not actually a limit: it reads and writes _last_usage_sync either side of
+        # an await, so N overlapping requests all pass it. Eight open dashboard
+        # tabs meant eight simultaneous full scans, each holding its own
+        # deserialized copy of the table — hundreds of MB in flight on a task
+        # sized for far less.
+        self._usage_sync_task: asyncio.Task | None = None
+
+    # ------------------------------------------------------------------
+    # Fleet-wide read helpers
+    # ------------------------------------------------------------------
+
+    async def _synced_records(self) -> list:
+        """The usage records for an aggregate, refreshed at most once per TTL.
+
+        Every aggregate below sums the cost tracker's record list, which holds
+        only what this process served. Behind a load balancer that makes each
+        answer a function of which task replied. This funnels those reads through
+        one refresh so they describe the fleet instead.
+
+        Rate-limited rather than per-request because the refresh is a paged scan
+        whose cost grows with history, and the dashboard polls on a 3s timer — see
+        ``USAGE_SYNC_TTL_SECONDS``. The clock is advanced only on a refresh that
+        actually happened, so a persistence outage retries on the next read rather
+        than serving stale data for a full TTL after a failure.
+
+        Concurrent callers share one scan: the TTL check alone cannot bound
+        anything, because it straddles an await and every overlapping request
+        passes it before the first one finishes.
+        """
+        now = time.monotonic()
+        if now - self._last_usage_sync < self.USAGE_SYNC_TTL_SECONDS:
+            return self.cost_tracker._records
+
+        if self._usage_sync_task is None or self._usage_sync_task.done():
+            self._usage_sync_task = asyncio.create_task(
+                self.cost_tracker.sync_records_from_store()
+            )
+        try:
+            synced = await asyncio.shield(self._usage_sync_task)
+        except Exception:
+            # A refresh that raised must not fail the operator's page — the local
+            # records are still a truthful answer for this instance, which is what
+            # the endpoint returned before any of this existed.
+            logger.warning("Fleet-wide usage refresh failed", exc_info=True)
+            synced = False
+        if synced:
+            self._last_usage_sync = now
+        return self.cost_tracker._records
+
+    async def _fleet_spend(self, scope: str, ident: str, local: float) -> float:
+        """Exact fleet-wide spend, falling back to the local figure.
+
+        Kept separate from ``_synced_records`` because money has a cheaper and
+        better source than the record list: a shared counter read per call, which
+        is neither TTL-stale nor subject to record trimming. Where a page shows
+        both, the cost is exact and the counts are up to one TTL behind.
+        """
+        total = await self.cost_tracker.fleet_spend(scope, ident)
+        return local if total is None else total
 
     # ------------------------------------------------------------------
     # GET /admin/overview
@@ -286,7 +371,7 @@ class AdminAPI:
 
     async def overview(self, request: Request) -> JSONResponse:
         """Total requests, cost, active projects, and active users."""
-        records = self.cost_tracker._records
+        records = await self._synced_records()
         total_requests = len(records)
         total_cost = sum(r.cost for r in records)
         active_projects = len({r.project_id for r in records})
@@ -314,21 +399,38 @@ class AdminAPI:
     async def list_projects(self, request: Request) -> JSONResponse:
         """List all projects with spend, budget utilization, and request counts."""
         result = []
-        for project in (await self._all_projects()).values():
-            budget_status = await self.cost_tracker.check_budget(project.project_id)
+        # One refresh for the whole list, not one per project: the scan returns
+        # every project's records at once, so filtering the synced list in the
+        # loop costs nothing extra.
+        synced = await self._synced_records()
+        projects = list((await self._all_projects()).values())
+
+        # Counter reads concurrently rather than one per iteration. Each is a
+        # separate GetItem in a thread, so sequentially they add up: 300 projects
+        # at ~8ms is nearly 3s of an operator staring at a spinner, for reads that
+        # do not depend on each other.
+        statuses = await asyncio.gather(*(
+            self.cost_tracker.check_budget(p.project_id) for p in projects
+        ))
+        spends = await asyncio.gather(*(
+            self._fleet_spend("project", p.project_id, s.current_spend)
+            for p, s in zip(projects, statuses)
+        ))
+
+        for project, current_spend in zip(projects, spends):
             records = [
-                r for r in self.cost_tracker._records
+                r for r in synced
                 if r.project_id == project.project_id
             ]
             utilization = (
-                (budget_status.current_spend / project.budget_limit * 100)
+                (current_spend / project.budget_limit * 100)
                 if project.budget_limit
                 else None
             )
             result.append({
                 "project_id": project.project_id,
                 "name": project.name,
-                "current_spend": budget_status.current_spend,
+                "current_spend": current_spend,
                 "budget_limit": project.budget_limit,
                 "budget_utilization_pct": utilization,
                 "request_count": len(records),
@@ -350,7 +452,7 @@ class AdminAPI:
             )
 
         records = [
-            r for r in self.cost_tracker._records
+            r for r in await self._synced_records()
             if r.project_id == project_id
         ]
         users = list({r.user_id for r in records})
@@ -723,6 +825,10 @@ class AdminAPI:
             user_id=params.get("user_id"),
         )
 
+        # Before aggregating, not after: get_aggregated_usage and _apply_filters
+        # both read the record list, so the refresh has to land first or the
+        # report describes one instance.
+        await self._synced_records()
         report = await self.cost_tracker.get_aggregated_usage(filters)
 
         total_cached_tokens = sum(
@@ -786,6 +892,12 @@ class AdminAPI:
                 {"error": {"type": "invalid_request", "message": "level must be records or breakdown"}},
                 status_code=400,
             )
+
+        # A chargeback export that silently covered one task of N would allocate
+        # cost to the wrong owners, so this refresh matters more here than on any
+        # dashboard panel. After validation, so a bad request fails without paying
+        # for a scan.
+        await self._synced_records()
 
         if level == "records":
             columns = [
@@ -961,7 +1073,7 @@ class AdminAPI:
 
     async def list_users(self, request: Request) -> JSONResponse:
         """List all users with aggregated usage stats and budget info."""
-        records = self.cost_tracker._records
+        records = await self._synced_records()
         user_data: dict[str, dict] = {}
         for r in records:
             entry = user_data.setdefault(r.user_id, {
@@ -976,18 +1088,27 @@ class AdminAPI:
             entry["total_tokens"] += r.total_tokens
             entry["cost"] += r.cost
 
+        # Exact from the shared counter where there is one; the summed cost is the
+        # fallback. Utilization is what a user gets throttled on, so it should not
+        # disagree with enforcement. Gathered rather than awaited per user: this
+        # loop is the worst offender, since a busy deployment has far more users
+        # than projects.
+        users = list(user_data.values())
+        spends = await asyncio.gather(*(
+            self._fleet_spend("user", u["user_id"], u["cost"]) for u in users
+        ))
+
         result = []
-        for u in user_data.values():
+        for u, current_spend in zip(users, spends):
             budget = self.cost_tracker.get_user_budget(u["user_id"])
             budget_limit = budget.get("budget_limit")
-            current_spend = u["cost"]
             utilization = (current_spend / budget_limit * 100) if budget_limit else None
             result.append({
                 "user_id": u["user_id"],
                 "projects": sorted(u["projects"]),
                 "requests": u["requests"],
                 "total_tokens": u["total_tokens"],
-                "cost": u["cost"],
+                "cost": current_spend,
                 "budget_limit": budget_limit,
                 "alert_threshold": budget.get("alert_threshold"),
                 "budget_utilization_pct": utilization,
@@ -1002,7 +1123,7 @@ class AdminAPI:
     async def get_user(self, request: Request) -> JSONResponse:
         """User detail with per-project and per-model breakdown, plus budget info."""
         user_id = request.path_params["id"]
-        records = [r for r in self.cost_tracker._records if r.user_id == user_id]
+        records = [r for r in await self._synced_records() if r.user_id == user_id]
         if not records:
             return JSONResponse(
                 {"error": {"type": "not_found", "message": f"User '{user_id}' not found"}},
@@ -1011,7 +1132,9 @@ class AdminAPI:
 
         total_requests = len(records)
         total_tokens = sum(r.total_tokens for r in records)
-        total_cost = sum(r.cost for r in records)
+        total_cost = await self._fleet_spend(
+            "user", user_id, sum(r.cost for r in records)
+        )
         projects = sorted({r.project_id for r in records})
 
         model_breakdown: dict[str, dict] = {}
@@ -1221,7 +1344,9 @@ class AdminAPI:
     async def list_models(self, request: Request) -> JSONResponse:
         """List all models with usage stats."""
         models = self.model_registry.list_models()
-        records = self.cost_tracker._records
+        # No shared counter is keyed by model, so per-model cost has only the
+        # record list as a source — the refresh is the whole fix here.
+        records = await self._synced_records()
 
         result = []
         for m in models:
@@ -1433,12 +1558,34 @@ class AdminAPI:
 
     async def traces(self, request: Request) -> JSONResponse:
         """Return recent request traces for the live traces view."""
-        records = self.cost_tracker._records
-        limit = int(request.query_params.get("limit", "100"))
-        recent = records[-limit:] if len(records) > limit else records
+        records = await self._synced_records()
+        # Clamp rather than trust: an unparseable limit used to 500, and a negative
+        # one silently returned an empty list.
+        try:
+            limit = int(request.query_params.get("limit", "100"))
+        except (TypeError, ValueError):
+            limit = 100
+        limit = max(1, min(limit, 1000))
+
+        # Order by timestamp rather than slicing the tail. Within one process the
+        # list is already chronological, so the tail was "recent" for free — but a
+        # fleet-wide refresh appends other instances' records in scan order, which
+        # is arbitrary. Taking the tail of that would show a mix of new local
+        # requests and whatever the scan happened to return last, and label it
+        # recent.
+        #
+        # nlargest, not sorted(): this runs every 3s per open tab, and a full sort
+        # of 100k records blocks the event loop for ~19ms where nlargest costs
+        # ~5ms. Nulls sort oldest — a record with no timestamp cannot be claimed to
+        # be the newest thing that happened.
+        recent = heapq.nlargest(
+            limit,
+            records,
+            key=lambda r: self.cost_tracker._as_aware(r.timestamp) if r.timestamp else _EPOCH,
+        )
 
         traces = []
-        for r in reversed(recent):
+        for r in recent:
             traces.append({
                 "request_id": r.request_id,
                 "timestamp": r.timestamp.isoformat() if r.timestamp else None,
@@ -1469,6 +1616,9 @@ class AdminAPI:
                 status_code=501,
             )
 
+        # The analyzer reads the same record list this API does, so refreshing
+        # here is enough — it needs no fleet awareness of its own.
+        await self._synced_records()
         all_metrics = self._efficiency_analyzer.get_all_user_metrics()
 
         grade_distribution: dict[str, int] = {}
@@ -1522,6 +1672,7 @@ class AdminAPI:
                 status_code=501,
             )
 
+        await self._synced_records()
         report = self._efficiency_analyzer.analyze_user(user_id)
 
         result: dict = {
@@ -1620,6 +1771,7 @@ class AdminAPI:
                 status_code=404,
             )
 
+        await self._synced_records()
         report = self._efficiency_analyzer.analyze_project(project_id)
 
         result: dict = {
@@ -1903,8 +2055,11 @@ class AdminAPI:
         than surveyed. Rendered fresh per request from the live registry, so
         editing either file and reloading shows the new coverage.
         """
+        # Fleet-wide, because the shadow-AI finding depends on it: a model only
+        # another task has served looks undeclared-and-idle from here, which is
+        # exactly the traffic this page exists to surface.
         report = audit_catalog(
-            self.model_registry, self._catalog, self.cost_tracker._records
+            self.model_registry, self._catalog, await self._synced_records()
         )
         return HTMLResponse(
             render_catalog_drift_page(
