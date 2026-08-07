@@ -3,11 +3,29 @@
 import asyncio
 import base64
 import json
+import logging
 import time
 
+import httpx
 import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import ec, rsa
+from jose import jwk as jose_jwk
+from jose import jwt as jose_jwt
 
-from src.gateway.auth.oidc_service import OIDCConfig, OIDCService
+from src.gateway.auth.oidc_service import (
+    MAX_DIRECT_OIDC_HEADER_BYTES,
+    MAX_DIRECT_OIDC_JWT_BYTES,
+    MAX_DIRECT_OIDC_KID_BYTES,
+    MAX_JWKS_CACHE_TTL_SECONDS,
+    MAX_OIDC_DISCOVERY_BYTES,
+    MAX_OIDC_JWKS_BYTES,
+    MAX_OIDC_JWKS_KEYS,
+    OIDC_HTTP_CONNECT_TIMEOUT_SECONDS,
+    OIDC_HTTP_TOTAL_TIMEOUT_SECONDS,
+    OIDCConfig,
+    OIDCService,
+)
 from src.gateway.models import AuthMethod
 
 
@@ -30,6 +48,108 @@ def config():
 @pytest.fixture
 def service(config):
     return OIDCService(config=config)
+
+
+@pytest.fixture(scope="module")
+def rsa_signing_material():
+    return _new_rsa_signing_material("k1")
+
+
+def _new_rsa_signing_material(kid: str):
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    private_pem = private_key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption(),
+    )
+    public_pem = private_key.public_key().public_bytes(
+        serialization.Encoding.PEM,
+        serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+    public_jwk = jose_jwk.construct(public_pem, algorithm="RS256").to_dict()
+    public_jwk.update({"kid": kid, "use": "sig"})
+    return private_pem, public_jwk
+
+
+def _valid_claims(config: OIDCConfig, **overrides) -> dict:
+    claims = {
+        "iss": config.issuer,
+        "aud": config.audience,
+        "exp": int(time.time()) + 3600,
+        "sub": "user-1",
+        "custom:project_id": "project-1",
+        "custom:tenant_id": "tenant-1",
+        "custom:roles": ["member"],
+        "scope": "openid chat:invoke",
+    }
+    claims.update(overrides)
+    return claims
+
+
+def _signed_token(
+    config: OIDCConfig,
+    signing_material,
+    *,
+    headers: dict | None = None,
+    remove_claims: tuple[str, ...] = (),
+    **claim_overrides,
+) -> str:
+    private_pem, _ = signing_material
+    claims = _valid_claims(config, **claim_overrides)
+    for claim in remove_claims:
+        claims.pop(claim, None)
+    return jose_jwt.encode(
+        claims,
+        private_pem,
+        algorithm="RS256",
+        headers={"kid": "k1"} if headers is None else headers,
+    )
+
+
+def _cache_signing_key(service: OIDCService, signing_material) -> None:
+    _, public_jwk = signing_material
+    service._install_jwks(
+        {"keys": [public_jwk]},
+        service._config.issuer,
+    )
+
+
+def _install_oidc_transport(monkeypatch, handler):
+    real_async_client = httpx.AsyncClient
+    requests = []
+    client_options = []
+
+    def recording_handler(request):
+        requests.append(request)
+        return handler(request)
+
+    transport = httpx.MockTransport(recording_handler)
+
+    def client_factory(**kwargs):
+        client_options.append(kwargs)
+        return real_async_client(transport=transport, **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", client_factory)
+    return requests, client_options
+
+
+def _json_response(payload, *, status_code: int = 200) -> httpx.Response:
+    return httpx.Response(status_code, json=payload)
+
+
+class _AsyncChunks(httpx.AsyncByteStream):
+    def __init__(self, *chunks: bytes, delay: float = 0) -> None:
+        self._chunks = chunks
+        self._delay = delay
+
+    async def __aiter__(self):
+        for chunk in self._chunks:
+            if self._delay:
+                await asyncio.sleep(self._delay)
+            yield chunk
+
+    async def aclose(self) -> None:
+        return None
 
 
 class TestDecodeJWTHeader:
@@ -87,139 +207,618 @@ class TestClaimMapping:
 
 
 class TestValidateOIDCJWT:
-    def test_rejects_expired_token(self, service):
-        header = {"alg": "RS256", "kid": "k1"}
-        payload = {
-            "sub": "user-1",
-            "exp": int(time.time()) - 3600,
-            "iss": service._config.issuer,
-            "aud": service._config.audience,
-        }
-        token = _make_jwt(header, payload)
+    def test_accepts_valid_signed_token(self, service, rsa_signing_material):
+        _cache_signing_key(service, rsa_signing_material)
+        token = _signed_token(service._config, rsa_signing_material)
 
-        # Without python-jose, falls back to manual decode but checks exp
-        result = asyncio.run(
-            service.validate_oidc_jwt(token)
+        context = asyncio.run(service.validate_oidc_jwt(token))
+
+        assert context is not None
+        assert context.user_id == "user-1"
+        assert context.project_id == "project-1"
+        assert context.tenant_id == "tenant-1"
+        assert context.roles == ["member"]
+        assert context.scopes == ["openid", "chat:invoke"]
+        assert context.issuer == service._config.issuer
+        assert context.subject == "user-1"
+
+    def test_preserves_valid_es256_flow(self, service):
+        private_key = ec.generate_private_key(ec.SECP256R1())
+        private_pem = private_key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
         )
-        assert result is None
-
-    def test_rejects_wrong_issuer(self, service):
-        header = {"alg": "RS256", "kid": "k1"}
-        payload = {
-            "sub": "user-1",
-            "exp": int(time.time()) + 3600,
-            "iss": "https://wrong-issuer.com",
-            "aud": service._config.audience,
-        }
-        token = _make_jwt(header, payload)
-
-        # Pre-populate JWKS cache so it doesn't try to fetch
-        service._jwks_cache = {"keys": [{"kid": "k1", "kty": "RSA"}]}
-        service._jwks_fetched_at = time.time()
-
-        result = asyncio.run(
-            service.validate_oidc_jwt(token)
+        public_pem = private_key.public_key().public_bytes(
+            serialization.Encoding.PEM,
+            serialization.PublicFormat.SubjectPublicKeyInfo,
         )
-        assert result is None
-
-    def test_rejects_wrong_audience(self, service):
-        header = {"alg": "RS256", "kid": "k1"}
-        payload = {
-            "sub": "user-1",
-            "exp": int(time.time()) + 3600,
-            "iss": service._config.issuer,
-            "aud": "wrong-audience",
-        }
-        token = _make_jwt(header, payload)
-
-        service._jwks_cache = {"keys": [{"kid": "k1", "kty": "RSA"}]}
-        service._jwks_fetched_at = time.time()
-
-        result = asyncio.run(
-            service.validate_oidc_jwt(token)
+        public_jwk = jose_jwk.construct(public_pem, algorithm="ES256").to_dict()
+        public_jwk.update({"kid": "ec1", "use": "sig"})
+        service._install_jwks(
+            {"keys": [public_jwk]},
+            service._config.issuer,
         )
-        assert result is None
-
-
-class TestUnconfiguredAudienceAndIssuerAreNotChecked:
-    """The `if self._config.audience and ...` guards, asserted as behaviour.
-
-    A token that verifies cryptographically but was minted for a *different*
-    application is accepted when `AXON_OIDC_AUDIENCE` is empty — the
-    confused-deputy shape, and the reason the README says to set both variables
-    rather than treating them as optional tuning. Pinned here so the guard is a
-    documented default rather than an accident, and so tightening it (checking
-    `aud` unconditionally) is a deliberate change that fails a test naming the
-    behaviour it alters.
-    """
-
-    def _accepting_service(self, **overrides) -> OIDCService:
-        svc = OIDCService(config=OIDCConfig(alb_region="us-east-1", **overrides))
-        # A key must resolve for validation to reach the aud/iss checks at all;
-        # _verify_and_decode is stubbed because signature verification is the
-        # separate concern asserted above.
-        svc._jwks_cache = {"keys": [{"kid": "k1", "kty": "RSA"}]}
-        svc._jwks_fetched_at = time.time()
-        return svc
-
-    def _token(self, **claims) -> str:
-        payload = {"sub": "user-1", "exp": int(time.time()) + 3600, **claims}
-        return _make_jwt({"alg": "RS256", "kid": "k1"}, payload)
-
-    def test_empty_audience_accepts_a_token_for_another_application(self, monkeypatch):
-        service = self._accepting_service(issuer="https://issuer.example.com")
-        monkeypatch.setattr(
-            service,
-            "_verify_and_decode",
-            lambda token, key, algorithms: json.loads(
-                base64.urlsafe_b64decode(token.split(".")[1] + "==")
-            ),
+        token = jose_jwt.encode(
+            _valid_claims(service._config),
+            private_pem,
+            algorithm="ES256",
+            headers={"kid": "ec1"},
         )
-        token = self._token(iss="https://issuer.example.com", aud="some-other-app")
-
-        ctx = asyncio.run(service.validate_oidc_jwt(token))
-        assert ctx is not None, (
-            "with AXON_OIDC_AUDIENCE unset, aud is not checked — if this now "
-            "rejects, the README's 'checked only when you set it' is out of date"
-        )
-        assert ctx.user_id == "user-1"
-
-    def test_empty_issuer_accepts_a_token_from_another_idp(self, monkeypatch):
-        service = self._accepting_service(audience="axonllm-app")
-        monkeypatch.setattr(
-            service,
-            "_verify_and_decode",
-            lambda token, key, algorithms: json.loads(
-                base64.urlsafe_b64decode(token.split(".")[1] + "==")
-            ),
-        )
-        token = self._token(iss="https://attacker.example.com", aud="axonllm-app")
 
         assert asyncio.run(service.validate_oidc_jwt(token)) is not None
 
-    def test_expiry_is_checked_regardless(self, monkeypatch):
-        """The one claim with no opt-out, so an unconfigured deploy is not
-        indefinitely replayable."""
-        service = self._accepting_service()
-        monkeypatch.setattr(
-            service,
-            "_verify_and_decode",
-            lambda token, key, algorithms: json.loads(
-                base64.urlsafe_b64decode(token.split(".")[1] + "==")
+    @pytest.mark.asyncio
+    async def test_refreshes_once_for_concurrent_valid_rotated_key(
+        self,
+        service,
+        rsa_signing_material,
+        monkeypatch,
+    ):
+        _cache_signing_key(service, rsa_signing_material)
+        rotated_material = _new_rsa_signing_material("k2")
+        token = _signed_token(
+            service._config,
+            rotated_material,
+            headers={"kid": "k2"},
+        )
+        calls = 0
+
+        async def fetch_rotated_jwks():
+            nonlocal calls
+            calls += 1
+            await asyncio.sleep(0.01)
+            return {
+                "keys": [
+                    rsa_signing_material[1],
+                    rotated_material[1],
+                ]
+            }
+
+        monkeypatch.setattr(service, "_fetch_jwks", fetch_rotated_jwks)
+
+        contexts = await asyncio.gather(*(service.validate_oidc_jwt(token) for _ in range(12)))
+
+        assert all(context is not None for context in contexts)
+        assert calls == 1
+
+    @pytest.mark.asyncio
+    async def test_unknown_kid_flood_is_globally_rate_limited(
+        self,
+        service,
+        rsa_signing_material,
+        monkeypatch,
+    ):
+        _cache_signing_key(service, rsa_signing_material)
+        calls = 0
+
+        async def fetch_unchanged_jwks():
+            nonlocal calls
+            calls += 1
+            await asyncio.sleep(0.01)
+            return {"keys": [rsa_signing_material[1]]}
+
+        monkeypatch.setattr(service, "_fetch_jwks", fetch_unchanged_jwks)
+        tokens = [
+            _make_jwt(
+                {"alg": "RS256", "kid": f"attacker-{index}"},
+                _valid_claims(service._config),
+            )
+            for index in range(32)
+        ]
+
+        results = await asyncio.gather(*(service.validate_oidc_jwt(token) for token in tokens))
+        later_result = await service.validate_oidc_jwt(
+            _make_jwt(
+                {"alg": "RS256", "kid": "another-unknown"},
+                _valid_claims(service._config),
+            )
+        )
+
+        assert all(result is None for result in results)
+        assert later_result is None
+        assert calls == 1
+
+    @pytest.mark.parametrize(
+        "token",
+        [
+            "x" * (MAX_DIRECT_OIDC_JWT_BYTES + 1),
+            _make_jwt(
+                {
+                    "alg": "RS256",
+                    "kid": "k1",
+                    "padding": "x" * MAX_DIRECT_OIDC_HEADER_BYTES,
+                },
+                {"sub": "user-1"},
             ),
+            _make_jwt(
+                {
+                    "alg": "RS256",
+                    "kid": "k" * (MAX_DIRECT_OIDC_KID_BYTES + 1),
+                },
+                {"sub": "user-1"},
+            ),
+        ],
+        ids=("oversized-token", "oversized-header", "oversized-kid"),
+    )
+    def test_rejects_bounded_token_fields_before_jwks_access(
+        self,
+        service,
+        monkeypatch,
+        token,
+    ):
+        async def unexpected_get_jwks():
+            raise AssertionError("invalid token metadata must not access JWKS")
+
+        monkeypatch.setattr(service, "_get_jwks", unexpected_get_jwks)
+
+        assert asyncio.run(service.validate_oidc_jwt(token)) is None
+
+    @pytest.mark.parametrize("algorithm", ["HS256", "RS512", "none"])
+    def test_rejects_algorithm_confusion_before_key_fetch(self, service, algorithm, monkeypatch):
+        async def unexpected_fetch():
+            raise AssertionError("unsupported algorithms must not trigger JWKS fetch")
+
+        monkeypatch.setattr(service, "_fetch_jwks", unexpected_fetch)
+        token = _make_jwt(
+            {"alg": algorithm, "kid": "k1"},
+            _valid_claims(service._config),
         )
-        expired = _make_jwt(
-            {"alg": "RS256", "kid": "k1"}, {"sub": "user-1", "exp": int(time.time()) - 1}
+
+        assert asyncio.run(service.validate_oidc_jwt(token)) is None
+
+    @pytest.mark.parametrize("headers", [{}, {"kid": ""}, {"kid": True}])
+    def test_rejects_missing_or_malformed_kid(self, service, rsa_signing_material, headers):
+        _cache_signing_key(service, rsa_signing_material)
+        token = _signed_token(
+            service._config,
+            rsa_signing_material,
+            headers=headers,
         )
-        assert asyncio.run(service.validate_oidc_jwt(expired)) is None
+
+        assert asyncio.run(service.validate_oidc_jwt(token)) is None
+
+    def test_rejects_unknown_kid(
+        self,
+        service,
+        rsa_signing_material,
+        monkeypatch,
+    ):
+        _cache_signing_key(service, rsa_signing_material)
+        token = _signed_token(
+            service._config,
+            rsa_signing_material,
+            headers={"kid": "unknown"},
+        )
+
+        async def fetch_unchanged_jwks():
+            return {"keys": [rsa_signing_material[1]]}
+
+        monkeypatch.setattr(service, "_fetch_jwks", fetch_unchanged_jwks)
+
+        assert asyncio.run(service.validate_oidc_jwt(token)) is None
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("kty", "oct"),
+            ("alg", "HS256"),
+            ("use", "enc"),
+            ("key_ops", ["sign"]),
+        ],
+    )
+    def test_rejects_incompatible_exact_kid_jwk(self, service, rsa_signing_material, field, value):
+        _, public_jwk = rsa_signing_material
+        confused_jwk = {**public_jwk, field: value}
+        service._install_jwks(
+            {"keys": [confused_jwk]},
+            service._config.issuer,
+        )
+        token = _signed_token(service._config, rsa_signing_material)
+
+        assert asyncio.run(service.validate_oidc_jwt(token)) is None
+
+    @pytest.mark.parametrize("claim", ["iss", "aud", "exp", "sub"])
+    def test_rejects_missing_required_claim(self, service, rsa_signing_material, claim):
+        _cache_signing_key(service, rsa_signing_material)
+        token = _signed_token(
+            service._config,
+            rsa_signing_material,
+            remove_claims=(claim,),
+        )
+
+        assert asyncio.run(service.validate_oidc_jwt(token)) is None
+
+    @pytest.mark.parametrize("subject", ["", "   ", True, {"id": "user-1"}])
+    def test_rejects_invalid_subject(self, service, rsa_signing_material, subject):
+        _cache_signing_key(service, rsa_signing_material)
+        token = _signed_token(
+            service._config,
+            rsa_signing_material,
+            sub=subject,
+        )
+
+        assert asyncio.run(service.validate_oidc_jwt(token)) is None
+
+    def test_rejects_expired_token(self, service, rsa_signing_material):
+        _cache_signing_key(service, rsa_signing_material)
+        token = _signed_token(
+            service._config,
+            rsa_signing_material,
+            exp=int(time.time()) - 3600,
+        )
+
+        assert asyncio.run(service.validate_oidc_jwt(token)) is None
+
+    def test_rejects_wrong_issuer(self, service, rsa_signing_material):
+        _cache_signing_key(service, rsa_signing_material)
+        token = _signed_token(
+            service._config,
+            rsa_signing_material,
+            iss="https://wrong-issuer.example",
+        )
+
+        assert asyncio.run(service.validate_oidc_jwt(token)) is None
+
+    def test_rejects_wrong_audience(self, service, rsa_signing_material):
+        _cache_signing_key(service, rsa_signing_material)
+        token = _signed_token(
+            service._config,
+            rsa_signing_material,
+            aud="wrong-audience",
+        )
+
+        assert asyncio.run(service.validate_oidc_jwt(token)) is None
+
+    def test_accepts_expected_audience_in_array(self, service, rsa_signing_material):
+        _cache_signing_key(service, rsa_signing_material)
+        token = _signed_token(
+            service._config,
+            rsa_signing_material,
+            aud=["another-service", service._config.audience],
+        )
+
+        assert asyncio.run(service.validate_oidc_jwt(token)) is not None
+
+    @pytest.mark.parametrize(
+        "audience",
+        [
+            ["another-service"],
+            [True, "axonllm-app"],
+            {"service": "axonllm-app"},
+        ],
+    )
+    def test_rejects_invalid_audience_array(self, service, rsa_signing_material, audience):
+        _cache_signing_key(service, rsa_signing_material)
+        token = _signed_token(
+            service._config,
+            rsa_signing_material,
+            aud=audience,
+        )
+
+        assert asyncio.run(service.validate_oidc_jwt(token)) is None
+
+    @pytest.mark.parametrize(
+        ("claim", "value"),
+        [
+            ("custom:roles", {"admin": False}),
+            ("custom:roles", True),
+            ("custom:roles", ["member", False]),
+            ("custom:roles", ["member", ""]),
+            ("scope", ["openid", "profile"]),
+            ("scope", {"admin": True}),
+            ("scope", False),
+            ("custom:tenant_id", {"id": "tenant-1"}),
+            ("custom:tenant_id", True),
+            ("custom:tenant_id", ["tenant-1"]),
+            ("custom:project_id", {"id": "project-1"}),
+            ("custom:project_id", False),
+            ("custom:project_id", ["project-1"]),
+        ],
+    )
+    def test_rejects_type_confused_application_claims(self, service, rsa_signing_material, claim, value):
+        _cache_signing_key(service, rsa_signing_material)
+        token = _signed_token(
+            service._config,
+            rsa_signing_material,
+            **{claim: value},
+        )
+
+        assert asyncio.run(service.validate_oidc_jwt(token)) is None
+
+    @pytest.mark.parametrize(
+        "config",
+        [
+            OIDCConfig(issuer="", audience="axonllm-app"),
+            OIDCConfig(issuer="https://issuer.example", audience=""),
+        ],
+    )
+    def test_rejects_unconfigured_issuer_or_audience(self, config, rsa_signing_material):
+        service = OIDCService(config)
+        token = _signed_token(config, rsa_signing_material)
+
+        assert asyncio.run(service.validate_oidc_jwt(token)) is None
+
+
+class TestOIDCDiscoveryTransport:
+    @pytest.mark.asyncio
+    async def test_fetches_valid_jwks_with_hardened_http_client(
+        self,
+        service,
+        rsa_signing_material,
+        monkeypatch,
+    ):
+        jwks_uri = f"{service._config.issuer}/jwks.json"
+
+        def handler(request):
+            if request.url.path.endswith("openid-configuration"):
+                return _json_response(
+                    {
+                        "issuer": service._config.issuer,
+                        "jwks_uri": jwks_uri,
+                    }
+                )
+            assert str(request.url) == jwks_uri
+            return _json_response({"keys": [rsa_signing_material[1]]})
+
+        requests, client_options = _install_oidc_transport(
+            monkeypatch,
+            handler,
+        )
+
+        jwks = await service._fetch_jwks()
+
+        assert jwks == {"keys": [rsa_signing_material[1]]}
+        assert len(requests) == 2
+        assert client_options[0]["trust_env"] is False
+        assert client_options[0]["follow_redirects"] is False
+        assert client_options[0]["timeout"].connect == OIDC_HTTP_CONNECT_TIMEOUT_SECONDS
+        assert client_options[0]["timeout"].read == OIDC_HTTP_TOTAL_TIMEOUT_SECONDS
+        assert all(request.headers["accept-encoding"] == "identity" for request in requests)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "issuer",
+        [
+            "http://issuer.example.test",
+            "https://localhost",
+            "https://127.0.0.1",
+            "https://[::1]",
+            "https://2130706433",
+            "https://0177.0.0.1",
+            "https://0x7f000001",
+            "https://user:password@issuer.example.test",
+            "https://issuer.example.test/path?query=1",
+            "https://issuer.example.test/path#fragment",
+            " https://issuer.example.test",
+        ],
+    )
+    async def test_rejects_unsafe_issuer_before_network(
+        self,
+        issuer,
+        monkeypatch,
+    ):
+        def unexpected_client(**_kwargs):
+            raise AssertionError("unsafe issuer must not create an HTTP client")
+
+        monkeypatch.setattr(httpx, "AsyncClient", unexpected_client)
+        service = OIDCService(
+            OIDCConfig(
+                issuer=issuer,
+                audience="axonllm-app",
+            )
+        )
+
+        assert await service._fetch_jwks() is None
+
+    @pytest.mark.asyncio
+    async def test_requires_exact_discovery_issuer(
+        self,
+        service,
+        monkeypatch,
+    ):
+        def handler(_request):
+            return _json_response(
+                {
+                    "issuer": f"{service._config.issuer}/",
+                    "jwks_uri": f"{service._config.issuer}/jwks.json",
+                }
+            )
+
+        requests, _ = _install_oidc_transport(monkeypatch, handler)
+
+        assert await service._fetch_jwks() is None
+        assert len(requests) == 1
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "jwks_uri",
+        [
+            "http://cognito-idp.us-east-1.amazonaws.com/jwks.json",
+            "https://keys.example.test/jwks.json",
+            "https://127.0.0.1/jwks.json",
+            "https://user@cognito-idp.us-east-1.amazonaws.com/jwks.json",
+        ],
+        ids=("http", "cross-origin", "ip-literal", "userinfo"),
+    )
+    async def test_rejects_unsafe_discovered_jwks_uri(
+        self,
+        service,
+        monkeypatch,
+        jwks_uri,
+    ):
+        def handler(_request):
+            return _json_response(
+                {
+                    "issuer": service._config.issuer,
+                    "jwks_uri": jwks_uri,
+                }
+            )
+
+        requests, _ = _install_oidc_transport(monkeypatch, handler)
+
+        assert await service._fetch_jwks() is None
+        assert len(requests) == 1
+
+    @pytest.mark.asyncio
+    async def test_does_not_follow_discovery_redirect(
+        self,
+        service,
+        monkeypatch,
+    ):
+        def handler(_request):
+            return httpx.Response(
+                302,
+                headers={"location": (f"{service._config.issuer}/redirected-discovery")},
+            )
+
+        requests, client_options = _install_oidc_transport(
+            monkeypatch,
+            handler,
+        )
+
+        assert await service._fetch_jwks() is None
+        assert len(requests) == 1
+        assert client_options[0]["follow_redirects"] is False
+
+    @pytest.mark.asyncio
+    async def test_enforces_end_to_end_discovery_deadline(
+        self,
+        service,
+        monkeypatch,
+    ):
+        monkeypatch.setattr(
+            "src.gateway.auth.oidc_service.OIDC_HTTP_TOTAL_TIMEOUT_SECONDS",
+            0.01,
+        )
+
+        def handler(_request):
+            return httpx.Response(
+                200,
+                stream=_AsyncChunks(
+                    b'{"issuer":"never-read"}',
+                    delay=1,
+                ),
+                headers={"content-type": "application/json"},
+            )
+
+        requests, _ = _install_oidc_transport(monkeypatch, handler)
+
+        assert await service._fetch_jwks() is None
+        assert len(requests) == 1
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "kind",
+        [
+            "malformed",
+            "duplicate",
+            "oversized",
+            "wrong-content-type",
+            "compressed",
+        ],
+    )
+    async def test_rejects_malformed_or_unbounded_discovery(
+        self,
+        service,
+        monkeypatch,
+        kind,
+    ):
+        valid_body = json.dumps(
+            {
+                "issuer": service._config.issuer,
+                "jwks_uri": f"{service._config.issuer}/jwks.json",
+            }
+        ).encode()
+        bodies = {
+            "malformed": b"{",
+            "duplicate": (b'{"issuer":"first","issuer":"second","jwks_uri":"https://issuer.example.test/jwks"}'),
+            "oversized": b"x" * (MAX_OIDC_DISCOVERY_BYTES + 1),
+            "wrong-content-type": valid_body,
+            "compressed": valid_body,
+        }
+        headers = {"content-type": "application/json"}
+        if kind == "wrong-content-type":
+            headers["content-type"] = "text/html"
+        if kind == "compressed":
+            headers["content-encoding"] = "gzip"
+
+        def handler(_request):
+            if kind == "oversized":
+                return httpx.Response(
+                    200,
+                    stream=_AsyncChunks(bodies[kind]),
+                    headers=headers,
+                )
+            return httpx.Response(
+                200,
+                content=bodies[kind],
+                headers=headers,
+            )
+
+        requests, _ = _install_oidc_transport(monkeypatch, handler)
+
+        assert await service._fetch_jwks() is None
+        assert len(requests) == 1
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "kind",
+        ["malformed", "duplicate", "oversized", "too-many-keys"],
+    )
+    async def test_rejects_malformed_or_unbounded_jwks(
+        self,
+        service,
+        monkeypatch,
+        kind,
+    ):
+        jwks_uri = f"{service._config.issuer}/jwks.json"
+
+        def handler(request):
+            if request.url.path.endswith("openid-configuration"):
+                return _json_response(
+                    {
+                        "issuer": service._config.issuer,
+                        "jwks_uri": jwks_uri,
+                    }
+                )
+            if kind == "too-many-keys":
+                return _json_response({"keys": [{"kid": f"key-{index}"} for index in range(MAX_OIDC_JWKS_KEYS + 1)]})
+            bodies = {
+                "malformed": b"{",
+                "duplicate": (b'{"keys":[{"kid":"first"}],"keys":[{"kid":"second"}]}'),
+                "oversized": b"x" * (MAX_OIDC_JWKS_BYTES + 1),
+            }
+            if kind == "oversized":
+                return httpx.Response(
+                    200,
+                    stream=_AsyncChunks(bodies[kind]),
+                    headers={"content-type": "application/jwk-set+json"},
+                )
+            return httpx.Response(
+                200,
+                content=bodies[kind],
+                headers={"content-type": "application/jwk-set+json"},
+            )
+
+        requests, _ = _install_oidc_transport(monkeypatch, handler)
+
+        assert await service._fetch_jwks() is None
+        assert len(requests) == 2
 
 
 class TestJWKSCache:
-    def test_cache_used_within_ttl(self, service):
-        service._jwks_cache = {"keys": [{"kid": "k1"}]}
-        service._jwks_fetched_at = time.time()
+    def test_cache_used_within_ttl(self, service, monkeypatch):
+        service._install_jwks(
+            {"keys": [{"kid": "k1"}]},
+            service._config.issuer,
+        )
 
-        # _get_jwks should return cache without fetching
+        async def unexpected_fetch():
+            raise AssertionError("fresh cache should not be refreshed")
+
+        monkeypatch.setattr(service, "_fetch_jwks", unexpected_fetch)
+
         result = asyncio.run(service._get_jwks())
         assert result == {"keys": [{"kid": "k1"}]}
 
@@ -228,6 +827,75 @@ class TestJWKSCache:
         assert service._find_key(jwks, "b") == {"kid": "b"}
         assert service._find_key(jwks, "x") is None
 
-    def test_find_key_returns_first_when_no_kid(self, service):
+    def test_find_key_rejects_missing_kid(self, service):
         jwks = {"keys": [{"kid": "a"}, {"kid": "b"}]}
-        assert service._find_key(jwks, None) == {"kid": "a"}
+        assert service._find_key(jwks, None) is None
+
+    def test_find_key_rejects_duplicate_kid(self, service):
+        jwks = {"keys": [{"kid": "a"}, {"kid": "a"}]}
+        assert service._find_key(jwks, "a") is None
+
+    def test_stale_cache_is_not_used_when_refresh_fails(self, service, rsa_signing_material, monkeypatch):
+        _, public_jwk = rsa_signing_material
+        service._install_jwks(
+            {"keys": [public_jwk]},
+            service._config.issuer,
+        )
+        service._jwks_fetched_at = time.monotonic() - service._config.jwks_cache_ttl - 1
+
+        async def failed_fetch():
+            return None
+
+        monkeypatch.setattr(service, "_fetch_jwks", failed_fetch)
+        token = _signed_token(service._config, rsa_signing_material)
+
+        assert asyncio.run(service.validate_oidc_jwt(token)) is None
+        assert service._jwks_cache == {}
+
+    def test_fetch_exception_fails_closed_without_raw_error(
+        self,
+        service,
+        monkeypatch,
+        caplog,
+    ):
+        async def failed_fetch():
+            raise RuntimeError("provider-response-secret")
+
+        monkeypatch.setattr(service, "_fetch_jwks", failed_fetch)
+
+        with caplog.at_level(logging.DEBUG):
+            assert asyncio.run(service._get_jwks()) is None
+        assert service._jwks_cache == {}
+        assert "provider-response-secret" not in caplog.text
+
+    def test_cache_is_bound_to_issuer(
+        self,
+        service,
+        rsa_signing_material,
+        monkeypatch,
+    ):
+        _cache_signing_key(service, rsa_signing_material)
+        service._config.issuer = "https://replacement-issuer.example"
+
+        async def failed_fetch():
+            return None
+
+        monkeypatch.setattr(service, "_fetch_jwks", failed_fetch)
+
+        assert asyncio.run(service._get_jwks()) is None
+        assert service._jwks_cache == {}
+
+    def test_cache_ttl_is_bounded(self, service, monkeypatch):
+        service._config.jwks_cache_ttl = MAX_JWKS_CACHE_TTL_SECONDS * 100
+        service._install_jwks(
+            {"keys": [{"kid": "k1"}]},
+            service._config.issuer,
+        )
+        service._jwks_fetched_at = time.monotonic() - MAX_JWKS_CACHE_TTL_SECONDS - 1
+
+        async def failed_fetch():
+            return None
+
+        monkeypatch.setattr(service, "_fetch_jwks", failed_fetch)
+
+        assert asyncio.run(service._get_jwks()) is None

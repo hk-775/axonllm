@@ -2,6 +2,16 @@
 # Deploy AxonLLM to ECS Fargate via CDK
 # Usage: ./deploy-fargate.sh [region] [--yes]
 #
+# Required deployment inputs:
+#   AXON_VIEWER_DOMAIN_NAME
+#   AXON_VIEWER_CERTIFICATE_ARN
+#   AXON_ORIGIN_DOMAIN_NAME
+#   AXON_ORIGIN_CERTIFICATE_ARN
+#   AXON_APPROVED_HTTPS_PREFIX_LIST_ID
+#
+# Optional:
+#   AXON_DYNAMODB_TABLE_NAME (defaults to axonllm-state)
+#
 # --yes skips CDK's approval prompt for security-sensitive changes (IAM roles,
 # security group rules). Without it the script cannot run unattended at all: CDK
 # needs a terminal to ask, so in CI it fails with "Stack includes
@@ -54,6 +64,37 @@ for arg in "$@"; do
 done
 REGION="${REGION:-us-east-1}"
 
+if [ "$REGION" != "us-east-1" ]; then
+    echo "The reference stack must be deployed in us-east-1 (CloudFront WAF scope)." >&2
+    exit 2
+fi
+
+require_env() {
+    local name="$1"
+    if [ -z "${!name:-}" ]; then
+        echo "Required environment variable is not set: ${name}" >&2
+        exit 2
+    fi
+}
+
+require_env AXON_VIEWER_DOMAIN_NAME
+require_env AXON_VIEWER_CERTIFICATE_ARN
+require_env AXON_ORIGIN_DOMAIN_NAME
+require_env AXON_ORIGIN_CERTIFICATE_ARN
+require_env AXON_APPROVED_HTTPS_PREFIX_LIST_ID
+
+if [[ ! "$AXON_APPROVED_HTTPS_PREFIX_LIST_ID" =~ ^pl-[0-9a-fA-F]+$ ]]; then
+    echo "AXON_APPROVED_HTTPS_PREFIX_LIST_ID must be an EC2 prefix list id." >&2
+    exit 2
+fi
+if [[ "$AXON_VIEWER_CERTIFICATE_ARN" != arn:aws:acm:us-east-1:* ]] ||
+   [[ "$AXON_ORIGIN_CERTIFICATE_ARN" != arn:aws:acm:us-east-1:* ]]; then
+    echo "Both ACM certificate ARNs must be in us-east-1." >&2
+    exit 2
+fi
+
+TABLE_NAME="${AXON_DYNAMODB_TABLE_NAME:-axonllm-state}"
+
 # "broadening" still prompts, and only when a change widens IAM or network
 # access; "never" prompts for nothing. Anything else CDK would reject.
 if [ "$ASSUME_YES" = true ]; then
@@ -82,6 +123,12 @@ source .venv/bin/activate
 echo "==> Running cdk deploy..."
 npx cdk deploy \
     --context region="$REGION" \
+    --context table_name="$TABLE_NAME" \
+    --parameters "AxonLLMStack:ViewerDomainName=${AXON_VIEWER_DOMAIN_NAME}" \
+    --parameters "AxonLLMStack:ViewerCertificateArn=${AXON_VIEWER_CERTIFICATE_ARN}" \
+    --parameters "AxonLLMStack:OriginDomainName=${AXON_ORIGIN_DOMAIN_NAME}" \
+    --parameters "AxonLLMStack:OriginCertificateArn=${AXON_ORIGIN_CERTIFICATE_ARN}" \
+    --parameters "AxonLLMStack:ApprovedHttpsPrefixListId=${AXON_APPROVED_HTTPS_PREFIX_LIST_ID}" \
     --require-approval "$APPROVAL" \
     --outputs-file outputs.json
 
@@ -90,13 +137,13 @@ echo "==> Deployment complete!"
 echo ""
 
 if [ -f outputs.json ]; then
-    ALB_URL=$(python3 -c "import json; d=json.load(open('outputs.json')); print(list(d.values())[0].get('ServiceServiceURL', 'check AWS console'))" 2>/dev/null || echo "check AWS console")
-    echo "Dashboard: ${ALB_URL}/admin/dashboard"
-    echo "API:       ${ALB_URL}/api/chat"
+    PUBLIC_URL=$(python3 -c "import json; d=json.load(open('outputs.json')); print(list(d.values())[0].get('CloudFrontURL', 'check AWS console'))" 2>/dev/null || echo "check AWS console")
+    echo "Dashboard: ${PUBLIC_URL}/admin/dashboard"
+    echo "API:       ${PUBLIC_URL}/api/chat"
     echo ""
 fi
 
 echo "Next steps:"
 echo "  1. Set API keys: aws secretsmanager put-secret-value --secret-id axonllm/api-keys --secret-string '{\"ANTHROPIC_API_KEY\":\"sk-ant-...\",\"OPENAI_API_KEY\":\"sk-...\"}'"
-echo "  2. (Optional) Add HTTPS: attach an ACM certificate to the ALB in the AWS Console"
-echo "  3. (Optional) Add OIDC: set AXON_OIDC_ISSUER and AXON_OIDC_AUDIENCE in the task environment"
+echo "  2. Point ${AXON_VIEWER_DOMAIN_NAME} at the CloudFront distribution."
+echo "  3. Configure OIDC and canonical principals before allowing real traffic."

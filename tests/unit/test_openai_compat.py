@@ -29,15 +29,19 @@ class _FakeClientAgent:
         self.chat_extra = chat_extra or {}
         self.stream_chunks = stream_chunks
 
-    def _record(self, model, user_id, project_id, smart_routing, tools, tool_choice):
+    def _record(self, model, user_id, project_id, smart_routing, tools, tool_choice,
+                top_p, stop, system):
         self.last_call = {"user_id": user_id, "project_id": project_id,
                           "model": model, "smart_routing": smart_routing,
-                          "tools": tools, "tool_choice": tool_choice}
+                          "tools": tools, "tool_choice": tool_choice,
+                          "top_p": top_p, "stop": stop, "system": system}
 
     async def chat(self, model, messages, temperature=None, max_tokens=None,
+                   top_p=None, stop=None, system=None,
                    user_id=None, project_id=None, smart_routing=False,
                    tools=None, tool_choice=None):
-        self._record(model, user_id, project_id, smart_routing, tools, tool_choice)
+        self._record(model, user_id, project_id, smart_routing, tools, tool_choice,
+                     top_p, stop, system)
         return {
             "id": "internal-1", "model": model or "auto-selected", "provider": "test",
             "content": "hello there",
@@ -46,9 +50,11 @@ class _FakeClientAgent:
         }
 
     async def chat_stream(self, model, messages, temperature=None, max_tokens=None,
+                          top_p=None, stop=None, system=None,
                           user_id=None, project_id=None, smart_routing=False,
                           tools=None, tool_choice=None):
-        self._record(model, user_id, project_id, smart_routing, tools, tool_choice)
+        self._record(model, user_id, project_id, smart_routing, tools, tool_choice,
+                     top_p, stop, system)
         if self.stream_chunks is not None:
             for chunk in self.stream_chunks:
                 yield chunk
@@ -97,6 +103,20 @@ class TestChatCompletions:
         assert d["choices"][0]["message"] == {"role": "assistant", "content": "hello there"}
         assert d["choices"][0]["finish_reason"] == "stop"
         assert d["usage"] == {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5}
+
+    def test_sampling_and_system_fields_are_forwarded(self):
+        client, agent = _make_client()
+        response = client.post("/v1/chat/completions", json={
+            "model": "m",
+            "messages": [{"role": "user", "content": "hi"}],
+            "top_p": 0.7,
+            "stop": ["DONE"],
+            "system": "Be concise.",
+        })
+        assert response.status_code == 200
+        assert agent.last_call["top_p"] == 0.7
+        assert agent.last_call["stop"] == ["DONE"]
+        assert agent.last_call["system"] == "Be concise."
 
     def test_identity_from_context_not_body(self):
         # Body claims a different tenant; must be ignored in favor of the token.

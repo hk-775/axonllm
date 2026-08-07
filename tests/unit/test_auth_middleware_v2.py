@@ -21,11 +21,19 @@ from src.gateway.models import APIKey, AuthMethod, RequestContext
 class FakeOIDCService:
     def __init__(self, valid_tokens: dict[str, RequestContext] | None = None):
         self._valid_tokens = valid_tokens or {}
+        self.alb_calls: list[tuple[str, str]] = []
+        self.oidc_calls: list[str] = []
 
-    async def validate_alb_jwt(self, token: str) -> RequestContext | None:
+    async def validate_alb_jwt(
+        self,
+        token: str,
+        expected_subject: str,
+    ) -> RequestContext | None:
+        self.alb_calls.append((token, expected_subject))
         return self._valid_tokens.get(f"alb:{token}")
 
     async def validate_oidc_jwt(self, token: str) -> RequestContext | None:
+        self.oidc_calls.append(token)
         return self._valid_tokens.get(f"oidc:{token}")
 
 
@@ -94,10 +102,14 @@ class TestOIDCAuth:
         app = _build_app(oidc_service=oidc, mode="ENFORCE")
         client = TestClient(app)
 
-        resp = client.post("/api/chat", headers={"X-Amzn-Oidc-Data": "valid-alb-token"})
+        resp = client.post("/api/chat", headers={
+            "X-Amzn-Oidc-Data": "valid-alb-token",
+            "X-Amzn-Oidc-Identity": "user-1",
+        })
         assert resp.status_code == 200
         assert resp.json()["user_id"] == "user-1"
         assert resp.json()["auth_method"] == "oidc_jwt"
+        assert oidc.alb_calls == [("valid-alb-token", "user-1")]
 
     def test_bearer_oidc_authenticates(self):
         ctx = RequestContext(
@@ -145,7 +157,7 @@ class TestAPIKeyAuth:
 
 
 class TestPriorityOrder:
-    def test_oidc_wins_over_api_key(self):
+    def test_competing_alb_and_api_key_credentials_are_rejected(self):
         oidc_ctx = RequestContext(
             user_id="oidc-user", project_id="oidc-proj",
             roles=[], scopes=[], auth_method=AuthMethod.OIDC_JWT,
@@ -163,9 +175,71 @@ class TestPriorityOrder:
 
         resp = client.post("/api/chat", headers={
             "X-Amzn-Oidc-Data": "alb-token",
+            "X-Amzn-Oidc-Identity": "oidc-user",
             "X-Api-Key": "axon_" + "c" * 64,
         })
-        assert resp.json()["user_id"] == "oidc-user"
+        assert resp.status_code == 401
+        assert oidc.alb_calls == []
+
+    @pytest.mark.parametrize(
+        "headers",
+        [
+            [
+                ("Authorization", "Bearer first"),
+                ("Authorization", "Bearer second"),
+            ],
+            [
+                ("X-Api-Key", "axon_" + "a" * 64),
+                ("X-Api-Key", "axon_" + "b" * 64),
+            ],
+            [
+                ("Authorization", "Bearer valid-direct-token"),
+                ("X-Api-Key", "axon_" + "a" * 64),
+            ],
+        ],
+    )
+    def test_duplicate_or_competing_direct_credentials_are_rejected(
+        self,
+        headers,
+    ):
+        context = RequestContext(
+            user_id="direct-user",
+            project_id="project-1",
+            roles=[],
+            scopes=[],
+            auth_method=AuthMethod.OIDC_JWT,
+        )
+        oidc = FakeOIDCService(
+            valid_tokens={
+                "oidc:first": context,
+                "oidc:second": context,
+                "oidc:valid-direct-token": context,
+            }
+        )
+        key = APIKey(
+            key_id="axk_direct",
+            key_hash="h",
+            project_id="project-1",
+            name="direct",
+            scopes=["inference.invoke"],
+            created_by="admin",
+        )
+        api_keys = FakeAPIKeyService(
+            valid_keys={
+                "axon_" + "a" * 64: key,
+                "axon_" + "b" * 64: key,
+            }
+        )
+        app = _build_app(
+            oidc_service=oidc,
+            api_key_service=api_keys,
+            mode="ENFORCE",
+        )
+
+        response = TestClient(app).post("/api/chat", headers=headers)
+
+        assert response.status_code == 401
+        assert oidc.oidc_calls == []
 
 
 class TestNoCredentials:
@@ -195,7 +269,10 @@ class TestPolicyDenial:
         app = _build_app(oidc_service=oidc, policy_service=policy, mode="ENFORCE")
         client = TestClient(app)
 
-        resp = client.post("/api/chat", headers={"X-Amzn-Oidc-Data": "token"})
+        resp = client.post("/api/chat", headers={
+            "X-Amzn-Oidc-Data": "token",
+            "X-Amzn-Oidc-Identity": "user-1",
+        })
         assert resp.status_code == 403
 
     def test_policy_deny_logs_only_in_log_mode(self):
@@ -209,5 +286,64 @@ class TestPolicyDenial:
         app = _build_app(oidc_service=oidc, policy_service=policy, mode="LOG_ONLY")
         client = TestClient(app)
 
-        resp = client.post("/api/chat", headers={"X-Amzn-Oidc-Data": "token"})
+        resp = client.post("/api/chat", headers={
+            "X-Amzn-Oidc-Data": "token",
+            "X-Amzn-Oidc-Identity": "user-1",
+        })
         assert resp.status_code == 200
+
+
+class TestALBHeaderHardening:
+    @pytest.mark.parametrize(
+        "headers",
+        [
+            [
+                ("X-Amzn-Oidc-Data", "first"),
+                ("X-Amzn-Oidc-Data", "second"),
+                ("X-Amzn-Oidc-Identity", "user-1"),
+            ],
+            [
+                ("X-Amzn-Oidc-Data", "token"),
+                ("X-Amzn-Oidc-Identity", "user-1"),
+                ("X-Amzn-Oidc-Identity", "user-2"),
+            ],
+            [("X-Amzn-Oidc-Data", "token")],
+            [("X-Amzn-Oidc-Identity", "user-1")],
+            [
+                ("X-Amzn-Oidc-Data", "token"),
+                ("X-Amzn-Oidc-Identity", ""),
+            ],
+        ],
+    )
+    def test_rejects_duplicate_or_incomplete_alb_headers(self, headers):
+        oidc = FakeOIDCService()
+        app = _build_app(oidc_service=oidc, mode="ENFORCE")
+
+        response = TestClient(app).post("/api/chat", headers=headers)
+
+        assert response.status_code == 401
+        assert response.json()["error"]["type"] == "authentication_error"
+        assert oidc.alb_calls == []
+
+    def test_invalid_alb_headers_do_not_fall_back_to_valid_bearer(self):
+        fallback_context = RequestContext(
+            user_id="fallback-user",
+            project_id="project-1",
+            roles=[],
+            scopes=[],
+            auth_method=AuthMethod.OIDC_JWT,
+        )
+        oidc = FakeOIDCService(valid_tokens={"oidc:valid-direct-token": fallback_context})
+        app = _build_app(oidc_service=oidc, mode="ENFORCE")
+
+        response = TestClient(app).post("/api/chat", headers={
+            "X-Amzn-Oidc-Data": "invalid-alb-token",
+            "X-Amzn-Oidc-Identity": "sensitive-subject",
+            "Authorization": "Bearer valid-direct-token",
+        })
+
+        assert response.status_code == 401
+        assert oidc.alb_calls == []
+        assert oidc.oidc_calls == []
+        assert "invalid-alb-token" not in response.text
+        assert "sensitive-subject" not in response.text

@@ -13,11 +13,18 @@ import json
 import logging
 import pathlib
 import traceback
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, StreamingResponse
 from starlette.routing import Route
+
+from src.gateway.chat.request_body import (
+    DEFAULT_CHAT_REQUEST_MAX_BYTES,
+    JSONBodyError,
+    read_json_object,
+)
+from src.gateway.request_validator import RequestValidator
 
 if TYPE_CHECKING:
     from src.gateway.chat.client_agent import ClientAgent
@@ -50,8 +57,20 @@ def _identity_from_context(request: Request) -> tuple[str | None, str | None]:
 class ChatAPI:
     """Route handlers for the client-facing chat interface."""
 
-    def __init__(self, client_agent: ClientAgent) -> None:
+    def __init__(
+        self,
+        client_agent: ClientAgent,
+        *,
+        max_request_bytes: int = DEFAULT_CHAT_REQUEST_MAX_BYTES,
+        request_validator: RequestValidator | None = None,
+    ) -> None:
         self.client_agent = client_agent
+        self.max_request_bytes = max_request_bytes
+        self.request_validator = (
+            request_validator
+            if request_validator is not None
+            else _resolve_request_validator(client_agent)
+        )
 
     # ------------------------------------------------------------------
     # GET /api/models
@@ -95,7 +114,11 @@ class ChatAPI:
     async def chat(self, request: Request) -> JSONResponse:
         """Non-streaming chat completion."""
         # Parse and validate request body
-        body, error_response = await _parse_chat_body(request)
+        body, error_response = await _parse_chat_body(
+            request,
+            request_validator=self.request_validator,
+            max_bytes=self.max_request_bytes,
+        )
         if error_response is not None:
             return error_response
 
@@ -103,7 +126,16 @@ class ChatAPI:
         messages = body["messages"]
         temperature = body.get("temperature")
         max_tokens = body.get("max_tokens")
+        top_p = body.get("top_p")
+        stop = body.get("stop")
+        system = body.get("system")
         provider = body.get("provider")
+        tools = body.get("tools")
+        tool_choice = body.get("tool_choice")
+        tool_options: dict[str, Any] = {}
+        if tools is not None:
+            tool_options["tools"] = tools
+            tool_options["tool_choice"] = tool_choice
         # Identity for attribution comes from the authenticated context, NOT the
         # request body — the body's user_id/project_id are ignored so a caller
         # cannot impersonate another tenant's quota/budget/model-access context.
@@ -115,7 +147,9 @@ class ChatAPI:
         try:
             response = await self.client_agent.chat(
                 model, messages, temperature=temperature, max_tokens=max_tokens,
+                top_p=top_p, stop=stop, system=system,
                 user_id=user_id, project_id=project_id, provider=provider, smart_routing=smart_routing,
+                **tool_options,
             )
         except Exception:
             return JSONResponse(
@@ -151,15 +185,28 @@ class ChatAPI:
     async def chat_stream(self, request: Request) -> StreamingResponse:
         """Streaming chat completion via SSE."""
         # Parse and validate request body (return 400 JSON, not SSE)
-        body, error_response = await _parse_chat_body(request)
+        body, error_response = await _parse_chat_body(
+            request,
+            request_validator=self.request_validator,
+            max_bytes=self.max_request_bytes,
+        )
         if error_response is not None:
             return error_response
 
-        model = body["model"]
+        model = body.get("model", "")
         messages = body["messages"]
         temperature = body.get("temperature")
         max_tokens = body.get("max_tokens")
+        top_p = body.get("top_p")
+        stop = body.get("stop")
+        system = body.get("system")
         provider = body.get("provider")
+        tools = body.get("tools")
+        tool_choice = body.get("tool_choice")
+        tool_options: dict[str, Any] = {}
+        if tools is not None:
+            tool_options["tools"] = tools
+            tool_options["tool_choice"] = tool_choice
         # Smart-routing flag (Auto mode): empty model + context.smart_routing.
         ctx = body.get("context", {})
         smart_routing = ctx.get("smart_routing", False) if isinstance(ctx, dict) else False
@@ -174,8 +221,10 @@ class ChatAPI:
         try:
             result = self.client_agent.chat_stream(
                 model, messages, temperature=temperature, max_tokens=max_tokens,
+                top_p=top_p, stop=stop, system=system,
                 user_id=user_id, project_id=project_id, provider=provider,
                 smart_routing=smart_routing,
+                **tool_options,
             )
         except Exception as exc:
             logging.getLogger("gateway.chat").error("Stream error: %s\n%s", exc, traceback.format_exc())
@@ -209,7 +258,7 @@ class ChatAPI:
                     yield f"data: {json.dumps(chunk)}\n\n"
             except Exception as exc:
                 logging.getLogger("gateway.chat").error("Stream error: %s\n%s", exc, traceback.format_exc())
-                yield f"data: {json.dumps({'error': {'type': 'server_error', 'message': str(exc)}})}\n\n"
+                yield f"data: {json.dumps({'error': {'type': 'server_error', 'message': 'Internal server error'}})}\n\n"
                 yield "data: [DONE]\n\n"
 
         streaming_response = StreamingResponse(event_generator(), media_type="text/event-stream")
@@ -248,34 +297,55 @@ class ChatAPI:
 # ------------------------------------------------------------------
 
 
-async def _parse_chat_body(request: Request) -> tuple[dict, JSONResponse | None]:
+def _resolve_request_validator(client_agent: ClientAgent) -> RequestValidator:
+    gateway_agent = getattr(client_agent, "gateway_agent", None)
+    validator = getattr(gateway_agent, "request_validator", None)
+    if isinstance(validator, RequestValidator):
+        return validator
+    return RequestValidator()
+
+
+def _body_error(error: JSONBodyError) -> JSONResponse:
+    return JSONResponse(
+        {"error": {"type": "invalid_request", "message": error.message}},
+        status_code=error.status_code,
+    )
+
+
+async def _parse_chat_body(
+    request: Request,
+    *,
+    request_validator: RequestValidator | None = None,
+    max_bytes: int = DEFAULT_CHAT_REQUEST_MAX_BYTES,
+) -> tuple[dict[str, Any], JSONResponse | None]:
     """Parse and validate the chat request body.
 
     Returns (body_dict, None) on success, or (empty_dict, error_response) on failure.
     """
     try:
-        body = await request.json()
-    except Exception:
-        return {}, JSONResponse(
-            {"error": {"type": "invalid_request", "message": "Invalid JSON"}},
-            status_code=400,
-        )
+        body = await read_json_object(request, max_bytes=max_bytes)
+    except JSONBodyError as exc:
+        return {}, _body_error(exc)
 
-    model = body.get("model")
     # Allow empty model when smart_routing context is present (auto-select mode)
     context = body.get("context", {})
-    smart_routing = context.get("smart_routing", False) if isinstance(context, dict) else False
-    if not smart_routing:
-        if not model or not isinstance(model, str) or not model.strip():
-            return {}, JSONResponse(
-                {"error": {"type": "invalid_request", "message": "Field 'model' is required"}},
-                status_code=400,
-            )
-
-    messages = body.get("messages")
-    if not messages or not isinstance(messages, list) or len(messages) == 0:
+    smart_routing = (
+        isinstance(context, dict) and context.get("smart_routing") is True
+    )
+    validator = request_validator or RequestValidator()
+    errors = validator.validate_payload(
+        body,
+        allow_empty_model=smart_routing,
+        check_model=False,
+    )
+    if errors:
         return {}, JSONResponse(
-            {"error": {"type": "invalid_request", "message": "Field 'messages' is required and must be non-empty"}},
+            {
+                "error": {
+                    "type": "invalid_request",
+                    "message": errors[0].message,
+                }
+            },
             status_code=400,
         )
 

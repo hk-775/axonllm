@@ -44,11 +44,15 @@ class ClientAgent:
         smart_routing: bool = False,
         tools: list[dict] | None = None,
         tool_choice: str | dict | None = None,
+        top_p: float | None = None,
+        stop: str | list[str] | None = None,
+        system: str | None = None,
     ) -> dict:
         """Non-streaming chat completion. Returns simplified response dict."""
         request_data = self._build_request_data(
             model, messages, stream=False,
             temperature=temperature, max_tokens=max_tokens,
+            top_p=top_p, stop=stop, system=system,
             tools=tools, tool_choice=tool_choice,
         )
         context = self._build_context(
@@ -119,6 +123,9 @@ class ClientAgent:
         smart_routing: bool = False,
         tools: list[dict] | None = None,
         tool_choice: str | dict | None = None,
+        top_p: float | None = None,
+        stop: str | list[str] | None = None,
+        system: str | None = None,
     ) -> AsyncIterator[dict]:
         """Streaming chat completion. Yields chunk dicts.
 
@@ -130,6 +137,7 @@ class ClientAgent:
         request_data = self._build_request_data(
             model, messages, stream=True,
             temperature=temperature, max_tokens=max_tokens,
+            top_p=top_p, stop=stop, system=system,
             tools=tools, tool_choice=tool_choice,
         )
         context = self._build_context(
@@ -213,6 +221,9 @@ class ClientAgent:
         max_tokens: int | None = None,
         tools: list[dict] | None = None,
         tool_choice: str | dict | None = None,
+        top_p: float | None = None,
+        stop: str | list[str] | None = None,
+        system: str | None = None,
     ) -> dict:
         request_data: dict[str, Any] = {
             "model": model,
@@ -223,6 +234,12 @@ class ClientAgent:
             request_data["temperature"] = temperature
         if max_tokens is not None:
             request_data["max_tokens"] = max_tokens
+        if top_p is not None:
+            request_data["top_p"] = top_p
+        if stop is not None:
+            request_data["stop"] = stop
+        if system is not None:
+            request_data["system"] = system
         # Truthiness, not `is not None`: an empty tools list is not the same
         # request as no tools, and some providers reject `tools: []` outright.
         if tools:

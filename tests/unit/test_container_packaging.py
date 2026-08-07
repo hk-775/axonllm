@@ -24,6 +24,17 @@ _DOCKERFILE = _ROOT / "Dockerfile"
 _DOCKERIGNORE = _ROOT / ".dockerignore"
 
 
+def _dockerfile_instructions() -> list[str]:
+    """Return Dockerfile instructions with continued lines joined."""
+    text = _DOCKERFILE.read_text(encoding="utf-8")
+    text = re.sub(r"\\\s*\n", " ", text)
+    return [
+        line.strip()
+        for line in text.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+
+
 def _copied_paths() -> set[str]:
     """Sources named by a ``COPY`` in the Dockerfile, excluding ``--from`` ones.
 
@@ -104,3 +115,54 @@ class TestTheCdkAppStaysOutOfTheImage:
         assert ".py" not in SITE_ASSET_TYPES
         assert "infra" not in SITE_ASSET_DIRS
         assert not _is_servable_site_path(Path("infra/stack.py"))
+
+
+class TestTheProductionRuntimeIsHardened:
+    def test_the_final_user_is_a_dedicated_non_root_account(self):
+        instructions = _dockerfile_instructions()
+        users = [
+            instruction.split(maxsplit=1)[1]
+            for instruction in instructions
+            if instruction.upper().startswith("USER ")
+        ]
+        assert users, "Dockerfile has no USER instruction, so the image runs as root"
+
+        final_user = users[-1]
+        match = re.fullmatch(r"(\d+):(\d+)", final_user)
+        assert match, "final USER must use a stable numeric UID:GID"
+        uid, gid = (int(part) for part in match.groups())
+        assert uid > 0 and gid > 0, "final USER must not be root"
+
+        build_steps = " ".join(
+            instruction
+            for instruction in instructions
+            if instruction.upper().startswith("RUN ")
+        )
+        assert re.search(rf"\bgroupadd\b.*--gid\s+{gid}\b", build_steps)
+        assert re.search(rf"\buseradd\b.*--uid\s+{uid}\b", build_steps)
+        assert "chown -R root:root /app" in build_steps
+        assert "chmod -R a-w /app" in build_steps
+
+    def test_authentication_defaults_to_enforcement(self):
+        environment = " ".join(
+            instruction
+            for instruction in _dockerfile_instructions()
+            if instruction.upper().startswith("ENV ")
+        )
+        assert re.search(r"\bAXON_AUTH_MODE=ENFORCE\b", environment)
+
+    def test_every_sync_installs_the_locked_enterprise_extras(self):
+        sync_steps = [
+            instruction
+            for instruction in _dockerfile_instructions()
+            if instruction.upper().startswith("RUN ") and "uv sync" in instruction
+        ]
+        assert sync_steps, "Dockerfile does not install dependencies with uv sync"
+
+        required_extras = {"oidc", "saml", "otel"}
+        for sync_step in sync_steps:
+            assert "--frozen" in sync_step, "container dependencies must use uv.lock"
+            installed_extras = set(
+                re.findall(r"--extra(?:=|\s+)([a-z0-9-]+)", sync_step)
+            )
+            assert required_extras <= installed_extras

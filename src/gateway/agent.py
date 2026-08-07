@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
+import json
 import logging
 import time
 import warnings
@@ -54,6 +56,10 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger("gateway.agent")
+
+# Complete-output inspection must be bounded. The normal request validator caps
+# requested output tokens, but providers can ignore that cap or omit usage.
+_MAX_POLICY_BUFFER_BYTES = 8 * 1024 * 1024
 
 
 # ---------------------------------------------------------------------------
@@ -459,10 +465,37 @@ class GatewayAgent:
         # twice per miss.
         cache_key: str | None = None
         semantic_eligible = False
-        if project and project.cache_enabled:
+        # Redaction tokens are request-local and normalize different sensitive
+        # values to the same placeholders. Sharing that normalized key would
+        # conflate distinct prompts even when re-injection is disabled.
+        contains_redacted_pii = (
+            pii_mapping is not None
+            and pii_mapping.redacted_count > 0
+        )
+        cache_privacy_eligible = (
+            not request.stream
+            and request.tools is None
+            and request.tool_choice is None
+            and not contains_redacted_pii
+            and not is_smart_routing
+            and not is_ensemble
+            and not context.get("provider")
+            and not context.get("data_residency_zone")
+            and not context.get("preferred_region")
+        )
+        if project and project.cache_enabled and cache_privacy_eligible:
             cache_key = self.cache_manager.compute_cache_key(request, req_ctx.project_id)
             cached = await self.cache_manager.get(cache_key)
             if cached is not None:
+                cached = await self._apply_cached_output_policy(
+                    cached,
+                    request=request,
+                    req_ctx=req_ctx,
+                    request_id=request_id,
+                    project=project,
+                    resolved_policy=resolved_policy,
+                    pii_mapping=pii_mapping,
+                )
                 result = self._response_to_dict(cached, is_cached=True)
                 result["_rate_limit_headers"] = _rate_limit_headers
                 return result
@@ -477,6 +510,15 @@ class GatewayAgent:
                     threshold=project.semantic_cache_threshold,
                 )
                 if sem_hit is not None:
+                    sem_hit = await self._apply_cached_output_policy(
+                        sem_hit,
+                        request=request,
+                        req_ctx=req_ctx,
+                        request_id=request_id,
+                        project=project,
+                        resolved_policy=resolved_policy,
+                        pii_mapping=pii_mapping,
+                    )
                     result = self._response_to_dict(sem_hit, is_cached=True)
                     # Flagged separately from is_cached. An exact hit is the
                     # answer to this question; a semantic hit is the answer to a
@@ -621,6 +663,9 @@ class GatewayAgent:
                         req_ctx.user_id,
                         per_call,
                         _rate_limit_headers,
+                        resolved_policy,
+                        pii_mapping,
+                        request_id,
                     )
 
                 response, ensemble_decision = await self.router.ensemble_route(
@@ -737,34 +782,27 @@ class GatewayAgent:
             resp["_rate_limit_headers"] = _rate_limit_headers
             return resp
 
-        # 11. Response guardrails
-        response_blocked = False
-        if project and project.guardrail_rules:
-            resp_guard = self.guardrail_engine.evaluate_response(
-                response, project.guardrail_rules
-            )
-            if not resp_guard.passed:
-                response = self._replace_response_content(
-                    response,
-                    resp_guard.message or "Response blocked by guardrail.",
-                )
-                # Not cacheable. The content is now a refusal notice, and caching
-                # it would serve that notice to every later request that matched
-                # — turning one blocked response into a block on a whole family
-                # of questions, with no violation to explain it.
-                response_blocked = True
-
-        # 11.5. PII re-injection into response
-        if pii_mapping is not None and pii_mapping.redacted_count > 0 and self._pii_redactor is not None:
-            for i, choice in enumerate(response.choices):
-                msg = choice.get("message", {})
-                content = msg.get("content", "")
-                if isinstance(content, str) and content:
-                    reinjected = self._pii_redactor.reinject_response(content, pii_mapping)
-                    response.choices[i] = {
-                        **choice,
-                        "message": {**msg, "content": reinjected},
-                    }
+        # 11. Response guardrails.
+        # 11.5. Output PII policy. This same helper is used by true and buffered
+        # streaming paths so no provider output can take an early return around
+        # post-response policy.
+        (
+            response,
+            response_blocked,
+            output_pii_count,
+            output_pii_types,
+        ) = await self._apply_output_policy(
+            response,
+            project=project,
+            resolved_policy=resolved_policy,
+            pii_mapping=pii_mapping,
+        )
+        await self._record_output_pii_redaction(
+            req_ctx=req_ctx,
+            request_id=request_id,
+            count=output_pii_count,
+            redacted_types=output_pii_types,
+        )
 
         # 11.6. Audit trail — record LLM request
         if self._audit_trail is not None:
@@ -775,7 +813,10 @@ class GatewayAgent:
                 model=response.model,
                 provider=response.provider,
                 message_count=len(request.messages or []),
-                pii_redacted_count=pii_mapping.redacted_count if pii_mapping else 0,
+                pii_redacted_count=(
+                    (pii_mapping.redacted_count if pii_mapping else 0)
+                    + output_pii_count
+                ),
                 injection_score=0.0,
             )
 
@@ -854,9 +895,10 @@ class GatewayAgent:
                 return self._stream_response_real(
                     request, response, budget_status, _rate_limit_headers,
                     prompt_caching_enabled=prompt_caching_enabled,
-                    pii_mapping=pii_mapping,
                 )
-            return self._stream_response(response, budget_status, _rate_limit_headers, pii_mapping=pii_mapping)
+            return self._stream_response(
+                response, budget_status, _rate_limit_headers
+            )
 
         # 15.5. Cache write
         #
@@ -935,6 +977,400 @@ class GatewayAgent:
             )
         return chain
 
+    def _effective_pii_policy(
+        self, resolved_policy: ResolvedPolicy | None
+    ) -> ResolvedPolicy:
+        policy = resolved_policy or ResolvedPolicy()
+        if self._pii_redactor is None:
+            return policy
+        return self._pii_redactor.effective_policy(policy)
+
+    def _requires_output_buffering(
+        self,
+        *,
+        project: Project | None,
+        resolved_policy: ResolvedPolicy | None,
+    ) -> bool:
+        """Whether output must be complete before any provider text is released."""
+        has_response_guardrail = bool(
+            project
+            and any(
+                rule.applies_to in ("response", "both")
+                for rule in project.guardrail_rules
+            )
+        )
+        policy = self._effective_pii_policy(resolved_policy)
+        return has_response_guardrail or bool(
+            self._pii_redactor is not None and policy.pii_redaction_enabled
+        )
+
+    @staticmethod
+    def _guardrail_inspection_response(
+        response: ChatCompletionResponse,
+    ) -> ChatCompletionResponse:
+        """Expose tool/function output to the existing text guardrail engine."""
+        choices: list[dict] = []
+        for choice in response.choices:
+            message = choice.get("message")
+            if not isinstance(message, dict):
+                choices.append(choice)
+                continue
+            parts: list[str] = []
+            content = message.get("content")
+            if isinstance(content, str) and content:
+                parts.append(content)
+            for key in ("tool_calls", "function_call"):
+                value = message.get(key)
+                if value is not None:
+                    parts.append(
+                        json.dumps(
+                            value,
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                            default=str,
+                        )
+                    )
+            choices.append({
+                **choice,
+                "message": {**message, "content": "\n".join(parts)},
+            })
+        return dataclasses.replace(response, choices=choices)
+
+    async def _apply_output_policy(
+        self,
+        response: ChatCompletionResponse,
+        *,
+        project: Project | None,
+        resolved_policy: ResolvedPolicy | None,
+        pii_mapping: RedactionMapping | None,
+    ) -> tuple[ChatCompletionResponse, bool, int, list[str]]:
+        """Apply the same complete-output controls to every response path.
+
+        Guardrails run on raw provider text. PII processing then re-injects only
+        values supplied by this caller when policy allows it and redacts any new
+        PII generated by the provider. A configured NER detector failure is
+        raised so streaming callers can withhold the entire buffered response.
+        """
+        if project and project.guardrail_rules:
+            result = self.guardrail_engine.evaluate_response(
+                self._guardrail_inspection_response(response),
+                project.guardrail_rules,
+            )
+            if not result.passed:
+                return (
+                    self._replace_response_content(
+                        response,
+                        result.message or "Response blocked by guardrail.",
+                    ),
+                    True,
+                    0,
+                    [],
+                )
+
+        if self._pii_redactor is None:
+            return response, False, 0, []
+
+        policy = self._effective_pii_policy(resolved_policy)
+        known_values = set()
+        if pii_mapping is not None and policy.pii_reinject:
+            known_values.update(pii_mapping._forward.values())
+
+        output_count = 0
+        output_types: set[str] = set()
+
+        async def _process_text(value: str) -> str:
+            nonlocal output_count
+            if not value:
+                return value
+            if pii_mapping is not None and pii_mapping.redacted_count > 0:
+                value = self._pii_redactor.reinject_response(
+                    value, pii_mapping
+                )
+            if not policy.pii_redaction_enabled:
+                return value
+
+            scan_policy = dataclasses.replace(policy, pii_reinject=True)
+            messages, output_mapping = (
+                await self._pii_redactor.redact_messages_async(
+                    [{"role": "assistant", "content": value}],
+                    scan_policy,
+                )
+            )
+            value = messages[0]["content"]
+            if output_mapping.ner_error is not None:
+                output_mapping._forward.clear()
+                output_mapping._dedup.clear()
+                raise RuntimeError("output PII detector unavailable")
+
+            # Re-injection applies only to PII that came from this caller.
+            # Provider-generated PII remains tokenized even in reversible
+            # mode, preventing a model from introducing a new secret.
+            for token, original in output_mapping._forward.items():
+                if original in known_values:
+                    value = value.replace(token, original)
+                    continue
+                output_count += 1
+                token_type = token.removeprefix("[").rsplit("_", 1)[0]
+                output_types.add(token_type.lower())
+            output_mapping._forward.clear()
+            output_mapping._dedup.clear()
+            return value
+
+        choices: list[dict] = []
+        for choice in response.choices:
+            message = choice.get("message")
+            if not isinstance(message, dict):
+                choices.append(choice)
+                continue
+            content = message.get("content")
+            new_message = dict(message)
+            if isinstance(content, str):
+                new_message["content"] = await _process_text(content)
+
+            tool_calls = message.get("tool_calls")
+            if isinstance(tool_calls, list):
+                new_calls: list[Any] = []
+                for call in tool_calls:
+                    if not isinstance(call, dict):
+                        new_calls.append(call)
+                        continue
+                    function = call.get("function")
+                    if not isinstance(function, dict):
+                        new_calls.append(call)
+                        continue
+                    arguments = function.get("arguments")
+                    if isinstance(arguments, str):
+                        function = {
+                            **function,
+                            "arguments": await _process_text(arguments),
+                        }
+                    new_calls.append({**call, "function": function})
+                new_message["tool_calls"] = new_calls
+
+            function_call = message.get("function_call")
+            if isinstance(function_call, dict):
+                arguments = function_call.get("arguments")
+                if isinstance(arguments, str):
+                    new_message["function_call"] = {
+                        **function_call,
+                        "arguments": await _process_text(arguments),
+                    }
+
+            choices.append({
+                **choice,
+                "message": new_message,
+            })
+
+        return (
+            dataclasses.replace(response, choices=choices),
+            False,
+            output_count,
+            sorted(output_types),
+        )
+
+    async def _record_output_pii_redaction(
+        self,
+        *,
+        req_ctx: RequestContext,
+        request_id: str,
+        count: int,
+        redacted_types: list[str],
+    ) -> None:
+        if count <= 0:
+            return
+        if self._audit_trail is not None:
+            await self._audit_trail.record_pii_redaction(
+                user_id=req_ctx.user_id,
+                project_id=req_ctx.project_id,
+                request_id=request_id,
+                redacted_types=redacted_types,
+                count=count,
+            )
+        if self._event_dispatcher is not None:
+            await self._event_dispatcher.dispatch_pii_event(
+                event_id=request_id,
+                user_id=req_ctx.user_id,
+                project_id=req_ctx.project_id,
+                redacted_types=redacted_types,
+                count=count,
+            )
+
+    async def _apply_cached_output_policy(
+        self,
+        response: ChatCompletionResponse,
+        *,
+        request: ChatCompletionRequest,
+        req_ctx: RequestContext,
+        request_id: str,
+        project: Project | None,
+        resolved_policy: ResolvedPolicy | None,
+        pii_mapping: RedactionMapping | None,
+    ) -> ChatCompletionResponse:
+        """Re-evaluate cached output under current policy and audit the access."""
+        response, _, output_pii_count, output_pii_types = (
+            await self._apply_output_policy(
+                response,
+                project=project,
+                resolved_policy=resolved_policy,
+                pii_mapping=pii_mapping,
+            )
+        )
+        await self._record_output_pii_redaction(
+            req_ctx=req_ctx,
+            request_id=request_id,
+            count=output_pii_count,
+            redacted_types=output_pii_types,
+        )
+        if self._audit_trail is not None:
+            await self._audit_trail.record_llm_request(
+                user_id=req_ctx.user_id,
+                project_id=req_ctx.project_id,
+                request_id=request_id,
+                model=response.model,
+                provider=response.provider,
+                message_count=len(request.messages or []),
+                pii_redacted_count=(
+                    (pii_mapping.redacted_count if pii_mapping else 0)
+                    + output_pii_count
+                ),
+                injection_score=0.0,
+            )
+        return response
+
+    @staticmethod
+    def _response_text(response: ChatCompletionResponse) -> str:
+        parts: list[str] = []
+        for choice in response.choices:
+            message = choice.get("message")
+            if not isinstance(message, dict):
+                continue
+            content = message.get("content")
+            if isinstance(content, str) and content:
+                parts.append(content)
+        return " ".join(parts)
+
+    @staticmethod
+    def _stream_chunk_size(chunk: StreamChunk) -> int:
+        payload = {
+            "id": chunk.id,
+            "choices": chunk.choices,
+            "model": chunk.model,
+        }
+        return len(
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                default=str,
+            ).encode("utf-8")
+        )
+
+    @staticmethod
+    def _merge_tool_call_delta(
+        calls: dict[int, dict], raw_call: dict, position: int
+    ) -> None:
+        call_index = raw_call.get("index", position)
+        if not isinstance(call_index, int):
+            call_index = position
+        call = calls.setdefault(
+            call_index,
+            {
+                "id": "",
+                "type": "function",
+                "function": {"name": "", "arguments": ""},
+            },
+        )
+        if raw_call.get("id"):
+            call["id"] = raw_call["id"]
+        if raw_call.get("type"):
+            call["type"] = raw_call["type"]
+        function = raw_call.get("function")
+        if isinstance(function, dict):
+            if function.get("name"):
+                call["function"]["name"] += str(function["name"])
+            if function.get("arguments"):
+                call["function"]["arguments"] += str(function["arguments"])
+
+    def _response_from_stream_chunks(
+        self,
+        chunks: list[StreamChunk],
+        *,
+        provider: str,
+        fallback_model: str,
+        usage: TokenUsage | None,
+    ) -> ChatCompletionResponse:
+        """Reconstruct a checked response from withheld provider chunks."""
+        states: dict[int, dict[str, Any]] = {}
+        response_id = ""
+        response_model = fallback_model
+
+        for chunk in chunks:
+            response_id = chunk.id or response_id
+            response_model = chunk.model or response_model
+            for position, choice in enumerate(chunk.choices):
+                index = choice.get("index", position)
+                if not isinstance(index, int):
+                    index = position
+                state = states.setdefault(
+                    index,
+                    {
+                        "content": [],
+                        "role": "assistant",
+                        "finish_reason": None,
+                        "tool_calls": {},
+                    },
+                )
+                delta = choice.get("delta")
+                if isinstance(delta, dict):
+                    content = delta.get("content")
+                    if isinstance(content, str) and content:
+                        state["content"].append(content)
+                    if isinstance(delta.get("role"), str):
+                        state["role"] = delta["role"]
+                    raw_calls = delta.get("tool_calls")
+                    if isinstance(raw_calls, list):
+                        for call_position, raw_call in enumerate(raw_calls):
+                            if isinstance(raw_call, dict):
+                                self._merge_tool_call_delta(
+                                    state["tool_calls"],
+                                    raw_call,
+                                    call_position,
+                                )
+                if choice.get("finish_reason") is not None:
+                    state["finish_reason"] = choice["finish_reason"]
+
+        choices: list[dict] = []
+        for index, state in sorted(states.items()):
+            message: dict[str, Any] = {
+                "role": state["role"],
+                "content": "".join(state["content"]),
+            }
+            if state["tool_calls"]:
+                message["tool_calls"] = [
+                    state["tool_calls"][call_index]
+                    for call_index in sorted(state["tool_calls"])
+                ]
+            choices.append({
+                "index": index,
+                "message": message,
+                "finish_reason": state["finish_reason"],
+            })
+
+        if not choices:
+            choices = [{
+                "index": 0,
+                "message": {"role": "assistant", "content": ""},
+                "finish_reason": None,
+            }]
+
+        return ChatCompletionResponse(
+            id=response_id,
+            choices=choices,
+            usage=usage or TokenUsage(0, 0, 0),
+            model=response_model,
+            provider=provider,
+        )
+
     async def _stream_true(
         self,
         request: ChatCompletionRequest,
@@ -952,14 +1388,14 @@ class GatewayAgent:
         smart_routing_decision: Any = None,
         spoke: Any = None,
     ) -> AsyncIterator[dict]:
-        """Real end-to-end streaming (#18): one provider call, first token ASAP.
+        """Real end-to-end streaming with policy-aware release.
 
-        Opens the provider SSE stream directly (no prior blocking call), relays
-        each chunk as it arrives (with PII re-injection), accumulates the text
-        and token usage, and runs cost / audit / trace / session accounting once
-        the stream completes. Provider fallback applies only while opening the
-        stream; after the first byte a mid-stream failure surfaces as a stream
-        error (a switch is impossible once the client has received bytes).
+        Opens one provider SSE stream directly. Policy-free output is relayed
+        immediately; configured response guardrails or PII controls require a
+        bounded full-response buffer so cross-chunk matches can be evaluated
+        before any provider text is released. Provider fallback applies only
+        while opening the stream. Usage, audit, trace, and quota accounting run
+        on success, provider failure, and cancellation.
         """
         factory = self.provider_fn_factory
         assert factory is not None
@@ -1039,39 +1475,140 @@ class GatewayAgent:
                     preferred_provider=preferred_provider,
                     allowed_models=effective_allowed,
                 )
-            except Exception as exc:  # noqa: BLE001 — genuine provider failure
+            except Exception:  # noqa: BLE001 — genuine provider failure
+                logger.warning(
+                    "buffered stream fallback failed req=%s model=%s",
+                    request_id,
+                    request.model,
+                    exc_info=True,
+                )
                 yield {"data": {"error": {"type": "provider_error",
-                        "message": f"All providers failed: {exc}",
+                        "message": "The provider request failed.",
                         "code": "all_providers_exhausted"}}}
                 yield {"data": "[DONE]"}
                 return
-            async for chunk_dict in self._stream_response(
-                response, budget_status=None, rate_limit_headers=rate_limit_headers,
-                pii_mapping=pii_mapping):
-                yield chunk_dict
-            # _stream_response already emits [DONE]; record accounting on the
-            # buffered response so cost/audit still fire for this request.
-            await self._finalize_stream(
-                request=request, req_ctx=req_ctx, request_id=request_id,
-                request_start=request_start, resolved_policy=resolved_policy,
-                pii_mapping=pii_mapping, provider=response.provider,
-                model=request.model, response_model=response.model,
-                text="", usage=response.usage, status="success",
-                task_type=task_type, provider_request_id=response.id or "")
+
+            raw_text = self._response_text(response)
+            try:
+                (
+                    response,
+                    _response_blocked,
+                    output_pii_count,
+                    output_pii_types,
+                ) = await self._apply_output_policy(
+                    response,
+                    project=self._projects.get(req_ctx.project_id),
+                    resolved_policy=resolved_policy,
+                    pii_mapping=pii_mapping,
+                )
+                await self._record_output_pii_redaction(
+                    req_ctx=req_ctx,
+                    request_id=request_id,
+                    count=output_pii_count,
+                    redacted_types=output_pii_types,
+                )
+            except Exception:  # noqa: BLE001 — fail closed before any content
+                logger.exception(
+                    "buffered stream output policy failed req=%s", request_id
+                )
+                await self._finalize_stream_safely(
+                    request=request,
+                    req_ctx=req_ctx,
+                    request_id=request_id,
+                    request_start=request_start,
+                    resolved_policy=resolved_policy,
+                    pii_mapping=pii_mapping,
+                    provider=response.provider,
+                    model=request.model,
+                    response_model=response.model,
+                    text=raw_text,
+                    usage=response.usage,
+                    status="error",
+                    task_type=task_type,
+                    provider_request_id=response.id or "",
+                )
+                yield {"data": {"error": {
+                    "type": "output_policy_error",
+                    "message": "The response was withheld because output policy evaluation failed.",
+                    "code": "output_policy_failed",
+                }}}
+                yield {"data": "[DONE]"}
+                return
+
+            stream_status = "success"
+            client_error_emitted = False
+            finalization_ok = True
+            try:
+                if rate_limit_headers:
+                    yield {"_rate_limit_headers": rate_limit_headers}
+                for chunk in simulate_streaming(response):
+                    yield {"data": self._chunk_to_dict(chunk)}
+            except asyncio.CancelledError:
+                stream_status = "cancelled"
+                raise
+            except GeneratorExit:
+                stream_status = "cancelled"
+                raise
+            except Exception:  # noqa: BLE001 — do not expose internals
+                stream_status = "error"
+                client_error_emitted = True
+                logger.warning(
+                    "buffered response streaming failed req=%s",
+                    request_id,
+                    exc_info=True,
+                )
+                yield {"data": {"error": {
+                    "type": "stream_error",
+                    "message": "The response stream failed.",
+                    "code": "response_stream_failed",
+                }}}
+            finally:
+                finalization_ok = await self._finalize_stream_safely(
+                    request=request,
+                    req_ctx=req_ctx,
+                    request_id=request_id,
+                    request_start=request_start,
+                    resolved_policy=resolved_policy,
+                    pii_mapping=pii_mapping,
+                    provider=response.provider,
+                    model=request.model,
+                    response_model=response.model,
+                    text=raw_text,
+                    usage=response.usage,
+                    status=stream_status,
+                    task_type=task_type,
+                    provider_request_id=response.id or "",
+                    output_pii_count=output_pii_count,
+                )
+            if not finalization_ok and not client_error_emitted:
+                yield {"data": {"error": {
+                    "type": "stream_error",
+                    "message": "The response accounting could not be completed.",
+                    "code": "stream_finalization_failed",
+                }}}
+            yield {"data": "[DONE]"}
             return
 
-        # --- Relay chunks; accumulate text + usage for end-of-stream accounting ---
-        if rate_limit_headers:
-            yield {"_rate_limit_headers": rate_limit_headers}
-
+        # --- Relay or policy-buffer chunks; always accumulate for accounting ---
+        project = self._projects.get(req_ctx.project_id)
+        buffer_for_policy = self._requires_output_buffering(
+            project=project,
+            resolved_policy=resolved_policy,
+        )
         pii_buffer: dict = {"pending": ""}
+        buffered_chunks: list[StreamChunk] = []
+        buffered_bytes = 0
         accumulated: list[str] = []
         final_usage: TokenUsage | None = None
         stream_status = "success"
         response_model = chosen.model_id
+        output_pii_count = 0
+        failure_type = "provider"
+        client_error_emitted = False
+        finalization_ok = True
 
-        async def _emit(chunk: StreamChunk):
-            nonlocal final_usage, response_model
+        def _consume(chunk: StreamChunk) -> dict | None:
+            nonlocal final_usage, response_model, buffered_bytes
             if chunk.usage is not None:
                 final_usage = self._merge_stream_usage(final_usage, chunk.usage)
             if chunk.model:
@@ -1081,6 +1618,14 @@ class GatewayAgent:
                 c = delta.get("content", "")
                 if isinstance(c, str) and c:
                     accumulated.append(c)
+
+            if buffer_for_policy:
+                buffered_bytes += self._stream_chunk_size(chunk)
+                if buffered_bytes > _MAX_POLICY_BUFFER_BYTES:
+                    raise RuntimeError("output policy buffer limit exceeded")
+                buffered_chunks.append(chunk)
+                return None
+
             # A usage-only trailing chunk (OpenAI include_usage) has empty
             # choices — capture its usage above but don't emit an empty SSE chunk.
             if not chunk.choices:
@@ -1091,31 +1636,103 @@ class GatewayAgent:
             return {"data": chunk_dict}
 
         try:
+            if rate_limit_headers:
+                yield {"_rate_limit_headers": rate_limit_headers}
+
             if first_chunk is not None:
-                out = await _emit(first_chunk)
+                out = _consume(first_chunk)
                 if out is not None:
                     yield out
-                # Keep consuming to the end of the SSE stream. We do NOT stop on
-                # is_final: providers that report usage in-stream (OpenAI) send
-                # the usage chunk AFTER the finish_reason chunk, and we need it
-                # for accurate end-of-stream cost accounting.
-                async for chunk in stream:
-                    out = await _emit(chunk)
-                    if out is not None:
-                        yield out
-        except Exception as exc:  # noqa: BLE001 — after first byte, no fallback
+
+            # Keep consuming to the end of the SSE stream. We do NOT stop on
+            # is_final: providers that report usage in-stream (OpenAI) send the
+            # usage chunk AFTER the finish_reason chunk.
+            async for chunk in stream:
+                out = _consume(chunk)
+                if out is not None:
+                    yield out
+
+            if buffer_for_policy:
+                failure_type = "output_policy"
+                buffered_response = self._response_from_stream_chunks(
+                    buffered_chunks,
+                    provider=chosen.provider,
+                    fallback_model=response_model,
+                    usage=final_usage,
+                )
+                (
+                    buffered_response,
+                    _response_blocked,
+                    output_pii_count,
+                    output_pii_types,
+                ) = await self._apply_output_policy(
+                    buffered_response,
+                    project=project,
+                    resolved_policy=resolved_policy,
+                    pii_mapping=pii_mapping,
+                )
+                await self._record_output_pii_redaction(
+                    req_ctx=req_ctx,
+                    request_id=request_id,
+                    count=output_pii_count,
+                    redacted_types=output_pii_types,
+                )
+                for approved_chunk in simulate_streaming(buffered_response):
+                    yield {"data": self._chunk_to_dict(approved_chunk)}
+        except asyncio.CancelledError:
+            stream_status = "cancelled"
+            raise
+        except GeneratorExit:
+            stream_status = "cancelled"
+            raise
+        except Exception:  # noqa: BLE001 — after first byte, no fallback
             stream_status = "error"
-            yield {"data": {"error": {"type": "stream_error", "message": str(exc)}}}
+            client_error_emitted = True
+            logger.warning(
+                "%s stream failure req=%s provider=%s",
+                failure_type,
+                request_id,
+                chosen.provider,
+                exc_info=True,
+            )
+            if failure_type == "output_policy":
+                yield {"data": {"error": {
+                    "type": "output_policy_error",
+                    "message": "The response was withheld because output policy evaluation failed.",
+                    "code": "output_policy_failed",
+                }}}
+            else:
+                yield {"data": {"error": {
+                    "type": "stream_error",
+                    "message": "The provider stream failed.",
+                    "code": "provider_stream_failed",
+                }}}
         finally:
-            await self._finalize_stream(
+            close = getattr(stream, "aclose", None)
+            if close is not None:
+                try:
+                    await close()
+                except Exception:  # noqa: BLE001 — cleanup cannot replace result
+                    logger.debug(
+                        "provider stream close failed req=%s", request_id,
+                        exc_info=True,
+                    )
+            finalization_ok = await self._finalize_stream_safely(
                 request=request, req_ctx=req_ctx, request_id=request_id,
                 request_start=request_start, resolved_policy=resolved_policy,
                 pii_mapping=pii_mapping, provider=chosen.provider,
                 model=request.model, response_model=response_model,
                 text="".join(accumulated), usage=final_usage, status=stream_status,
                 task_type=task_type,
+                output_pii_count=output_pii_count,
             )
-            yield {"data": "[DONE]"}
+        if not finalization_ok and not client_error_emitted:
+            yield {"data": {"error": {
+                "type": "stream_error",
+                "message": "The response accounting could not be completed.",
+                "code": "stream_finalization_failed",
+            }}}
+        yield {"data": "[DONE]"}
 
     def _merge_stream_usage(
         self, current: TokenUsage | None, incoming: TokenUsage,
@@ -1143,6 +1760,7 @@ class GatewayAgent:
         self, *, request, req_ctx, request_id, request_start, resolved_policy,
         pii_mapping, provider, model, response_model, text, usage, status,
         task_type: str = "", provider_request_id: str = "",
+        output_pii_count: int = 0,
     ) -> None:
         """End-of-stream accounting: usage, cost, audit, trace, OTLP, quota.
 
@@ -1173,7 +1791,10 @@ class GatewayAgent:
                 user_id=req_ctx.user_id, project_id=req_ctx.project_id,
                 request_id=request_id, model=response_model, provider=provider,
                 message_count=len(request.messages or []),
-                pii_redacted_count=pii_mapping.redacted_count if pii_mapping else 0,
+                pii_redacted_count=(
+                    (pii_mapping.redacted_count if pii_mapping else 0)
+                    + output_pii_count
+                ),
                 injection_score=0.0,
             )
 
@@ -1213,6 +1834,20 @@ class GatewayAgent:
         if approximate:
             logger.debug("stream usage estimated (provider reported none) req=%s", request_id)
 
+    async def _finalize_stream_safely(self, **kwargs: Any) -> bool:
+        """Contain accounting failures so streams terminate in protocol order."""
+        try:
+            await self._finalize_stream(**kwargs)
+            return True
+        except (asyncio.CancelledError, GeneratorExit):
+            raise
+        except Exception:  # noqa: BLE001 — client receives a stable error event
+            logger.exception(
+                "stream finalization failed req=%s",
+                kwargs.get("request_id", ""),
+            )
+            return False
+
     async def _stream_response(
         self,
         response: ChatCompletionResponse,
@@ -1236,14 +1871,20 @@ class GatewayAgent:
                 if pii_mapping and pii_mapping.redacted_count > 0:
                     chunk_dict = self._reinject_chunk_pii(chunk_dict, pii_mapping, pii_buffer)
                 yield {"data": chunk_dict}
-        except Exception as exc:
-            # On error during streaming, yield error event then DONE
-            yield {"data": {"error": {"type": "stream_error", "message": str(exc)}}}
-        finally:
-            done_data: dict[str, Any] = {"data": "[DONE]"}
-            if budget_status and budget_status.is_over_budget:
-                done_data["budget_exceeded"] = True
-            yield done_data
+        except (asyncio.CancelledError, GeneratorExit):
+            raise
+        except Exception:
+            logger.warning("buffered response streaming failed", exc_info=True)
+            yield {"data": {"error": {
+                "type": "stream_error",
+                "message": "The response stream failed.",
+                "code": "response_stream_failed",
+            }}}
+
+        done_data: dict[str, Any] = {"data": "[DONE]"}
+        if budget_status and budget_status.is_over_budget:
+            done_data["budget_exceeded"] = True
+        yield done_data
 
     async def _stream_ensemble_response(
         self,
@@ -1255,6 +1896,9 @@ class GatewayAgent:
         user_id: str,
         per_call: float,
         rate_limit_headers: dict[str, str] | None = None,
+        resolved_policy: ResolvedPolicy | None = None,
+        pii_mapping: RedactionMapping | None = None,
+        request_id: str = "",
     ) -> AsyncIterator[dict]:
         """Async generator for streaming ensemble requests.
 
@@ -1288,11 +1932,73 @@ class GatewayAgent:
             EnsembleNoSurvivorsError,
             EnsembleQuorumError,
             EnsembleSynthesisError,
-        ) as exc:
+        ):
             # Pre-dispatch rejection (access / cost ceiling), below quorum
             # under error policy, 0 survivors, or judge failure: terminate the
             # stream with an error chunk and no synthesized content (Req 10.4).
-            yield {"data": {"error": {"type": "ensemble_error", "message": str(exc)}}}
+            logger.warning(
+                "ensemble stream failed req=%s project=%s",
+                request_id,
+                project_id,
+                exc_info=True,
+            )
+            yield {"data": {"error": {
+                "type": "ensemble_error",
+                "message": "The ensemble request failed.",
+                "code": "ensemble_failed",
+            }}}
+            yield {"data": "[DONE]"}
+            return
+
+        req_ctx = RequestContext(
+            user_id=user_id,
+            project_id=project_id,
+            roles=[],
+            scopes=[],
+        )
+        try:
+            (
+                response,
+                _response_blocked,
+                output_pii_count,
+                output_pii_types,
+            ) = await self._apply_output_policy(
+                response,
+                project=self._projects.get(project_id),
+                resolved_policy=resolved_policy,
+                pii_mapping=pii_mapping,
+            )
+            await self._record_output_pii_redaction(
+                req_ctx=req_ctx,
+                request_id=request_id,
+                count=output_pii_count,
+                redacted_types=output_pii_types,
+            )
+            if self._audit_trail is not None:
+                await self._audit_trail.record_llm_request(
+                    user_id=user_id,
+                    project_id=project_id,
+                    request_id=request_id,
+                    model=response.model,
+                    provider=response.provider,
+                    message_count=len(request.messages or []),
+                    pii_redacted_count=(
+                        (pii_mapping.redacted_count if pii_mapping else 0)
+                        + output_pii_count
+                    ),
+                    injection_score=0.0,
+                )
+        except Exception:  # noqa: BLE001 — no unapproved content has been sent
+            logger.exception(
+                "ensemble output policy failed req=%s project=%s",
+                request_id,
+                project_id,
+            )
+            yield {"data": {"error": {
+                "type": "output_policy_error",
+                "message": "The response was withheld because output policy evaluation failed.",
+                "code": "output_policy_failed",
+            }}}
             yield {"data": "[DONE]"}
             return
 
@@ -1303,10 +2009,19 @@ class GatewayAgent:
             chunks = simulate_streaming(response)
             for chunk in chunks:
                 yield {"data": self._chunk_to_dict(chunk)}
-        except Exception as exc:
-            yield {"data": {"error": {"type": "stream_error", "message": str(exc)}}}
-        finally:
-            yield {"data": "[DONE]"}
+        except (asyncio.CancelledError, GeneratorExit):
+            raise
+        except Exception:
+            logger.warning(
+                "ensemble response streaming failed req=%s", request_id,
+                exc_info=True,
+            )
+            yield {"data": {"error": {
+                "type": "stream_error",
+                "message": "The response stream failed.",
+                "code": "response_stream_failed",
+            }}}
+        yield {"data": "[DONE]"}
 
     async def _stream_response_real(
         self,
@@ -1317,63 +2032,18 @@ class GatewayAgent:
         prompt_caching_enabled: bool = False,
         pii_mapping: RedactionMapping | None = None,
     ) -> AsyncIterator[dict]:
-        """Async generator that yields real SSE chunks from the provider.
+        """Replay an already checked response for the legacy streaming path.
 
-        Uses ``ProviderFnFactory``'s underlying ``HttpClient.execute_streaming``
-        to obtain a real SSE stream from the provider, rather than simulating
-        streaming from a complete response.
-
-        Falls back to simulated streaming if the real SSE call fails.
+        Real provider streaming is opened by ``_stream_true`` before any blocking
+        call. Reopening a second provider stream here would double bill and expose
+        output different from the response that passed guardrails.
         """
-        assert self.provider_fn_factory is not None  # caller guarantees this
-
-        factory = self.provider_fn_factory
-        adapter = factory._adapter_registry.get(response.provider)
-        config = factory._provider_configs.get(response.provider)
-
-        if adapter is None or config is None:
-            # Fall back to simulated streaming if we can't resolve provider info
-            async for chunk_dict in self._stream_response(response, budget_status, rate_limit_headers, pii_mapping=pii_mapping):
-                yield chunk_dict
-            return
-
-        # Resolve the mapping from the router's fallback chain
-        chain = self.router.get_fallback_chain(request.model)
-        mapping = None
-        for m in chain:
-            if m.provider == response.provider:
-                mapping = m
-                break
-
-        if mapping is None:
-            async for chunk_dict in self._stream_response(response, budget_status, rate_limit_headers, pii_mapping=pii_mapping):
-                yield chunk_dict
-            return
-
-        # Yield rate limit headers as first metadata chunk if present
-        if rate_limit_headers:
-            yield {"_rate_limit_headers": rate_limit_headers}
-
-        try:
-            pii_buffer: dict = {"pending": ""}
-            stream = factory._http_client.execute_streaming(
-                request, mapping, adapter, config,
-                prompt_caching_enabled=prompt_caching_enabled,
-            )
-            async for chunk in stream:
-                chunk_dict = self._chunk_to_dict(chunk)
-                if pii_mapping and pii_mapping.redacted_count > 0:
-                    chunk_dict = self._reinject_chunk_pii(chunk_dict, pii_mapping, pii_buffer)
-                yield {"data": chunk_dict}
-                if chunk.is_final:
-                    break
-        except Exception as exc:
-            yield {"data": {"error": {"type": "stream_error", "message": str(exc)}}}
-        finally:
-            done_data: dict[str, Any] = {"data": "[DONE]"}
-            if budget_status and budget_status.is_over_budget:
-                done_data["budget_exceeded"] = True
-            yield done_data
+        async for chunk_dict in self._stream_response(
+            response,
+            budget_status,
+            rate_limit_headers,
+        ):
+            yield chunk_dict
 
     # ------------------------------------------------------------------
     # Smart Routing
@@ -1583,13 +2253,16 @@ class GatewayAgent:
 
     def _parse_request(self, data: dict) -> ChatCompletionRequest:
         """Parse raw dict into ChatCompletionRequest."""
+        stop = data.get("stop")
+        if isinstance(stop, str):
+            stop = [stop]
         return ChatCompletionRequest(
             messages=data.get("messages", []),
             model=data.get("model", ""),
             temperature=data.get("temperature"),
             max_tokens=data.get("max_tokens"),
             top_p=data.get("top_p"),
-            stop=data.get("stop"),
+            stop=stop,
             stream=data.get("stream", False),
             system=data.get("system"),
             tools=data.get("tools"),

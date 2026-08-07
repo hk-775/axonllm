@@ -64,7 +64,13 @@ def load_app_config() -> AppConfig:
         load_demo_data=os.environ.get("AXON_LOAD_DEMO_DATA", "false").lower() == "true",
         oidc_issuer=os.environ.get("AXON_OIDC_ISSUER", ""),
         oidc_audience=os.environ.get("AXON_OIDC_AUDIENCE", ""),
+        alb_signer_arn=os.environ.get("AXON_ALB_SIGNER_ARN", ""),
+        alb_client_id=os.environ.get("AXON_ALB_CLIENT_ID", ""),
+        alb_issuer=os.environ.get("AXON_ALB_ISSUER", ""),
         auth_mode=_load_auth_mode(),
+        canonical_identity_required=os.environ.get(
+            "AXON_REQUIRE_CANONICAL_IDENTITY", "false"
+        ).lower() == "true",
         semantic_cache_enabled=os.environ.get(
             "AXON_SEMANTIC_CACHE", "false"
         ).lower() == "true",

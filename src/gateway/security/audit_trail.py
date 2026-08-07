@@ -27,6 +27,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+GENESIS_HASH = "genesis"
+
 
 class AuditEventType(Enum):
     LLM_REQUEST = "llm_request"
@@ -76,6 +78,9 @@ class AuditTrail:
     Records are stored in DynamoDB (when enabled) and kept in an
     in-memory buffer for recent queries. The hash chain allows
     tamper detection during compliance audits.
+
+    The lock serializes writers within one process. Multi-replica
+    transactional chain-head storage remains a required follow-up.
     """
 
     def __init__(
@@ -86,7 +91,7 @@ class AuditTrail:
         self._persistence = persistence
         self._buffer: deque[AuditRecord] = deque(maxlen=buffer_size)
         self._buffer_size = buffer_size
-        self._last_hash = "genesis"
+        self._last_hash = GENESIS_HASH
         self._initialized = False
         self._lock = asyncio.Lock()
 
@@ -157,12 +162,12 @@ class AuditTrail:
                 prev_hash=self._last_hash,
             )
             record.record_hash = record.compute_hash()
+
+            if self._persistence and self._persistence.enabled:
+                await self._persist(record)
+
             self._last_hash = record.record_hash
-
             self._buffer.append(record)
-
-        if self._persistence and self._persistence.enabled:
-            await self._persist(record)
 
         return record
 
@@ -247,33 +252,44 @@ class AuditTrail:
             results = [r for r in results if r.event_type == event_type]
         return results[-limit:]
 
-    def verify_chain(self, records: list[AuditRecord] | None = None) -> bool:
-        """Verify hash chain integrity. Returns False if tampered."""
+    def verify_chain(
+        self,
+        records: list[AuditRecord] | None = None,
+        expected_prev_hash: str = GENESIS_HASH,
+    ) -> bool:
+        """Verify hash chain integrity from an expected predecessor hash."""
         records = records if records is not None else list(self._buffer)
         if not records:
             return True
 
-        for i, record in enumerate(records):
+        prev = expected_prev_hash
+        for record in records:
             expected_hash = record.compute_hash()
             if record.record_hash != expected_hash:
                 return False
-            if i > 0 and record.prev_hash != records[i - 1].record_hash:
+            if record.prev_hash != prev:
                 return False
+            prev = record.record_hash
 
         return True
 
-    async def verify_persisted_chain(self, project_id: str | None = None) -> dict:
+    async def verify_persisted_chain(
+        self,
+        project_id: str | None = None,
+        expected_prev_hash: str = GENESIS_HASH,
+    ) -> dict:
         """Verify the hash chain of the DURABLE store (not just the buffer).
 
         The in-memory ``verify_chain`` can't detect tampering with persisted rows
         or gaps across restarts. This reloads the persisted records, rebuilds
         AuditRecords, and checks each row's own hash and its link to the prior
-        row. Returns {valid, checked, [broken_at]}.
+        row, including the first row's link to ``expected_prev_hash``. Returns
+        {valid, checked, [broken_at]}.
         """
         if not (self._persistence and self._persistence.enabled):
             return {"valid": True, "checked": 0, "note": "persistence disabled"}
         rows = await self._persistence.load_audit_records(project_id)
-        prev = "genesis"
+        prev = expected_prev_hash
         checked = 0
         for row in rows:
             try:
@@ -294,9 +310,14 @@ class AuditTrail:
             if rec.compute_hash() != rec.record_hash:
                 return {"valid": False, "broken_at": rec.record_id,
                         "reason": "record_hash mismatch (content altered)", "checked": checked}
-            if checked > 0 and rec.prev_hash != prev:
+            if rec.prev_hash != prev:
+                reason = (
+                    "first record does not link to expected genesis hash"
+                    if checked == 0 and expected_prev_hash == GENESIS_HASH
+                    else "prev_hash link broken (row removed/reordered)"
+                )
                 return {"valid": False, "broken_at": rec.record_id,
-                        "reason": "prev_hash link broken (row removed/reordered)", "checked": checked}
+                        "reason": reason, "checked": checked}
             prev = rec.record_hash
             checked += 1
         return {"valid": True, "checked": checked}
@@ -342,3 +363,4 @@ class AuditTrail:
                 await self._persistence.put_item(item)
         except Exception:
             logger.error("Failed to persist audit record %s", record.record_id, exc_info=True)
+            raise

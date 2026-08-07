@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from src.gateway.security.audit_trail import AuditEventType, AuditTrail
 
 
@@ -15,8 +17,13 @@ class FakePersistence:
 
     def __init__(self) -> None:
         self.rows: list[dict] = []
+        self.put_error: Exception | None = None
 
     async def put_item(self, item: dict) -> None:
+        if self.put_error:
+            error = self.put_error
+            self.put_error = None
+            raise error
         self.rows.append(item)
 
     async def load_audit_records(self, project_id: str | None = None) -> list[dict]:
@@ -77,6 +84,72 @@ async def test_verify_persisted_detects_removal():
     del p.rows[1]                                         # remove the middle row
     result = await a.verify_persisted_chain()
     assert result["valid"] is False
+
+
+async def test_failed_append_does_not_advance_chain_or_buffer():
+    p = FakePersistence()
+    a = AuditTrail(persistence=p)
+    committed = await a.record(
+        AuditEventType.LLM_REQUEST, "u", "proj", "r1", {},
+    )
+    original_buffer = list(a._buffer)
+
+    p.put_error = RuntimeError("injected append failure")
+    with pytest.raises(RuntimeError, match="injected append failure"):
+        await a.record(AuditEventType.LLM_REQUEST, "u", "proj", "failed", {})
+
+    assert a._last_hash == committed.record_hash
+    assert list(a._buffer) == original_buffer
+    assert len(p.rows) == 1
+
+    recovered = await a.record(
+        AuditEventType.LLM_REQUEST, "u", "proj", "r2", {},
+    )
+    assert recovered.prev_hash == committed.record_hash
+    assert a.verify_chain() is True
+
+
+async def test_verify_persisted_detects_first_row_removal():
+    p = FakePersistence()
+    a = AuditTrail(persistence=p)
+    await a.record(AuditEventType.LLM_REQUEST, "u", "proj", "r1", {})
+    await a.record(AuditEventType.LLM_REQUEST, "u", "proj", "r2", {})
+    del p.rows[0]
+
+    result = await a.verify_persisted_chain()
+
+    assert result["valid"] is False
+    assert result["checked"] == 0
+    assert "genesis" in result["reason"]
+
+
+async def test_verify_persisted_detects_forged_first_row_predecessor():
+    p = FakePersistence()
+    a = AuditTrail(persistence=p)
+    first = await a.record(
+        AuditEventType.LLM_REQUEST, "u", "proj", "r1", {"k": "v"},
+    )
+    first.prev_hash = "forged-predecessor"
+    first.record_hash = first.compute_hash()
+    p.rows[0]["prev_hash"] = first.prev_hash
+    p.rows[0]["record_hash"] = first.record_hash
+
+    result = await a.verify_persisted_chain()
+
+    assert result["valid"] is False
+    assert result["broken_at"] == first.record_id
+    assert result["checked"] == 0
+    assert "genesis" in result["reason"]
+
+
+async def test_verify_buffer_requires_expected_first_row_predecessor():
+    a = AuditTrail(persistence=None)
+    first = await a.record(AuditEventType.LLM_REQUEST, "u", "proj", "r1", {})
+    await a.record(AuditEventType.LLM_REQUEST, "u", "proj", "r2", {})
+    a._buffer.popleft()
+
+    assert a.verify_chain() is False
+    assert a.verify_chain(expected_prev_hash=first.record_hash) is True
 
 
 async def test_initialize_noop_without_persistence():

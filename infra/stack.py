@@ -2,9 +2,11 @@
 
 from aws_cdk import (
     CfnOutput,
+    CfnParameter,
     Duration,
     RemovalPolicy,
     Stack,
+    aws_certificatemanager as acm,
     aws_cloudfront as cloudfront,
     aws_cloudfront_origins as origins,
     aws_dynamodb as dynamodb,
@@ -12,9 +14,11 @@ from aws_cdk import (
     aws_ecr_assets as ecr_assets,
     aws_ecs as ecs,
     aws_ecs_patterns as ecs_patterns,
+    aws_elasticloadbalancingv2 as elbv2,
     aws_iam as iam,
     aws_logs as logs,
     aws_secretsmanager as secretsmanager,
+    aws_wafv2 as wafv2,
 )
 from constructs import Construct
 
@@ -23,12 +27,107 @@ class AxonLLMStack(Stack):
     def __init__(self, scope: Construct, construct_id: str, **kwargs) -> None:
         super().__init__(scope, construct_id, **kwargs)
 
+        if self.region != "us-east-1":
+            raise ValueError(
+                "AxonLLMStack must be deployed in us-east-1 because its "
+                "CloudFront WebACL has global scope"
+            )
+
+        # These values are deliberately required CloudFormation parameters. A
+        # deploy must bring account-owned TLS, DNS, and egress policy; the
+        # reference stack must not silently fall back to plaintext or open
+        # networking when those controls are absent.
+        viewer_domain_name = CfnParameter(
+            self,
+            "ViewerDomainName",
+            type="String",
+            min_length=1,
+            description=(
+                "CloudFront alternate domain name covered by ViewerCertificateArn"
+            ),
+        )
+        viewer_certificate_arn = CfnParameter(
+            self,
+            "ViewerCertificateArn",
+            type="String",
+            min_length=1,
+            description=(
+                "ACM certificate ARN in us-east-1 covering ViewerDomainName"
+            ),
+        )
+        origin_domain_name = CfnParameter(
+            self,
+            "OriginDomainName",
+            type="String",
+            min_length=1,
+            description=(
+                "Private ALB origin name covered by OriginCertificateArn"
+            ),
+        )
+        origin_certificate_arn = CfnParameter(
+            self,
+            "OriginCertificateArn",
+            type="String",
+            min_length=1,
+            description=(
+                "ACM certificate ARN in this stack's region covering OriginDomainName"
+            ),
+        )
+        approved_https_prefix_list_id = CfnParameter(
+            self,
+            "ApprovedHttpsPrefixListId",
+            type="String",
+            allowed_pattern=r"^pl-[0-9a-fA-F]+$",
+            constraint_description="must be an EC2 managed prefix list ID",
+            description=(
+                "Managed prefix list containing every approved HTTPS destination "
+                "required by ECS, AWS APIs, and configured LLM providers"
+            ),
+        )
+
         # --- Networking ---
         vpc = ec2.Vpc(
             self,
             "Vpc",
             max_azs=2,
             nat_gateways=1,
+            restrict_default_security_group=True,
+            subnet_configuration=[
+                ec2.SubnetConfiguration(
+                    name="Public",
+                    subnet_type=ec2.SubnetType.PUBLIC,
+                    cidr_mask=24,
+                    map_public_ip_on_launch=False,
+                ),
+                ec2.SubnetConfiguration(
+                    name="Application",
+                    subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS,
+                    cidr_mask=24,
+                ),
+            ],
+        )
+
+        task_security_group = ec2.SecurityGroup(
+            self,
+            "TaskSecurityGroup",
+            vpc=vpc,
+            allow_all_outbound=False,
+            description="AxonLLM task ingress and explicitly approved egress",
+        )
+        task_security_group.add_egress_rule(
+            ec2.Peer.ipv4(vpc.vpc_cidr_block),
+            ec2.Port.udp(53),
+            "DNS to the VPC resolver",
+        )
+        task_security_group.add_egress_rule(
+            ec2.Peer.ipv4(vpc.vpc_cidr_block),
+            ec2.Port.tcp(53),
+            "DNS fallback to the VPC resolver",
+        )
+        task_security_group.add_egress_rule(
+            ec2.Peer.prefix_list(approved_https_prefix_list_id.value_as_string),
+            ec2.Port.tcp(443),
+            "HTTPS to explicitly approved destinations",
         )
 
         # --- Secrets ---
@@ -69,7 +168,9 @@ class AxonLLMStack(Stack):
             sort_key=dynamodb.Attribute(name="SK", type=dynamodb.AttributeType.STRING),
             billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
             removal_policy=RemovalPolicy.RETAIN,
-            point_in_time_recovery=True,
+            point_in_time_recovery_specification=dynamodb.PointInTimeRecoverySpecification(
+                point_in_time_recovery_enabled=True
+            ),
         )
 
         # --- ECS Cluster ---
@@ -98,6 +199,12 @@ class AxonLLMStack(Stack):
             "Image",
             directory="..",
             platform=ecr_assets.Platform.LINUX_AMD64,
+        )
+
+        origin_certificate = acm.Certificate.from_certificate_arn(
+            self,
+            "OriginCertificate",
+            origin_certificate_arn.value_as_string,
         )
 
         # --- Fargate service with ALB ---
@@ -144,8 +251,26 @@ class AxonLLMStack(Stack):
                     "AXON_LOAD_DEMO_DATA": "false",
                 },
             ),
-            public_load_balancer=True,
+            assign_public_ip=False,
+            task_subnets=ec2.SubnetSelection(
+                subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS
+            ),
+            security_groups=[task_security_group],
+            public_load_balancer=False,
+            open_listener=False,
+            certificate=origin_certificate,
+            protocol=elbv2.ApplicationProtocol.HTTPS,
+            listener_port=443,
+            ssl_policy=elbv2.SslPolicy.RECOMMENDED_TLS,
             health_check_grace_period=Duration.seconds(60),
+        )
+
+        # CloudFront VPC origins use private addresses in this VPC. The ALB is
+        # internal and its listener is not opened to the internet.
+        fargate_service.load_balancer.connections.allow_from(
+            ec2.Peer.ipv4(vpc.vpc_cidr_block),
+            ec2.Port.tcp(443),
+            "CloudFront VPC origin traffic",
         )
 
         # --- Health check ---
@@ -216,18 +341,82 @@ class AxonLLMStack(Stack):
         fargate_service.load_balancer.set_attribute(
             "idle_timeout.timeout_seconds", "300"
         )
+        fargate_service.load_balancer.set_attribute(
+            "routing.http.drop_invalid_header_fields.enabled", "true"
+        )
 
         # --- CloudFront distribution ---
+        vpc_origin = origins.VpcOrigin.with_application_load_balancer(
+            fargate_service.load_balancer,
+            domain_name=origin_domain_name.value_as_string,
+            protocol_policy=cloudfront.OriginProtocolPolicy.HTTPS_ONLY,
+            origin_ssl_protocols=[cloudfront.OriginSslPolicy.TLS_V1_2],
+            https_port=443,
+            read_timeout=Duration.seconds(60),
+            keepalive_timeout=Duration.seconds(60),
+        )
+        viewer_certificate = acm.Certificate.from_certificate_arn(
+            self,
+            "ViewerCertificate",
+            viewer_certificate_arn.value_as_string,
+        )
+        web_acl = wafv2.CfnWebACL(
+            self,
+            "WebAcl",
+            scope="CLOUDFRONT",
+            default_action=wafv2.CfnWebACL.DefaultActionProperty(
+                allow=wafv2.CfnWebACL.AllowActionProperty()
+            ),
+            visibility_config=wafv2.CfnWebACL.VisibilityConfigProperty(
+                cloud_watch_metrics_enabled=True,
+                metric_name="AxonLLMWebAcl",
+                sampled_requests_enabled=True,
+            ),
+            rules=[
+                wafv2.CfnWebACL.RuleProperty(
+                    name="AWSManagedRulesAmazonIpReputationList",
+                    priority=10,
+                    override_action=wafv2.CfnWebACL.OverrideActionProperty(
+                        none={}
+                    ),
+                    statement=wafv2.CfnWebACL.StatementProperty(
+                        managed_rule_group_statement=wafv2.CfnWebACL.ManagedRuleGroupStatementProperty(
+                            name="AWSManagedRulesAmazonIpReputationList",
+                            vendor_name="AWS",
+                        )
+                    ),
+                    visibility_config=wafv2.CfnWebACL.VisibilityConfigProperty(
+                        cloud_watch_metrics_enabled=True,
+                        metric_name="AxonLLMIPReputation",
+                        sampled_requests_enabled=True,
+                    ),
+                ),
+                wafv2.CfnWebACL.RuleProperty(
+                    name="PerIpRateLimit",
+                    priority=20,
+                    action=wafv2.CfnWebACL.RuleActionProperty(
+                        block=wafv2.CfnWebACL.BlockActionProperty()
+                    ),
+                    statement=wafv2.CfnWebACL.StatementProperty(
+                        rate_based_statement=wafv2.CfnWebACL.RateBasedStatementProperty(
+                            aggregate_key_type="IP",
+                            evaluation_window_sec=300,
+                            limit=2000,
+                        )
+                    ),
+                    visibility_config=wafv2.CfnWebACL.VisibilityConfigProperty(
+                        cloud_watch_metrics_enabled=True,
+                        metric_name="AxonLLMRateLimit",
+                        sampled_requests_enabled=True,
+                    ),
+                ),
+            ],
+        )
         distribution = cloudfront.Distribution(
             self,
             "CDN",
             default_behavior=cloudfront.BehaviorOptions(
-                origin=origins.LoadBalancerV2Origin(
-                    fargate_service.load_balancer,
-                    protocol_policy=cloudfront.OriginProtocolPolicy.HTTP_ONLY,
-                    read_timeout=Duration.seconds(60),
-                    keepalive_timeout=Duration.seconds(60),
-                ),
+                origin=vpc_origin,
                 viewer_protocol_policy=cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
                 allowed_methods=cloudfront.AllowedMethods.ALLOW_ALL,
                 cache_policy=cloudfront.CachePolicy.CACHING_DISABLED,
@@ -235,17 +424,37 @@ class AxonLLMStack(Stack):
             ),
             additional_behaviors={
                 "/admin/static/*": cloudfront.BehaviorOptions(
-                    origin=origins.LoadBalancerV2Origin(
-                        fargate_service.load_balancer,
-                        protocol_policy=cloudfront.OriginProtocolPolicy.HTTP_ONLY,
-                    ),
+                    origin=vpc_origin,
                     viewer_protocol_policy=cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
                     cache_policy=cloudfront.CachePolicy.CACHING_OPTIMIZED,
                 ),
             },
+            certificate=viewer_certificate,
+            domain_names=[viewer_domain_name.value_as_string],
+            minimum_protocol_version=cloudfront.SecurityPolicyProtocol.TLS_V1_2_2021,
+            ssl_support_method=cloudfront.SSLMethod.SNI,
+            web_acl_id=web_acl.attr_arn,
             price_class=cloudfront.PriceClass.PRICE_CLASS_100,
         )
 
         # --- Outputs ---
-        CfnOutput(self, "CloudFrontURL", value=f"https://{distribution.domain_name}")
-        CfnOutput(self, "ALBURL", value=f"http://{fargate_service.load_balancer.load_balancer_dns_name}")
+        CfnOutput(
+            self,
+            "CloudFrontURL",
+            value=f"https://{viewer_domain_name.value_as_string}",
+        )
+        CfnOutput(
+            self,
+            "CloudFrontDistributionDomain",
+            value=distribution.domain_name,
+        )
+        CfnOutput(
+            self,
+            "ALBURL",
+            value=f"https://{origin_domain_name.value_as_string}",
+        )
+        CfnOutput(
+            self,
+            "InternalALBDomain",
+            value=fargate_service.load_balancer.load_balancer_dns_name,
+        )

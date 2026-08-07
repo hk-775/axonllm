@@ -15,12 +15,14 @@ def _make_request(
     messages: list[dict] | None = None,
     temperature: float | None = 0.7,
     max_tokens: int | None = 100,
+    system: str | None = None,
 ) -> ChatCompletionRequest:
     return ChatCompletionRequest(
         model=model,
         messages=messages or [{"role": "user", "content": "hello"}],
         temperature=temperature,
         max_tokens=max_tokens,
+        system=system,
     )
 
 
@@ -122,6 +124,16 @@ async def test_different_messages_produce_different_cache_keys():
     cm = CacheManager()
     req1 = _make_request(messages=[{"role": "user", "content": "hello"}])
     req2 = _make_request(messages=[{"role": "user", "content": "goodbye"}])
+    key1 = cm.compute_cache_key(req1, "proj-1")
+    key2 = cm.compute_cache_key(req2, "proj-1")
+    assert key1 != key2
+
+
+@pytest.mark.asyncio
+async def test_different_system_instructions_produce_different_cache_keys():
+    cm = CacheManager()
+    req1 = _make_request(system="Answer for customers.")
+    req2 = _make_request(system="Answer for administrators.")
     key1 = cm.compute_cache_key(req1, "proj-1")
     key2 = cm.compute_cache_key(req2, "proj-1")
     assert key1 != key2
