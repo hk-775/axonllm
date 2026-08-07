@@ -66,6 +66,18 @@ class SharedStore:
         self.scans += 1
         return list(self.records)
 
+    async def load_usage_records_or_none(self) -> list[UsageRecord] | None:
+        """The variant the sync uses: None on failure, so an outage is not cached.
+
+        Mirrors the real one's contract rather than aliasing it, so a test that
+        makes the scan raise gets ``None`` here instead of an exception escaping
+        into the handler.
+        """
+        try:
+            return await self.load_usage_records()
+        except Exception:
+            return None
+
     async def add_spend(self, scope: str, ident: str, cost: float) -> float | None:
         total = self.totals.get((scope, ident), 0.0) + cost
         self.totals[(scope, ident)] = total
@@ -268,6 +280,22 @@ class TestTheSyncIsRateLimited:
         _run(api.overview(None))
         assert calls["n"] == 2, "a failed sync was cached as though it succeeded"
 
+    def test_concurrent_reads_share_one_scan(self):
+        """The TTL check straddles an await, so it cannot gate on its own.
+
+        Eight dashboard panels loading together would each pass the check before
+        any of them recorded a sync, turning one refresh into eight full table
+        scans. The single-flight task is what makes the TTL mean what it says.
+        """
+        store = SharedStore()
+        api = _admin(_tracker(store), store)
+
+        async def eight_at_once():
+            await asyncio.gather(*(api.overview(None) for _ in range(8)))
+
+        _run(eight_at_once())
+        assert store.scans == 1, f"expected one coalesced scan, got {store.scans}"
+
     def test_the_first_read_always_syncs(self):
         """Guards the ``-inf`` sentinel.
 
@@ -344,6 +372,77 @@ class TestTheSyncDoesNotCorruptBudgets:
             _run(tracker.sync_records_from_store())
         assert len(tracker._records) == 1
 
+    def test_reading_the_dashboard_does_not_reopen_a_closed_budget(self):
+        """An admin read is a read. This one wasn't, and it unblocked spending.
+
+        The first cut of ``fleet_spend`` cached its answer into
+        ``_project_spend`` — the live enforcement counter — and the store
+        returned ``0.0`` for a project with no counter row yet. Loading
+        ``/admin/projects`` therefore zeroed the spend of every over-budget
+        project and let requests through until the next bill landed.
+        """
+        store = SharedStore()
+        tracker = _tracker(store)
+        tracker.register_project("my-project", budget_limit=100.0)
+        tracker._project_spend["my-project"] = 120.0
+        assert _run(tracker.check_budget("my-project")).is_over_budget is True
+
+        api = _admin(tracker, store, {"my-project": Project(
+            project_id="my-project", name="Mine", budget_limit=100.0)})
+        _run(api.list_projects(None))
+
+        assert tracker._project_spend["my-project"] == pytest.approx(120.0)
+        assert _run(tracker.check_budget("my-project")).is_over_budget is True, (
+            "an admin read wrote to the enforcement counter and reopened the gate"
+        )
+
+    def test_an_absent_counter_is_not_reported_as_zero_spend(self):
+        """"No row yet" and "spent nothing" need different answers.
+
+        The store returns None for a missing counter so the caller can fall back
+        to its own number; returning ``0.0`` made every not-yet-persisted project
+        look free.
+        """
+        store = SharedStore()
+        tracker = _tracker(store)
+        tracker._project_spend["my-project"] = 3.0
+        assert _run(store.get_spend("project", "my-project")) is None
+
+        api = _admin(tracker, store, {"my-project": Project(
+            project_id="my-project", name="Mine", budget_limit=10.0)})
+        row = _json(_run(api.list_projects(None)))[0]
+        assert row["current_spend"] == pytest.approx(3.0)
+
+    def test_the_sync_trims_the_scanned_side_not_the_merged_list(self):
+        """Which side gets trimmed decides whether local-only records survive.
+
+        Trimming after the merge cuts from the head of a list whose head is the
+        local records — exactly what the dedupe exists to keep — and makes the
+        count oscillate every window with no traffic at all.
+        """
+        store = SharedStore()
+        tracker = _tracker(store)
+        tracker.MAX_RECORDS = 4
+
+        async def drop(record):
+            pass
+
+        store.save_usage_record = drop
+        _run(tracker.record_usage(_record(request_id="local_only")))
+        store.save_usage_record = store.__class__.save_usage_record.__get__(store)
+
+        base = datetime(2026, 8, 6, 12, 0, tzinfo=UTC)
+        store.records = [
+            _record(request_id=f"fleet{i}", timestamp=base + timedelta(minutes=i))
+            for i in range(10)
+        ]
+        _run(tracker.sync_records_from_store())
+
+        ids = [r.request_id for r in tracker._records]
+        assert "local_only" in ids, "the merge trimmed away the record it was protecting"
+        assert len(tracker._records) <= tracker.MAX_RECORDS
+        assert "fleet9" in ids, "trimming kept the oldest scanned rows, not the newest"
+
 
 class TestTracesStayChronological:
     """Ordering, because the fleet-wide list no longer arrives sorted."""
@@ -376,6 +475,22 @@ class TestTracesStayChronological:
         api = _admin(_tracker(store), store)
         traces = _json(_run(api.traces(_FakeRequest({"limit": "2"}))))["traces"]
         assert [t["request_id"] for t in traces] == ["r4", "r3"]
+
+    def test_a_nonsense_limit_does_not_become_a_default_page(self):
+        """``int("abc")`` raised inside the handler; the fallback must be the default.
+
+        And the ceiling matters now that the list is fleet-wide: ``?limit=999999``
+        would serialize the whole scanned history into one response.
+        """
+        store = SharedStore()
+        base = datetime(2026, 8, 6, 12, 0, tzinfo=UTC)
+        store.records = [
+            _record(request_id=f"r{i}", timestamp=base + timedelta(minutes=i))
+            for i in range(3)
+        ]
+        api = _admin(_tracker(store), store)
+        assert len(_json(_run(api.traces(_FakeRequest({"limit": "abc"}))))["traces"]) == 3
+        assert len(_json(_run(api.traces(_FakeRequest({"limit": "0"}))))["traces"]) == 1
 
     def test_an_undated_record_does_not_sort_as_newest(self):
         """A missing timestamp must not float to the top of a live view, and must

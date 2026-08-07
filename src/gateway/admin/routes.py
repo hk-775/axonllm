@@ -11,23 +11,20 @@ Provides Starlette routes for:
 
 from __future__ import annotations
 
+import asyncio
 import csv
+import heapq
 import io
 import logging
 import pathlib
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import TYPE_CHECKING
 
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, StreamingResponse
 from starlette.routing import Route
-
-# Sort floor for records with no timestamp, so ordering never compares None to a
-# datetime (TypeError) and an undated record is treated as oldest rather than
-# newest. tz-aware to match _as_aware's output.
-_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
 _STATIC_DIR = pathlib.Path(__file__).resolve().parent / "static"
 _PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent.parent.parent
@@ -116,7 +113,7 @@ from src.gateway.admin.pricing_drift import audit_pricing, render_drift_page
 from src.gateway.admin.production_checklist import render_checklist_page, run_checklist
 from src.gateway.auth.cedar_policy import CedarPolicyService, parse_policy
 from src.gateway.config import AppConfig
-from src.gateway.cost_tracker import CostTracker
+from src.gateway.cost_tracker import _EPOCH, CostTracker
 from src.gateway.efficiency_analyzer import EfficiencyAnalyzer
 from src.gateway.health_tracker import ProviderHealthTracker
 from src.gateway.model_registry import ModelRegistry
@@ -306,6 +303,14 @@ class AdminAPI:
         # time.monotonic() has an arbitrary origin and can legitimately be near 0
         # early in the process, which with a 0 sentinel would skip the first sync.
         self._last_usage_sync = float("-inf")
+        # The in-flight refresh, if any, so concurrent admin reads await one scan
+        # instead of each starting their own. Without this the TTL check below is
+        # not actually a limit: it reads and writes _last_usage_sync either side of
+        # an await, so N overlapping requests all pass it. Eight open dashboard
+        # tabs meant eight simultaneous full scans, each holding its own
+        # deserialized copy of the table — hundreds of MB in flight on a task
+        # sized for far less.
+        self._usage_sync_task: asyncio.Task | None = None
 
     # ------------------------------------------------------------------
     # Fleet-wide read helpers
@@ -324,11 +329,29 @@ class AdminAPI:
         ``USAGE_SYNC_TTL_SECONDS``. The clock is advanced only on a refresh that
         actually happened, so a persistence outage retries on the next read rather
         than serving stale data for a full TTL after a failure.
+
+        Concurrent callers share one scan: the TTL check alone cannot bound
+        anything, because it straddles an await and every overlapping request
+        passes it before the first one finishes.
         """
         now = time.monotonic()
-        if now - self._last_usage_sync >= self.USAGE_SYNC_TTL_SECONDS:
-            if await self.cost_tracker.sync_records_from_store():
-                self._last_usage_sync = now
+        if now - self._last_usage_sync < self.USAGE_SYNC_TTL_SECONDS:
+            return self.cost_tracker._records
+
+        if self._usage_sync_task is None or self._usage_sync_task.done():
+            self._usage_sync_task = asyncio.create_task(
+                self.cost_tracker.sync_records_from_store()
+            )
+        try:
+            synced = await asyncio.shield(self._usage_sync_task)
+        except Exception:
+            # A refresh that raised must not fail the operator's page — the local
+            # records are still a truthful answer for this instance, which is what
+            # the endpoint returned before any of this existed.
+            logger.warning("Fleet-wide usage refresh failed", exc_info=True)
+            synced = False
+        if synced:
+            self._last_usage_sync = now
         return self.cost_tracker._records
 
     async def _fleet_spend(self, scope: str, ident: str, local: float) -> float:
@@ -380,11 +403,21 @@ class AdminAPI:
         # every project's records at once, so filtering the synced list in the
         # loop costs nothing extra.
         synced = await self._synced_records()
-        for project in (await self._all_projects()).values():
-            budget_status = await self.cost_tracker.check_budget(project.project_id)
-            current_spend = await self._fleet_spend(
-                "project", project.project_id, budget_status.current_spend
-            )
+        projects = list((await self._all_projects()).values())
+
+        # Counter reads concurrently rather than one per iteration. Each is a
+        # separate GetItem in a thread, so sequentially they add up: 300 projects
+        # at ~8ms is nearly 3s of an operator staring at a spinner, for reads that
+        # do not depend on each other.
+        statuses = await asyncio.gather(*(
+            self.cost_tracker.check_budget(p.project_id) for p in projects
+        ))
+        spends = await asyncio.gather(*(
+            self._fleet_spend("project", p.project_id, s.current_spend)
+            for p, s in zip(projects, statuses)
+        ))
+
+        for project, current_spend in zip(projects, spends):
             records = [
                 r for r in synced
                 if r.project_id == project.project_id
@@ -1055,14 +1088,20 @@ class AdminAPI:
             entry["total_tokens"] += r.total_tokens
             entry["cost"] += r.cost
 
+        # Exact from the shared counter where there is one; the summed cost is the
+        # fallback. Utilization is what a user gets throttled on, so it should not
+        # disagree with enforcement. Gathered rather than awaited per user: this
+        # loop is the worst offender, since a busy deployment has far more users
+        # than projects.
+        users = list(user_data.values())
+        spends = await asyncio.gather(*(
+            self._fleet_spend("user", u["user_id"], u["cost"]) for u in users
+        ))
+
         result = []
-        for u in user_data.values():
+        for u, current_spend in zip(users, spends):
             budget = self.cost_tracker.get_user_budget(u["user_id"])
             budget_limit = budget.get("budget_limit")
-            # Exact from the shared counter where there is one; the summed cost is
-            # the fallback. Utilization is what a user gets throttled on, so it
-            # should not disagree with enforcement.
-            current_spend = await self._fleet_spend("user", u["user_id"], u["cost"])
             utilization = (current_spend / budget_limit * 100) if budget_limit else None
             result.append({
                 "user_id": u["user_id"],
@@ -1520,22 +1559,33 @@ class AdminAPI:
     async def traces(self, request: Request) -> JSONResponse:
         """Return recent request traces for the live traces view."""
         records = await self._synced_records()
-        limit = int(request.query_params.get("limit", "100"))
-        # Sort by timestamp rather than slicing the tail. Within one process the
+        # Clamp rather than trust: an unparseable limit used to 500, and a negative
+        # one silently returned an empty list.
+        try:
+            limit = int(request.query_params.get("limit", "100"))
+        except (TypeError, ValueError):
+            limit = 100
+        limit = max(1, min(limit, 1000))
+
+        # Order by timestamp rather than slicing the tail. Within one process the
         # list is already chronological, so the tail was "recent" for free — but a
         # fleet-wide refresh appends other instances' records in scan order, which
         # is arbitrary. Taking the tail of that would show a mix of new local
         # requests and whatever the scan happened to return last, and label it
-        # recent. Nulls sort oldest: a record with no timestamp cannot be claimed
-        # to be the newest thing that happened.
-        ordered = sorted(
+        # recent.
+        #
+        # nlargest, not sorted(): this runs every 3s per open tab, and a full sort
+        # of 100k records blocks the event loop for ~19ms where nlargest costs
+        # ~5ms. Nulls sort oldest — a record with no timestamp cannot be claimed to
+        # be the newest thing that happened.
+        recent = heapq.nlargest(
+            limit,
             records,
             key=lambda r: self.cost_tracker._as_aware(r.timestamp) if r.timestamp else _EPOCH,
         )
-        recent = ordered[-limit:] if len(ordered) > limit else ordered
 
         traces = []
-        for r in reversed(recent):
+        for r in recent:
             traces.append({
                 "request_id": r.request_id,
                 "timestamp": r.timestamp.isoformat() if r.timestamp else None,

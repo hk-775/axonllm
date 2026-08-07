@@ -24,6 +24,11 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Sort floor for records with no timestamp, so ordering never compares None to a
+# datetime (TypeError) and an undated record is treated as oldest rather than
+# newest. tz-aware to match ``CostTracker._as_aware``'s output.
+_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
 
 class CostTracker:
     """Records usage, calculates costs, checks budgets, and aggregates usage data.
@@ -240,29 +245,32 @@ class CostTracker:
 
         ``scope`` is ``"project"`` or ``"user"``, matching the shared counter keys.
 
-        The local counter is updated with what comes back, so a subsequent budget
-        check on this instance benefits too. Returns None when there is no shared
-        counter to read or it cannot be read, which callers must treat as "use the
-        local figure" rather than as zero — a project that has spent money must
-        never report $0 because DynamoDB was briefly unavailable.
+        Deliberately does NOT write the result back into the local counters, even
+        though that would look like a free cache warm-up. Those counters are live
+        enforcement state, and this is a read path: an earlier version of this
+        method assigned to them, which let a single ``GET /admin/projects`` reopen
+        a closed budget gate. With ``get_spend`` returning 0.0 for an absent
+        counter, a project at $120 against a $100 limit went ``is_over_budget``
+        True → False because an operator loaded a page. Both halves are fixed —
+        absent now reads as None — but a read that mutates the gate is the wrong
+        shape regardless, so the assignment is gone too. ``/admin/users`` made it
+        worst: one page load looped over every user and overwrote each counter.
+
+        Returns None when there is no shared counter, it cannot be read, or
+        persistence is off. Callers must treat None as "use the local figure"
+        rather than as zero — a project that has spent money must never report $0
+        because DynamoDB was briefly unavailable.
         """
         if self._persistence is None or not self._persistence.enabled:
             return None
         try:
-            total = await self._persistence.get_spend(scope, ident)
+            return await self._persistence.get_spend(scope, ident)
         except Exception:
             logger.warning(
                 "Failed to read shared %s spend for %s; falling back to local",
                 scope, ident, exc_info=True,
             )
             return None
-        if total is None:
-            return None
-        if scope == "project":
-            self._project_spend[ident] = total
-        elif scope == "user":
-            self._user_spend[ident] = total
-        return total
 
     async def sync_records_from_store(self) -> bool:
         """Re-read persisted usage records so aggregates cover the whole fleet.
@@ -283,13 +291,15 @@ class CostTracker:
         history that reporting can see.
 
         Returns whether the refresh happened, so a caller can tell "synced" from
-        "persistence is off, these numbers are one instance's" rather than
-        guessing.
+        "persistence is off or the store could not be read, these numbers are one
+        instance's" rather than guessing. A caller that rate-limits itself must
+        only advance its clock on True, or one failure serves single-instance
+        numbers for a whole window after the store has recovered.
         """
         if self._persistence is None or not self._persistence.enabled:
             return False
         try:
-            records = await self._persistence.load_usage_records()
+            records = await self._persistence.load_usage_records_or_none()
         except Exception:
             logger.warning(
                 "Failed to refresh usage records for admin read; "
@@ -297,22 +307,41 @@ class CostTracker:
                 exc_info=True,
             )
             return False
+        # None is a failed read; [] is a genuinely empty store. Distinguished
+        # because load_usage_records swallows its own exceptions and returns [],
+        # so treating them alike reported success on every outage.
+        if records is None:
+            return False
+
+        # Trim the SCANNED side before merging, never the merged list.
+        #
+        # Two bugs came from trimming afterwards. Local records sit at the head of
+        # the merged list, so a tail slice cut exactly the records this instance
+        # served whose store write had failed — the data the dedupe below exists to
+        # preserve. And when the store held more than MAX_RECORDS, each sync
+        # re-appended a different window and trimmed to a different half, so
+        # total_requests pinned at MAX_RECORDS//2 while /admin/traces showed a
+        # different set of requests every refresh with no new traffic.
+        #
+        # Keeping the newest scanned records also makes the bound mean something:
+        # "the most recent N of fleet history" rather than "whichever N the scan
+        # happened to return last".
+        room = max(self.MAX_RECORDS - len(self._records), 0)
+        if len(records) > room:
+            records = sorted(
+                records,
+                key=lambda r: self._as_aware(r.timestamp) if r.timestamp else _EPOCH,
+            )[-room:] if room else []
 
         # De-dupe against what is already here rather than replacing the list:
-        # records this instance served since the last refresh are not in the
-        # store yet if their write failed, and dropping them would make a
-        # refresh lose data that the un-refreshed path would have shown.
+        # records this instance served since the last refresh are not in the store
+        # yet if their write failed, and dropping them would make a refresh lose
+        # data that the un-refreshed path would have shown.
         existing = {r.request_id for r in self._records}
         for rec in records:
             if rec.request_id not in existing:
                 self._records.append(rec)
                 existing.add(rec.request_id)
-
-        # Same trim as record_usage, for the same reason: the list is bounded, and
-        # a fleet-wide refresh is exactly how it gets big fastest. Spend counters
-        # are untouched above, so trimming cannot cost budget accuracy here.
-        if len(self._records) > self.MAX_RECORDS:
-            self._records = self._records[-(self.MAX_RECORDS // 2):]
         return True
 
     async def adopt_fleet_spend(self, project_ids, user_ids=()) -> None:

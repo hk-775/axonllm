@@ -52,6 +52,10 @@ class DynamoPersistence:
         # Set to a short reason string when a write is dropped, so a health probe
         # can surface silent persistence failures instead of losing data quietly.
         self.last_write_error: str | None = None
+        # Whether the last usage-record scan raised. Lets
+        # ``load_usage_records_or_none`` distinguish an outage from an empty table
+        # without changing ``load_usage_records``' return-[] contract.
+        self._last_scan_failed = False
 
     @property
     def enabled(self) -> bool:
@@ -405,6 +409,24 @@ class DynamoPersistence:
         except Exception:
             self._record_write_failure("usage record", record.request_id)
 
+    async def load_usage_records_or_none(self) -> list[UsageRecord] | None:
+        """Like ``load_usage_records``, but None on failure instead of ``[]``.
+
+        ``load_usage_records`` swallows its exceptions and returns an empty list,
+        which is right for startup hydration — a gateway should boot with no
+        history rather than refuse to start. It is wrong for a caller that
+        rate-limits itself on the result: an outage looks identical to an empty
+        store, so the caller records a successful refresh and serves
+        single-instance numbers for a full window after the store recovers.
+
+        Kept as a separate method rather than changing the original's contract,
+        which several callers depend on.
+        """
+        if not self._enabled:
+            return None
+        records = await self.load_usage_records()
+        return None if self._last_scan_failed else records
+
     async def load_usage_records(self) -> list[UsageRecord]:
         """Scan DynamoDB for all usage records and deserialize them."""
         if not self._enabled:
@@ -433,9 +455,15 @@ class DynamoPersistence:
             for item in raw_items:
                 item = self._convert_decimals_to_native(item)
                 records.append(self.deserialize_usage_record(item))
+            self._last_scan_failed = False
             return records
         except Exception:
             logger.warning("Failed to load usage records from DynamoDB", exc_info=True)
+            # Recorded rather than raised, so this method's contract (boot with no
+            # history rather than refuse to start) is unchanged, while
+            # ``load_usage_records_or_none`` can still tell an outage from an
+            # empty table.
+            self._last_scan_failed = True
             return []
 
     async def load_audit_records(self, project_id: str | None = None) -> list[dict]:
@@ -958,7 +986,14 @@ class DynamoPersistence:
         try:
             item = await asyncio.to_thread(_get)
             if item is None:
-                return 0.0
+                # Absent, not zero — the distinction this method's contract
+                # promises. It used to return 0.0 here, which made "no counter
+                # yet" look like "nothing spent" and defeated every caller's
+                # None check. That is unsafe in the fail-open direction: a
+                # project whose counter has not been created (demo seed bills
+                # with share=False; reset_spend deletes the item) would read as
+                # $0 and reopen a budget gate the local total knows is closed.
+                return None
             return float(item.get("spend", 0))
         except Exception:
             logger.warning("Failed to read %s spend for %s", scope, ident, exc_info=True)
