@@ -80,6 +80,39 @@ class TestIssueKey:
         assert key.key_hash == APIKeyService.hash_key(raw)
         assert raw not in key.key_hash
 
+    def test_failed_durable_save_never_caches_or_returns_a_key(self, monkeypatch):
+        persistence = FakePersistence()
+        service = APIKeyService(persistence=persistence)
+        raw = PREFIX + "a" * 64
+        monkeypatch.setattr(service, "generate_raw_key", lambda: raw)
+
+        async def _fail(_key):
+            raise RuntimeError("transaction failed")
+
+        persistence.save_api_key = _fail
+
+        with pytest.raises(RuntimeError, match="transaction failed"):
+            asyncio.run(
+                service.issue_key("proj-1", "K", ["chat:invoke"], "admin")
+            )
+
+        assert service._cache == {}
+        assert service._memory_store == {}
+        assert APIKeyService.hash_key(raw) not in persistence._hash_index
+
+    def test_existing_fake_persistence_contract_remains_supported(self):
+        persistence = FakePersistence()
+        assert not hasattr(persistence, "revoke_api_key")
+
+        service = APIKeyService(persistence=persistence)
+        key, _ = asyncio.run(
+            service.issue_key("proj-1", "K", ["chat:invoke"], "admin")
+        )
+
+        assert asyncio.run(service.revoke_key(key.key_id)) is True
+        assert persistence._keys[key.key_id].revoked is True
+        assert persistence.epoch == 1
+
 
 class TestValidateKey:
     def test_valid_key_returns_record(self, service):
@@ -134,6 +167,63 @@ class TestRevokeKey:
         success = asyncio.run(service.revoke_key("nonexistent"))
         assert success is False
 
+    def test_failed_atomic_revoke_does_not_mutate_cache_or_fake_store(self):
+        persistence = FakePersistence()
+        service = APIKeyService(persistence=persistence)
+        key, _ = asyncio.run(
+            service.issue_key("proj-1", "K", ["chat:invoke"], "admin")
+        )
+
+        async def _fail(_key):
+            raise RuntimeError("revocation transaction failed")
+
+        persistence.revoke_api_key = _fail
+
+        with pytest.raises(RuntimeError, match="revocation transaction failed"):
+            asyncio.run(service.revoke_key(key.key_id))
+
+        assert persistence._keys[key.key_id].revoked is False
+        assert key.key_hash in service._cache
+
+    def test_already_revoked_row_evicts_stale_local_cache(self):
+        persistence = FakePersistence()
+        service = APIKeyService(persistence=persistence)
+        key, raw = asyncio.run(
+            service.issue_key("proj-1", "K", ["chat:invoke"], "admin")
+        )
+        persistence._keys[key.key_id] = APIKey(
+            **{
+                **key.__dict__,
+                "revoked": True,
+                "revoked_at": datetime.now(timezone.utc),
+            }
+        )
+
+        assert asyncio.run(service.revoke_key(key.key_id)) is False
+        assert key.key_hash not in service._cache
+        assert key.key_hash not in service._requires_epoch_baseline
+        assert asyncio.run(service.validate_key(raw)) is None
+
+    def test_concurrent_revoke_conflict_evicts_stale_local_cache(self):
+        persistence = FakePersistence()
+        service = APIKeyService(persistence=persistence)
+        key, raw = asyncio.run(
+            service.issue_key("proj-1", "K", ["chat:invoke"], "admin")
+        )
+
+        async def _conflict(revoked_key):
+            persistence._keys[key.key_id] = revoked_key
+            persistence.epoch += 1
+            return False
+
+        persistence.revoke_api_key = _conflict
+
+        assert asyncio.run(service.revoke_key(key.key_id)) is False
+        assert persistence._keys[key.key_id].revoked is True
+        assert key.key_hash not in service._cache
+        assert key.key_hash not in service._requires_epoch_baseline
+        assert asyncio.run(service.validate_key(raw)) is None
+
 
 class TestRotateKey:
     def test_rotate_returns_new_key(self, service):
@@ -157,6 +247,24 @@ class TestRotateKey:
         asyncio.run(service.rotate_key(key.key_id, "admin"))
         result = asyncio.run(service.validate_key(old_raw))
         assert result is None
+
+    def test_failed_replacement_leaves_old_key_safely_revoked(self):
+        persistence = FakePersistence()
+        service = APIKeyService(persistence=persistence)
+        key, old_raw = asyncio.run(
+            service.issue_key("proj-1", "K", ["chat:invoke"], "admin")
+        )
+
+        async def _fail(_key):
+            raise RuntimeError("replacement transaction failed")
+
+        persistence.save_api_key = _fail
+
+        with pytest.raises(RuntimeError, match="replacement transaction failed"):
+            asyncio.run(service.rotate_key(key.key_id, "admin"))
+
+        assert persistence._keys[key.key_id].revoked is True
+        assert asyncio.run(service.validate_key(old_raw)) is None
 
 
 class TestListKeys:

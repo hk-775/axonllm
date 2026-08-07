@@ -73,6 +73,16 @@ class TestProjectRoundTrip:
         item = DynamoPersistence.serialize_project(project)
         return DynamoPersistence.deserialize_project(item)
 
+    def test_tenant_id_preserves_the_legacy_positional_constructor(self):
+        from src.gateway.models import Project
+
+        project = Project("p1", "P1", 125.0, 0.8, ["claude-sonnet"])
+
+        assert project.tenant_id is None
+        assert project.budget_limit == 125.0
+        assert project.alert_threshold == 0.8
+        assert project.allowed_models == ["claude-sonnet"]
+
     def test_the_semantic_cache_flags_survive(self):
         from src.gateway.models import Project
 
@@ -112,3 +122,20 @@ class TestProjectRoundTrip:
         back = DynamoPersistence.deserialize_project(item)
         assert isinstance(back.semantic_cache_threshold, float)
         assert back.semantic_cache_threshold == 0.95
+
+    def test_tenant_project_uses_compound_ownership_key(self):
+        from src.gateway.models import Project
+
+        project = Project(
+            project_id="shared",
+            tenant_id="tenant-a",
+            name="Tenant A",
+        )
+
+        item = DynamoPersistence.serialize_project(project)
+        back = DynamoPersistence.deserialize_project(item)
+
+        assert item["PK"] == "TENANT#tenant-a"
+        assert item["SK"] == "PROJECT#shared"
+        assert item["tenant_id"] == "tenant-a"
+        assert back.tenant_id == "tenant-a"

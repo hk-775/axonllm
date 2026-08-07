@@ -21,15 +21,33 @@ class ClientAgent:
         self.default_user_id = default_user_id
         self.default_project_id = default_project_id
 
-    async def list_models(self, project_id: str | None = None, user_id: str | None = None) -> list[dict]:
+    async def list_models(
+        self,
+        project_id: str | None = None,
+        user_id: str | None = None,
+        authorized_project: Any | None = None,
+        tenant_id: str | None = None,
+        allow_legacy_project_lookup: bool = False,
+    ) -> list[dict]:
         """Return available models filtered by access context.
 
         Passes project_id and user_id through to GatewayAgent.handle_list_models
         so that only models the caller is permitted to use are returned.
         """
-        pid = project_id or self.default_project_id
+        pid, resolved_tenant_id = self._resolve_scope(
+            project_id=project_id,
+            tenant_id=tenant_id,
+            authorized_project=authorized_project,
+        )
         uid = user_id or self.default_user_id
-        result = await self.gateway_agent.handle_list_models(project_id=pid, user_id=uid)
+        kwargs: dict[str, Any] = {"project_id": pid, "user_id": uid}
+        if resolved_tenant_id is not None:
+            kwargs["tenant_id"] = resolved_tenant_id
+        if authorized_project is not None:
+            kwargs["authorized_project"] = authorized_project
+        if allow_legacy_project_lookup:
+            kwargs["allow_legacy_project_lookup"] = True
+        result = await self.gateway_agent.handle_list_models(**kwargs)
         return result.get("models", [])
 
     async def chat(
@@ -47,6 +65,9 @@ class ClientAgent:
         top_p: float | None = None,
         stop: str | list[str] | None = None,
         system: str | None = None,
+        authorized_project: Any | None = None,
+        tenant_id: str | None = None,
+        allow_legacy_project_lookup: bool = False,
     ) -> dict:
         """Non-streaming chat completion. Returns simplified response dict."""
         request_data = self._build_request_data(
@@ -56,7 +77,13 @@ class ClientAgent:
             tools=tools, tool_choice=tool_choice,
         )
         context = self._build_context(
-            user_id=user_id, project_id=project_id, provider=provider, smart_routing=smart_routing,
+            user_id=user_id,
+            project_id=project_id,
+            provider=provider,
+            smart_routing=smart_routing,
+            authorized_project=authorized_project,
+            tenant_id=tenant_id,
+            allow_legacy_project_lookup=allow_legacy_project_lookup,
         )
         response = await self.gateway_agent.handle_chat_completion(request_data, context)
 
@@ -126,6 +153,9 @@ class ClientAgent:
         top_p: float | None = None,
         stop: str | list[str] | None = None,
         system: str | None = None,
+        authorized_project: Any | None = None,
+        tenant_id: str | None = None,
+        allow_legacy_project_lookup: bool = False,
     ) -> AsyncIterator[dict]:
         """Streaming chat completion. Yields chunk dicts.
 
@@ -143,6 +173,9 @@ class ClientAgent:
         context = self._build_context(
             user_id=user_id, project_id=project_id, provider=provider,
             smart_routing=smart_routing,
+            authorized_project=authorized_project,
+            tenant_id=tenant_id,
+            allow_legacy_project_lookup=allow_legacy_project_lookup,
         )
         result = await self.gateway_agent.handle_chat_completion(request_data, context)
 
@@ -254,16 +287,79 @@ class ClientAgent:
         project_id: str | None = None,
         provider: str | None = None,
         smart_routing: bool = False,
+        authorized_project: Any | None = None,
+        tenant_id: str | None = None,
+        allow_legacy_project_lookup: bool = False,
     ) -> dict:
+        resolved_project_id, resolved_tenant_id = self._resolve_scope(
+            project_id=project_id,
+            tenant_id=tenant_id,
+            authorized_project=authorized_project,
+        )
         ctx: dict[str, Any] = {
             "user_id": user_id or self.default_user_id,
-            "project_id": project_id or self.default_project_id,
+            "project_id": resolved_project_id,
         }
         if provider:
             ctx["provider"] = provider
         if smart_routing:
             ctx["smart_routing"] = True
+        if resolved_tenant_id is not None:
+            ctx["tenant_id"] = resolved_tenant_id
+        if authorized_project is not None:
+            ctx["authorized_project"] = authorized_project
+        if allow_legacy_project_lookup:
+            if authorized_project is not None:
+                raise ValueError(
+                    "legacy project lookup cannot accompany an authorized project"
+                )
+            ctx["allow_legacy_project_lookup"] = True
         return ctx
+
+    def _resolve_scope(
+        self,
+        *,
+        project_id: str | None,
+        tenant_id: str | None,
+        authorized_project: Any | None,
+    ) -> tuple[str, str | None]:
+        """Resolve tenant/project hints without weakening canonical authority."""
+        if tenant_id is not None and (
+            not isinstance(tenant_id, str) or not tenant_id.strip()
+        ):
+            raise ValueError("tenant_id must be None or a non-empty string")
+
+        if authorized_project is None:
+            return project_id or self.default_project_id, tenant_id
+
+        authoritative_project_id = getattr(
+            authorized_project,
+            "project_id",
+            None,
+        )
+        authoritative_tenant_id = getattr(
+            authorized_project,
+            "tenant_id",
+            None,
+        )
+        if (
+            not isinstance(authoritative_project_id, str)
+            or not authoritative_project_id.strip()
+            or not isinstance(authoritative_tenant_id, str)
+            or not authoritative_tenant_id.strip()
+        ):
+            raise ValueError(
+                "authorized_project must have non-empty project_id and tenant_id"
+            )
+        if project_id and project_id != authoritative_project_id:
+            raise ValueError(
+                "project_id does not match the authorized project"
+            )
+        if tenant_id is not None and tenant_id != authoritative_tenant_id:
+            raise ValueError(
+                "tenant_id does not match the authorized project"
+            )
+        return authoritative_project_id, authoritative_tenant_id
 
     async def get_available_users(self) -> list[str]:
         """Return known user IDs, covering the fleet rather than this task only.

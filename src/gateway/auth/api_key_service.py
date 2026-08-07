@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import secrets
 import time
+from dataclasses import replace
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
@@ -48,6 +49,12 @@ class APIKeyService:
         # clearing a cache it only just built.
         self._revocation_epoch: int | None = None
         self._revocation_checked_at: float = 0.0
+        self._tenant_revocation_epochs: dict[str, int] = {}
+        self._tenant_revocation_checked_at: dict[str, float] = {}
+        # Keys cached immediately after issuance can predate this replica's
+        # first revocation-epoch read. Only those entries need a strong reread
+        # after the baseline is established.
+        self._requires_epoch_baseline: set[str] = set()
 
     @property
     def _in_memory(self) -> bool:
@@ -68,6 +75,7 @@ class APIKeyService:
         scopes: list[str],
         created_by: str,
         expires_at: datetime | None = None,
+        tenant_id: str | None = None,
     ) -> tuple[APIKey, str]:
         """Issue a new API key. Returns (key_record, raw_key_one_time)."""
         raw_key = self.generate_raw_key()
@@ -81,17 +89,28 @@ class APIKeyService:
             name=name,
             scopes=scopes,
             created_by=created_by,
+            tenant_id=tenant_id,
             created_at=datetime.now(timezone.utc),
             expires_at=expires_at,
         )
 
+        # Real persistence treats this as one conditional transaction. Do not
+        # expose or cache the plaintext credential until all durable rows exist.
         await self._persistence.save_api_key(key)
         if self._in_memory:
             self._memory_store[key_id] = key
         self._cache[key_hash] = (key, time.time())
+        if not self._in_memory:
+            baseline = (
+                self._revocation_epoch
+                if tenant_id is None
+                else self._tenant_revocation_epochs.get(tenant_id)
+            )
+            if baseline is None:
+                self._requires_epoch_baseline.add(key_hash)
         return key, raw_key
 
-    async def _check_revocations(self) -> None:
+    async def _check_revocations(self, tenant_id: str | None) -> bool:
         """Drop the local cache if another instance has revoked a key.
 
         ``revoke_key`` clears the cache on the instance that served the request,
@@ -109,22 +128,119 @@ class APIKeyService:
 
         A failed read leaves the epoch untouched, so behaviour degrades to the
         TTL rather than to clearing the cache on every request.
+
+        Returns True when a key loaded before this check must be re-read: either
+        this call established the first epoch baseline or it observed an epoch
+        change. In both cases, a second strong key read orders the cached value
+        after the epoch observation.
         """
         if self._in_memory:
-            return
+            return False
         now = time.time()
-        if now - self._revocation_checked_at < REVOCATION_POLL_SECONDS:
-            return
-        self._revocation_checked_at = now
-        epoch = await self._persistence.get_revocation_epoch()
+        if tenant_id is None:
+            checked_at = self._revocation_checked_at
+        else:
+            checked_at = self._tenant_revocation_checked_at.get(tenant_id, 0.0)
+        if now - checked_at < REVOCATION_POLL_SECONDS:
+            return False
+
+        if tenant_id is None:
+            self._revocation_checked_at = now
+            epoch = await self._persistence.get_revocation_epoch()
+            previous = self._revocation_epoch
+        else:
+            self._tenant_revocation_checked_at[tenant_id] = now
+            epoch = await self._persistence.get_revocation_epoch(tenant_id)
+            previous = self._tenant_revocation_epochs.get(tenant_id)
         if epoch is None:
-            return
-        if self._revocation_epoch is None:
-            self._revocation_epoch = epoch
-            return
-        if epoch != self._revocation_epoch:
-            self._revocation_epoch = epoch
-            self._cache.clear()
+            return False
+        if previous is None:
+            if tenant_id is None:
+                self._revocation_epoch = epoch
+            else:
+                self._tenant_revocation_epochs[tenant_id] = epoch
+            return True
+        if epoch != previous:
+            if tenant_id is None:
+                self._revocation_epoch = epoch
+            else:
+                self._tenant_revocation_epochs[tenant_id] = epoch
+            self._cache = {
+                key_hash: entry
+                for key_hash, entry in self._cache.items()
+                if entry[0].tenant_id != tenant_id
+            }
+            self._requires_epoch_baseline.intersection_update(self._cache)
+            return True
+        return False
+
+    async def _load_key_by_hash(self, key_hash: str) -> APIKey | None:
+        if self._in_memory:
+            return next(
+                (k for k in self._memory_store.values() if k.key_hash == key_hash),
+                None,
+            )
+        return await self._persistence.get_api_key_by_hash(key_hash)
+
+    @staticmethod
+    def _is_usable(key: APIKey) -> bool:
+        if key.revoked:
+            return False
+        return not (
+            key.expires_at and key.expires_at < datetime.now(timezone.utc)
+        )
+
+    def _evict_cached_key(self, key: APIKey) -> None:
+        """Remove local state that could still authenticate this key."""
+        self._cache.pop(key.key_hash, None)
+        self._requires_epoch_baseline.discard(key.key_hash)
+
+    async def _load_cacheable_key(self, key_hash: str) -> APIKey | None:
+        key = await self._load_key_by_hash(key_hash)
+        if key is None or not self._is_usable(key):
+            return None
+
+        epoch_requires_reread = await self._check_revocations(key.tenant_id)
+        if epoch_requires_reread and not self._in_memory:
+            # The first read may have raced a revocation that committed before
+            # either a newly established baseline or an observed epoch change.
+            # A strongly consistent second read orders the cached value after
+            # that epoch observation.
+            key = await self._load_key_by_hash(key_hash)
+            if key is None or not self._is_usable(key):
+                return None
+        return key
+
+    async def _check_cached_revocations(
+        self,
+        key_hash: str,
+    ) -> tuple[APIKey, float] | None:
+        entry = self._cache.get(key_hash)
+        if entry is None:
+            return None
+        await self._check_revocations(entry[0].tenant_id)
+        tenant_id = entry[0].tenant_id
+        baseline_known = (
+            self._revocation_epoch is not None
+            if tenant_id is None
+            else tenant_id in self._tenant_revocation_epochs
+        )
+        if (
+            key_hash in self._requires_epoch_baseline
+            and baseline_known
+            and not self._in_memory
+        ):
+            # A key issued by this replica is already cached before its tenant
+            # epoch has a baseline. Another replica may revoke it before the
+            # first validation. Order a strong read after that baseline rather
+            # than accepting the stale issued object until its TTL expires.
+            key = await self._load_key_by_hash(key_hash)
+            self._requires_epoch_baseline.discard(key_hash)
+            if key is None or not self._is_usable(key):
+                self._cache.pop(key_hash, None)
+                return None
+            self._cache[key_hash] = (key, entry[1])
+        return self._cache.get(key_hash)
 
     async def validate_key(self, raw_key: str) -> APIKey | None:
         """Validate a raw API key. Returns the key record or None."""
@@ -133,67 +249,90 @@ class APIKeyService:
 
         key_hash = self.hash_key(raw_key)
 
-        await self._check_revocations()
-
-        entry = self._cache.get(key_hash)
+        entry = await self._check_cached_revocations(key_hash)
         if entry is not None:
             cached, cached_at = entry
-            if (time.time() - cached_at) < CACHE_TTL_SECONDS and not cached.revoked:
-                if cached.expires_at and cached.expires_at < datetime.now(timezone.utc):
-                    return None
+            if (
+                (time.time() - cached_at) < CACHE_TTL_SECONDS
+                and self._is_usable(cached)
+            ):
                 cached.last_used_at = datetime.now(timezone.utc)
                 return cached
             else:
                 del self._cache[key_hash]
+                self._requires_epoch_baseline.discard(key_hash)
 
-        if self._in_memory:
-            key = next(
-                (k for k in self._memory_store.values() if k.key_hash == key_hash), None
-            )
-        else:
-            key = await self._persistence.get_api_key_by_hash(key_hash)
+        key = await self._load_cacheable_key(key_hash)
         if key is None:
-            return None
-
-        if key.revoked:
-            return None
-
-        if key.expires_at and key.expires_at < datetime.now(timezone.utc):
             return None
 
         key.last_used_at = datetime.now(timezone.utc)
         self._cache[key_hash] = (key, time.time())
         return key
 
-    async def revoke_key(self, key_id: str) -> bool:
+    async def revoke_key(
+        self,
+        key_id: str,
+        tenant_id: str | None = None,
+    ) -> bool:
         """Revoke a key by ID. Returns True if found and revoked."""
-        key = await self._get_key(key_id)
+        key = await self._get_key(key_id, tenant_id)
         if key is None:
             return False
+        if key.revoked:
+            self._evict_cached_key(key)
+            return False
 
-        key.revoked = True
-        key.revoked_at = datetime.now(timezone.utc)
-        await self._persistence.update_api_key(key)
+        revoked_key = replace(
+            key,
+            revoked=True,
+            revoked_at=datetime.now(timezone.utc),
+        )
 
-        self._cache.pop(key.key_hash, None)
-        # Tell the other instances. Without this the key stays valid on every
-        # instance except this one until their cache entries expire.
-        await self._persistence.bump_revocation_epoch()
+        if self._in_memory:
+            self._memory_store[key_id] = revoked_key
+        else:
+            atomic_revoke = getattr(self._persistence, "revoke_api_key", None)
+            if atomic_revoke is not None:
+                if not await atomic_revoke(revoked_key):
+                    self._evict_cached_key(key)
+                    return False
+            else:
+                # Compatibility path for pre-transaction test doubles. A
+                # production DynamoPersistence always provides atomic_revoke.
+                await self._persistence.update_api_key(revoked_key)
+                if tenant_id is None:
+                    await self._persistence.bump_revocation_epoch()
+                else:
+                    await self._persistence.bump_revocation_epoch(tenant_id)
+
+        # Mutate process-local state only after the durable operation succeeds.
+        self._evict_cached_key(key)
         return True
 
     def invalidate_cache(self) -> None:
         """Clear the key cache (e.g., after receiving a revocation from another instance)."""
         self._cache.clear()
+        self._requires_epoch_baseline.clear()
 
     async def rotate_key(
-        self, key_id: str, rotated_by: str
+        self,
+        key_id: str,
+        rotated_by: str,
+        tenant_id: str | None = None,
     ) -> tuple[APIKey, str] | None:
-        """Revoke old key and issue a new one with the same project/scopes."""
-        old_key = await self._get_key(key_id)
+        """Revoke old key, then issue a replacement.
+
+        This is deliberately not described as atomic. If replacement creation
+        fails, the old credential remains safely revoked and the failure reaches
+        the caller.
+        """
+        old_key = await self._get_key(key_id, tenant_id)
         if old_key is None:
             return None
 
-        await self.revoke_key(key_id)
+        if not await self.revoke_key(key_id, old_key.tenant_id):
+            return None
 
         return await self.issue_key(
             project_id=old_key.project_id,
@@ -201,16 +340,39 @@ class APIKeyService:
             scopes=old_key.scopes,
             created_by=rotated_by,
             expires_at=old_key.expires_at,
+            tenant_id=old_key.tenant_id,
         )
 
-    async def list_keys(self, project_id: str) -> list[APIKey]:
+    async def list_keys(
+        self,
+        project_id: str,
+        tenant_id: str | None = None,
+    ) -> list[APIKey]:
         """List all keys for a project (excludes raw key values)."""
         if self._in_memory:
-            return [k for k in self._memory_store.values() if k.project_id == project_id]
-        return await self._persistence.list_api_keys_for_project(project_id)
+            return [
+                key
+                for key in self._memory_store.values()
+                if key.project_id == project_id and key.tenant_id == tenant_id
+            ]
+        if tenant_id is None:
+            return await self._persistence.list_api_keys_for_project(project_id)
+        return await self._persistence.list_api_keys_for_project(
+            project_id,
+            tenant_id,
+        )
 
-    async def _get_key(self, key_id: str) -> APIKey | None:
+    async def _get_key(
+        self,
+        key_id: str,
+        tenant_id: str | None = None,
+    ) -> APIKey | None:
         """Fetch a key by ID from whichever store is authoritative."""
         if self._in_memory:
-            return self._memory_store.get(key_id)
-        return await self._persistence.get_api_key(key_id)
+            key = self._memory_store.get(key_id)
+            if key is None or key.tenant_id != tenant_id:
+                return None
+            return key
+        if tenant_id is None:
+            return await self._persistence.get_api_key(key_id)
+        return await self._persistence.get_api_key(key_id, tenant_id)

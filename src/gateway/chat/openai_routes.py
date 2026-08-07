@@ -38,19 +38,39 @@ if TYPE_CHECKING:
 logger = logging.getLogger("gateway.openai")
 
 
-def _identity(request: Request) -> tuple[str | None, str | None]:
-    """Trustworthy (user_id, project_id) from the authenticated context.
+def _identity(
+    request: Request,
+) -> tuple[str | None, str | None, str | None]:
+    """Trustworthy user, project, and tenant from authenticated context.
 
     Mirrors chat/routes.py::_identity_from_context — identity comes from the
-    token, not the request body. ANONYMOUS (dev/LOG_ONLY) returns (None, None)
-    so ClientAgent falls back to its configured defaults.
+    token, not the request body. ANONYMOUS (dev/LOG_ONLY) returns three ``None``
+    values so ClientAgent falls back to its configured defaults.
     """
     ctx = getattr(request.state, "context", None)
     if ctx is None:
-        return None, None
+        return None, None, None
     if getattr(ctx.auth_method, "value", None) == "anonymous":
-        return None, None
-    return (ctx.user_id or None), (ctx.project_id or None)
+        return None, None, None
+    return (
+        ctx.user_id or None,
+        ctx.project_id or None,
+        getattr(ctx, "tenant_id", None) or None,
+    )
+
+
+def _authorized_project(request: Request):
+    """Return the tenant-qualified project established by middleware."""
+    context = getattr(request.state, "context", None)
+    return getattr(context, "authorized_project", None)
+
+
+def _allow_legacy_project_lookup(request: Request) -> bool:
+    """Allow the global project map only outside canonical principal mode."""
+    return (
+        getattr(request.state, "principal", None) is None
+        and _authorized_project(request) is None
+    )
 
 
 def _error(status_code: int, message: str, err_type: str = "invalid_request_error") -> JSONResponse:
@@ -195,28 +215,46 @@ class OpenAICompatAPI:
         # The one failure mode worse than a 400.
         tools = body.get("tools")
         tool_choice = body.get("tool_choice")
-        user_id, project_id = _identity(request)
+        user_id, project_id, tenant_id = _identity(request)
+        authorized_project = _authorized_project(request)
+        allow_legacy_project_lookup = _allow_legacy_project_lookup(request)
 
         if stream:
             return await self._stream(model, messages, temperature, max_tokens,
                                       top_p, stop, system,
                                       user_id, project_id, smart_routing,
-                                      tools, tool_choice)
+                                      tools, tool_choice, authorized_project,
+                                      tenant_id, allow_legacy_project_lookup)
         return await self._complete(model, messages, temperature, max_tokens,
                                     top_p, stop, system,
                                     user_id, project_id, smart_routing,
-                                    tools, tool_choice)
+                                    tools, tool_choice, authorized_project,
+                                    tenant_id, allow_legacy_project_lookup)
 
     async def _complete(self, model, messages, temperature, max_tokens, top_p,
                         stop, system, user_id, project_id, smart_routing=False,
-                        tools=None, tool_choice=None):
+                        tools=None, tool_choice=None, authorized_project=None,
+                        tenant_id=None, allow_legacy_project_lookup=False):
         try:
-            resp = await self.client_agent.chat(
-                model, messages, temperature=temperature, max_tokens=max_tokens,
-                top_p=top_p, stop=stop, system=system,
-                user_id=user_id, project_id=project_id, smart_routing=smart_routing,
-                tools=tools, tool_choice=tool_choice,
-            )
+            kwargs = {
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+                "top_p": top_p,
+                "stop": stop,
+                "system": system,
+                "user_id": user_id,
+                "project_id": project_id,
+                "smart_routing": smart_routing,
+                "tools": tools,
+                "tool_choice": tool_choice,
+            }
+            if tenant_id is not None:
+                kwargs["tenant_id"] = tenant_id
+            if authorized_project is not None:
+                kwargs["authorized_project"] = authorized_project
+            if allow_legacy_project_lookup:
+                kwargs["allow_legacy_project_lookup"] = True
+            resp = await self.client_agent.chat(model, messages, **kwargs)
         except Exception:
             logger.exception("chat completion failed")
             return _error(500, "Internal server error", err_type="server_error")
@@ -280,17 +318,31 @@ class OpenAICompatAPI:
 
     async def _stream(self, model, messages, temperature, max_tokens, top_p,
                       stop, system, user_id, project_id, smart_routing=False,
-                      tools=None, tool_choice=None):
+                      tools=None, tool_choice=None, authorized_project=None,
+                      tenant_id=None, allow_legacy_project_lookup=False):
         completion_id = f"chatcmpl-{uuid.uuid4().hex}"
         created = int(time.time())
 
         try:
-            chunks = self.client_agent.chat_stream(
-                model, messages, temperature=temperature, max_tokens=max_tokens,
-                top_p=top_p, stop=stop, system=system,
-                user_id=user_id, project_id=project_id, smart_routing=smart_routing,
-                tools=tools, tool_choice=tool_choice,
-            )
+            kwargs = {
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+                "top_p": top_p,
+                "stop": stop,
+                "system": system,
+                "user_id": user_id,
+                "project_id": project_id,
+                "smart_routing": smart_routing,
+                "tools": tools,
+                "tool_choice": tool_choice,
+            }
+            if tenant_id is not None:
+                kwargs["tenant_id"] = tenant_id
+            if authorized_project is not None:
+                kwargs["authorized_project"] = authorized_project
+            if allow_legacy_project_lookup:
+                kwargs["allow_legacy_project_lookup"] = True
+            chunks = self.client_agent.chat_stream(model, messages, **kwargs)
         except Exception:
             logger.exception("stream setup failed")
             return _error(500, "Internal server error", err_type="server_error")
@@ -362,9 +414,17 @@ class OpenAICompatAPI:
     # ------------------------------------------------------------------
 
     async def list_models(self, request: Request) -> JSONResponse:
-        user_id, project_id = _identity(request)
+        user_id, project_id, tenant_id = _identity(request)
         try:
-            models = await self.client_agent.list_models(project_id=project_id, user_id=user_id)
+            kwargs = {"project_id": project_id, "user_id": user_id}
+            if tenant_id is not None:
+                kwargs["tenant_id"] = tenant_id
+            project = _authorized_project(request)
+            if project is not None:
+                kwargs["authorized_project"] = project
+            elif _allow_legacy_project_lookup(request):
+                kwargs["allow_legacy_project_lookup"] = True
+            models = await self.client_agent.list_models(**kwargs)
         except Exception:
             logger.exception("list models failed")
             return _error(500, "Internal server error", err_type="server_error")

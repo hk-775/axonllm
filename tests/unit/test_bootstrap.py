@@ -8,6 +8,7 @@ import pytest
 
 from src.gateway.bootstrap import (
     GatewayComponents,
+    _persistence_readiness,
     build_gateway_components,
     build_starlette_app,
     build_gateway_agent,
@@ -83,6 +84,57 @@ class TestBuildStaletteApp:
         app = build_starlette_app(demo_app_config)
         assert app is not None
         assert hasattr(app, "routes")
+
+    def test_readiness_route_is_separate_from_liveness(
+        self,
+        minimal_app_config: AppConfig,
+    ):
+        from starlette.testclient import TestClient
+
+        response = TestClient(build_starlette_app(minimal_app_config)).get(
+            "/ready"
+        )
+
+        assert response.status_code == 200
+        assert response.json() == {
+            "status": "ready",
+            "ready": True,
+            "dependencies": {"persistence": "disabled"},
+        }
+
+
+class TestPersistenceReadiness:
+    @pytest.mark.asyncio
+    async def test_unreachable_enabled_store_is_not_ready(self):
+        class _Persistence:
+            enabled = True
+
+            async def health_status(self):
+                return {"enabled": True, "reachable": False}
+
+        ready, dependencies = await _persistence_readiness(_Persistence())
+
+        assert ready is False
+        assert dependencies == {"persistence": "unavailable"}
+
+    @pytest.mark.asyncio
+    async def test_store_timeout_is_not_ready(self):
+        import asyncio
+
+        class _Persistence:
+            enabled = True
+
+            async def health_status(self):
+                await asyncio.sleep(0.05)
+                return {"enabled": True, "reachable": True}
+
+        ready, dependencies = await _persistence_readiness(
+            _Persistence(),
+            timeout_seconds=0.001,
+        )
+
+        assert ready is False
+        assert dependencies == {"persistence": "timeout"}
 
 
 class TestCedarWiring:

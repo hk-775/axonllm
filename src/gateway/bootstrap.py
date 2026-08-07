@@ -36,6 +36,10 @@ from src.gateway.auth.dynamo_principal_repository import DynamoPrincipalReposito
 from src.gateway.auth.oidc_service import OIDCConfig, OIDCService
 from src.gateway.auth.policy_hierarchy import PolicyHierarchyResolver
 from src.gateway.auth.principal import CanonicalPrincipalResolver, PrincipalResolver
+from src.gateway.auth.project_repository import (
+    DynamoProjectRepository,
+    ProjectResolver,
+)
 from src.gateway.auth.saml_routes import SamlAPI, create_saml_routes
 from src.gateway.auth.saml_service import SamlService, load_saml_config
 from src.gateway.auth.scim_routes import ScimAPI, create_scim_routes
@@ -128,6 +132,7 @@ class GatewayComponents:
     api_key_service: APIKeyService | None = None
     oidc_service: OIDCService | None = None
     principal_resolver: PrincipalResolver | None = None
+    project_resolver: ProjectResolver | None = None
     scim_store: ScimStore | None = None
     saml_service: SamlService | None = None
     policy_resolver: PolicyHierarchyResolver | None = None
@@ -185,6 +190,7 @@ def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComp
     )
     oidc_service = OIDCService(config=oidc_config)
     principal_resolver = None
+    project_resolver = None
     if app_config.canonical_identity_required:
         if app_config.auth_mode != "ENFORCE":
             raise RuntimeError(
@@ -197,6 +203,7 @@ def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComp
         principal_resolver = CanonicalPrincipalResolver(
             DynamoPrincipalRepository(persistence)
         )
+        project_resolver = DynamoProjectRepository(persistence)
 
     # --- Enterprise identity: SCIM provisioning + SAML SSO ---
     scim_store = ScimStore(persistence=persistence)
@@ -471,6 +478,7 @@ def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComp
         api_key_service=api_key_service,
         oidc_service=oidc_service,
         principal_resolver=principal_resolver,
+        project_resolver=project_resolver,
         scim_store=scim_store,
         saml_service=saml_service,
         policy_resolver=policy_resolver,
@@ -491,6 +499,28 @@ def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComp
 # ---------------------------------------------------------------------------
 # Starlette app builder (used by serve_dashboard.py)
 # ---------------------------------------------------------------------------
+
+
+async def _persistence_readiness(
+    persistence: DynamoPersistence,
+    timeout_seconds: float = 5.0,
+) -> tuple[bool, dict[str, str]]:
+    """Return a sanitized readiness result for the required state store."""
+    if not persistence.enabled:
+        return True, {"persistence": "disabled"}
+    try:
+        status = await asyncio.wait_for(
+            persistence.health_status(),
+            timeout=timeout_seconds,
+        )
+    except TimeoutError:
+        return False, {"persistence": "timeout"}
+    except Exception:
+        logger.warning("Persistence readiness check failed", exc_info=True)
+        return False, {"persistence": "unavailable"}
+    if status.get("enabled") is True and status.get("reachable") is True:
+        return True, {"persistence": "ready"}
+    return False, {"persistence": "unavailable"}
 
 
 def build_starlette_app(app_config: AppConfig | None = None) -> Starlette:
@@ -593,8 +623,22 @@ def build_starlette_app(app_config: AppConfig | None = None) -> Starlette:
     async def health_check(request: Request) -> JSONResponse:
         return JSONResponse({"status": "healthy"})
 
+    async def readiness_check(request: Request) -> JSONResponse:
+        ready, dependencies = await _persistence_readiness(comp.persistence)
+        return JSONResponse(
+            {
+                "status": "ready" if ready else "not_ready",
+                "ready": ready,
+                "dependencies": dependencies,
+            },
+            status_code=200 if ready else 503,
+        )
+
     routes = (
-        [Route("/health", health_check)]
+        [
+            Route("/health", health_check),
+            Route("/ready", readiness_check),
+        ]
         + create_admin_routes(admin_api)
         + create_key_routes(key_api)
         + create_policy_hierarchy_routes(policy_api)
@@ -640,7 +684,11 @@ def build_starlette_app(app_config: AppConfig | None = None) -> Starlette:
     # Baseline tenant RBAC for the inference and model-list data plane. Added
     # before AuthMiddleware so Starlette wraps it inside auth and a canonical
     # principal is already attached when this executes.
-    app.add_middleware(TenantAuthorizationMiddleware)
+    app.add_middleware(
+        TenantAuthorizationMiddleware,
+        project_resolver=comp.project_resolver,
+        require_tenant_project=app_config.canonical_identity_required,
+    )
 
     # Auth middleware (outermost — runs first on every request)
     app.add_middleware(

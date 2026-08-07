@@ -291,6 +291,112 @@ def test_cloudfront_has_tls_waf_and_preserved_behaviors(synthesized_template):
     )
 
 
+def test_alb_and_cloudfront_access_logs_are_private_and_retained(
+    synthesized_template,
+):
+    buckets = [
+        (logical_id, resource)
+        for logical_id, resource in synthesized_template["Resources"].items()
+        if resource["Type"] == "AWS::S3::Bucket"
+    ]
+    assert len(buckets) == 1
+    bucket_id, bucket = buckets[0]
+    properties = bucket["Properties"]
+
+    assert bucket["DeletionPolicy"] == "Retain"
+    assert bucket["UpdateReplacePolicy"] == "Retain"
+    assert properties["BucketEncryption"] == {
+        "ServerSideEncryptionConfiguration": [
+            {
+                "ServerSideEncryptionByDefault": {
+                    "SSEAlgorithm": "AES256",
+                }
+            }
+        ]
+    }
+    assert properties["OwnershipControls"] == {
+        "Rules": [{"ObjectOwnership": "ObjectWriter"}]
+    }
+    assert properties["PublicAccessBlockConfiguration"] == {
+        "BlockPublicAcls": True,
+        "BlockPublicPolicy": True,
+        "IgnorePublicAcls": True,
+        "RestrictPublicBuckets": True,
+    }
+    assert properties["LifecycleConfiguration"] == {
+        "Rules": [
+            {
+                "AbortIncompleteMultipartUpload": {
+                    "DaysAfterInitiation": 7,
+                },
+                "ExpirationInDays": 365,
+                "Id": "ExpireAccessLogs",
+                "Status": "Enabled",
+            }
+        ]
+    }
+
+    load_balancer = _one_resource(
+        synthesized_template, "AWS::ElasticLoadBalancingV2::LoadBalancer"
+    )["Properties"]
+    attributes = {
+        item["Key"]: item["Value"]
+        for item in load_balancer["LoadBalancerAttributes"]
+    }
+    assert attributes["access_logs.s3.enabled"] == "true"
+    assert attributes["access_logs.s3.bucket"] == {"Ref": bucket_id}
+    assert attributes["access_logs.s3.prefix"] == "alb"
+
+    distribution = _one_resource(
+        synthesized_template, "AWS::CloudFront::Distribution"
+    )["Properties"]["DistributionConfig"]
+    assert distribution["Logging"] == {
+        "Bucket": {"Fn::GetAtt": [bucket_id, "RegionalDomainName"]},
+        "IncludeCookies": False,
+        "Prefix": "cloudfront/",
+    }
+
+    bucket_policy = _one_resource(
+        synthesized_template, "AWS::S3::BucketPolicy"
+    )["Properties"]["PolicyDocument"]["Statement"]
+    assert any(
+        statement.get("Effect") == "Deny"
+        and statement.get("Condition", {})
+        .get("Bool", {})
+        .get("aws:SecureTransport")
+        == "false"
+        for statement in bucket_policy
+    )
+    assert any(
+        statement.get("Effect") == "Allow"
+        and statement.get("Principal", {}).get("Service")
+        == "delivery.logs.amazonaws.com"
+        and "s3:PutObject"
+        in (
+            [statement["Action"]]
+            if isinstance(statement["Action"], str)
+            else statement["Action"]
+        )
+        for statement in bucket_policy
+    )
+
+
+def test_ecs_deployments_roll_back_without_dropping_healthy_capacity(
+    synthesized_template,
+):
+    service = _one_resource(
+        synthesized_template,
+        "AWS::ECS::Service",
+    )["Properties"]
+
+    assert service["DeploymentConfiguration"]["DeploymentCircuitBreaker"] == {
+        "Enable": True,
+        "Rollback": True,
+    }
+    assert service["DeploymentConfiguration"]["MinimumHealthyPercent"] == 100
+    assert service["DeploymentConfiguration"]["MaximumPercent"] == 200
+
+
 def test_private_origin_and_public_distribution_are_discoverable(
     synthesized_template,
 ):
@@ -310,7 +416,7 @@ def test_health_check_and_streaming_settings_are_preserved(
     target_group = _one_resource(
         synthesized_template, "AWS::ElasticLoadBalancingV2::TargetGroup"
     )["Properties"]
-    assert target_group["HealthCheckPath"] == "/health"
+    assert target_group["HealthCheckPath"] == "/ready"
     assert target_group["Matcher"] == {"HttpCode": "200"}
     assert target_group["HealthCheckTimeoutSeconds"] == 5
     assert target_group["TargetGroupAttributes"] == [

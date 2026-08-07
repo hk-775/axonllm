@@ -17,6 +17,7 @@ from aws_cdk import (
     aws_elasticloadbalancingv2 as elbv2,
     aws_iam as iam,
     aws_logs as logs,
+    aws_s3 as s3,
     aws_secretsmanager as secretsmanager,
     aws_wafv2 as wafv2,
 )
@@ -215,6 +216,9 @@ class AxonLLMStack(Stack):
             cpu=1024,
             memory_limit_mib=2048,
             desired_count=2,
+            circuit_breaker=ecs.DeploymentCircuitBreaker(rollback=True),
+            min_healthy_percent=100,
+            max_healthy_percent=200,
             # Named for the same reason as the cluster: `--service axonllm` and
             # `--task-definition axonllm` appear in the README's post-deploy
             # steps, and both failed against a real deployment before this.
@@ -275,7 +279,7 @@ class AxonLLMStack(Stack):
 
         # --- Health check ---
         fargate_service.target_group.configure_health_check(
-            path="/health",
+            path="/ready",
             healthy_http_codes="200",
             interval=Duration.seconds(30),
             timeout=Duration.seconds(5),
@@ -343,6 +347,30 @@ class AxonLLMStack(Stack):
         )
         fargate_service.load_balancer.set_attribute(
             "routing.http.drop_invalid_header_fields.enabled", "true"
+        )
+
+        # CloudFront standard logging requires ACLs, so this bucket must use
+        # ObjectWriter ownership rather than S3's ACL-disabled default. ALB log
+        # delivery adds its own least-privilege bucket policy below.
+        access_logs_bucket = s3.Bucket(
+            self,
+            "AccessLogs",
+            block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
+            encryption=s3.BucketEncryption.S3_MANAGED,
+            enforce_ssl=True,
+            object_ownership=s3.ObjectOwnership.OBJECT_WRITER,
+            lifecycle_rules=[
+                s3.LifecycleRule(
+                    id="ExpireAccessLogs",
+                    expiration=Duration.days(365),
+                    abort_incomplete_multipart_upload_after=Duration.days(7),
+                )
+            ],
+            removal_policy=RemovalPolicy.RETAIN,
+        )
+        fargate_service.load_balancer.log_access_logs(
+            access_logs_bucket,
+            "alb",
         )
 
         # --- CloudFront distribution ---
@@ -435,6 +463,10 @@ class AxonLLMStack(Stack):
             ssl_support_method=cloudfront.SSLMethod.SNI,
             web_acl_id=web_acl.attr_arn,
             price_class=cloudfront.PriceClass.PRICE_CLASS_100,
+            enable_logging=True,
+            log_bucket=access_logs_bucket,
+            log_file_prefix="cloudfront/",
+            log_includes_cookies=False,
         )
 
         # --- Outputs ---

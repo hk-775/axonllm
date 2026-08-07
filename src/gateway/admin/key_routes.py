@@ -143,6 +143,7 @@ class KeyManagementAPI:
             scopes=scopes,
             created_by=created_by,
             expires_at=expires_at,
+            tenant_id=ctx.tenant_id if ctx else None,
         )
 
         return JSONResponse(
@@ -173,7 +174,10 @@ class KeyManagementAPI:
             if denial is not None:
                 return denial
 
-        keys = await self.api_key_service.list_keys(project_id)
+        keys = await self.api_key_service.list_keys(
+            project_id,
+            ctx.tenant_id if ctx else None,
+        )
 
         return JSONResponse(
             content=[
@@ -200,7 +204,10 @@ class KeyManagementAPI:
         """
         if ctx is None:
             return False
-        keys = await self.api_key_service.list_keys(ctx.project_id)
+        keys = await self.api_key_service.list_keys(
+            ctx.project_id,
+            ctx.tenant_id,
+        )
         return any(k.key_id == key_id for k in keys)
 
     async def revoke_key(self, request: Request) -> JSONResponse:
@@ -215,7 +222,10 @@ class KeyManagementAPI:
             if denial is not None:
                 return denial
 
-        success = await self.api_key_service.revoke_key(key_id)
+        success = await self.api_key_service.revoke_key(
+            key_id,
+            ctx.tenant_id if ctx else None,
+        )
 
         if not success:
             return JSONResponse(
@@ -253,7 +263,10 @@ class KeyManagementAPI:
                 target = next(
                     (
                         k
-                        for k in await self.api_key_service.list_keys(ctx.project_id)
+                        for k in await self.api_key_service.list_keys(
+                            ctx.project_id,
+                            ctx.tenant_id,
+                        )
                         if k.key_id == key_id
                     ),
                     None,
@@ -269,7 +282,11 @@ class KeyManagementAPI:
                     if denial is not None:
                         return denial
 
-        result = await self.api_key_service.rotate_key(key_id, rotated_by)
+        result = await self.api_key_service.rotate_key(
+            key_id,
+            rotated_by,
+            ctx.tenant_id if ctx else None,
+        )
         if result is None:
             return JSONResponse(
                 status_code=404,

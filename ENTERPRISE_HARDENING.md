@@ -1,6 +1,6 @@
 # AxonLLM Enterprise Hardening Runbook
 
-This runbook describes `hardening/enterprise-tenant-foundation` as of
+This runbook describes `hardening/enterprise-tenant-sweep-2` as of
 2026-08-07. It separates controls present in the code from work still required
 before a shared, multi-tenant production release.
 
@@ -9,25 +9,34 @@ before a shared, multi-tenant production release.
 Implemented:
 
 - Canonical principals backed by strongly consistent DynamoDB reads.
-- Default-deny tenant role/action policy, project grants, cross-tenant 404
+- Strongly consistent, tenant-qualified project ownership lookup before RBAC,
+  default-deny tenant role/action policy, project grants, cross-tenant 404
   concealment, and data-plane enforcement for model listing and inference.
+- Tenant-qualified exact and semantic response caches, including isolation for
+  identical project ids in different tenants.
+- Tenant-qualified API-key rows and project indexes, atomic three-row issuance,
+  and atomic revocation plus per-tenant cache-invalidation epoch updates.
 - Hardened direct and ALB OIDC verification and a fail-closed AgentCore adapter.
+- Explicit AgentCore lifespan initialization, bounded OIDC/DynamoDB readiness,
+  a distinct `/ready` route, and bounded provider HTTP/OTLP shutdown.
 - Bounded chat ingress, PII-sensitive cache bypass, current-policy checks on
   cache hits, append-only audit-chain containment, secret-aware Docker context,
   and a non-root immutable image.
 - A Fargate reference stack with an internal TLS ALB behind CloudFront VPC
-  Origin, WAF, private tasks, and explicitly approved HTTPS egress.
+  Origin, WAF, private tasks, explicitly approved HTTPS egress, retained
+  ALB/CloudFront access logs, and deployment rollback.
 - Hash-locked application/AgentCore dependencies and CI gates for lint, tests,
   secret/dependency/IaC scanning, CDK synthesis, and container build/scan.
 
 Not complete:
 
-- Authoritative tenant-qualified project ownership and tenant-scoped
-  persistence for all customer data and `/admin/*` routes.
-- An automated principal migration/provisioning path or transactional SCIM and
-  API-key lifecycle integration.
+- Tenant-scoped persistence and authorization for all remaining customer data
+  and `/admin/*` routes.
+- An automated principal migration/provisioning path, transactional SCIM
+  lifecycle integration, and atomic API-key rotation tied to canonical
+  principal authorization versions.
 - Production AgentCore IaC, JWT authorizer/header forwarding, private
-  networking, memory isolation, and a real dependency readiness probe.
+  networking, distributed controls, and memory isolation.
 - The remaining release blockers listed at the end of this document.
 
 The current branch is a tenant authorization foundation. It is not a claim that
@@ -85,7 +94,7 @@ Each principal record must contain:
 | `roles` | One or more canonical `TenantRole` values |
 | `auth_method` | `oidc_jwt`, `api_key`, or the supported source method |
 | `membership_status` | `active` to authorize |
-| `project_ids` | Explicit grants for every tenant role, including tenant admins, until authoritative project ownership exists |
+| `project_ids` | Explicit grants required by the current policy for every tenant role, including tenant admins |
 | `scopes` | Server-held action scopes, primarily for `service` principals |
 | `authorization_version` | Positive integer; increment by one on each update |
 
@@ -113,10 +122,12 @@ Every decision requires an active membership. Unknown actions default deny.
 | `platform_admin` | Platform actions only; tenant access requires break glass |
 
 The kernel requires every tenant role to hold an explicit grant when the
-resource carries a project id, including `tenant_admin`: the gateway cannot
-safely infer ownership from a globally keyed project id. A service scope may be
-an exact action, a namespace wildcard such as `inference.*`, or `*`; these are
-server-held scopes, not trusted token claims.
+resource carries a project id, including `tenant_admin`. Before that grant is
+evaluated, canonical ingress resolves the exact project under the principal's
+tenant with a strongly consistent point read. Ownership and permission are
+therefore independent checks. A service scope may be an exact action, a
+namespace wildcard such as `inference.*`, or `*`; these are server-held scopes,
+not trusted token claims.
 
 `query.select` expresses read-only query intent. `query.mutate` is denied for
 every role, including platform administrators and services. No SQL/query HTTP
@@ -155,20 +166,21 @@ there is no default-project fallback on that path. AgentCore requires both
 tenant and project claims. Legacy migration mode does not provide this canonical
 RBAC floor and must not be used for shared tenancy.
 
-Projects, users, usage, API keys, caches, quotas, policies, webhooks, SCIM
-objects, and audit data must all be tenant-qualified and filtered before
-tenant-admin/member read and write behavior can be exposed through the admin
-API. Until then, use a separately isolated operator control plane or one
-deployment per tenant.
+Canonical data-plane projects now carry a tenant owner and use
+`PK=TENANT#{tenant_id}`, `SK=PROJECT#{project_id}`. HTTP and AgentCore resolve
+that exact row before RBAC, return a concealed 404 when it is absent, and return
+503 when ownership cannot be established safely. The resolved object is carried
+through model listing, chat, routing, and response policy rather than looked up
+again in the global startup map. Exact and semantic cache namespaces also
+include both tenant and project, with tests for colliding project ids.
 
-The explicit project grant is containment, not authoritative ownership. The
-middleware currently constructs a project resource using the resolved
-principal's tenant because `Project` has no tenant owner and project records are
-keyed only by project id. A grant whose id collides with another tenant's project
-could therefore select globally keyed state. Production requires a
-tenant-qualified project lookup before authorization and compound
-tenant/project keys throughout the data plane. Tests must cover identical
-project ids in different tenants.
+Users, usage/accounting, quotas, hierarchy and Cedar policies, webhooks, SCIM
+objects, and audit data are still not comprehensively tenant-qualified. API-key
+storage is tenant-qualified, but its current routes remain behind legacy admin
+RBAC and key creation does not create a canonical service principal. Do not
+expose the current admin API to multiple untrusted tenants; use an isolated
+operator control plane or one deployment per tenant until those boundaries are
+closed.
 
 ## Break Glass
 
@@ -238,11 +250,16 @@ configured LLM provider without a `0.0.0.0/0` entry. The stack outputs
 `CloudFrontDistributionDomain` and `InternalALBDomain` for DNS wiring.
 
 This improves transport and network defaults but does not make the deployment
-multi-tenant ready. It still lacks the ALB authentication action, canonical
-principal provisioning, tenant-qualified ownership, WAF/access logging and
-tuning, multi-AZ NAT, and a tested readiness gate. After CloudFront creates its
-VPC-origin service security group, restrict ALB ingress to that group instead of
-the VPC-wide bootstrap rule.
+multi-tenant ready. ALB and CloudFront access logs are written to a private,
+TLS-only, SSE-S3 bucket retained independently of the stack and expired after
+365 days. ECS uses a rollback circuit breaker with 100% minimum and 200% maximum
+healthy deployment percentages. Its target group probes public `GET /ready`,
+which returns 503 when the enabled DynamoDB store is unreachable or times out;
+`GET /health` remains liveness. The stack still lacks the ALB authentication
+action, canonical principal provisioning, WAF tuning, multi-AZ NAT, and broader
+identity/provider readiness checks. After CloudFront creates its VPC-origin
+service security group, restrict ALB ingress to that group instead of the
+VPC-wide bootstrap rule.
 
 ## AgentCore Runtime
 
@@ -253,6 +270,11 @@ The AgentCore adapter supports three actions:
 | `chat` | Required | Strict chat validation, canonical RBAC, native async streaming |
 | `list_models` | Required | Models for the signed and granted project |
 | `health` | Not required | Liveness only: `ready: false`, dependencies unchecked |
+
+The SDK application also exposes `GET /ready`. It is separate from the
+AgentCore action payload and returns 200 only when the explicitly initialized
+runtime, OIDC/JWKS dependency, and DynamoDB principal/project store are ready;
+otherwise it returns 503 with sanitized dependency states.
 
 Identity is accepted only from `context.request_headers`, using exactly one of:
 
@@ -284,21 +306,29 @@ Before deployment:
 5. Replace local generated AgentCore configuration with reviewed IaC. Do not
    commit `.bedrock_agentcore*`, staged archives, account ids, role ARNs, or
    deployment buckets.
-6. Test token expiry, wrong issuer/audience, wrong tenant/project, deprovisioned
-   membership, JWKS outage, DynamoDB outage, concurrent cold start, and streaming.
+6. Wire `/ready` into the deployment readiness gate, then test token expiry,
+   wrong issuer/audience, wrong tenant/project, deprovisioned membership, JWKS
+   outage, DynamoDB outage, startup timeout, graceful shutdown, and streaming.
 
 AgentCore does not expose the Starlette admin console or
 `/admin/production-checklist`. Run control-plane readiness separately and use
-authenticated `list_models` plus a low-cost completion as the AgentCore canary.
-The `health` action must never be used as a readiness signal.
+`/ready`, authenticated `list_models`, and a low-cost completion as the
+AgentCore canary. The `health` action must never be used as a readiness signal.
 
-Runtime initialization is lazy on the first authenticated action. It loads
-projects, users, usage, feedback, policies, destinations, topology, and audit
-state; usage and audit paths scan retained history. A project-load failure can
-currently return an empty mapping, after which missing project controls can fail
-open. Rate-limit windows, cache state, and audit-chain serialization also remain
-process-local, and the AgentCore runtime does not close provider HTTP sessions or
-flush OTLP resources on shutdown. These are release blockers, not tuning items.
+Runtime initialization now runs once in the AgentCore lifespan before traffic
+is accepted, and request admission has an initialization deadline. It fails
+startup when OIDC/JWKS, DynamoDB, canonical principal resolution, or
+authoritative project resolution is unavailable. The synchronous factory runs
+in a Python worker thread, which cannot be forcibly cancelled; a permanently
+hung factory can outlive the admission deadline and must be contained by the
+runtime's process-level startup/termination policy. Readiness probes are bounded
+and cached briefly; shutdown closes provider HTTP sessions and flushes OTLP
+resources within a deadline. Bootstrap still scans retained projects, users,
+usage, feedback,
+policies, destinations, topology, and audit state, and several non-project
+control domains retain fail-open hydration or process-local semantics.
+Rate-limit windows, response caches, and audit-chain serialization remain
+process-local. Those are release blockers, not tuning items.
 
 ### Private Networking
 
@@ -376,24 +406,24 @@ proving that canonical service-principal scopes match key metadata.
 
 ## Remaining Release Blockers
 
-- Tenant-qualified persistence and filtered admin reads/writes for projects,
-  users, usage, keys, caches, quotas, policies, webhooks, SCIM, and audit.
-- Authoritative project ownership lookup before authorization, including
-  isolation tests for the same project id in two tenants.
+- Tenant-qualified persistence and filtered admin reads/writes for users,
+  usage/accounting, quotas, policies, webhooks, SCIM, and audit, plus
+  tenant-aware project administration rather than a global startup map.
 - Redacted member views and tenant-admin configuration routes.
-- Transactional API-key issue/revoke and SCIM deprovisioning tied to canonical
-  principal authorization versions.
+- Atomic API-key rotation and SCIM deprovisioning tied to canonical principal
+  authorization versions; migration for legacy unqualified keys.
 - Fargate ALB authentication-action/trust-value wiring, post-create restriction
-  to the CloudFront VPC-origin service security group, DNS, and access logging.
+  to the CloudFront VPC-origin service security group, DNS, alarms, and broader
+  identity/provider readiness checks beyond the DynamoDB gate.
 - Distributed rate-limit and budget semantics plus cross-replica cache and
   revocation behavior verified under load.
 - Durable audit/accounting reservation semantics for failures after the first
   streamed byte; terminal errors are sanitized and emitted before `[DONE]`, but
   already delivered provider content cannot be recalled.
-- Fail-closed control-state hydration, bounded startup reads, eager AgentCore
-  initialization, graceful HTTP/OTLP shutdown, and dependency readiness.
 - AgentCore IaC, JWT authorizer/header forwarding, private networking,
-  distributed controls, and memory isolation.
+  fail-closed non-project control-state hydration, bounded startup reads,
+  process-level containment of a stuck synchronous bootstrap, distributed
+  controls, and memory isolation.
 - Secret rotation and audit of any previously staged CDK/AgentCore build assets.
 - Release SBOM/signing/provenance and successful CI evidence for the exact
   artifact; backup/restore drills, load tests, and multi-replica failure tests.

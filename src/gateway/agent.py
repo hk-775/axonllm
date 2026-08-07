@@ -233,7 +233,18 @@ class GatewayAgent:
 
         # 2. Extract context
         req_ctx = self._extract_context(context)
-        project = self._projects.get(req_ctx.project_id)
+        project = self._project_for_context(req_ctx)
+        if (
+            req_ctx.tenant_id is not None
+            and project is None
+            and not req_ctx.allow_legacy_project_lookup
+        ):
+            return _error_response(
+                404,
+                "not_found",
+                "The requested resource was not found.",
+                code="resource_not_found",
+            )
 
         # 2.5. Request validation (before rate limiting)
         # Skip model validation for smart routing (model will be selected later)
@@ -484,7 +495,11 @@ class GatewayAgent:
             and not context.get("preferred_region")
         )
         if project and project.cache_enabled and cache_privacy_eligible:
-            cache_key = self.cache_manager.compute_cache_key(request, req_ctx.project_id)
+            cache_key = self.cache_manager.compute_cache_key(
+                request,
+                req_ctx.project_id,
+                req_ctx.tenant_id,
+            )
             cached = await self.cache_manager.get(cache_key)
             if cached is not None:
                 cached = await self._apply_cached_output_policy(
@@ -508,6 +523,7 @@ class GatewayAgent:
                     request,
                     req_ctx.project_id,
                     threshold=project.semantic_cache_threshold,
+                    tenant_id=req_ctx.tenant_id,
                 )
                 if sem_hit is not None:
                     sem_hit = await self._apply_cached_output_policy(
@@ -666,6 +682,8 @@ class GatewayAgent:
                         resolved_policy,
                         pii_mapping,
                         request_id,
+                        authorized_project=project,
+                        tenant_id=req_ctx.tenant_id,
                     )
 
                 response, ensemble_decision = await self.router.ensemble_route(
@@ -921,7 +939,11 @@ class GatewayAgent:
                 # put() swallows its own failures; an embedding outage must not
                 # turn a completed request into an error.
                 await self._semantic_cache.put(
-                    request, req_ctx.project_id, response, ttl
+                    request,
+                    req_ctx.project_id,
+                    response,
+                    ttl,
+                    tenant_id=req_ctx.tenant_id,
                 )
 
         # 16. Non-streaming return
@@ -1497,7 +1519,7 @@ class GatewayAgent:
                     output_pii_types,
                 ) = await self._apply_output_policy(
                     response,
-                    project=self._projects.get(req_ctx.project_id),
+                    project=self._project_for_context(req_ctx),
                     resolved_policy=resolved_policy,
                     pii_mapping=pii_mapping,
                 )
@@ -1590,7 +1612,7 @@ class GatewayAgent:
             return
 
         # --- Relay or policy-buffer chunks; always accumulate for accounting ---
-        project = self._projects.get(req_ctx.project_id)
+        project = self._project_for_context(req_ctx)
         buffer_for_policy = self._requires_output_buffering(
             project=project,
             resolved_policy=resolved_policy,
@@ -1899,6 +1921,8 @@ class GatewayAgent:
         resolved_policy: ResolvedPolicy | None = None,
         pii_mapping: RedactionMapping | None = None,
         request_id: str = "",
+        authorized_project: Project | None = None,
+        tenant_id: str | None = None,
     ) -> AsyncIterator[dict]:
         """Async generator for streaming ensemble requests.
 
@@ -1955,6 +1979,8 @@ class GatewayAgent:
             project_id=project_id,
             roles=[],
             scopes=[],
+            tenant_id=tenant_id,
+            authorized_project=authorized_project,
         )
         try:
             (
@@ -1964,7 +1990,7 @@ class GatewayAgent:
                 output_pii_types,
             ) = await self._apply_output_policy(
                 response,
-                project=self._projects.get(project_id),
+                project=self._project_for_context(req_ctx),
                 resolved_policy=resolved_policy,
                 pii_mapping=pii_mapping,
             )
@@ -2271,12 +2297,39 @@ class GatewayAgent:
 
     def _extract_context(self, context: dict) -> RequestContext:
         """Extract RequestContext from the context dict."""
+        authorized_project = context.get("authorized_project")
+        if not isinstance(authorized_project, Project):
+            authorized_project = None
         return RequestContext(
             user_id=context.get("user_id", ""),
             project_id=context.get("project_id", ""),
             roles=context.get("roles", []),
             scopes=context.get("scopes", []),
+            tenant_id=context.get("tenant_id"),
+            authorized_project=authorized_project,
+            allow_legacy_project_lookup=bool(
+                context.get("allow_legacy_project_lookup", False)
+            ),
         )
+
+    def _project_for_context(self, context: RequestContext) -> Project | None:
+        """Return only the project proven to belong to this request's tenant."""
+        project = context.authorized_project
+        if project is not None:
+            if project.project_id != context.project_id:
+                return None
+            if (
+                context.tenant_id is None
+                or project.tenant_id != context.tenant_id
+            ):
+                return None
+            return project
+        if (
+            context.tenant_id is not None
+            and not context.allow_legacy_project_lookup
+        ):
+            return None
+        return self._projects.get(context.project_id)
 
     def _make_provider_fn(self):
         """Return a provider function compatible with Router.execute_with_fallback.
@@ -2376,7 +2429,14 @@ class GatewayAgent:
             warnings=response.warnings + ["Response modified by guardrail"],
         )
 
-    async def handle_list_models(self, project_id: str | None = None, user_id: str | None = None) -> dict:
+    async def handle_list_models(
+        self,
+        project_id: str | None = None,
+        user_id: str | None = None,
+        tenant_id: str | None = None,
+        authorized_project: Project | None = None,
+        allow_legacy_project_lookup: bool = False,
+    ) -> dict:
         """Return all models with descriptions and capabilities.
 
         If project_id is provided and the project has allowed_models,
@@ -2385,7 +2445,23 @@ class GatewayAgent:
         """
         models = self.router.model_registry.list_models()
         if project_id:
-            project = self._projects.get(project_id)
+            project = self._project_for_context(
+                RequestContext(
+                    user_id=user_id or "",
+                    project_id=project_id,
+                    roles=[],
+                    scopes=[],
+                    tenant_id=tenant_id,
+                    authorized_project=authorized_project,
+                    allow_legacy_project_lookup=allow_legacy_project_lookup,
+                )
+            )
+            if (
+                tenant_id is not None
+                and project is None
+                and not allow_legacy_project_lookup
+            ):
+                return {"models": []}
             if project and project.allowed_models:
                 allowed = set(project.allowed_models)
                 models = [m for m in models if m.name in allowed]

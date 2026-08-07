@@ -181,6 +181,7 @@ class Project:
 
     project_id: str
     name: str
+    tenant_id: str | None = field(default=None, kw_only=True)
     budget_limit: float | None = None
     alert_threshold: float | None = None
     allowed_models: list[str] | None = None
@@ -204,6 +205,10 @@ class Project:
     rate_limit_rpm: int | None = None
     members: list[str] = field(default_factory=list)
     created_at: datetime = field(default_factory=_utcnow)
+
+    def __post_init__(self) -> None:
+        if self.tenant_id is not None and not self.tenant_id.strip():
+            raise ValueError("tenant_id must be None or non-empty")
 
 
 @dataclass
@@ -482,6 +487,8 @@ class RequestContext:
     subject: str | None = None
     principal_id: str | None = None
     authorization_version: int | None = None
+    authorized_project: Project | None = None
+    allow_legacy_project_lookup: bool = False
 
 
 @dataclass

@@ -81,7 +81,16 @@ def test_trivy_exception_is_narrow_and_expires() -> None:
                 "paths": ["Dockerfile"],
                 "statement": "AXON_AUTH_MODE is a non-secret enforcement setting.",
                 "expired_at": "2027-08-07T00:00:00Z",
-            }
+            },
+            {
+                "id": "AWS-0132",
+                "paths": ["AxonLLMStack.template.json"],
+                "statement": (
+                    "ALB and CloudFront access-log delivery require SSE-S3; "
+                    "the bucket cannot use a customer-managed KMS key."
+                ),
+                "expired_at": "2027-08-07T00:00:00Z",
+            },
         ]
     }
 

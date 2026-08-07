@@ -120,6 +120,15 @@ async def test_different_projects_produce_different_cache_keys():
 
 
 @pytest.mark.asyncio
+async def test_same_project_in_different_tenants_produces_different_cache_keys():
+    cm = CacheManager()
+    req = _make_request()
+    key1 = cm.compute_cache_key(req, "shared-project", "tenant-a")
+    key2 = cm.compute_cache_key(req, "shared-project", "tenant-b")
+    assert key1 != key2
+
+
+@pytest.mark.asyncio
 async def test_different_messages_produce_different_cache_keys():
     cm = CacheManager()
     req1 = _make_request(messages=[{"role": "user", "content": "hello"}])
