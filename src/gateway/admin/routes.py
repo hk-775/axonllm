@@ -17,7 +17,6 @@ import heapq
 import io
 import logging
 import pathlib
-import time
 import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING
@@ -220,22 +219,6 @@ PROVIDER_MODEL_CATALOG = {
 class AdminAPI:
     """Holds references to gateway components and exposes admin route handlers."""
 
-    # How long a fleet-wide usage refresh is reused before the next admin read
-    # pays for another one.
-    #
-    # Chosen against the dashboard's own behaviour, not picked round: the traces
-    # panel polls every 3s (see static/index.html), so an uncached read-through
-    # would scan the usage table ~20 times a minute per open tab, forever. The
-    # refresh is a paged scan whose cost grows with total history — ~53 sequential
-    # 1MB round-trips at 100k records, about 1.4s — so per-request refreshing
-    # degrades into a dashboard that is slower the longer the gateway has run.
-    #
-    # A ceiling of one scan per 10s makes that cost independent of both poll rate
-    # and tab count, and 10s is already finer than the 3s panel can show a human
-    # anything meaningful about. Money does not depend on this window at all:
-    # ``_fleet_spend`` reads the shared counter per call.
-    USAGE_SYNC_TTL_SECONDS = 10.0
-
     def __init__(
         self,
         cost_tracker: CostTracker,
@@ -256,6 +239,7 @@ class AdminAPI:
         api_key_service: object | None = None,
         semantic_cache: object | None = None,
         policy_service: CedarPolicyService | None = None,
+        config_sync: object | None = None,
     ) -> None:
         self.cost_tracker = cost_tracker
         self.health_tracker = health_tracker
@@ -274,6 +258,10 @@ class AdminAPI:
         # The live evaluator, so POST /admin/policies can recompile it. None when
         # no Cedar service is wired (auth middleware built without one).
         self._policy_service = policy_service
+        # The fleet config sync, so a write here records the version it produced
+        # rather than rediscovering its own change on the next poll, and so the
+        # list endpoints can converge before answering. None when not wired.
+        self._config_sync = config_sync
         self._user_configs: dict[str, dict] = (
             user_configs if user_configs is not None else {})
         self._config_path = config_path
@@ -308,19 +296,6 @@ class AdminAPI:
         # did not wire one; the endpoint then reports it as unavailable, which is
         # distinguishable from a wired cache with no hits.
         self._semantic_cache = semantic_cache
-        # Monotonic timestamp of the last fleet-wide usage refresh. Negative
-        # infinity rather than 0 so the first admin read always refreshes:
-        # time.monotonic() has an arbitrary origin and can legitimately be near 0
-        # early in the process, which with a 0 sentinel would skip the first sync.
-        self._last_usage_sync = float("-inf")
-        # The in-flight refresh, if any, so concurrent admin reads await one scan
-        # instead of each starting their own. Without this the TTL check below is
-        # not actually a limit: it reads and writes _last_usage_sync either side of
-        # an await, so N overlapping requests all pass it. Eight open dashboard
-        # tabs meant eight simultaneous full scans, each holding its own
-        # deserialized copy of the table — hundreds of MB in flight on a task
-        # sized for far less.
-        self._usage_sync_task: asyncio.Task | None = None
 
     # ------------------------------------------------------------------
     # Fleet-wide read helpers
@@ -334,35 +309,14 @@ class AdminAPI:
         answer a function of which task replied. This funnels those reads through
         one refresh so they describe the fleet instead.
 
-        Rate-limited rather than per-request because the refresh is a paged scan
-        whose cost grows with history, and the dashboard polls on a 3s timer — see
-        ``USAGE_SYNC_TTL_SECONDS``. The clock is advanced only on a refresh that
-        actually happened, so a persistence outage retries on the next read rather
-        than serving stale data for a full TTL after a failure.
-
-        Concurrent callers share one scan: the TTL check alone cannot bound
-        anything, because it straddles an await and every overlapping request
-        passes it before the first one finishes.
+        The refresh itself lives on ``CostTracker`` because ``GET /api/users``
+        needs the same thing, and two copies would mean two clocks: the chat
+        selector and the dashboard could then refresh on different beats and
+        disagree about who exists, and a burst across both would issue two scans
+        where one would do. See ``CostTracker.USAGE_SYNC_TTL_SECONDS`` for why it
+        is rate-limited at all.
         """
-        now = time.monotonic()
-        if now - self._last_usage_sync < self.USAGE_SYNC_TTL_SECONDS:
-            return self.cost_tracker._records
-
-        if self._usage_sync_task is None or self._usage_sync_task.done():
-            self._usage_sync_task = asyncio.create_task(
-                self.cost_tracker.sync_records_from_store()
-            )
-        try:
-            synced = await asyncio.shield(self._usage_sync_task)
-        except Exception:
-            # A refresh that raised must not fail the operator's page — the local
-            # records are still a truthful answer for this instance, which is what
-            # the endpoint returned before any of this existed.
-            logger.warning("Fleet-wide usage refresh failed", exc_info=True)
-            synced = False
-        if synced:
-            self._last_usage_sync = now
-        return self.cost_tracker._records
+        return await self.cost_tracker.synced_records()
 
     async def _fleet_spend(self, scope: str, ident: str, local: float) -> float:
         """Exact fleet-wide spend, falling back to the local figure.
@@ -374,6 +328,43 @@ class AdminAPI:
         """
         total = await self.cost_tracker.fleet_spend(scope, ident)
         return local if total is None else total
+
+    async def _note_config_write(self) -> None:
+        """Tell the sync which version this instance's own write produced.
+
+        Called after a project or user config write. Without it the writing
+        instance sees its own bump as a remote change on the next poll and
+        re-scans both tables to learn what it already knows — harmless but a
+        wasted pair of scans per write.
+        """
+        if self._config_sync is None or self._persistence is None:
+            return
+        if not self._persistence.enabled:
+            return
+        try:
+            version = await self._persistence.get_config_version()
+        except Exception:
+            logger.warning("Could not read back the config version", exc_info=True)
+            return
+        self._config_sync.note_local_version(version)
+
+    async def _refresh_config(self) -> None:
+        """Converge on the fleet's config before listing or reading it.
+
+        The list endpoints have no id to read through on, so unlike
+        ``_get_project`` they cannot recover from a miss — an empty local dict is
+        indistinguishable from an empty table. This is also what arms enforcement
+        for limits another instance set, so a read here is not merely cosmetic.
+        """
+        if self._config_sync is None:
+            return
+        try:
+            await self._config_sync.refresh_if_stale()
+        except Exception:
+            logger.warning(
+                "Config refresh failed; answering from this instance's config",
+                exc_info=True,
+            )
 
     # ------------------------------------------------------------------
     # GET /admin/overview
@@ -583,6 +574,7 @@ class AdminAPI:
         if self._persistence is not None and self._persistence.enabled:
             try:
                 await self._persistence.save_project(project)
+                await self._note_config_write()
             except Exception:
                 logger.warning(
                     "Failed to persist project %s to DynamoDB",
@@ -676,6 +668,7 @@ class AdminAPI:
         if self._persistence is not None and self._persistence.enabled:
             try:
                 await self._persistence.save_project(project)
+                await self._note_config_write()
             except Exception:
                 logger.warning(
                     "Failed to persist project %s to DynamoDB",
@@ -723,18 +716,29 @@ class AdminAPI:
         return project
 
     async def _all_projects(self) -> dict:
-        """Every project, including ones created by another instance.
+        """Every project, including ones created or changed by another instance.
 
         The list endpoint cannot read through on a miss the way ``_get_project``
         does — there is no id to miss on, and an empty local dict is
-        indistinguishable from an empty table. So it re-scans and merges.
+        indistinguishable from an empty table.
 
-        Locally-known objects win over the scanned copy on purpose: a request
-        that is mid-mutation holds a reference to the dict's object, and
-        replacing it here would discard an in-flight change that has not been
-        persisted yet. The scan only contributes projects this instance has never
-        seen.
+        Prefers the config sync where one is wired. That is strictly better than
+        the scan below on three counts: it is version-gated rather than
+        per-request, it adopts *updates* and not just additions, and it arms
+        enforcement for the limits it adopts. The scan remains as the fallback for
+        callers that construct ``AdminAPI`` without a sync, where the old
+        behaviour is better than none.
+
+        In the fallback, locally-known objects win over the scanned copy: a
+        request that is mid-mutation holds a reference to the dict's object, and
+        replacing it would show a pre-mutation copy. That also means a project
+        another instance *edited* keeps its stale local fields, which is the gap
+        the sync closes — see ``ConfigSyncService._refresh`` for why adopting the
+        stored copy is the right trade once versions make it bounded.
         """
+        if self._config_sync is not None:
+            await self._refresh_config()
+            return self.projects
         if self._persistence is None or not self._persistence.enabled:
             return self.projects
         try:
@@ -764,6 +768,7 @@ class AdminAPI:
         if self._persistence is not None and self._persistence.enabled:
             try:
                 await self._persistence.save_project(project)
+                await self._note_config_write()
             except Exception:
                 logger.warning(
                     "Failed to persist project %s to DynamoDB",
@@ -1107,6 +1112,10 @@ class AdminAPI:
 
     async def list_users(self, request: Request) -> JSONResponse:
         """List all users with aggregated usage stats and budget info."""
+        # Budgets come from cost_tracker._user_budgets, which is armed from the
+        # user config dict — so without this the limits shown were whichever ones
+        # this task happened to be told about.
+        await self._refresh_config()
         records = await self._synced_records()
         user_data: dict[str, dict] = {}
         for r in records:
@@ -1157,6 +1166,9 @@ class AdminAPI:
     async def get_user(self, request: Request) -> JSONResponse:
         """User detail with per-project and per-model breakdown, plus budget info."""
         user_id = request.path_params["id"]
+        # Same reason as list_users: the budget and allowed-models this reports
+        # are per-instance config unless the sync has run.
+        await self._refresh_config()
         records = [r for r in await self._synced_records() if r.user_id == user_id]
         if not records:
             return JSONResponse(
@@ -1225,13 +1237,29 @@ class AdminAPI:
             alert_threshold=alert_threshold,
         )
 
-        # Persist user config to DynamoDB if enabled
+        # setdefault, not .get(user_id, {}): the latter hands back a throwaway dict
+        # on a miss, so the limits were written to DynamoDB and never recorded in
+        # self._user_configs. Because save_user_config is a whole-item put_item,
+        # the *next* write for this user then serialized a config with no budget in
+        # it and erased the limit from the table:
+        #
+        #   after the budget write, store:  {'budget_limit': 100.0, 'alert_threshold': 80.0}
+        #   after the budget write, local:  {}
+        #   after the models write, store:  {'allowed_models': ['claude-haiku']}
+        #
+        # Setting a budget and then an allowed-models list silently dropped the
+        # budget, and since restart rehydrates from this row, the limit was gone
+        # for good. Moved out of the persistence branch too — the local dict is
+        # what the request path reads, so it must be updated whether or not
+        # DynamoDB is on.
+        config = self._user_configs.setdefault(user_id, {})
+        config["budget_limit"] = budget_limit
+        config["alert_threshold"] = alert_threshold
+
         if self._persistence is not None and self._persistence.enabled:
             try:
-                config = self._user_configs.get(user_id, {})
-                config["budget_limit"] = budget_limit
-                config["alert_threshold"] = alert_threshold
                 await self._persistence.save_user_config(user_id, config)
+                await self._note_config_write()
             except Exception:
                 logger.warning(
                     "Failed to persist user config for %s to DynamoDB",
@@ -1262,6 +1290,7 @@ class AdminAPI:
             try:
                 config = self._user_configs.get(user_id, {})
                 await self._persistence.save_user_config(user_id, config)
+                await self._note_config_write()
             except Exception:
                 logger.warning(
                     "Failed to persist user config for %s to DynamoDB",

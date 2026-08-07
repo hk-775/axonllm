@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any, AsyncIterator
+
+logger = logging.getLogger(__name__)
 
 
 class ClientAgent:
@@ -245,8 +248,32 @@ class ClientAgent:
             ctx["smart_routing"] = True
         return ctx
 
-    def get_available_users(self) -> list[str]:
-        """Return list of known user IDs from the cost tracker."""
+    async def get_available_users(self) -> list[str]:
+        """Return known user IDs, covering the fleet rather than this task only.
+
+        ``cost_tracker._records`` holds what *this* process served plus whatever
+        was hydrated at startup, so on a multi-instance deployment the user
+        selector listed a different set depending on which task answered:
+
+            store holds: ['alice', 'bob']
+            GET /api/users on task A: ['alice', 'chat-user']
+            GET /api/users on task B: ['bob', 'chat-user']
+
+        Async now because the refresh is: the same rate-limited fleet sync the
+        admin aggregates use, so a dashboard and the chat selector cannot
+        disagree about who exists. Falls back to the local records when
+        persistence is off or the scan fails, which is the answer this returned
+        before any of this existed.
+        """
+        synced = getattr(self.gateway_agent.cost_tracker, "synced_records", None)
+        if synced is not None:
+            try:
+                await synced()
+            except Exception:
+                logger.warning(
+                    "Fleet-wide user list refresh failed; listing this instance's users",
+                    exc_info=True,
+                )
         records = self.gateway_agent.cost_tracker._records
         user_ids = sorted({r.user_id for r in records})
         # Also include users from user_configs that may not have records yet

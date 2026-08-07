@@ -68,6 +68,7 @@ from src.gateway.chat.client_agent import ClientAgent
 from src.gateway.chat.routes import ChatAPI, create_chat_routes
 from src.gateway.chat.openai_routes import OpenAICompatAPI, create_openai_routes
 from src.gateway.config import AppConfig
+from src.gateway.config_sync import ConfigSyncService
 from src.gateway.config_loader import (
     DemoSeedData,
     load_app_config,
@@ -499,6 +500,21 @@ def build_starlette_app(app_config: AppConfig | None = None) -> Starlette:
         cedar_service.note_local_version(
             asyncio.run(comp.persistence.get_policy_version()))
 
+    # Handed the *same* dicts the agent and the admin API hold, so a config write
+    # on another task converges into the objects the request path actually reads.
+    # The cost tracker and resolver come along because adopting the dicts is not
+    # the same as arming enforcement — limits live in the tracker, not the dicts.
+    config_sync = ConfigSyncService(
+        projects=comp.projects,
+        user_configs=comp.user_configs,
+        cost_tracker=comp.cost_tracker,
+        persistence=comp.persistence,
+        policy_resolver=comp.policy_resolver,
+    )
+    if comp.persistence.enabled:
+        config_sync.note_local_version(
+            asyncio.run(comp.persistence.get_config_version()))
+
     admin_api = AdminAPI(
         cost_tracker=comp.cost_tracker,
         health_tracker=comp.health_tracker,
@@ -525,6 +541,7 @@ def build_starlette_app(app_config: AppConfig | None = None) -> Starlette:
         # actually served from.
         semantic_cache=comp.semantic_cache,
         policy_service=cedar_service,
+        config_sync=config_sync,
     )
 
     # Key, policy, audit, webhook, region, and quota admin APIs
@@ -606,6 +623,9 @@ def build_starlette_app(app_config: AppConfig | None = None) -> Starlette:
         api_key_service=comp.api_key_service,
         policy_service=cedar_service,
         mode=app_config.auth_mode,
+        # Refreshed here, before any handler reads the project or user config, so
+        # /api/chat gets the same converged view the admin pages do.
+        config_sync=config_sync,
     )
 
     return app

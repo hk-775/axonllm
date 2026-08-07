@@ -30,6 +30,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A project or per-user config written through the API gated only the task that
+  served the write.** `self.projects` and `self._user_configs` are hydrated once at
+  startup and thereafter mutated only by the instance that took the write. Both
+  dicts *gate* requests, so unlike a stale count this fails open: an unresolved
+  project means no budget limit, no allowed-models list and no rate limit, and a
+  missing user config means no per-user model restriction. The restriction an
+  operator set was enforced by one task and ignored by the other, chosen per
+  request by the load balancer:
+
+  ```
+  in the store: {'alice': {'allowed_models': ['claude-haiku']}}
+  task A, alice asks for claude-opus: 403 model_not_allowed
+  task B, alice asks for claude-opus: 200 routed
+  ```
+
+  Fixed the same way as the Cedar divergence: config writes bump a shared version
+  counter, and each instance re-reads the two config scans only when that number
+  moves. Steady-state cost is one small `GetItem` per instance per 5-second window.
+  Adopting the dicts is not the same as arming enforcement, so the refresh also
+  re-registers budgets with `CostTracker` — the distinction the previous release
+  fixed for the restart path, which applies identically here. As with the policy
+  refresh, a failed config scan is **not** adopted as empty (that would clear every
+  limit in the fleet because one read timed out), a failed write does not bump the
+  version, and an unreadable counter does not advance the clock.
+- **`GET /api/users` reported one task's view of usage while `/admin/*` reported
+  the fleet's.** The previous release made the admin aggregates re-read the shared
+  usage store but left the chat UI's user selector reading `cost_tracker._records`
+  directly, so the same deployment answered the same question two ways depending on
+  the endpoint. The 10-second refresh now lives on `CostTracker` rather than in
+  `AdminAPI`, which gives both callers one clock and one in-flight scan instead of
+  two of each.
+- **Setting a user's budget through the admin API recorded it in DynamoDB and not
+  in the running process, and the next write for that user erased it.**
+  `self._user_configs.get(user_id, {})` hands back a throwaway dict on a miss, and
+  the limits were written into that. Because `save_user_config` is a whole-item
+  `put_item`, the *following* write for the same user then serialized a config with
+  no budget in it — so the stored limit disappeared too. `setdefault` now, and the
+  local dict is updated whether or not persistence is enabled, since the local dict
+  is what the request path reads.
 - **A Cedar policy written through the API governed only the task that served the
   write.** Statements are compiled once, so `POST /admin/policies` recompiled the
   local evaluator and nothing else. Behind the shipped `desired_count=2` an

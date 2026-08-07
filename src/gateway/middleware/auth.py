@@ -77,6 +77,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         policy_service: PolicyService | None = None,
         mode: str = "ENFORCE",
         public_paths: frozenset[str] | None = None,
+        config_sync: object | None = None,
     ):
         super().__init__(app)
         self.oidc_service = oidc_service
@@ -84,6 +85,11 @@ class AuthMiddleware(BaseHTTPMiddleware):
         self.policy_service = policy_service
         self.mode = mode
         self.public_paths = public_paths or PUBLIC_PATHS
+        # Optional so every existing caller constructs unchanged and never polls.
+        # Refreshed here rather than in GatewayAgent because the project and user
+        # config gate more than chat — the admin reads and /api/users need the
+        # same converged view, and one refresh per request serves all of them.
+        self.config_sync = config_sync
 
     async def dispatch(self, request: Request, call_next) -> Response:
         # Skip auth for public paths and static assets.
@@ -154,6 +160,21 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 )
 
         request.state.context = context
+
+        # Adopt any project or user config another instance wrote, before the
+        # handler reads either. Both gate requests rather than decorate them — an
+        # unresolved project means no budget limit, no allowed-models list and no
+        # rate limit, and a missing user config means no per-user model
+        # restriction — so a write that reached only one task made enforcement a
+        # function of which task the balancer picked. Rate-limited to one counter
+        # read per CONFIG_SYNC_TTL_SECONDS and a no-op without persistence.
+        if self.config_sync is not None:
+            try:
+                await self.config_sync.refresh_if_stale()
+            except Exception:
+                # Never fail a request over a refresh; the loaded config still
+                # decides it, which is what happened before this existed.
+                logger.warning("Config refresh failed", exc_info=True)
 
         # Policy evaluation
         if self.policy_service:

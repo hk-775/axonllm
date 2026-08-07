@@ -1439,7 +1439,8 @@ ALB happened to pick.
 |-------|------------------------|-----|
 | API keys | ✅ | Read through to DynamoDB, cached for 5 min |
 | Key revocations | ✅ | A revocation counter in the table, polled every 5 s |
-| Projects | ✅ | Startup hydration plus a read-through on a local miss |
+| Projects | ✅ | A version counter in the table, polled every 5 s — see below |
+| Per-user config (budgets, allowed models) | ✅ | The same version counter — see below |
 | Usage/cost records — **the write** | ✅ | Every record goes to the table, so nothing is lost |
 | Usage/cost records — **the admin read** | ✅ | Costs read the shared counter; counts refresh from the table every 10 s — see below |
 | Budget **enforcement** | ✅ | Atomic counter in the table — see below |
@@ -1517,6 +1518,33 @@ And if the *write* to DynamoDB fails, the version is not bumped, so other
 instances are not told to reload a change that is not there. Policies from
 `demo_seed.yaml` are not in DynamoDB at all, so a refresh merges the stored set
 over the seeded one by name rather than replacing it.
+
+**Project and per-user config converge across the fleet within 5 seconds**, by the
+same mechanism and for a sharper reason. Both dicts *gate* requests: an
+unresolved project means no budget limit, no allowed-models list and no rate
+limit, and a missing user config means no per-user model restriction. Before
+v0.2.2 each instance mutated its own copy, so a restriction an operator set was
+enforced by the task that took the `PUT` and ignored by the others:
+
+```
+in the store: {'alice': {'allowed_models': ['claude-haiku']}}
+task A, alice asks for claude-opus: 403 model_not_allowed
+task B, alice asks for claude-opus: 200 routed
+```
+
+Projects were half-covered before this — `GET /admin/projects/{id}` read through
+on a miss, so the *admin* view recovered, but the chat path had no such fallback
+and a `POST /admin/projects` returned 201 for a project no request could resolve.
+Editing a project was not covered at all: the list endpoint merged with
+`setdefault`, so once an instance had seen a project it kept its own copy forever
+and a *lowered* budget never arrived.
+
+Writes bump a shared config version counter; each instance re-reads the project
+and user-config scans only when it moves. Adopting them also re-arms enforcement,
+because limits live in the cost tracker rather than in the dicts — adopting the
+dict alone would show the operator a limit that nothing checks. A failed scan is
+not adopted, for the same reason as with policies: the empty result would clear
+every budget limit and model restriction in the fleet.
 
 **Rate limits are still per-process**, both the hierarchy's `rate_limit_rpm` and
 `SlidingWindowRateLimiter`, so those do need dividing by `desired_count`: two

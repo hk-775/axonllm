@@ -59,6 +59,12 @@ class DynamoPersistence:
         # Same idea for the Cedar policy scan, where mistaking an outage for an
         # empty set would drop every enforced policy rather than lose a count.
         self._last_policy_scan_failed = False
+        # And for the two config scans a live refresh re-reads. Same stakes as
+        # the policy one: adopting an empty result would un-enforce every budget
+        # and model restriction the fleet is running, so the refresh needs to
+        # tell "the table is empty" from "the scan failed".
+        self._last_project_scan_failed = False
+        self._last_user_config_scan_failed = False
 
     @property
     def enabled(self) -> bool:
@@ -530,6 +536,10 @@ class DynamoPersistence:
             await asyncio.to_thread(_put)
         except Exception:
             self._record_write_failure("project", project.project_id)
+            # Don't advertise a change that isn't in the table — see
+            # save_cedar_policy for the same reasoning.
+            return
+        await self.bump_config_version()
 
     async def get_project(self, project_id: str) -> Project | None:
         """Read a single project by id.
@@ -590,9 +600,11 @@ class DynamoPersistence:
                 item = self._convert_decimals_to_native(item)
                 project = self.deserialize_project(item)
                 projects[project.project_id] = project
+            self._last_project_scan_failed = False
             return projects
         except Exception:
             logger.warning("Failed to load projects from DynamoDB", exc_info=True)
+            self._last_project_scan_failed = True
             return {}
 
     async def save_user_config(self, user_id: str, config: dict) -> None:
@@ -610,6 +622,92 @@ class DynamoPersistence:
             await asyncio.to_thread(_put)
         except Exception:
             self._record_write_failure("user config", user_id)
+            return
+        await self.bump_config_version()
+
+    async def bump_config_version(self) -> int | None:
+        """Atomically increment the shared config version, returning the new one.
+
+        One counter covers both projects and user configs rather than one each.
+        The refresh re-reads both scans together, so a second counter would only
+        let it skip one of two scans it is already making — and two counters can
+        disagree about ordering, which one cannot.
+        """
+        if not self._enabled:
+            return None
+
+        def _add():
+            resp = self._get_table().update_item(
+                Key={"PK": "CONFIG#VERSION", "SK": "TOTAL"},
+                UpdateExpression="ADD #v :one",
+                ExpressionAttributeNames={"#v": "version"},
+                ExpressionAttributeValues={":one": Decimal("1")},
+                ReturnValues="UPDATED_NEW",
+            )
+            return resp.get("Attributes", {}).get("version")
+
+        try:
+            version = await asyncio.to_thread(_add)
+            return int(version) if version is not None else None
+        except Exception:
+            self._record_write_failure("config version", "TOTAL")
+            return None
+
+    async def get_config_version(self) -> int | None:
+        """Read the shared config version, or None if it could not be read.
+
+        Absent returns 0 for the same reason ``get_policy_version`` does: no
+        config has ever been written through the API is a known state, and every
+        gateway starts in it. Conflating it with unreadable would mean a
+        seed-only deployment never records a successful check and re-reads this
+        counter on every request forever.
+        """
+        if not self._enabled:
+            return None
+
+        def _get():
+            resp = self._get_table().get_item(
+                Key={"PK": "CONFIG#VERSION", "SK": "TOTAL"}
+            )
+            item = resp.get("Item")
+            return item.get("version", 0) if item else 0
+
+        try:
+            return int(await asyncio.to_thread(_get))
+        except Exception:
+            logger.warning("Failed to read the shared config version", exc_info=True)
+            return None
+
+    async def load_projects_or_none(self) -> dict[str, Project] | None:
+        """Like ``load_projects``, but None on failure instead of ``{}``.
+
+        ``load_projects`` returns ``{}`` on failure so a Dynamo outage cannot
+        block startup. On a live refresh that trade inverts: adopting ``{}``
+        would drop every project the fleet knows about, and an unresolved project
+        means no budget gate and no allowed-models list.
+        """
+        if not self._enabled:
+            return None
+        # Reset here rather than relying on the loader to clear it, so this cannot
+        # read a flag left set by an earlier caller. That makes the loader's own
+        # success-path clear redundant; it is kept because the flag is public
+        # enough that a future reader of it should not have to know which of the
+        # two resets it depends on.
+        self._last_project_scan_failed = False
+        projects = await self.load_projects()
+        return None if self._last_project_scan_failed else projects
+
+    async def load_user_configs_or_none(self) -> dict[str, dict] | None:
+        """Like ``load_user_configs``, but None on failure instead of ``{}``.
+
+        Same reasoning as ``load_projects_or_none``: an adopted empty result
+        clears every per-user budget limit and model restriction in the fleet.
+        """
+        if not self._enabled:
+            return None
+        self._last_user_config_scan_failed = False
+        configs = await self.load_user_configs()
+        return None if self._last_user_config_scan_failed else configs
 
     async def load_user_configs(self) -> dict[str, dict]:
         """Scan DynamoDB for all user configs and deserialize them."""
@@ -640,9 +738,11 @@ class DynamoPersistence:
                 item = self._convert_decimals_to_native(item)
                 user_id, config = self.deserialize_user_config(item)
                 configs[user_id] = config
+            self._last_user_config_scan_failed = False
             return configs
         except Exception:
             logger.warning("Failed to load user configs from DynamoDB", exc_info=True)
+            self._last_user_config_scan_failed = True
             return {}
 
     # --- FeedbackRecord serialization ---
