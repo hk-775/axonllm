@@ -10,10 +10,13 @@ wrong in a way no request surfaces:
   fails over silently;
 * ``AXON_AUTH_MODE=LOG_ONLY`` admits every unauthenticated request while logging
   that it would have denied them;
+* canonical tenant identity disabled trusts credential claims instead of
+  resolving server-held membership and project grants;
 * demo data seeded in production shows fabricated spend on the real dashboard;
 * DynamoDB disabled or unreachable drops every write, by design, without raising;
-* an API key's scopes look like a capability boundary but are never checked on
-  ``/v1/*``, and a key issued without ``expires_at`` is valid until revoked.
+* legacy API-key metadata scopes do not constrain ``/v1`` chat, canonical
+  service-principal authority can drift from key metadata, and a key issued
+  without ``expires_at`` is valid until revoked.
 
 None of these raise, so none of them appear in a log an operator greps after an
 incident. A checklist is the format that fits: the question being answered is not
@@ -438,45 +441,80 @@ def check_auth_mode(app_config: AppConfig) -> CheckResult:
     )
 
 
+def check_canonical_identity(app_config: AppConfig) -> CheckResult:
+    """Tenant roles and project grants come from durable server-held state."""
+    if app_config.canonical_identity_required:
+        return CheckResult(
+            key="canonical_identity",
+            title="Tenant membership is authoritative",
+            status=Status.PASS,
+            summary=(
+                "AXON_REQUIRE_CANONICAL_IDENTITY=true — credentials resolve "
+                "through durable tenant membership."
+            ),
+        )
+
+    return CheckResult(
+        key="canonical_identity",
+        title="Tenant membership is authoritative",
+        status=Status.FAIL,
+        summary=(
+            "AXON_REQUIRE_CANONICAL_IDENTITY=false — legacy claim-based "
+            "authority is still enabled."
+        ),
+        detail=(
+            "OIDC role, tenant, and project claims can reach legacy authorization "
+            "without an active server-held membership check. SCIM deprovisioning "
+            "therefore cannot reliably revoke an existing credential."
+        ),
+        fix=(
+            "Provision tenant principal records in DynamoDB, test every principal "
+            "and project, then set AXON_REQUIRE_CANONICAL_IDENTITY=true."
+        ),
+    )
+
+
 async def check_api_keys(
     keys: KeyProbe | None,
     project_ids: list[str],
 ) -> CheckResult:
-    """Issued API keys are scoped and expire.
+    """API-key authorization and expiry are understood before production use.
 
-    Two properties of the key model that fail quietly, both verified against a
-    live ENFORCE gateway:
+    Three properties of the key model can fail quietly:
 
-    1. **Scopes are not enforced on the data plane.** ``AuthMiddleware`` puts
-       ``key_record.scopes`` on the RequestContext, and ``admin_rbac`` reads them
-       for ``/admin/*`` — but nothing consults them on ``/v1/*``. A key issued
-       ``["models:read"]``, and a key issued ``[]``, both invoke
-       ``/v1/chat/completions`` and spend money. What actually constrains a key
-       is its project's ``allowed_models`` and budget, so a scope string reads
-       like a capability boundary while being documentation.
+    1. **Legacy metadata scopes do not constrain chat.** In legacy identity
+       mode, ``AuthMiddleware`` puts ``key_record.scopes`` on the
+       ``RequestContext``, but the chat path does not consult them. The key's
+       project model and budget settings are the effective bounds.
 
-    2. **``expires_at`` is optional and defaults to none.** ``issue_key`` takes
+    2. **Canonical authority lives on the service principal.** In canonical
+       identity mode, mapped ``/api`` and ``/v1`` data-plane routes use the
+       resolved server-held service principal's action scopes and explicit
+       project grant. This checklist lists key records but cannot resolve and
+       compare their principal records, so it cannot prove that relationship is
+       present and consistent.
+
+    3. **``expires_at`` is optional and defaults to none.** ``issue_key`` takes
        ``expires_at: datetime | None = None`` and the admin route only sets it
        when the caller supplies one, so the default key is valid forever. There
        is no maximum age and no rotation reminder: revocation is the only way a
        key ever stops working. ``rotate_key`` copies the old ``expires_at``
        through, so rotating a non-expiring key yields another one.
 
-    WARN, not FAIL. Neither is a misconfiguration the operator can fix by
-    flipping a setting — there is no "enforce scopes" flag to set — and a key
-    that never expires is a defensible choice for a service account with a
-    revocation process. The value is in saying so before an incident, rather
-    than discovering it while trying to work out what a leaked key could reach.
+    WARN, not FAIL, whenever live keys exist. The checklist cannot prove
+    key/principal consistency, and a non-expiring key may be deliberate when a
+    reliable revocation process exists.
     """
     if keys is None:
         return CheckResult(
             key="api_keys",
-            title="Issued API keys are scoped and expire",
+            title="API key authorization mode and expiry",
             status=Status.UNKNOWN,
             summary="No API key service available to inspect.",
             detail=(
-                "The checklist could not enumerate issued keys, so their scopes "
-                "and expiry are unverified — not confirmed absent."
+                "The checklist could not enumerate API-key metadata or compare "
+                "keys with canonical service-principal records, so authorization "
+                "consistency and expiry are unverified."
             ),
             fix="Pass the gateway's APIKeyService to run_checklist.",
         )
@@ -488,7 +526,7 @@ async def check_api_keys(
     except Exception as exc:
         return CheckResult(
             key="api_keys",
-            title="Issued API keys are scoped and expire",
+            title="API key authorization mode and expiry",
             status=Status.UNKNOWN,
             summary=f"Could not list API keys ({type(exc).__name__}).",
             fix="Check persistence connectivity and credentials.",
@@ -498,7 +536,7 @@ async def check_api_keys(
     if not live:
         return CheckResult(
             key="api_keys",
-            title="Issued API keys are scoped and expire",
+            title="API key authorization mode and expiry",
             status=Status.PASS,
             summary=(
                 f"No live API keys across {len(project_ids)} "
@@ -514,19 +552,19 @@ async def check_api_keys(
         expiry = getattr(k, "expires_at", None)
         rows.append((
             f"{getattr(k, 'project_id', '?')} / {getattr(k, 'name', '?')}",
-            f"scopes={', '.join(scopes) if scopes else 'none'} · "
+            f"key_metadata_scopes={', '.join(scopes) if scopes else 'none'} · "
             f"expires={expiry.date().isoformat() if expiry else 'never'}",
         ))
 
     n = len(live)
     detail = (
-        "Scopes are not enforced on /v1/*. A key's scopes reach the "
-        "RequestContext and gate /admin/* through admin RBAC, but no check "
-        "consults them on the chat path — a key scoped 'models:read', or "
-        "scoped to nothing at all, can still invoke completions and spend "
-        "against the project budget. What actually limits a key is its "
-        "project's allowed_models and budget_limit, so treat the project as "
-        "the security boundary and the scope string as a label."
+        "Legacy mode: API-key metadata scopes do not constrain /v1 chat; the "
+        "key's project allowed_models and budget_limit are the effective bounds. "
+        "Canonical mode: mapped /api and /v1 data-plane routes are governed by "
+        "the resolved server-held service-principal action scopes and explicit "
+        "project grant, not the key record's scope list. This checklist only "
+        "lists key records; it does not resolve or compare their principal "
+        "records, so key/principal consistency is unverified."
     )
     if never_expire:
         detail += (
@@ -539,18 +577,19 @@ async def check_api_keys(
 
     return CheckResult(
         key="api_keys",
-        title="Issued API keys are scoped and expire",
+        title="API key authorization mode and expiry",
         status=Status.WARN,
         summary=(
             f"{n} live key{'s' if n != 1 else ''}; "
             f"{len(never_expire)} without an expiry. "
-            "Scopes do not restrict /v1/* access."
+            "Key/principal consistency is unverified."
         ),
         detail=detail,
         fix=(
-            "Set expires_at when issuing, and rely on per-project "
-            "allowed_models and budget_limit — not scopes — to bound what a "
-            "key can reach."
+            "Reconcile each live key with its canonical service-principal "
+            "record and set expires_at when issuing. In legacy mode, use "
+            "per-project allowed_models and budget_limit rather than key "
+            "metadata scopes to bound chat access."
         ),
         rows=rows,
     )
@@ -718,6 +757,7 @@ async def run_checklist(
 
     checks = [
         check_auth_mode(app_config),
+        check_canonical_identity(app_config),
         check_demo_data(app_config, environ),
         check_provider_credentials(model_registry, provider_configs),
         check_pricing(drift),

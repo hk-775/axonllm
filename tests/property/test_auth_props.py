@@ -34,7 +34,11 @@ class FakeOIDCService:
     def __init__(self, claims: dict | None = None):
         self._claims = claims
 
-    async def validate_alb_jwt(self, token: str) -> RequestContext | None:
+    async def validate_alb_jwt(
+        self,
+        token: str,
+        expected_subject: str,
+    ) -> RequestContext | None:
         return None
 
     async def validate_oidc_jwt(self, token: str) -> RequestContext | None:

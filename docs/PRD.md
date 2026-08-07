@@ -43,7 +43,7 @@ Organizations adopting large language models face compounding operational comple
 
 AxonLLM is a unified gateway that sits between applications and LLM providers, giving platform teams a single control plane for intelligent request routing, cost tracking, budget enforcement, access control, content guardrails, and observability. Applications send requests to AxonLLM using a standard OpenAI-compatible API. AxonLLM handles everything else: translating requests to the target provider's format, routing to the optimal provider based on configurable strategies, retrying on failures, falling back to alternative providers, tracking costs per request/user/project, enforcing budgets, applying content guardrails, and surfacing real-time usage analytics through a web-based admin console.
 
-Deployed as a serverless agent on Amazon Bedrock AgentCore Runtime, AxonLLM eliminates the need for teams to build and maintain custom LLM integration infrastructure while providing the governance controls that enterprises require.
+AxonLLM's full HTTP and admin surface runs as a Starlette application. A separate Amazon Bedrock AgentCore adapter currently provides a hardening preview for chat, model listing, and liveness; it is not a production-complete deployment.
 
 ---
 
@@ -89,7 +89,7 @@ A single gateway endpoint that applications target instead of individual provide
 | G5 | **Content safety** | Configurable guardrail rules (keyword blocking, regex matching, content category filtering) inspect requests and responses, with block/warn/redact actions. |
 | G6 | **High availability** | Automatic retry with exponential backoff on transient failures, multi-provider fallback chains, and health-aware routing ensure application continuity during provider outages. |
 | G7 | **Operational visibility** | A web-based admin console provides real-time dashboards for usage monitoring, cost analytics, project management, and provider health status. |
-| G8 | **Serverless deployment** | The gateway deploys as a managed agent on Amazon Bedrock AgentCore Runtime with zero infrastructure management. |
+| G8 | **Managed AgentCore deployment** | Graduate the current three-action AgentCore hardening preview to a production deployment with reviewed infrastructure, identity, networking, readiness, and distributed-state controls. |
 
 ### 3.2 Non-Goals
 
@@ -335,7 +335,7 @@ stored and no request is slowed.
 
 | ID | Requirement | Target |
 |----|-------------|--------|
-| NFR-A1 | Gateway uptime | 99.9% (matching AgentCore SLA) |
+| NFR-A1 | Gateway uptime | 99.9% production target; not yet established for the AgentCore preview |
 | NFR-A2 | Provider failover time | < 2s (retry + fallback to next provider) |
 | NFR-A3 | Health check interval | Configurable (default 30s) |
 
@@ -343,8 +343,8 @@ stored and no request is slowed.
 
 | ID | Requirement | Target |
 |----|-------------|--------|
-| NFR-S1 | Horizontal scaling | AgentCore Runtime provides serverless auto-scaling based on request volume |
-| NFR-S2 | Per-instance in-memory state | Rate limiter counters, health tracker state, and cache are per-instance. Multi-instance deployments can optionally use DynamoDB-backed shared storage. |
+| NFR-S1 | Horizontal scaling | Runtime scaling must be validated only after readiness and distributed-control blockers are closed |
+| NFR-S2 | Per-instance and persisted state | Rate limits, quotas, health state, caches, and parts of audit/accounting coordination remain per-instance; persisted customer records are not comprehensively tenant-qualified |
 
 ### 7.4 Reliability
 
@@ -358,7 +358,7 @@ stored and no request is slowed.
 
 | ID | Requirement | Target |
 |----|-------------|--------|
-| NFR-T1 | Unit test coverage | 2,177 tests covering all components (2,090 unit, 87 property-based) |
+| NFR-T1 | Automated test coverage | 2,763 passing tests across unit, integration, end-to-end, and property-based suites |
 | NFR-T2 | Property-based tests | Hypothesis-driven validation of formal correctness properties (routing fairness, cost accuracy, cache determinism, retry behavior) |
 | NFR-T3 | Integration test scenarios | Automated test traffic covering: normal chat, multi-turn, rate limiting, budget enforcement, model access control, guardrail violations |
 
@@ -444,7 +444,7 @@ stored and no request is slowed.
 | **SAML / SCIM / OIDC** | Enterprise SSO and user provisioning | `auth/saml_service.py`, `auth/scim_service.py`, `auth/oidc_service.py` |
 | **RegionRouter** | Hub-and-spoke region selection with health, failover and residency filtering | `multi_region/` |
 | **TraceForwarder** | Emits per-request traces to Ostiari; OTLP export alongside | `observability/` |
-| **SessionManager** | Conversation persistence via AgentCore Memory | `session_manager.py` |
+| **SessionManager (inactive)** | AgentCore Memory abstraction exists but is not wired into bootstrap or the AgentCore entrypoint | `session_manager.py` |
 | **AdminAPI** | Admin REST API (69 method+path routes) and the server-rendered dashboard | `admin/` |
 | **ChatAPI** | Client-facing chat API, OpenAI-compatible API, and web interfaces | `chat/` |
 | **CLI** | `axon` entry point — `demo`, `serve`, `issue-key`, `chat`, `models` | `cli.py` |
@@ -815,7 +815,7 @@ Project
   |- log_level: str                    # "INFO"
   |- log_destination: str?
   |- prompt_caching_enabled: bool
-  |- ltm_enabled: bool                 # AgentCore Memory long-term recall
+  |- ltm_enabled: bool                 # Reserved; no active AgentCore Memory wiring
   |- retention_period_hours: int       # 24
   |- rate_limit_rpm: int?
   |- members: list[str]
@@ -980,12 +980,19 @@ the readiness checklist's persistence check exists to surface.
 
 | Option | Description | Use Case |
 |--------|-------------|----------|
-| **ECS Fargate via CDK** | `./deploy-fargate.sh <region>`. The stack in `infra/stack.py` provisions VPC, ALB, Fargate service, DynamoDB table and IAM roles, and sets `AXON_AUTH_MODE=ENFORCE`. This is the path that is actually exercised end to end. | Production |
-| **Amazon Bedrock AgentCore** | `agentcore configure` + `agentcore launch` against `agentcore_agent.py`. Serverless, auto-scaling, managed infrastructure. | Production (alternative) |
-| **AWS App Runner** | Docker container deployed via ECR + App Runner (`deploy.sh`). Semi-managed with container-level configuration. | Production (alternative) |
+| **ECS Fargate via CDK** | `./deploy-fargate.sh <region>`. The stack in `infra/stack.py` provisions CloudFront/WAF, an internal TLS ALB, private Fargate tasks, DynamoDB and IAM roles, and sets `AXON_AUTH_MODE=ENFORCE`. Tenant-qualified ownership and ALB authentication remain release blockers. | Reference / isolated staging |
+| **Amazon Bedrock AgentCore** | `agentcore configure` + `agentcore launch` against `agentcore_agent.py`; hardening preview with `chat`, `list_models`, and `health` (liveness only). | Evaluation |
+| **AWS App Runner** | Docker container deployed via ECR + App Runner (`deploy.sh`). Semi-managed with container-level configuration; it does not close the shared-tenancy blockers. | Reference / isolated staging |
 | **Docker / Compose** | `docker build` + `docker run`, or `docker compose up` using `docker-compose.yml` (gateway + DynamoDB Local). | Staging, on-premises |
 | **Local development** | `uv run python serve_dashboard.py`. Uvicorn dev server with demo data seeded and `AXON_AUTH_MODE=LOG_ONLY`. | Development |
 | **CLI** | `uv run axon serve` (or `uv run axon demo`) after `uv sync`. Same app, argparse front end. | Development, scripted runs |
+
+The AgentCore preview does not mount the Starlette application or expose its
+HTTP/admin console. The repository has no checked-in production AgentCore IaC,
+JWT authorizer, resource policy, or private-network topology, and it does not
+wire `SessionManager` or AgentCore Memory. Initialization is lazy, `health` is
+not a dependency-readiness probe, and distributed controls plus tenant-qualified
+persistence remain production blockers.
 
 ### 12.1.1 CLI
 
@@ -1196,7 +1203,7 @@ call. With no URL and no registered sink, the forwarder is inert.
 
 | Dependency | Type | Impact if Unavailable |
 |------------|------|----------------------|
-| Amazon Bedrock AgentCore Runtime | Infrastructure | Primary deployment target unavailable; fall back to App Runner/Docker |
+| Amazon Bedrock AgentCore Runtime | Optional preview infrastructure | AgentCore evaluation is unavailable; Starlette deployment modes are unaffected |
 | AWS Bedrock | Provider | Bedrock models unavailable; fallback to direct Anthropic/OpenAI if configured |
 | Anthropic API | Provider | Direct Anthropic models unavailable; fallback to Bedrock-hosted Claude |
 | OpenAI API | Provider | OpenAI models unavailable; no fallback (provider-exclusive models) |
@@ -1234,7 +1241,7 @@ call. With no URL and no registered sink, the forwarder is inert.
 - [x] Admin dashboard with real-time analytics
 - [x] Chat, Playground, and Routing Explorer web interfaces
 - [x] DynamoDB persistence layer
-- [x] AgentCore Runtime deployment
+- [x] AgentCore action adapter hardening preview
 - [x] App Runner / Docker deployment
 - [x] ECS Fargate via CDK (`infra/stack.py`, `./deploy-fargate.sh`)
 - [x] PII redaction with re-injection, plus optional Comprehend entity detection
@@ -1242,10 +1249,14 @@ call. With no URL and no registered sink, the forwarder is inert.
 - [x] Immutable SHA-256 hash-chain audit trail
 - [x] Policy hierarchy (org → BU → project → environment) with quota enforcement
 - [x] API key issue / rotate / revoke, and admin RBAC
-- [x] 2,177 unit and property-based tests
+- [x] 2,763 unit, integration, end-to-end, and property-based tests
 
 ### Phase 2: Production Hardening
 
+- [ ] Production AgentCore IaC, JWT authorizer, resource policy, private
+      networking, dependency readiness, and failure-safe initialization
+- [ ] Active tenant-isolated AgentCore Memory integration; `SessionManager`
+      exists but is not wired into the runtime
 - [ ] Azure OpenAI, Vertex AI, Cohere adapters fully validated with live providers
 - [x] End-to-end integration test suite in CI/CD — `.github/workflows/ci.yml` runs
       the full suite on 3.11 and 3.12 with lint and a `uv lock --check`, including
@@ -1457,7 +1468,7 @@ src/gateway/                     # 40 top-level modules + 8 packages
   |- model_registry.py           # YAML model config loader
   |- persistence.py              # DynamoDB single-table persistence (14 entity types)
   |- streaming.py                # Streaming helpers; simulated streaming is the fallback
-  |- session_manager.py          # AgentCore Memory integration
+  |- session_manager.py          # Inactive AgentCore Memory abstraction
   |- models.py                   # All dataclasses and enums
   |- config.py                   # Centralized configuration
   |- config_loader.py            # YAML + env var parsing
@@ -1513,5 +1524,5 @@ scripts/
 tests/
   |- unit/                       # 88 files
   |- property/                   # 19 files, Hypothesis property-based
-  |- conftest.py                 # 2,177 tests total (2,090 unit, 87 property)
+  |- conftest.py                 # Shared fixtures for the 2,763-test suite
 ```

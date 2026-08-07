@@ -8,6 +8,7 @@ estimates otherwise, and falls back across providers only before the first byte.
 
 from __future__ import annotations
 
+import time
 from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock
 
@@ -18,14 +19,20 @@ from src.gateway.cache_manager import CacheManager
 from src.gateway.cost_tracker import CostTracker
 from src.gateway.guardrail_engine import GuardrailEngine
 from src.gateway.models import (
+    ChatCompletionRequest,
+    GuardrailRule,
+    Project,
     ProviderModelMapping,
     RateLimitResult,
+    RequestContext,
+    ResolvedPolicy,
     StreamChunk,
     TokenPricing,
     TokenUsage,
 )
 from src.gateway.rate_limiter import SlidingWindowRateLimiter
 from src.gateway.router import Router
+from src.gateway.security.pii_redactor import PIIRedactor
 
 
 def _chunk(content="", is_final=False, usage=None, model="claude-sonnet"):
@@ -48,6 +55,8 @@ class FakeHttpClient:
         if isinstance(item, Exception):
             raise item
         for c in item:
+            if isinstance(c, Exception):
+                raise c
             yield c
 
 
@@ -94,7 +103,14 @@ def _router(chain):
     return r
 
 
-def _agent(router, factory, cost_tracker=None, audit=None):
+def _agent(
+    router,
+    factory,
+    cost_tracker=None,
+    audit=None,
+    projects=None,
+    pii_redactor=None,
+):
     pricing = {"anthropic": {"claude-sonnet": TokenPricing(
         prompt_token_cost=0.003, completion_token_cost=0.015)}}
     return GatewayAgent(
@@ -105,6 +121,8 @@ def _agent(router, factory, cost_tracker=None, audit=None):
         cost_tracker=cost_tracker or CostTracker(pricing_config=pricing),
         provider_fn_factory=factory,
         audit_trail=audit,
+        projects=projects,
+        pii_redactor=pii_redactor,
     )
 
 
@@ -115,6 +133,15 @@ def _req(stream=True):
 
 def _ctx():
     return {"user_id": "u1", "project_id": "p1", "roles": [], "scopes": []}
+
+
+def _content(chunks):
+    return "".join(
+        choice.get("delta", {}).get("content") or ""
+        for chunk in chunks
+        if isinstance(chunk.get("data"), dict)
+        for choice in chunk["data"].get("choices", [])
+    )
 
 
 async def _drain(coro_or_gen):
@@ -167,6 +194,42 @@ class TestEndOfStreamAccounting:
         rec = cost_tracker.record_usage.call_args.args[0]
         assert rec.cost == 0.42 and rec.total_tokens == 140
         audit.record_llm_request.assert_awaited_once()
+
+    async def test_finalization_failure_is_sanitized_before_done(self):
+        chunks = [
+            _chunk("Hi"),
+            _chunk("", is_final=True, usage=TokenUsage(5, 2, 7)),
+        ]
+        chain = [
+            ProviderModelMapping(
+                provider="anthropic",
+                model_id="claude-sonnet",
+            )
+        ]
+        audit = MagicMock()
+        audit.record_llm_request = AsyncMock(
+            side_effect=RuntimeError("audit credential=secret-value")
+        )
+        agent = _agent(
+            _router(chain),
+            FakeFactory(
+                ["anthropic"],
+                FakeHttpClient({"anthropic": chunks}),
+            ),
+            audit=audit,
+        )
+
+        out = await _drain(agent.handle_chat_completion(_req(), _ctx()))
+
+        error = next(
+            chunk["data"]["error"]
+            for chunk in out
+            if isinstance(chunk.get("data"), dict)
+            and "error" in chunk["data"]
+        )
+        assert error["code"] == "stream_finalization_failed"
+        assert "secret-value" not in str(out)
+        assert out[-1] == {"data": "[DONE]"}
 
     async def test_estimates_usage_when_provider_reports_none(self):
         # No usage on any chunk → gateway estimates via tiktoken.
@@ -265,6 +328,105 @@ class TestBufferedFallbackForNonHttpProvider:
         # ...and end-of-stream accounting still ran once.
         cost_tracker.record_usage.assert_awaited_once()
 
+    async def test_finalization_failure_never_occurs_after_done(self):
+        from src.gateway.models import ChatCompletionResponse
+
+        chain = [
+            ProviderModelMapping(
+                provider="bedrock",
+                model_id="claude-sonnet",
+            )
+        ]
+        router = _router(chain)
+        router.execute_with_fallback = AsyncMock(
+            return_value=ChatCompletionResponse(
+                id="r1",
+                choices=[{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": "buffered content",
+                    },
+                }],
+                usage=TokenUsage(10, 5, 15),
+                model="claude-sonnet",
+                provider="bedrock",
+            )
+        )
+        factory = MagicMock()
+        factory._adapter_registry = {"bedrock": MagicMock()}
+        factory._provider_configs = {}
+        factory._http_client = MagicMock()
+        factory.config_for = MagicMock(return_value=None)
+        factory.create = MagicMock(return_value=AsyncMock())
+        cost_tracker = MagicMock(spec=CostTracker)
+        cost_tracker.calculate_cost = MagicMock(return_value=0.01)
+        cost_tracker.record_usage = AsyncMock(
+            side_effect=RuntimeError("storage credential=secret-value")
+        )
+        _no_budget(cost_tracker)
+        agent = _agent(router, factory, cost_tracker=cost_tracker)
+
+        out = await _drain(agent.handle_chat_completion(_req(), _ctx()))
+
+        error_index = next(
+            index
+            for index, chunk in enumerate(out)
+            if isinstance(chunk.get("data"), dict)
+            and "error" in chunk["data"]
+        )
+        assert out[error_index]["data"]["error"]["code"] == (
+            "stream_finalization_failed"
+        )
+        assert "secret-value" not in str(out)
+        assert out[-1] == {"data": "[DONE]"}
+        assert error_index == len(out) - 2
+
+    async def test_consumer_close_accounts_for_buffered_fallback(self):
+        from src.gateway.models import ChatCompletionResponse
+
+        chain = [
+            ProviderModelMapping(
+                provider="bedrock",
+                model_id="claude-sonnet",
+            )
+        ]
+        router = _router(chain)
+        router.execute_with_fallback = AsyncMock(
+            return_value=ChatCompletionResponse(
+                id="r1",
+                choices=[{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": "buffered content",
+                    },
+                }],
+                usage=TokenUsage(10, 5, 15),
+                model="claude-sonnet",
+                provider="bedrock",
+            )
+        )
+        factory = MagicMock()
+        factory._adapter_registry = {"bedrock": MagicMock()}
+        factory._provider_configs = {}
+        factory._http_client = MagicMock()
+        factory.config_for = MagicMock(return_value=None)
+        factory.create = MagicMock(return_value=AsyncMock())
+        cost_tracker = MagicMock(spec=CostTracker)
+        cost_tracker.calculate_cost = MagicMock(return_value=0.01)
+        cost_tracker.record_usage = AsyncMock()
+        _no_budget(cost_tracker)
+        agent = _agent(router, factory, cost_tracker=cost_tracker)
+
+        stream = await agent.handle_chat_completion(_req(), _ctx())
+        await anext(stream)  # rate-limit metadata
+        await anext(stream)  # first buffered content chunk
+        await stream.aclose()
+
+        cost_tracker.record_usage.assert_awaited_once()
+        assert cost_tracker.record_usage.call_args.args[0].status == "cancelled"
+
 
 class TestPreFirstByteFallback:
     async def test_falls_back_to_next_provider_before_first_byte(self):
@@ -321,7 +483,7 @@ class TestPiiReinjectOverStream:
                                     model="claude-sonnet", stream=True)
         gen = agent._stream_true(
             req, _ctx(), RequestContext(user_id="u", project_id="p", roles=[], scopes=[]),
-            False, None, None, mapping, "req_x", 0.0,
+            False, None, policy, mapping, "req_x", 0.0,
             preferred_provider=None, effective_allowed=None, smart_routing_decision=None,
         )
         out = await _drain(gen)
@@ -329,6 +491,375 @@ class TestPiiReinjectOverStream:
                  for c in out if isinstance(c.get("data"), dict) and "choices" in c["data"]]
         assert "a@b.com" in "".join(t for t in texts if t)   # reinjected across boundary
         assert "[EMAIL_1]" not in "".join(t for t in texts if t)
+
+
+class TestStreamingOutputPolicy:
+    async def test_blocked_pattern_split_across_chunks_never_leaks(self):
+        rules = [
+            GuardrailRule(
+                name="block_secret",
+                rule_type="keyword_block",
+                pattern="secret_data",
+                action="block",
+                applies_to="response",
+            )
+        ]
+        project = Project(project_id="p1", name="P1", guardrail_rules=rules)
+        chunks = [
+            _chunk("prefix secret_"),
+            _chunk("data suffix", is_final=True, usage=TokenUsage(4, 4, 8)),
+        ]
+        chain = [
+            ProviderModelMapping(provider="anthropic", model_id="claude-sonnet")
+        ]
+        agent = _agent(
+            _router(chain),
+            FakeFactory(
+                ["anthropic"],
+                FakeHttpClient({"anthropic": chunks}),
+            ),
+            projects={"p1": project},
+        )
+
+        out = await _drain(agent.handle_chat_completion(_req(), _ctx()))
+
+        content = _content(out)
+        assert "secret_data" not in content
+        assert "prefix" not in content
+        assert "block_secret" in content
+        assert out[-1] == {"data": "[DONE]"}
+
+    async def test_generated_pii_split_across_chunks_is_redacted(self):
+        policy = ResolvedPolicy(
+            pii_redaction_enabled=True,
+            pii_redact_types=["email"],
+            pii_reinject=False,
+        )
+        redactor = PIIRedactor()
+        chunks = [
+            _chunk("Contact generated@"),
+            _chunk(
+                "example.com now",
+                is_final=True,
+                usage=TokenUsage(4, 4, 8),
+            ),
+        ]
+        chain = [
+            ProviderModelMapping(provider="anthropic", model_id="claude-sonnet")
+        ]
+        agent = _agent(
+            _router(chain),
+            FakeFactory(
+                ["anthropic"],
+                FakeHttpClient({"anthropic": chunks}),
+            ),
+            pii_redactor=redactor,
+        )
+        _, mapping = redactor.redact("no pii here", policy)
+        request = ChatCompletionRequest(
+            messages=[{"role": "user", "content": "hello"}],
+            model="claude-sonnet",
+            stream=True,
+        )
+
+        out = await _drain(
+            agent._stream_true(
+                request,
+                _ctx(),
+                RequestContext(
+                    user_id="u1",
+                    project_id="p1",
+                    roles=[],
+                    scopes=[],
+                ),
+                False,
+                None,
+                policy,
+                mapping,
+                "req_pii",
+                time.perf_counter(),
+                preferred_provider=None,
+                effective_allowed=None,
+                smart_routing_decision=None,
+            )
+        )
+
+        content = _content(out)
+        assert "generated@example.com" not in content
+        assert "[EMAIL_1]" in content
+
+    async def test_pii_in_partial_tool_arguments_is_redacted(self):
+        policy = ResolvedPolicy(
+            pii_redaction_enabled=True,
+            pii_redact_types=["email"],
+            pii_reinject=False,
+        )
+        redactor = PIIRedactor()
+        chunks = [
+            StreamChunk(
+                id="c",
+                choices=[{
+                    "index": 0,
+                    "delta": {
+                        "tool_calls": [{
+                            "index": 0,
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {
+                                "name": "notify",
+                                "arguments": '{"email":"generated@',
+                            },
+                        }]
+                    },
+                    "finish_reason": None,
+                }],
+                model="claude-sonnet",
+            ),
+            StreamChunk(
+                id="c",
+                choices=[{
+                    "index": 0,
+                    "delta": {
+                        "tool_calls": [{
+                            "index": 0,
+                            "function": {
+                                "arguments": 'example.com"}',
+                            },
+                        }]
+                    },
+                    "finish_reason": "tool_calls",
+                }],
+                model="claude-sonnet",
+                is_final=True,
+                usage=TokenUsage(4, 4, 8),
+            ),
+        ]
+        chain = [
+            ProviderModelMapping(provider="anthropic", model_id="claude-sonnet")
+        ]
+        agent = _agent(
+            _router(chain),
+            FakeFactory(
+                ["anthropic"],
+                FakeHttpClient({"anthropic": chunks}),
+            ),
+            pii_redactor=redactor,
+        )
+        _, mapping = redactor.redact("no pii here", policy)
+        request = ChatCompletionRequest(
+            messages=[{"role": "user", "content": "hello"}],
+            model="claude-sonnet",
+            stream=True,
+            tools=[{"type": "function", "function": {"name": "notify"}}],
+        )
+
+        out = await _drain(
+            agent._stream_true(
+                request,
+                _ctx(),
+                RequestContext(
+                    user_id="u1",
+                    project_id="p1",
+                    roles=[],
+                    scopes=[],
+                ),
+                False,
+                None,
+                policy,
+                mapping,
+                "req_tool_pii",
+                time.perf_counter(),
+                preferred_provider=None,
+                effective_allowed=None,
+                smart_routing_decision=None,
+            )
+        )
+
+        calls = [
+            call
+            for chunk in out
+            if isinstance(chunk.get("data"), dict)
+            for choice in chunk["data"].get("choices", [])
+            for call in choice.get("delta", {}).get("tool_calls", [])
+        ]
+        arguments = calls[0]["function"]["arguments"]
+        assert "generated@example.com" not in arguments
+        assert "[EMAIL_1]" in arguments
+
+    async def test_configured_detector_failure_withholds_entire_output(self):
+        class FailingDetector:
+            async def detect(self, text, active_types):
+                raise RuntimeError("comprehend credential detail")
+
+        policy = ResolvedPolicy(
+            pii_redaction_enabled=True,
+            pii_redact_types=["email"],
+            pii_ner_enabled=True,
+            pii_ner_types=["name"],
+            pii_reinject=False,
+        )
+        redactor = PIIRedactor(entity_detector=FailingDetector())
+        chunks = [
+            _chunk("Alice generated@example.com"),
+            _chunk("", is_final=True, usage=TokenUsage(4, 4, 8)),
+        ]
+        chain = [
+            ProviderModelMapping(provider="anthropic", model_id="claude-sonnet")
+        ]
+        agent = _agent(
+            _router(chain),
+            FakeFactory(
+                ["anthropic"],
+                FakeHttpClient({"anthropic": chunks}),
+            ),
+            pii_redactor=redactor,
+        )
+        _, mapping = await redactor.redact_messages_async(
+            [{"role": "user", "content": "hello"}],
+            policy,
+        )
+        request = ChatCompletionRequest(
+            messages=[{"role": "user", "content": "hello"}],
+            model="claude-sonnet",
+            stream=True,
+        )
+
+        out = await _drain(
+            agent._stream_true(
+                request,
+                _ctx(),
+                RequestContext(
+                    user_id="u1",
+                    project_id="p1",
+                    roles=[],
+                    scopes=[],
+                ),
+                False,
+                None,
+                policy,
+                mapping,
+                "req_ner",
+                time.perf_counter(),
+                preferred_provider=None,
+                effective_allowed=None,
+                smart_routing_decision=None,
+            )
+        )
+
+        assert "Alice" not in _content(out)
+        error = next(
+            chunk["data"]["error"]
+            for chunk in out
+            if isinstance(chunk.get("data"), dict)
+            and "error" in chunk["data"]
+        )
+        assert error["code"] == "output_policy_failed"
+        assert "credential" not in error["message"]
+
+
+class TestStreamingFailureAndCancellation:
+    async def test_midstream_provider_failure_does_not_leak_buffered_output(self):
+        rules = [
+            GuardrailRule(
+                name="inspect_output",
+                rule_type="keyword_block",
+                pattern="never-match",
+                action="block",
+                applies_to="response",
+            )
+        ]
+        project = Project(project_id="p1", name="P1", guardrail_rules=rules)
+        chunks = [
+            _chunk("withheld provider content"),
+            RuntimeError("provider credential=secret-value"),
+        ]
+        chain = [
+            ProviderModelMapping(provider="anthropic", model_id="claude-sonnet")
+        ]
+        cost_tracker = MagicMock(spec=CostTracker)
+        cost_tracker.calculate_cost = MagicMock(return_value=0.0)
+        cost_tracker.record_usage = AsyncMock()
+        cost_tracker.estimate_tokens = AsyncMock(side_effect=[3, 4])
+        _no_budget(cost_tracker)
+        agent = _agent(
+            _router(chain),
+            FakeFactory(
+                ["anthropic"],
+                FakeHttpClient({"anthropic": chunks}),
+            ),
+            cost_tracker=cost_tracker,
+            projects={"p1": project},
+        )
+
+        out = await _drain(agent.handle_chat_completion(_req(), _ctx()))
+
+        assert "withheld provider content" not in _content(out)
+        error = next(
+            chunk["data"]["error"]
+            for chunk in out
+            if isinstance(chunk.get("data"), dict)
+            and "error" in chunk["data"]
+        )
+        assert error == {
+            "type": "stream_error",
+            "message": "The provider stream failed.",
+            "code": "provider_stream_failed",
+        }
+        assert "secret-value" not in str(out)
+        cost_tracker.record_usage.assert_awaited_once()
+        assert cost_tracker.record_usage.call_args.args[0].status == "error"
+
+    async def test_consumer_close_records_cancelled_usage_once(self):
+        chunks = [_chunk("first"), _chunk("second")]
+        chain = [
+            ProviderModelMapping(provider="anthropic", model_id="claude-sonnet")
+        ]
+        cost_tracker = MagicMock(spec=CostTracker)
+        cost_tracker.calculate_cost = MagicMock(return_value=0.0)
+        cost_tracker.record_usage = AsyncMock()
+        cost_tracker.estimate_tokens = AsyncMock(side_effect=[2, 1])
+        _no_budget(cost_tracker)
+        agent = _agent(
+            _router(chain),
+            FakeFactory(
+                ["anthropic"],
+                FakeHttpClient({"anthropic": chunks}),
+            ),
+            cost_tracker=cost_tracker,
+        )
+        request = ChatCompletionRequest(
+            messages=[{"role": "user", "content": "hello"}],
+            model="claude-sonnet",
+            stream=True,
+        )
+        stream = agent._stream_true(
+            request,
+            _ctx(),
+            RequestContext(
+                user_id="u1",
+                project_id="p1",
+                roles=[],
+                scopes=[],
+            ),
+            False,
+            None,
+            None,
+            None,
+            "req_cancel",
+            time.perf_counter(),
+            preferred_provider=None,
+            effective_allowed=None,
+            smart_routing_decision=None,
+        )
+
+        first = await anext(stream)
+        assert _content([first]) == "first"
+        await stream.aclose()
+
+        cost_tracker.record_usage.assert_awaited_once()
+        record = cost_tracker.record_usage.call_args.args[0]
+        assert record.status == "cancelled"
+        assert record.request_id == "req_cancel"
 
 
 class TestSimulateFallbackWhenNoFactory:

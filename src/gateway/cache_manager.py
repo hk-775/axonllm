@@ -44,7 +44,7 @@ class CacheManager:
     ) -> str:
         """Generate deterministic cache key from request parameters.
 
-        Uses SHA-256 hash of (model, messages, temperature, max_tokens,
+        Uses SHA-256 hash of (model, messages, system, temperature, max_tokens,
         top_p, stop, tools, tool_choice, project_id) serialized as sorted JSON.
 
         ``tools``/``tool_choice`` are part of the key because they change the
@@ -55,6 +55,7 @@ class CacheManager:
         key_data = {
             "model": request.model,
             "messages": request.messages,
+            "system": request.system,
             "temperature": request.temperature,
             "max_tokens": request.max_tokens,
             "top_p": request.top_p,

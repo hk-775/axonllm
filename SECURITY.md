@@ -50,18 +50,61 @@ The following are in scope:
 
 ### Known, and therefore not a vulnerability report
 
-**API key scopes are not enforced on the data plane.** Scopes are carried on the
-request context and checked by admin RBAC for `/admin/*`, but nothing consults
-them on `/v1/*`: a key issued `["models:read"]` — or `[]` — can still call
-`/v1/chat/completions` and spend money. What actually bounds a key is its
-project's `allowed_models` and budget. Keys also default to no expiry, and
-rotation carries the old expiry through, so revocation is the only thing that
-reliably stops one. This is documented rather than fixed, it is reported by
-`/admin/production-checklist` as a WARN, and it is stated here because it sits
-squarely inside "authorization bypass" above. A report that a low-scope key can
-reach the data plane is expected behaviour; a report that a *revoked* or
-*expired* key can, or that project `allowed_models`/budget can be bypassed, is a
-vulnerability.
+**Canonical identity is a migration gate and defaults off.** With
+`AXON_REQUIRE_CANONICAL_IDENTITY=false`, legacy credential claims can still
+supply roles, scopes, tenant, and project authority. The production checklist
+reports this as `FAIL`. Production must provision canonical principal records,
+enable DynamoDB, run `AXON_AUTH_MODE=ENFORCE`, and set the gate to `true`.
+
+**The current admin control plane is not tenant-scoped.** Canonical tenant RBAC
+protects the mapped model-list and inference data plane. Existing `/admin/*`
+routes still use legacy `admin` roles and `admin:*` scopes, and the underlying
+projects, users, usage, keys, policies, quotas, webhooks, SCIM, and audit records
+are not all tenant-qualified. `tenant_admin` intentionally does not imply
+current admin-route access. Canonical mode also denies unmapped `/api/*` and
+`/v1/*` routes, including the fleet-wide `GET /api/users`. Do not expose one
+admin plane to multiple untrusted tenants.
+
+**Project grants are temporary containment, not ownership proof.** Project
+records are still globally keyed and do not carry an authoritative tenant owner.
+Every tenant role, including `tenant_admin`, therefore needs an explicit
+server-held project grant. This blocks arbitrary project selection but does not
+make colliding project ids tenant-safe. Use one isolated deployment per tenant
+until project lookup and every dependent key are tenant-qualified.
+
+**API-key behavior differs by migration mode.** In legacy mode, key scopes gate
+`/admin/*` but do not constrain chat; project model and budget controls are the
+effective data-plane boundary. In canonical mode, the key must resolve to a
+server-held `service` principal with a project grant and explicit
+`model.list`/`inference.invoke` action scopes. Existing key metadata is not
+automatically converted into that principal. Keys default to no expiry, and
+rotation preserves the old expiry.
+
+**ALB validation is implemented, but the reference stack does not wire it.**
+The validator binds ES256 tokens to the configured ALB signer, client, regional
+issuer, expiry, and `X-Amzn-Oidc-Identity`. The checked-in Fargate stack does not
+configure an ALB authenticate action or the required `AXON_ALB_*` trust values.
+It does place an internal TLS ALB behind CloudFront VPC Origin, require WAF/TLS
+and approved-egress inputs, and keep tasks private. Do not accept ALB headers
+until the authentication action and trust values are complete, and restrict the
+ALB from its VPC-wide bootstrap ingress rule to the CloudFront-created
+VPC-origin service security group after deployment.
+
+**AgentCore is not a turnkey production deployment.** The adapter is fail closed,
+but release deployment still requires a JWT authorizer/header-forwarding
+contract, reviewed IaC, private networking, readiness, and tenant-safe memory
+design. Initialization is lazy, retained usage and audit state are scanned at
+startup, failed project hydration can leave controls absent, distributed
+rate/cache/audit semantics are incomplete, and graceful resource shutdown is
+not wired. Its dependency export is hash-pinned and includes the runtime, OIDC,
+and OIDC HTTP-client packages. See
+[ENTERPRISE_HARDENING.md](ENTERPRISE_HARDENING.md) for the exact implemented
+boundary and remaining blockers.
+
+Reports that exceed these documented boundaries are still in scope. Examples
+include a cross-tenant data-plane read, authorization with an inactive canonical
+membership, a revoked or expired key remaining valid beyond documented cache
+behavior, or any way to bypass project grants in canonical mode.
 
 ## Recognition
 

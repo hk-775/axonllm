@@ -209,16 +209,35 @@ class TestLoadAppConfig:
         assert config.server_port == 8000
         assert config.models_config_path == "config/models.yaml"
         assert config.load_demo_data is False
+        assert config.alb_signer_arn == ""
+        assert config.alb_client_id == ""
+        assert config.alb_issuer == ""
 
     def test_env_overrides(self, monkeypatch):
         monkeypatch.setenv("AWS_DEFAULT_REGION", "eu-west-1")
         monkeypatch.setenv("AXON_SERVER_PORT", "9000")
         monkeypatch.setenv("AXON_LOAD_DEMO_DATA", "true")
+        signer_arn = (
+            "arn:aws:elasticloadbalancing:eu-west-1:123456789012:"
+            "loadbalancer/app/axon-prod/50dc6c495c0c9188"
+        )
+        monkeypatch.setenv("AXON_ALB_SIGNER_ARN", signer_arn)
+        monkeypatch.setenv("AXON_ALB_CLIENT_ID", "client-123")
+        monkeypatch.setenv(
+            "AXON_ALB_ISSUER",
+            "https://public-keys.auth.elb.eu-west-1.amazonaws.com",
+        )
 
         config = load_app_config()
         assert config.aws_region == "eu-west-1"
         assert config.server_port == 9000
         assert config.load_demo_data is True
+        assert config.alb_signer_arn == signer_arn
+        assert config.alb_client_id == "client-123"
+        assert (
+            config.alb_issuer
+            == "https://public-keys.auth.elb.eu-west-1.amazonaws.com"
+        )
 
 
 class TestSemanticCacheConfig:

@@ -340,9 +340,133 @@ class AuthMethod(Enum):
     ANONYMOUS = "anonymous"
 
 
+class TenantStatus(Enum):
+    """Whether a tenant may authenticate and use the gateway."""
+
+    ACTIVE = "active"
+    SUSPENDED = "suspended"
+
+
+class MembershipStatus(Enum):
+    """Lifecycle state for a principal's tenant membership."""
+
+    INVITED = "invited"
+    ACTIVE = "active"
+    SUSPENDED = "suspended"
+    DEPROVISIONED = "deprovisioned"
+
+
+class TenantRole(Enum):
+    """Server-assigned roles used by the baseline authorization policy."""
+
+    PLATFORM_ADMIN = "platform_admin"
+    TENANT_ADMIN = "tenant_admin"
+    TENANT_MEMBER = "tenant_member"
+    TENANT_AUDITOR = "tenant_auditor"
+    SERVICE = "service"
+
+
+@dataclass(frozen=True)
+class Tenant:
+    """An isolation boundary for customer-owned configuration and data."""
+
+    tenant_id: str
+    name: str
+    status: TenantStatus = TenantStatus.ACTIVE
+    created_at: datetime = field(default_factory=_utcnow)
+
+    def __post_init__(self) -> None:
+        if not self.tenant_id.strip():
+            raise ValueError("tenant_id must not be empty")
+        if not self.name.strip():
+            raise ValueError("tenant name must not be empty")
+
+
+@dataclass(frozen=True)
+class TenantMembership:
+    """Authoritative role and project grants for one tenant principal."""
+
+    membership_id: str
+    tenant_id: str
+    principal_id: str
+    role: TenantRole
+    status: MembershipStatus = MembershipStatus.ACTIVE
+    project_ids: frozenset[str] = field(default_factory=frozenset)
+    authorization_version: int = 1
+
+    def __post_init__(self) -> None:
+        if not self.membership_id.strip():
+            raise ValueError("membership_id must not be empty")
+        if not self.tenant_id.strip():
+            raise ValueError("tenant_id must not be empty")
+        if not self.principal_id.strip():
+            raise ValueError("principal_id must not be empty")
+        if not isinstance(self.role, TenantRole):
+            raise TypeError("role must be a TenantRole")
+        if self.authorization_version < 1:
+            raise ValueError("authorization_version must be positive")
+        if any(not project_id.strip() for project_id in self.project_ids):
+            raise ValueError("project_ids must not contain empty values")
+
+
+@dataclass(frozen=True)
+class Principal:
+    """Canonical identity resolved from server-held membership state.
+
+    Identity-provider claims are inputs to principal resolution, not authority.
+    Roles, scopes, project grants, status, and the authorization version here
+    must come from the tenant identity repository.
+    """
+
+    principal_id: str
+    tenant_id: str
+    subject: str
+    issuer: str
+    roles: frozenset[TenantRole]
+    auth_method: AuthMethod
+    membership_status: MembershipStatus = MembershipStatus.ACTIVE
+    project_ids: frozenset[str] = field(default_factory=frozenset)
+    scopes: frozenset[str] = field(default_factory=frozenset)
+    authorization_version: int = 1
+    credential_id: str | None = None
+    email: str | None = None
+
+    def __post_init__(self) -> None:
+        required = {
+            "principal_id": self.principal_id,
+            "tenant_id": self.tenant_id,
+            "subject": self.subject,
+            "issuer": self.issuer,
+        }
+        for field_name, value in required.items():
+            if not value.strip():
+                raise ValueError(f"{field_name} must not be empty")
+        if self.auth_method is AuthMethod.ANONYMOUS:
+            raise ValueError("anonymous requests cannot create a Principal")
+        if not self.roles:
+            raise ValueError("roles must not be empty")
+        if any(not isinstance(role, TenantRole) for role in self.roles):
+            raise TypeError("roles must contain only TenantRole values")
+        exclusive_roles = {
+            TenantRole.PLATFORM_ADMIN,
+            TenantRole.SERVICE,
+        }
+        if len(self.roles) > 1 and not self.roles.isdisjoint(exclusive_roles):
+            raise ValueError(
+                "platform_admin and service roles cannot be combined with "
+                "other roles"
+            )
+        if self.authorization_version < 1:
+            raise ValueError("authorization_version must be positive")
+        if any(not value.strip() for value in self.project_ids):
+            raise ValueError("project_ids must not contain empty values")
+        if any(not value.strip() for value in self.scopes):
+            raise ValueError("scopes must not contain empty values")
+
+
 @dataclass
 class RequestContext:
-    """Extracted identity claims for request authorization."""
+    """Credential claims retained until a canonical Principal is resolved."""
 
     user_id: str
     project_id: str
@@ -354,6 +478,10 @@ class RequestContext:
     environment: str | None = None
     api_key_id: str | None = None
     email: str | None = None
+    issuer: str | None = None
+    subject: str | None = None
+    principal_id: str | None = None
+    authorization_version: int | None = None
 
 
 @dataclass
@@ -366,6 +494,7 @@ class APIKey:
     name: str
     scopes: list[str]
     created_by: str
+    tenant_id: str | None = None
     created_at: datetime = field(default_factory=_utcnow)
     expires_at: datetime | None = None
     revoked: bool = False

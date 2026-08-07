@@ -185,7 +185,7 @@ class TestPIIRedaction:
         # re-injection replaces tokens. Let's verify the response content is accessible.
         assert "choices" in result
 
-    def test_records_pii_audit(self):
+    def test_records_input_and_output_pii_audit(self):
         agent, _, audit_trail, _ = _make_agent()
         _run(agent.handle_chat_completion(
             {
@@ -195,9 +195,12 @@ class TestPIIRedaction:
             {"project_id": "proj:ml", "user_id": "u1"},
         ))
         pii_records = [r for r in audit_trail._buffer if r.event_type == AuditEventType.PII_REDACTION]
-        assert len(pii_records) == 1
-        assert pii_records[0].data["count"] == 1
-        assert "email" in pii_records[0].data["redacted_types"]
+        assert len(pii_records) == 2
+        assert sum(record.data["count"] for record in pii_records) == 2
+        assert all(
+            "email" in record.data["redacted_types"]
+            for record in pii_records
+        )
 
     def test_no_redaction_when_disabled(self):
         agent, router, _, _ = _make_agent(pii_enabled=False)

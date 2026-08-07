@@ -43,7 +43,11 @@ saml = [
 # declines to verify rather than trusting an unverified token — safe, but it
 # means SSO does not work, so this is required for any OIDC deployment.
 oidc = [
+    "httpx>=0.25.0",
     "python-jose[cryptography]>=3.3",
+]
+agentcore = [
+    "bedrock-agentcore>=1.21.0,<2",
 ]
 dev = [
     "hypothesis>=6.100.0",
@@ -60,6 +64,11 @@ dev = [
     "signxml>=3.2",
     # so CI exercises OIDC JWT signature verification
     "python-jose[cryptography]>=3.3",
+    # CI tooling is resolved through uv.lock rather than downloaded by uvx.
+    "ruff==0.16.2",
+]
+security = [
+    "pip-audit==2.10.1",
 ]
 
 [project.scripts]
@@ -74,7 +83,7 @@ asyncio_mode = "auto"
 pythonpath = ["."]
 
 [build-system]
-requires = ["setuptools>=68.0"]
+requires = ["setuptools==83.0.0"]
 build-backend = "setuptools.build_meta"
 
 # The codebase imports everything as `src.gateway.*` (65 modules), so the

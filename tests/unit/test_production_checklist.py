@@ -26,6 +26,7 @@ from src.gateway.admin.production_checklist import (
     Status,
     check_api_keys,
     check_auth_mode,
+    check_canonical_identity,
     check_demo_data,
     check_model_ids,
     check_persistence,
@@ -191,6 +192,23 @@ class TestAuthMode:
         assert result.status is Status.FAIL
         assert result.blocking is True
         assert "LOG_ONLY" in result.summary
+
+
+class TestCanonicalIdentity:
+    def test_server_held_membership_passes(self):
+        result = check_canonical_identity(
+            AppConfig(canonical_identity_required=True)
+        )
+
+        assert result.status is Status.PASS
+
+    def test_legacy_claim_authority_blocks_readiness(self):
+        result = check_canonical_identity(
+            AppConfig(canonical_identity_required=False)
+        )
+
+        assert result.status is Status.FAIL
+        assert "AXON_REQUIRE_CANONICAL_IDENTITY" in result.fix
 
 
 # ── Demo data ────────────────────────────────────────────────────────
@@ -420,7 +438,7 @@ class TestPersistenceCheck:
 
 
 class _FakeKeys:
-    """Stands in for APIKeyService, whose scopes do not gate the data plane."""
+    """Stands in for APIKeyService, which only exposes key metadata."""
 
     def __init__(self, keys=None, raises=False):
         self._keys = keys or []
@@ -462,19 +480,24 @@ class TestApiKeyCheck:
         assert result.status is Status.PASS
 
     @pytest.mark.asyncio
-    async def test_live_key_warns_about_scopes(self):
-        """A scoped key still warns: scopes do not restrict /v1/*.
-
-        Verified against a live ENFORCE gateway — a key scoped 'models:read',
-        and a key with no scopes at all, both invoke /v1/chat/completions.
-        """
+    async def test_live_key_warns_about_unverified_authorization(self):
         result = await check_api_keys(
             _FakeKeys([_key(scopes=("models:read",))]), ["proj-a"]
         )
 
         assert result.status is Status.WARN
-        assert "not enforced on /v1/*" in result.detail
+        assert result.title == "API key authorization mode and expiry"
+        assert result.summary == (
+            "1 live key; 1 without an expiry. "
+            "Key/principal consistency is unverified."
+        )
+        assert "Legacy mode" in result.detail
+        assert "metadata scopes do not constrain /v1 chat" in result.detail
         assert "allowed_models" in result.detail
+        assert "Canonical mode" in result.detail
+        assert "service-principal action scopes" in result.detail
+        assert "explicit project grant" in result.detail
+        assert "does not resolve or compare their principal records" in result.detail
 
     @pytest.mark.asyncio
     async def test_non_expiring_key_is_counted(self):
@@ -505,7 +528,7 @@ class TestApiKeyCheck:
             ["proj-a"],
         )
 
-        assert result.status is Status.WARN  # scopes still warn
+        assert result.status is Status.WARN  # principal consistency is still unverified
         assert "never expire" not in result.detail
         assert "0 without an expiry" in result.summary
 
@@ -557,7 +580,11 @@ class TestRunner:
         )
 
         report = await run_checklist(
-            app_config=AppConfig(load_demo_data=False, auth_mode="ENFORCE"),
+            app_config=AppConfig(
+                load_demo_data=False,
+                auth_mode="ENFORCE",
+                canonical_identity_required=True,
+            ),
             model_registry=registry,
             pricing_config={"openai": {"gpt-4": TokenPricing(0.03, 0.06)}},
             provider_configs={"openai": _config("openai")},
@@ -578,7 +605,11 @@ class TestRunner:
         passing it.
         """
         report = await run_checklist(
-            app_config=AppConfig(load_demo_data=False, auth_mode="ENFORCE"),
+            app_config=AppConfig(
+                load_demo_data=False,
+                auth_mode="ENFORCE",
+                canonical_identity_required=True,
+            ),
             model_registry=_registry(_model("gpt-4", ("openai", "gpt-4"))),
             pricing_config={"openai": {"gpt-4": TokenPricing(0.03, 0.06)}},
             provider_configs={"openai": _config("openai")},
@@ -608,7 +639,11 @@ class TestRunner:
     @pytest.mark.asyncio
     async def test_warnings_do_not_block_readiness(self):
         report = await run_checklist(
-            app_config=AppConfig(load_demo_data=False, auth_mode="ENFORCE"),
+            app_config=AppConfig(
+                load_demo_data=False,
+                auth_mode="ENFORCE",
+                canonical_identity_required=True,
+            ),
             model_registry=_registry(_model("gpt-4", ("openai", "gpt-4"))),
             pricing_config={"openai": {"gpt-4": TokenPricing(0.03, 0.06)}},
             provider_configs={"openai": _config("openai")},
@@ -653,7 +688,10 @@ class TestStartupNotice:
             monkeypatch, AvailabilityReport(checked_providers=["openai"], total_checked=1)
         )
         report = await run_checklist(
-            app_config=AppConfig(load_demo_data=False),
+            app_config=AppConfig(
+                load_demo_data=False,
+                canonical_identity_required=True,
+            ),
             model_registry=_registry(_model("gpt-4", ("openai", "gpt-4"))),
             pricing_config={"openai": {"gpt-4": TokenPricing(0.03, 0.06)}},
             provider_configs={"openai": _config("openai")},
@@ -666,7 +704,10 @@ class TestStartupNotice:
     @pytest.mark.asyncio
     async def test_warnings_alone_stay_quiet(self):
         report = await run_checklist(
-            app_config=AppConfig(load_demo_data=False),
+            app_config=AppConfig(
+                load_demo_data=False,
+                canonical_identity_required=True,
+            ),
             model_registry=_registry(_model("gpt-4", ("openai", "gpt-4"))),
             pricing_config={"openai": {"gpt-4": TokenPricing(0.03, 0.06)}},
             provider_configs={"openai": _config("openai")},
@@ -709,7 +750,10 @@ class TestPageRendering:
             monkeypatch, AvailabilityReport(checked_providers=["openai"], total_checked=1)
         )
         defaults = dict(
-            app_config=AppConfig(load_demo_data=False),
+            app_config=AppConfig(
+                load_demo_data=False,
+                canonical_identity_required=True,
+            ),
             model_registry=_registry(_model("gpt-4", ("openai", "gpt-4"))),
             pricing_config={"openai": {"gpt-4": TokenPricing(0.03, 0.06)}},
             provider_configs={"openai": _config("openai")},
@@ -792,7 +836,11 @@ class TestChecklistRoute:
         """A fix has to show up on reload, without a restart."""
         assert "banner fail" in client.get("/admin/production-checklist").text
 
-        api._app_config = AppConfig(load_demo_data=False, auth_mode="ENFORCE")
+        api._app_config = AppConfig(
+            load_demo_data=False,
+            auth_mode="ENFORCE",
+            canonical_identity_required=True,
+        )
 
         assert "banner fail" not in client.get("/admin/production-checklist").text
 

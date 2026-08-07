@@ -25,6 +25,13 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, StreamingResponse
 from starlette.routing import Route
 
+from src.gateway.chat.request_body import (
+    DEFAULT_CHAT_REQUEST_MAX_BYTES,
+    JSONBodyError,
+    read_json_object,
+)
+from src.gateway.request_validator import RequestValidator
+
 if TYPE_CHECKING:
     from src.gateway.chat.client_agent import ClientAgent
 
@@ -52,6 +59,14 @@ def _error(status_code: int, message: str, err_type: str = "invalid_request_erro
         {"error": {"message": message, "type": err_type, "param": None, "code": None}},
         status_code=status_code,
     )
+
+
+def _resolve_request_validator(client_agent: ClientAgent) -> RequestValidator:
+    gateway_agent = getattr(client_agent, "gateway_agent", None)
+    validator = getattr(gateway_agent, "request_validator", None)
+    if isinstance(validator, RequestValidator):
+        return validator
+    return RequestValidator()
 
 
 # OpenAI defines exactly four finish_reason values, and typed SDK clients
@@ -116,8 +131,20 @@ def _finish_reason(raw: Any, has_tool_calls: bool) -> str:
 class OpenAICompatAPI:
     """OpenAI-compatible route handlers backed by the internal ClientAgent."""
 
-    def __init__(self, client_agent: ClientAgent) -> None:
+    def __init__(
+        self,
+        client_agent: ClientAgent,
+        *,
+        max_request_bytes: int = DEFAULT_CHAT_REQUEST_MAX_BYTES,
+        request_validator: RequestValidator | None = None,
+    ) -> None:
         self.client_agent = client_agent
+        self.max_request_bytes = max_request_bytes
+        self.request_validator = (
+            request_validator
+            if request_validator is not None
+            else _resolve_request_validator(client_agent)
+        )
 
     # ------------------------------------------------------------------
     # POST /v1/chat/completions
@@ -125,25 +152,43 @@ class OpenAICompatAPI:
 
     async def chat_completions(self, request: Request):
         try:
-            body = await request.json()
-        except Exception:
-            return _error(400, "Invalid JSON in request body")
+            body = await read_json_object(
+                request,
+                max_bytes=self.max_request_bytes,
+            )
+        except JSONBodyError as exc:
+            return _error(exc.status_code, exc.message)
 
-        model = body.get("model")
+        raw_model = body.get("model")
         # Smart routing (auto model selection): model == "auto" or empty/missing.
         # Otherwise a concrete model string is required. Lets standard OpenAI
         # clients opt into task-aware routing via `model: "auto"`.
-        model = model if isinstance(model, str) else ""
+        smart_routing = "model" not in body or (
+            isinstance(raw_model, str)
+            and raw_model.strip().lower() in ("", "auto")
+        )
+        errors = self.request_validator.validate_payload(
+            body,
+            allow_empty_model=smart_routing,
+            check_model=False,
+        )
+        if errors:
+            return _error(400, errors[0].message)
+
+        model = body.get("model", "")
+        assert isinstance(model, str)
         smart_routing = model.strip().lower() in ("", "auto")
         if smart_routing:
             model = ""
         messages = body.get("messages")
-        if not messages or not isinstance(messages, list):
-            return _error(400, "you must provide a messages parameter")
+        assert isinstance(messages, list)
 
         temperature = body.get("temperature")
         max_tokens = body.get("max_tokens")
-        stream = bool(body.get("stream", False))
+        top_p = body.get("top_p")
+        stop = body.get("stop")
+        system = body.get("system")
+        stream = body.get("stream", False)
         # The pipeline translates tools per-provider, but this route never read
         # them off the body — so an OpenAI SDK client got a fluent 200 in which
         # the model states it has no such tool, with no error to notice it by.
@@ -154,17 +199,21 @@ class OpenAICompatAPI:
 
         if stream:
             return await self._stream(model, messages, temperature, max_tokens,
+                                      top_p, stop, system,
                                       user_id, project_id, smart_routing,
                                       tools, tool_choice)
         return await self._complete(model, messages, temperature, max_tokens,
+                                    top_p, stop, system,
                                     user_id, project_id, smart_routing,
                                     tools, tool_choice)
 
-    async def _complete(self, model, messages, temperature, max_tokens, user_id,
-                        project_id, smart_routing=False, tools=None, tool_choice=None):
+    async def _complete(self, model, messages, temperature, max_tokens, top_p,
+                        stop, system, user_id, project_id, smart_routing=False,
+                        tools=None, tool_choice=None):
         try:
             resp = await self.client_agent.chat(
                 model, messages, temperature=temperature, max_tokens=max_tokens,
+                top_p=top_p, stop=stop, system=system,
                 user_id=user_id, project_id=project_id, smart_routing=smart_routing,
                 tools=tools, tool_choice=tool_choice,
             )
@@ -229,14 +278,16 @@ class OpenAICompatAPI:
             completion["x_cache_type"] = resp.get("cache_type", "exact")
         return JSONResponse(completion)
 
-    async def _stream(self, model, messages, temperature, max_tokens, user_id,
-                      project_id, smart_routing=False, tools=None, tool_choice=None):
+    async def _stream(self, model, messages, temperature, max_tokens, top_p,
+                      stop, system, user_id, project_id, smart_routing=False,
+                      tools=None, tool_choice=None):
         completion_id = f"chatcmpl-{uuid.uuid4().hex}"
         created = int(time.time())
 
         try:
             chunks = self.client_agent.chat_stream(
                 model, messages, temperature=temperature, max_tokens=max_tokens,
+                top_p=top_p, stop=stop, system=system,
                 user_id=user_id, project_id=project_id, smart_routing=smart_routing,
                 tools=tools, tool_choice=tool_choice,
             )

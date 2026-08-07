@@ -150,7 +150,14 @@ class AppConfig:
     load_demo_data: bool = False
     oidc_issuer: str = ""
     oidc_audience: str = ""
+    alb_signer_arn: str = ""
+    alb_client_id: str = ""
+    alb_issuer: str = ""
     auth_mode: str = "ENFORCE"  # fail-closed by default; set AXON_AUTH_MODE=LOG_ONLY for local dev only
+    # Migration gate for server-held tenant memberships. Once enabled, every
+    # authenticated credential must resolve through durable canonical identity
+    # storage; startup refuses an in-memory-only configuration.
+    canonical_identity_required: bool = False
     # Semantic cache. Off by default at the gateway level *as well as* per
     # project: a project flag can only take effect once an embedder exists, and
     # building one costs a Bedrock dependency at startup. Both must say yes.

@@ -32,8 +32,10 @@ from src.gateway.admin.webhook_routes import WebhookAPI, create_webhook_routes
 from src.gateway.agent import GatewayAgent
 from src.gateway.auth.api_key_service import APIKeyService
 from src.gateway.auth.cedar_policy import CedarPolicyService
+from src.gateway.auth.dynamo_principal_repository import DynamoPrincipalRepository
 from src.gateway.auth.oidc_service import OIDCConfig, OIDCService
 from src.gateway.auth.policy_hierarchy import PolicyHierarchyResolver
+from src.gateway.auth.principal import CanonicalPrincipalResolver, PrincipalResolver
 from src.gateway.auth.saml_routes import SamlAPI, create_saml_routes
 from src.gateway.auth.saml_service import SamlService, load_saml_config
 from src.gateway.auth.scim_routes import ScimAPI, create_scim_routes
@@ -41,6 +43,7 @@ from src.gateway.auth.scim_service import ScimStore
 from src.gateway.efficiency_analyzer import EfficiencyAnalyzer
 from src.gateway.middleware.admin_rbac import AdminRBACMiddleware
 from src.gateway.middleware.auth import AuthMiddleware
+from src.gateway.middleware.tenant_authorization import TenantAuthorizationMiddleware
 from src.gateway.multi_region.health_monitor import SpokeHealthMonitor
 from src.gateway.multi_region.region_config import HubConfig, SpokeConfig, SpokeRole
 from src.gateway.multi_region.region_router import RegionRouter
@@ -124,6 +127,7 @@ class GatewayComponents:
     catalog: dict
     api_key_service: APIKeyService | None = None
     oidc_service: OIDCService | None = None
+    principal_resolver: PrincipalResolver | None = None
     scim_store: ScimStore | None = None
     saml_service: SamlService | None = None
     policy_resolver: PolicyHierarchyResolver | None = None
@@ -175,8 +179,24 @@ def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComp
         issuer=app_config.oidc_issuer,
         audience=app_config.oidc_audience,
         alb_region=app_config.aws_region,
+        alb_signer_arn=app_config.alb_signer_arn,
+        alb_client_id=app_config.alb_client_id,
+        alb_issuer=app_config.alb_issuer,
     )
     oidc_service = OIDCService(config=oidc_config)
+    principal_resolver = None
+    if app_config.canonical_identity_required:
+        if app_config.auth_mode != "ENFORCE":
+            raise RuntimeError(
+                "canonical identity requires AXON_AUTH_MODE=ENFORCE"
+            )
+        if not persistence.enabled:
+            raise RuntimeError(
+                "AXON_REQUIRE_CANONICAL_IDENTITY=true requires DynamoDB persistence"
+            )
+        principal_resolver = CanonicalPrincipalResolver(
+            DynamoPrincipalRepository(persistence)
+        )
 
     # --- Enterprise identity: SCIM provisioning + SAML SSO ---
     scim_store = ScimStore(persistence=persistence)
@@ -450,6 +470,7 @@ def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComp
         catalog=catalog,
         api_key_service=api_key_service,
         oidc_service=oidc_service,
+        principal_resolver=principal_resolver,
         scim_store=scim_store,
         saml_service=saml_service,
         policy_resolver=policy_resolver,
@@ -616,6 +637,11 @@ def build_starlette_app(app_config: AppConfig | None = None) -> Starlette:
     # Admin RBAC (runs after auth, checks role/scope on /admin/* paths)
     app.add_middleware(AdminRBACMiddleware, mode=app_config.auth_mode)
 
+    # Baseline tenant RBAC for the inference and model-list data plane. Added
+    # before AuthMiddleware so Starlette wraps it inside auth and a canonical
+    # principal is already attached when this executes.
+    app.add_middleware(TenantAuthorizationMiddleware)
+
     # Auth middleware (outermost — runs first on every request)
     app.add_middleware(
         AuthMiddleware,
@@ -626,6 +652,8 @@ def build_starlette_app(app_config: AppConfig | None = None) -> Starlette:
         # Refreshed here, before any handler reads the project or user config, so
         # /api/chat gets the same converged view the admin pages do.
         config_sync=config_sync,
+        principal_resolver=comp.principal_resolver,
+        require_canonical_principal=app_config.canonical_identity_required,
     )
 
     return app

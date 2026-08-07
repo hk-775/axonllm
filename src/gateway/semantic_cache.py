@@ -423,6 +423,11 @@ def is_cacheable(request: ChatCompletionRequest) -> tuple[bool, str]:
         # The value of a tool call is the side effect. Serving a cached one
         # would return a stale tool_use block the caller then acts on.
         return False, "tools"
+    if request.system:
+        # The system instruction governs the meaning and allowed shape of the
+        # answer. Embedding only the user text could otherwise reuse a response
+        # generated under a different system policy.
+        return False, "system_instruction"
     if request.temperature is not None and request.temperature > 0:
         # A caller asking for sampling asked for variety. Returning a fixed
         # answer silently overrides that.
@@ -433,6 +438,10 @@ def is_cacheable(request: ChatCompletionRequest) -> tuple[bool, str]:
     n = getattr(request, "n", None)
     if n is not None and n > 1:
         return False, "multiple_completions"
+
+    messages = request.messages or []
+    if len(messages) != 1 or messages[0].get("role") != "user":
+        return False, "conversation_context"
 
     prompt = last_user_text(request)
     if prompt is None:

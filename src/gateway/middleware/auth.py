@@ -21,6 +21,7 @@ from src.gateway.models import AuthMethod, RequestContext
 if TYPE_CHECKING:
     from src.gateway.auth.api_key_service import APIKeyService
     from src.gateway.auth.oidc_service import OIDCService
+    from src.gateway.auth.principal import PrincipalResolver
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +79,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
         mode: str = "ENFORCE",
         public_paths: frozenset[str] | None = None,
         config_sync: object | None = None,
+        principal_resolver: PrincipalResolver | None = None,
+        require_canonical_principal: bool = False,
     ):
         super().__init__(app)
         self.oidc_service = oidc_service
@@ -90,6 +93,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
         # config gate more than chat — the admin reads and /api/users need the
         # same converged view, and one refresh per request serves all of them.
         self.config_sync = config_sync
+        self.principal_resolver = principal_resolver
+        self.require_canonical_principal = require_canonical_principal
 
     async def dispatch(self, request: Request, call_next) -> Response:
         # Skip auth for public paths and static assets.
@@ -112,20 +117,54 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 scopes=[],
                 auth_method=AuthMethod.ANONYMOUS,
             )
+            request.state.principal = None
             return await call_next(request)
 
         context = None
 
-        # 1. ALB OIDC header
-        if self.oidc_service:
-            alb_token = request.headers.get("x-amzn-oidc-data")
-            if alb_token:
-                context = await self.oidc_service.validate_alb_jwt(alb_token)
+        # 1. ALB OIDC headers. Their presence is authoritative: an invalid or
+        # ambiguous ALB credential must not fall through to another auth method.
+        alb_tokens = request.headers.getlist("x-amzn-oidc-data")
+        alb_identities = request.headers.getlist("x-amzn-oidc-identity")
+        alb_auth_attempted = bool(alb_tokens or alb_identities)
+        authorization_headers = request.headers.getlist("authorization")
+        api_key_headers = request.headers.getlist("x-api-key")
+        header_auth_attempted = bool(
+            authorization_headers or api_key_headers
+        )
+        competing_credentials = (
+            (alb_auth_attempted and header_auth_attempted)
+            or (authorization_headers and api_key_headers)
+            or len(authorization_headers) > 1
+            or len(api_key_headers) > 1
+        )
+        if (
+            alb_auth_attempted
+            and not competing_credentials
+            and self.oidc_service
+            and len(alb_tokens) == 1
+            and len(alb_identities) == 1
+            and alb_tokens[0]
+            and alb_identities[0]
+        ):
+            context = await self.oidc_service.validate_alb_jwt(
+                alb_tokens[0],
+                expected_subject=alb_identities[0],
+            )
 
         # 2. Authorization: Bearer <token>
-        if context is None:
-            auth_header = request.headers.get("authorization")
-            if auth_header and auth_header.startswith("Bearer "):
+        if (
+            context is None
+            and not alb_auth_attempted
+            and not competing_credentials
+            and len(authorization_headers) == 1
+        ):
+            auth_header = authorization_headers[0]
+            if (
+                auth_header.startswith("Bearer ")
+                and auth_header[7:]
+                and auth_header == auth_header.strip()
+            ):
                 token = auth_header[7:]
                 if token.startswith("axon_"):
                     context = await self._authenticate_api_key(token)
@@ -133,9 +172,15 @@ class AuthMiddleware(BaseHTTPMiddleware):
                     context = await self.oidc_service.validate_oidc_jwt(token)
 
         # 3. X-Api-Key header
-        if context is None:
-            api_key_header = request.headers.get("x-api-key")
-            if api_key_header:
+        if (
+            context is None
+            and not alb_auth_attempted
+            and not competing_credentials
+            and not authorization_headers
+            and len(api_key_headers) == 1
+        ):
+            api_key_header = api_key_headers[0]
+            if api_key_header and api_key_header == api_key_header.strip():
                 context = await self._authenticate_api_key(api_key_header)
 
         # 4. No credentials — reject (or allow in LOG_ONLY mode)
@@ -159,7 +204,67 @@ class AuthMiddleware(BaseHTTPMiddleware):
                     auth_method=AuthMethod.ANONYMOUS,
                 )
 
+        principal = None
+        if context.auth_method is not AuthMethod.ANONYMOUS:
+            if self.principal_resolver is not None:
+                try:
+                    principal = await self.principal_resolver.resolve(context)
+                except Exception:
+                    logger.exception(
+                        "Canonical principal resolution is unavailable"
+                    )
+                    if self.mode == "ENFORCE":
+                        return JSONResponse(
+                            status_code=503,
+                            content={
+                                "error": {
+                                    "type": "authorization_error",
+                                    "message": (
+                                        "Canonical principal resolution is "
+                                        "temporarily unavailable."
+                                    ),
+                                    "code": "principal_resolver_unavailable",
+                                }
+                            },
+                        )
+                if principal is None:
+                    if self.mode == "ENFORCE":
+                        return JSONResponse(
+                            status_code=403,
+                            content={
+                                "error": {
+                                    "type": "authorization_error",
+                                    "message": (
+                                        "No active tenant membership exists for "
+                                        "this credential."
+                                    ),
+                                    "code": "tenant_membership_required",
+                                }
+                            },
+                        )
+                    logger.warning(
+                        "Canonical principal resolution failed user=%s tenant_hint=%s",
+                        context.user_id,
+                        context.tenant_id,
+                    )
+                else:
+                    from src.gateway.auth.principal import canonical_request_context
+
+                    context = canonical_request_context(context, principal)
+            elif self.require_canonical_principal:
+                return JSONResponse(
+                    status_code=503,
+                    content={
+                        "error": {
+                            "type": "configuration_error",
+                            "message": "Canonical principal resolution is unavailable.",
+                            "code": "principal_resolver_unavailable",
+                        }
+                    },
+                )
+
         request.state.context = context
+        request.state.principal = principal
 
         # Adopt any project or user config another instance wrote, before the
         # handler reads either. Both gate requests rather than decorate them — an
@@ -234,5 +339,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
             roles=["service"],
             scopes=key_record.scopes,
             auth_method=AuthMethod.API_KEY,
+            tenant_id=key_record.tenant_id,
             api_key_id=key_record.key_id,
+            issuer="urn:axonllm:api-key",
+            subject=key_record.key_id,
         )

@@ -1,0 +1,5 @@
+# Verified false positives: README curl examples use shell-variable placeholders.
+af424e91d36ce51815ad086469d5cbe71a3dcbec:README.md:curl-auth-header:676
+598f81be63ac42266641dba6ec2f58721b9ff610:README.md:curl-auth-header:157
+598f81be63ac42266641dba6ec2f58721b9ff610:README.md:curl-auth-header:162
+3feabd7a93073762a1b2968861649dee129b1ae4:README.md:curl-auth-header:109

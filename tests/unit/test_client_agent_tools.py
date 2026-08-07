@@ -63,6 +63,36 @@ def _collect(agen):
 
 
 class TestRequestSide:
+    def test_sampling_and_system_fields_reach_the_pipeline(self):
+        gw = _CapturingGateway()
+        ca = ClientAgent(gw)
+        asyncio.run(ca.chat(
+            "m",
+            [{"role": "user", "content": "hi"}],
+            top_p=0.8,
+            stop="DONE",
+            system="Be concise.",
+        ))
+        request = gw.requests[-1]
+        assert request["top_p"] == 0.8
+        assert request["stop"] == "DONE"
+        assert request["system"] == "Be concise."
+
+    def test_sampling_and_system_fields_reach_streaming_pipeline(self):
+        gw = _CapturingGateway(stream_chunks=[])
+        ca = ClientAgent(gw)
+        _collect(ca.chat_stream(
+            "m",
+            [{"role": "user", "content": "hi"}],
+            top_p=0.8,
+            stop=["DONE"],
+            system="Be concise.",
+        ))
+        request = gw.requests[-1]
+        assert request["top_p"] == 0.8
+        assert request["stop"] == ["DONE"]
+        assert request["system"] == "Be concise."
+
     def test_tools_and_choice_reach_the_pipeline(self):
         gw = _CapturingGateway()
         ca = ClientAgent(gw)

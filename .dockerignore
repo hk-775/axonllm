@@ -1,11 +1,96 @@
-.git
-.hypothesis
-.pytest_cache
-.vscode
-.kiro
+# Secret-bearing local configuration. Keep distributable examples in context.
+**/.env
+**/.env.*
+**/.envrc
+!**/.env.example
+!**/.env.sample
+!**/.env.template
+!**/.env.*.example
+!**/.env.*.sample
+!**/.env.*.template
+config/providers.yaml
+**/.bedrock_agentcore*
+**/.aws
+**/.ssh
+**/.netrc
+**/.npmrc
+**/.pypirc
+**/*.key
+**/*.p12
+**/*.pfx
+**/*.pem
+
+# Virtual environments and Python-generated state.
+**/.venv
+**/venv
+**/env
+**/.direnv
+**/.tox
+**/.nox
+**/__pycache__
+**/*.pyc
+**/*.pyo
+**/*.pyd
+**/*.egg-info
+**/.eggs
+
+# Test, analysis, and coverage caches.
+**/.pytest_cache
+**/.hypothesis
+**/.mypy_cache
+**/.ruff_cache
+**/.pyre
+**/.pytype
+**/.coverage
+**/.coverage.*
+**/coverage.xml
+**/htmlcov
+**/junit.xml
+**/test-results
+
+# Infrastructure output and staged deployment assets.
+**/cdk.out
+**/.cdk.staging
+**/cdk.context.json
+**/.aws-sam
+**/samconfig.toml
+
+# Version-control and editor metadata.
+**/.git
+**/.gitignore
+**/.gitattributes
+**/.gitmodules
+**/.idea
+**/.vscode
+**/.fleet
+**/.kiro
+**/*.iml
+**/*.swp
+**/*.swo
+**/*~
+
+# Local build output, package caches, logs, and runtime state.
+**/build
+**/dist
+**/wheels
+**/node_modules
+**/.cache
+**/.parcel-cache
+**/.next
+**/.nuxt
+**/target
+**/*.log
+**/*.pid
+**/*.tmp
+**/*.bak
+**/*.db
+**/*.sqlite
+**/*.sqlite3
+**/.DS_Store
+**/Thumbs.db
+
+# Repository content not copied into the runtime image.
 tests
-__pycache__
-*.pyc
 infra/
 # Anchored to the build root, so the line above does NOT cover site/infra —
 # verified, not assumed. The gateway serves site/ (see COPY in the Dockerfile),
