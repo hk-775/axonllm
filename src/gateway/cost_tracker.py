@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
 from collections import defaultdict
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
@@ -40,6 +42,23 @@ class CostTracker:
 
     MAX_RECORDS = 100_000
 
+    # How long a fleet-wide usage refresh is reused before the next reader pays
+    # for another one.
+    #
+    # Chosen against the dashboard's own behaviour, not picked round: the traces
+    # panel polls every 3s (see admin/static/index.html), so an uncached
+    # read-through would scan the usage table ~20 times a minute per open tab,
+    # forever. The refresh is a paged scan whose cost grows with total history —
+    # ~53 sequential 1MB round-trips at 100k records, about 1.4s — so
+    # per-request refreshing degrades into a dashboard that is slower the longer
+    # the gateway has run.
+    #
+    # A ceiling of one scan per 10s makes that cost independent of both poll rate
+    # and tab count, and 10s is already finer than the 3s panel can show a human
+    # anything meaningful about. Money does not depend on this window at all:
+    # ``fleet_spend`` reads the shared counter per call.
+    USAGE_SYNC_TTL_SECONDS = 10.0
+
     def __init__(
         self,
         pricing_config: dict[str, dict[str, TokenPricing]],
@@ -57,6 +76,48 @@ class CostTracker:
         self._budgets: dict[str, dict] = budgets or {}
         self._user_budgets: dict[str, dict] = {}
         self._persistence = persistence
+        # Monotonic timestamp of the last fleet-wide usage refresh, and the
+        # in-flight refresh if any. Negative infinity rather than 0 so the first
+        # read always refreshes: time.monotonic() has an arbitrary origin and can
+        # legitimately be near 0 early in the process.
+        self._last_usage_sync = float("-inf")
+        self._usage_sync_task: asyncio.Task | None = None
+
+    async def synced_records(self) -> list[UsageRecord]:
+        """The record list, refreshed fleet-wide at most once per TTL.
+
+        Lives here rather than on ``AdminAPI`` because it has two callers now —
+        the admin aggregates and ``GET /api/users`` — and they must share one
+        window and one in-flight scan. Two copies of this logic would mean two
+        clocks, so the chat selector and the dashboard could refresh on different
+        beats and disagree about who exists, and a burst across both would issue
+        two scans where one would do.
+
+        The clock advances only on a refresh that actually happened, so a
+        persistence outage retries on the next read rather than serving
+        single-instance numbers for a full window after the store recovered.
+
+        Concurrent callers share one scan: the TTL check alone cannot bound
+        anything, because it straddles an await and every overlapping request
+        passes it before the first one finishes.
+        """
+        now = time.monotonic()
+        if now - self._last_usage_sync < self.USAGE_SYNC_TTL_SECONDS:
+            return self._records
+
+        if self._usage_sync_task is None or self._usage_sync_task.done():
+            self._usage_sync_task = asyncio.create_task(self.sync_records_from_store())
+        try:
+            synced = await asyncio.shield(self._usage_sync_task)
+        except Exception:
+            # A refresh that raised must not fail the caller's page — the local
+            # records are still a truthful answer for this instance, which is what
+            # these endpoints returned before any of this existed.
+            logger.warning("Fleet-wide usage refresh failed", exc_info=True)
+            synced = False
+        if synced:
+            self._last_usage_sync = now
+        return self._records
 
     # ------------------------------------------------------------------
     # Budget / project registration

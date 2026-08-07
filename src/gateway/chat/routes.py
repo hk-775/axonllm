@@ -80,7 +80,7 @@ class ChatAPI:
     async def list_users(self, request: Request) -> JSONResponse:
         """Return available user IDs for the user selector."""
         try:
-            users = self.client_agent.get_available_users()
+            users = await self.client_agent.get_available_users()
             return JSONResponse(users)
         except Exception:
             return JSONResponse(

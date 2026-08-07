@@ -253,11 +253,17 @@ class TestTheSyncIsRateLimited:
         assert store.scans == 1, f"expected one scan inside the TTL, got {store.scans}"
 
     def test_the_window_expiring_allows_another_scan(self):
-        """Drives the clock by moving the recorded timestamp, not by sleeping."""
+        """Drives the clock by moving the recorded timestamp, not by sleeping.
+
+        The clock lives on the tracker rather than the admin API because
+        ``GET /api/users`` needs the same window; see
+        ``CostTracker.synced_records``.
+        """
         store = SharedStore()
-        api = _admin(_tracker(store), store)
+        tracker = _tracker(store)
+        api = _admin(tracker, store)
         _run(api.overview(None))
-        api._last_usage_sync -= api.USAGE_SYNC_TTL_SECONDS + 1
+        tracker._last_usage_sync -= tracker.USAGE_SYNC_TTL_SECONDS + 1
         _run(api.overview(None))
         assert store.scans == 2
 
@@ -304,8 +310,9 @@ class TestTheSyncIsRateLimited:
         one an operator is most likely to be looking at after a deploy.
         """
         store = SharedStore()
-        api = _admin(_tracker(store), store)
-        assert api._last_usage_sync == float("-inf")
+        tracker = _tracker(store)
+        api = _admin(tracker, store)
+        assert tracker._last_usage_sync == float("-inf")
         _run(api.overview(None))
         assert store.scans == 1
 
