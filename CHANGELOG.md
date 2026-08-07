@@ -30,6 +30,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Budgets set through the admin API stopped being enforced after a restart.**
+  `PUT /admin/users/{id}/budget` and `POST`/`PUT /admin/projects/{id}` write the
+  limit to DynamoDB, and the next boot read it back into the `projects` and
+  `user_configs` dicts — but the limits that `check_budget` and
+  `check_user_budget` consult live in `CostTracker._budgets` / `._user_budgets`,
+  and the one `QuotaEnforcer` resolves lives in the policy hierarchy's nodes.
+  None of those is a dict a `.update()` reaches. `_apply_seed_data` registered
+  seeded entities with all three; the persisted path registered nothing, so a
+  limit configured through the API was displayed by the dashboard, returned by
+  `GET /admin/users/{id}`, and checked by nothing:
+
+  ```
+  after restart, budget: {'budget_limit': None, 'alert_threshold': None}
+  alice has spent $500 against a $5 cap -> over_budget=False
+  ```
+
+  Worse than a limit that was never set, since the operator has evidence it is
+  there. Alert thresholds were lost the same way, removing the earlier warning
+  too. Now `_register_persisted_budgets` arms the same three places for loaded
+  projects and users as the seed path does, so a limit behaves identically
+  whether it arrived from `demo_seed.yaml` or the API. Two deliberate
+  asymmetries: a project with no limit is not registered (registering it would
+  turn "unlimited" into a policy node carrying no limit), and where a real
+  org → team → project hierarchy already has a node for the project, the flat
+  fallback node is not written over it — the project's own limit is already
+  enforced through `CostTracker`, and replacing a tree node would discard a
+  tighter parent cap and *raise* the effective limit.
 - **Admin reads reported one task's numbers as the whole fleet's.** Every admin
   aggregate summed `CostTracker._records` — an in-memory list hydrated from
   DynamoDB once at startup and afterwards grown only by requests that instance
