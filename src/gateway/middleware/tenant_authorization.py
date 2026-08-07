@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
 from src.gateway.auth.authorization import Action, ResourceRef, authorize
+from src.gateway.auth.project_repository import ProjectStoreUnavailable
+
+if TYPE_CHECKING:
+    from src.gateway.auth.project_repository import ProjectResolver
 
 
 DATA_PLANE_ACTIONS: dict[tuple[str, str], Action] = {
@@ -22,6 +28,17 @@ _CANONICAL_API_PREFIXES = ("/api/", "/v1/")
 
 class TenantAuthorizationMiddleware(BaseHTTPMiddleware):
     """Enforce the baseline RBAC floor after canonical authentication."""
+
+    def __init__(
+        self,
+        app,
+        *,
+        project_resolver: ProjectResolver | None = None,
+        require_tenant_project: bool = False,
+    ) -> None:
+        super().__init__(app)
+        self.project_resolver = project_resolver
+        self.require_tenant_project = require_tenant_project
 
     async def dispatch(self, request: Request, call_next) -> Response:
         # Legacy migration mode has no Principal. AuthMiddleware is responsible
@@ -67,14 +84,67 @@ class TenantAuthorizationMiddleware(BaseHTTPMiddleware):
                     }
                 },
             )
+        project = None
+        if self.require_tenant_project:
+            if self.project_resolver is None:
+                return JSONResponse(
+                    status_code=503,
+                    content={
+                        "error": {
+                            "type": "authorization_error",
+                            "message": (
+                                "Tenant project ownership is temporarily "
+                                "unavailable."
+                            ),
+                            "code": "project_resolver_unavailable",
+                        }
+                    },
+                )
+            try:
+                project = await self.project_resolver.resolve(
+                    principal.tenant_id,
+                    project_id,
+                )
+            except ProjectStoreUnavailable:
+                return JSONResponse(
+                    status_code=503,
+                    content={
+                        "error": {
+                            "type": "authorization_error",
+                            "message": (
+                                "Tenant project ownership is temporarily "
+                                "unavailable."
+                            ),
+                            "code": "project_resolver_unavailable",
+                        }
+                    },
+                )
+            if project is None:
+                return JSONResponse(
+                    status_code=404,
+                    content={
+                        "error": {
+                            "type": "authorization_error",
+                            "message": "The requested resource was not found.",
+                            "code": "resource_not_found",
+                        }
+                    },
+                )
+
         resource = ResourceRef(
             resource_type="project",
             resource_id=project_id,
-            tenant_id=principal.tenant_id,
+            tenant_id=(
+                project.tenant_id
+                if project is not None
+                else principal.tenant_id
+            ),
             project_id=project_id,
         )
         decision = authorize(principal, action, resource)
         if decision.allowed:
+            if project is not None:
+                request.state.context.authorized_project = project
             request.state.authorization_decision = decision
             return await call_next(request)
 

@@ -223,6 +223,9 @@ _POLAR_WORDS = frozenset().union(
 
 # (request model, prompt). See the comment on the key in put().
 _EntryKey = tuple[str, str]
+# Tenant and project form the authorization boundary. ``tenant_id`` is optional
+# only for legacy single-tenant callers.
+_BucketKey = tuple[str | None, str]
 
 
 @dataclass
@@ -494,7 +497,7 @@ def conversation_depth(request: ChatCompletionRequest) -> int:
 
 
 class SemanticCache:
-    """Per-project semantic response cache.
+    """Per-tenant, per-project semantic response cache.
 
     Consulted only after :class:`CacheManager` misses, so a byte-identical
     repeat never pays for an embedding call.
@@ -510,10 +513,12 @@ class SemanticCache:
         self._embedder = embedder
         self._threshold = similarity_threshold
         self._max_entries = max_entries_per_project
-        # project_id -> prompt-keyed entries. Keyed by prompt so the same
-        # question asked twice updates one entry instead of accumulating
-        # duplicates that then compete in the scan.
-        self._entries: dict[str, OrderedDict[_EntryKey, SemanticCacheEntry]] = {}
+        # (tenant_id, project_id) -> prompt-keyed entries. Keyed by prompt so
+        # the same question asked twice updates one entry instead of
+        # accumulating duplicates that then compete in the scan.
+        self._entries: dict[
+            _BucketKey, OrderedDict[_EntryKey, SemanticCacheEntry]
+        ] = {}
         self.stats = SemanticCacheStats()
         # One-slot memo of the most recent (prompt, embedding). A miss is
         # normally followed by a put of the same prompt, and embedding it twice
@@ -550,6 +555,7 @@ class SemanticCache:
         request: ChatCompletionRequest,
         project_id: str,
         threshold: float | None = None,
+        tenant_id: str | None = None,
     ) -> ChatCompletionResponse | None:
         """Closest acceptable cached response, or None.
 
@@ -571,7 +577,8 @@ class SemanticCache:
             self.stats.skipped += 1
             return None
 
-        bucket = self._entries.get(project_id)
+        bucket_key = (tenant_id, project_id)
+        bucket = self._entries.get(bucket_key)
         if not bucket:
             # No entries yet: a miss, but do not spend an embedding call to
             # discover that. Counted as a miss rather than a skip because the
@@ -591,7 +598,7 @@ class SemanticCache:
             self.stats.misses += 1
             return None
 
-        self._purge_expired(project_id)
+        self._purge_expired(project_id, tenant_id)
 
         match = self._best_match(
             bucket,
@@ -608,7 +615,9 @@ class SemanticCache:
         bucket.move_to_end(key)
         self.stats.hits += 1
         logger.info(
-            "semantic cache hit: project=%s similarity=%.4f cached_prompt=%r",
+            "semantic cache hit: tenant=%s project=%s similarity=%.4f "
+            "cached_prompt=%r",
+            tenant_id,
             project_id,
             score,
             entry.prompt[:80],
@@ -621,6 +630,7 @@ class SemanticCache:
         project_id: str,
         response: ChatCompletionResponse,
         ttl_seconds: int,
+        tenant_id: str | None = None,
     ) -> None:
         """Store a response for future semantic lookups. Never raises.
 
@@ -642,7 +652,7 @@ class SemanticCache:
         if embedding is None:
             return
 
-        bucket = self._entries.setdefault(project_id, OrderedDict())
+        bucket = self._entries.setdefault((tenant_id, project_id), OrderedDict())
         # Keyed on (model, prompt), not prompt alone: the same question asked of
         # two models is two answers, and a prompt-only key would make the second
         # overwrite the first — so a project routing between models would keep
@@ -661,25 +671,57 @@ class SemanticCache:
             bucket.popitem(last=False)
             self.stats.evictions += 1
 
-    def invalidate(self, project_id: str | None = None) -> int:
-        """Drop entries for one project, or all of them. Returns the count.
+    def invalidate(
+        self,
+        project_id: str | None = None,
+        tenant_id: str | None = None,
+    ) -> int:
+        """Drop entries for one tenant/project scope, one project, or all.
 
         Exists because a semantic cache has no natural way to know its answers
         went stale — the underlying documents or prompts change with nothing
         observable in the request. An operator needs a way to clear it that
         does not involve a restart.
+
+        A project-only call preserves the legacy admin behavior by clearing
+        every tenant namespace with that project ID. Canonical tenant-aware
+        invalidation must provide both identifiers.
         """
+        if tenant_id is not None and project_id is None:
+            raise ValueError("project_id is required when tenant_id is provided")
         if project_id is None:
             removed = sum(len(b) for b in self._entries.values())
             self._entries.clear()
             return removed
-        bucket = self._entries.pop(project_id, None)
-        return len(bucket) if bucket else 0
+        if tenant_id is not None:
+            bucket = self._entries.pop((tenant_id, project_id), None)
+            return len(bucket) if bucket else 0
 
-    def entry_count(self, project_id: str | None = None) -> int:
+        matching = [
+            key for key in self._entries
+            if key[1] == project_id
+        ]
+        removed = sum(len(self._entries[key]) for key in matching)
+        for key in matching:
+            del self._entries[key]
+        return removed
+
+    def entry_count(
+        self,
+        project_id: str | None = None,
+        tenant_id: str | None = None,
+    ) -> int:
+        if tenant_id is not None and project_id is None:
+            raise ValueError("project_id is required when tenant_id is provided")
         if project_id is None:
             return sum(len(b) for b in self._entries.values())
-        return len(self._entries.get(project_id, ()))
+        if tenant_id is not None:
+            return len(self._entries.get((tenant_id, project_id), ()))
+        return sum(
+            len(bucket)
+            for key, bucket in self._entries.items()
+            if key[1] == project_id
+        )
 
     # ------------------------------------------------------------------
     # Internals
@@ -731,8 +773,12 @@ class SemanticCache:
 
         return best
 
-    def _purge_expired(self, project_id: str) -> None:
-        bucket = self._entries.get(project_id)
+    def _purge_expired(
+        self,
+        project_id: str,
+        tenant_id: str | None = None,
+    ) -> None:
+        bucket = self._entries.get((tenant_id, project_id))
         if not bucket:
             return
         now = datetime.now(timezone.utc)

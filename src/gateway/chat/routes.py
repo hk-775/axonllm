@@ -32,26 +32,42 @@ if TYPE_CHECKING:
 _STATIC_DIR = pathlib.Path(__file__).resolve().parent / "static"
 
 
-def _identity_from_context(request: Request) -> tuple[str | None, str | None]:
-    """Resolve the trustworthy (user_id, project_id) for attribution.
+def _identity_from_context(
+    request: Request,
+) -> tuple[str | None, str | None, str | None]:
+    """Resolve trustworthy user, project, and tenant attribution.
 
     Identity comes from the authenticated request context established by
     AuthMiddleware — never from the request body, which a caller can forge.
     For an authenticated request (API key or OIDC) we use the context's
-    user_id/project_id so quota/budget/model-access is attributed to the real
-    tenant. In an ANONYMOUS context (local dev / LOG_ONLY mode) we return
-    (None, None) so ClientAgent falls back to its configured defaults and the
-    dev chat UI keeps working without credentials.
+    user_id/project_id/tenant_id. In an ANONYMOUS context (local dev / LOG_ONLY
+    mode) we return three ``None`` values so ClientAgent falls back to its
+    configured defaults and the dev chat UI keeps working without credentials.
     """
     ctx = getattr(request.state, "context", None)
     if ctx is None:
-        return None, None
+        return None, None, None
     # AuthMethod.ANONYMOUS => unauthenticated (dev/LOG_ONLY); don't trust it for attribution.
     if getattr(ctx.auth_method, "value", None) == "anonymous":
-        return None, None
+        return None, None, None
     user_id = ctx.user_id or None
     project_id = ctx.project_id or None
-    return user_id, project_id
+    tenant_id = getattr(ctx, "tenant_id", None) or None
+    return user_id, project_id, tenant_id
+
+
+def _authorized_project(request: Request):
+    """Return the project object resolved by tenant authorization, if any."""
+    context = getattr(request.state, "context", None)
+    return getattr(context, "authorized_project", None)
+
+
+def _allow_legacy_project_lookup(request: Request) -> bool:
+    """Allow the global project map only outside canonical principal mode."""
+    return (
+        getattr(request.state, "principal", None) is None
+        and _authorized_project(request) is None
+    )
 
 
 class ChatAPI:
@@ -81,10 +97,16 @@ class ChatAPI:
         try:
             # Access-filtered model list is scoped to the authenticated identity,
             # not query params (which a caller can set to any project/user).
-            user_id, project_id = _identity_from_context(request)
-            models = await self.client_agent.list_models(
-                project_id=project_id, user_id=user_id,
-            )
+            user_id, project_id, tenant_id = _identity_from_context(request)
+            kwargs = {"project_id": project_id, "user_id": user_id}
+            if tenant_id is not None:
+                kwargs["tenant_id"] = tenant_id
+            project = _authorized_project(request)
+            if project is not None:
+                kwargs["authorized_project"] = project
+            elif _allow_legacy_project_lookup(request):
+                kwargs["allow_legacy_project_lookup"] = True
+            models = await self.client_agent.list_models(**kwargs)
             return JSONResponse(models)
         except Exception:
             return JSONResponse(
@@ -139,12 +161,18 @@ class ChatAPI:
         # Identity for attribution comes from the authenticated context, NOT the
         # request body — the body's user_id/project_id are ignored so a caller
         # cannot impersonate another tenant's quota/budget/model-access context.
-        user_id, project_id = _identity_from_context(request)
+        user_id, project_id, tenant_id = _identity_from_context(request)
+        if tenant_id is not None:
+            tool_options["tenant_id"] = tenant_id
+        if _allow_legacy_project_lookup(request):
+            tool_options["allow_legacy_project_lookup"] = True
         # Extract smart_routing flag from context
         context = body.get("context", {})
         smart_routing = context.get("smart_routing", False) if isinstance(context, dict) else False
 
         try:
+            if (project := _authorized_project(request)) is not None:
+                tool_options["authorized_project"] = project
             response = await self.client_agent.chat(
                 model, messages, temperature=temperature, max_tokens=max_tokens,
                 top_p=top_p, stop=stop, system=system,
@@ -211,7 +239,11 @@ class ChatAPI:
         ctx = body.get("context", {})
         smart_routing = ctx.get("smart_routing", False) if isinstance(ctx, dict) else False
         # Identity for attribution comes from the authenticated context, not the body.
-        user_id, project_id = _identity_from_context(request)
+        user_id, project_id, tenant_id = _identity_from_context(request)
+        if tenant_id is not None:
+            tool_options["tenant_id"] = tenant_id
+        if _allow_legacy_project_lookup(request):
+            tool_options["allow_legacy_project_lookup"] = True
 
         # Collect the first response to check for errors / rate limit headers
         # before starting the SSE stream
@@ -219,6 +251,8 @@ class ChatAPI:
 
         # Try to get the stream result
         try:
+            if (project := _authorized_project(request)) is not None:
+                tool_options["authorized_project"] = project
             result = self.client_agent.chat_stream(
                 model, messages, temperature=temperature, max_tokens=max_tokens,
                 top_p=top_p, stop=stop, system=system,

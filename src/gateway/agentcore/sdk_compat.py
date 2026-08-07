@@ -21,6 +21,11 @@ except ModuleNotFoundError as exc:
 
         def __init__(self, *args: Any, **kwargs: Any) -> None:
             self.handlers: dict[str, Callable[..., Any]] = {}
+            self.lifespan = kwargs.get("lifespan")
+            self.routes: dict[str, Callable[..., Any] | None] = {
+                "/invocations": None,
+                "/ping": None,
+            }
 
         def entrypoint(
             self,
@@ -28,6 +33,16 @@ except ModuleNotFoundError as exc:
         ) -> Callable[..., Any]:
             self.handlers["main"] = function
             return function
+
+        def add_route(
+            self,
+            path: str,
+            route: Callable[..., Any],
+            methods: list[str] | None = None,
+            **kwargs: Any,
+        ) -> None:
+            del methods, kwargs
+            self.routes[path] = route
 
         def run(self, *args: Any, **kwargs: Any) -> NoReturn:
             raise RuntimeError("bedrock-agentcore is required to run the AgentCore entrypoint") from _SDK_IMPORT_ERROR

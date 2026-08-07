@@ -174,6 +174,28 @@ def _context(user_id: str) -> dict:
     return {"project_id": PROJECT_ID, "user_id": user_id}
 
 
+def _tenant_context(
+    user_id: str,
+    tenant_id: str,
+    *,
+    semantic_cache_enabled: bool = False,
+) -> dict:
+    project = Project(
+        project_id=PROJECT_ID,
+        tenant_id=tenant_id,
+        name=f"Cache Privacy {tenant_id}",
+        cache_enabled=True,
+        cache_ttl_seconds=300,
+        semantic_cache_enabled=semantic_cache_enabled,
+    )
+    return {
+        "project_id": PROJECT_ID,
+        "tenant_id": tenant_id,
+        "user_id": user_id,
+        "authorized_project": project,
+    }
+
+
 def _spy_exact_cache(cache: CacheManager) -> None:
     cache.get = AsyncMock(wraps=cache.get)
     cache.put = AsyncMock(wraps=cache.put)
@@ -415,6 +437,60 @@ async def test_ordinary_buffered_non_pii_request_still_uses_exact_cache():
     assert second["choices"][0]["message"]["content"] == "live response 1"
     assert len(router.requests) == 1
     assert len(exact._cache) == 1
+
+
+async def test_exact_cache_isolated_for_same_project_id_across_tenants():
+    agent, router, _ = _make_agent()
+    data = _request("Explain the refund policy")
+    tenant_a = _tenant_context("user-a", "tenant-a")
+    tenant_b = _tenant_context("user-b", "tenant-b")
+
+    first_a = await agent.handle_chat_completion(data, tenant_a)
+    first_b = await agent.handle_chat_completion(data, tenant_b)
+    second_a = await agent.handle_chat_completion(data, tenant_a)
+    second_b = await agent.handle_chat_completion(data, tenant_b)
+
+    assert first_a["choices"][0]["message"]["content"] == "live response 1"
+    assert first_b["choices"][0]["message"]["content"] == "live response 2"
+    assert second_a["choices"][0]["message"]["content"] == "live response 1"
+    assert second_b["choices"][0]["message"]["content"] == "live response 2"
+    assert second_a["is_cached"] is True
+    assert second_b["is_cached"] is True
+    assert len(router.requests) == 2
+
+
+async def test_semantic_cache_isolated_for_same_project_id_across_tenants():
+    semantic = SemanticCache(_Embedder())
+    agent, router, _ = _make_agent(semantic_cache=semantic)
+    tenant_a = _tenant_context(
+        "user-a",
+        "tenant-a",
+        semantic_cache_enabled=True,
+    )
+    tenant_b = _tenant_context(
+        "user-b",
+        "tenant-b",
+        semantic_cache_enabled=True,
+    )
+
+    first_a = await agent.handle_chat_completion(
+        _request("Explain the refund policy for annual plans"),
+        tenant_a,
+    )
+    first_b = await agent.handle_chat_completion(
+        _request("Describe the refund policy for annual plans"),
+        tenant_b,
+    )
+    second_b = await agent.handle_chat_completion(
+        _request("Tell me about the refund policy for annual plans"),
+        tenant_b,
+    )
+
+    assert first_a["choices"][0]["message"]["content"] == "live response 1"
+    assert first_b["choices"][0]["message"]["content"] == "live response 2"
+    assert second_b["choices"][0]["message"]["content"] == "live response 2"
+    assert second_b["cache_type"] == "semantic"
+    assert len(router.requests) == 2
 
 
 async def test_cache_hit_rechecks_current_output_policy_and_is_audited():

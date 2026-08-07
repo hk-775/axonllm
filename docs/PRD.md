@@ -215,9 +215,11 @@ Stakeholders who need visibility into LLM spend and assurance that usage complie
 | FR-AC2 | **User model access lists** | Individual users have configurable allowed model lists. The effective allowed set is the intersection of project and user lists when both are set. |
 | FR-AC3 | **JWT authentication** | Requests carry OIDC JWTs, verified in `auth/oidc_service.py` against the issuer's JWKS using `python-jose`. Claims are extracted into a RequestContext (user_id, project_id, roles, scopes). Verification is **fail-closed**: if `python-jose` is absent, decoding is refused rather than falling back to an unverified read of the token. |
 | FR-AC4 | **Cedar policy evaluation** | Fine-grained authorization via Cedar policies evaluated against (principal, action, resource) tuples. Policies support ENFORCE and LOG_ONLY modes. |
-| FR-AC5 | **API keys** | `auth/api_key_service.py` issues project-scoped `axon_`-prefixed keys, stored as SHA-256 hashes; the plaintext is returned once at issue time and never persisted. Supports issue, validate, revoke, rotate, with a 300s validation cache. With persistence disabled, keys live in an in-memory store so local dev can still list and revoke them. **Scopes gate `/admin/*` only** — see FR-AC6. |
-| FR-AC6 | **Scope enforcement is control-plane only** | Scopes on the request context are checked by admin RBAC for `/admin/*`. Nothing on `/v1/*` or `/api/chat` consults them, so a key issued `["models:read"]` — or `[]` — can still spend money on the data plane. What bounds a key there is its project's `allowed_models` and budget. Keys also default to **no expiry**, and `rotate_key` carries the old `expires_at` through, so revocation is the only reliable stop. Reported as a WARN by `/admin/production-checklist` and documented in `SECURITY.md`. |
+| FR-AC5 | **API keys** | `auth/api_key_service.py` issues project-scoped `axon_`-prefixed keys, stored as SHA-256 hashes; the plaintext is returned once and never persisted. Tenant-qualified production issuance conditionally creates the primary row, global hash lookup, and tenant/project edge in one DynamoDB transaction. Revocation atomically changes key state and advances a per-tenant epoch used to evict replica caches. Supports validate and non-atomic revoke-then-create rotation, with a 300s validation cache and five-second epoch polling. With persistence disabled, keys live in an in-memory store for local development. |
+| FR-AC6 | **Scope enforcement depends on identity mode** | In legacy mode, request-context scopes gate `/admin/*`; `/v1/*` and `/api/chat` do not consult them, so project model and budget controls are the effective data-plane boundary. In canonical mode, a key must resolve to a server-held `service` principal and its stored action scopes gate mapped data-plane actions. Key metadata is not automatically converted into that principal. Keys default to **no expiry**, and rotation carries the old `expires_at` through. Reported by `/admin/production-checklist` and documented in `SECURITY.md`. |
 | FR-AC7 | **Enterprise identity** | SAML 2.0 SSO (`auth/saml_service.py`, assertion signature verification via `signxml`) and SCIM 2.0 user/group provisioning (`auth/scim_service.py`) are exposed at `/saml/*` and `/scim/v2/*`. |
+| FR-AC8 | **Canonical tenant identity** | With `AXON_REQUIRE_CANONICAL_IDENTITY=true`, verified credential hints resolve through strongly consistent DynamoDB reads to an active server-held principal. Credential roles, scopes, project grants, principal id, and authorization version are replaced rather than merged. Missing, inactive, ambiguous, or malformed authority fails closed. |
+| FR-AC9 | **Authoritative project ownership** | Canonical HTTP and AgentCore requests strongly resolve `PK=TENANT#{tenant_id}`, `SK=PROJECT#{project_id}` before RBAC. Missing ownership is concealed as 404; an unavailable or malformed store returns 503. The exact resolved project is propagated through model listing and inference so colliding project ids cannot select another tenant's configuration. |
 
 ### 6.4.1 Policy Hierarchy and Quotas
 
@@ -243,10 +245,10 @@ Stakeholders who need visibility into LLM spend and assurance that usage complie
 
 | ID | Requirement | Details |
 |----|-------------|---------|
-| FR-CA1 | **Response caching** | Per-project configurable response cache. Semantically identical requests within the TTL (default 300s) are served from cache with zero additional provider cost. |
-| FR-CA2 | **Deterministic cache keys** | Cache keys are SHA-256 hashes of: model, messages, temperature, max_tokens, top_p, stop, tools, tool_choice, and project_id. Ensures identical requests produce identical keys regardless of field order. The tool list is part of the key because the same prompt sent with tools can return a tool call and sent without them returns prose — a shared key would serve a cached tool-free reply to a request that needs a call. |
+| FR-CA1 | **Response caching** | Per-project configurable response cache, isolated by tenant and project. Semantically identical requests within the TTL (default 300s) are served from cache with zero additional provider cost. |
+| FR-CA2 | **Deterministic cache keys** | Cache keys are SHA-256 hashes of: model, messages, temperature, max_tokens, top_p, stop, tools, tool_choice, tenant_id, and project_id. Ensures identical requests produce identical keys regardless of field order while the same project id in another tenant always misses. The tool list is part of the key because the same prompt sent with tools can return a tool call and sent without them returns prose. |
 | FR-CA3 | **Provider-level prompt caching** | When enabled per project, system prompts are annotated with `cache_control: ephemeral` blocks for Anthropic/Bedrock providers, reducing cost and latency on repeated system prompts. |
-| FR-CA4 | **Semantic cache** | A second lookup, tried only after the exact key in FR-CA2 misses: embed the prompt, compare by cosine similarity against the embeddings of recent cached entries, and serve the stored answer above a threshold. This is what catches "what is the refund policy?" against "what's our refund policy?", which FR-CA2 cannot — those are different SHA-256 keys. Per-project via `semantic_cache_enabled`. |
+| FR-CA4 | **Semantic cache** | A second lookup, tried only after the exact key in FR-CA2 misses: embed the prompt, compare by cosine similarity against recent entries in the same `(tenant_id, project_id)` bucket, and serve the stored answer above a threshold. This catches "what is the refund policy?" against "what's our refund policy?" without allowing a same-named project in another tenant to participate. Per-project via `semantic_cache_enabled`. |
 | FR-CA5 | **Embedding backend** | `embeddings.py` defines a one-method protocol (`embed(text) -> vector`) with Bedrock Titan as the only backend today. A protocol rather than a direct call because it keeps the cache's tests off the network; Titan rather than sentence-transformers because `boto3` is already a dependency and the gateway already talks to Bedrock, whereas sentence-transformers pulls torch into an otherwise slim image. |
 | FR-CA6 | **Similarity threshold** | Default 0.90 cosine, overridable per project via `semantic_cache_threshold`. Chosen against a labelled corpus, for distance from the highest-scoring pair of genuinely *different* questions (0.7476) rather than from a round number. |
 | FR-CA7 | **False-hit guards** | Cosine similarity alone is not sufficient — two prompts differing only in a negation or a unit score above 0.95. Two guards run before a hit is served: a **literal-token check** (numbers, identifiers and quoted strings must match, so "retry 3 times" does not answer "retry 5 times"), and a **polar-axis check** over seven opposition axes plus a set of one-sided blocks, so a prompt and its inverse never share an answer. On the calibration corpus these took must-block from 24/26 to 26/26 while must-allow went from 6/19 to 17/19. |
@@ -279,7 +281,7 @@ Stakeholders who need visibility into LLM spend and assurance that usage complie
 | FR-AD7 | **Provider health** | Real-time per-provider health status (healthy/unhealthy). |
 | FR-AD8 | **API key management** | Issue, list, revoke and rotate keys. The plaintext appears once, in the issue response. |
 | FR-AD9 | **Audit and PII views** | Browse audit records, verify the hash chain, and inspect PII redaction activity. |
-| FR-AD10 | **Production readiness checklist** | `/admin/production-checklist` runs seven checks over the live configuration and reports PASS/WARN/FAIL, including the API-key caveat in FR-AC6. |
+| FR-AD10 | **Production readiness checklist** | `/admin/production-checklist` runs eight checks over the live configuration and reports PASS/WARN/FAIL, including canonical identity and the API-key caveat in FR-AC6. |
 | FR-AD11 | **Drift detection** | Catalogue drift compares `config/catalog.yaml` against `models.yaml`; pricing drift reports models configured without pricing (currently 6 of 49). |
 | FR-AD12 | **Runtime configuration surface** | What is *not* runtime-editable is provider credentials. Projects, users, models, Cedar policies, the policy hierarchy, quotas, regions, webhooks and guardrail rules all take effect without a restart. |
 
@@ -344,7 +346,7 @@ stored and no request is slowed.
 | ID | Requirement | Target |
 |----|-------------|--------|
 | NFR-S1 | Horizontal scaling | Runtime scaling must be validated only after readiness and distributed-control blockers are closed |
-| NFR-S2 | Per-instance and persisted state | Rate limits, quotas, health state, caches, and parts of audit/accounting coordination remain per-instance; persisted customer records are not comprehensively tenant-qualified |
+| NFR-S2 | Per-instance and persisted state | Rate limits, health state, response caches, and parts of audit/accounting coordination remain per-instance. Projects and API keys have tenant-qualified canonical storage; other persisted customer records are not comprehensively tenant-qualified |
 
 ### 7.4 Reliability
 
@@ -352,13 +354,13 @@ stored and no request is slowed.
 |----|-------------|--------|
 | NFR-R1 | Retry behavior | Jittered backoff (base 1s, doubling, each delay drawn from `[0.5·full, full]`) with max 3 retries on transient errors |
 | NFR-R2 | Fallback depth | Full fallback chain traversal before returning error to caller |
-| NFR-R3 | Graceful degradation | DynamoDB outage does not block request processing (fire-and-forget writes with warning logs) |
+| NFR-R3 | Mode-aware failure behavior | Non-authoritative telemetry writes may degrade with warning logs. Canonical principal/project reads, API-key lifecycle transactions, and AgentCore startup/readiness fail closed on DynamoDB outage |
 
 ### 7.5 Testability
 
 | ID | Requirement | Target |
 |----|-------------|--------|
-| NFR-T1 | Automated test coverage | 2,763 passing tests across unit, integration, end-to-end, and property-based suites |
+| NFR-T1 | Automated test coverage | 2,844 passing tests across unit, integration, end-to-end, and property-based suites |
 | NFR-T2 | Property-based tests | Hypothesis-driven validation of formal correctness properties (routing fairness, cost accuracy, cache determinism, retry behavior) |
 | NFR-T3 | Integration test scenarios | Automated test traffic covering: normal chat, multi-turn, rate limiting, budget enforcement, model access control, guardrail violations |
 
@@ -662,7 +664,7 @@ data: [DONE]
 | `GET` | `/admin/architecture` | Interactive architecture page |
 | `GET` | `/admin/pricing-drift` | Pricing coverage report |
 | `GET` | `/admin/catalog-drift` | Drift between `models.yaml`, `catalog.yaml` and observed traffic |
-| `GET` | `/admin/production-checklist` | Seven readiness checks |
+| `GET` | `/admin/production-checklist` | Eight readiness checks |
 | `GET` `DELETE` | `/admin/semantic-cache` | Semantic cache stats; invalidate |
 
 **API keys**
@@ -804,6 +806,7 @@ TokenPricing
 Project
   |- project_id: str
   |- name: str
+  |- tenant_id: str?                 # Required on canonical multi-tenant paths
   |- budget_limit: float?
   |- alert_threshold: float?
   |- allowed_models: list[str]?
@@ -849,6 +852,7 @@ APIKey                                 # Plaintext is never stored; hash only
   |- key_id: str
   |- key_hash: str                     # SHA-256 of the axon_ key
   |- project_id: str
+  |- tenant_id: str?                   # Tenant-qualified production namespace
   |- name: str
   |- scopes: list[str]                 # Control plane only — see FR-AC6
   |- created_by: str
@@ -892,11 +896,15 @@ Single-table design using composite keys:
 | Entity | PK | SK | Purpose |
 |--------|----|----|---------|
 | Usage Record | `USAGE#{request_id}` | `USAGE#{timestamp}` | Per-request cost and token tracking |
-| Project | `PROJECT#{project_id}` | `PROJECT` | Project configuration and membership |
+| Project (canonical) | `TENANT#{tenant_id}` | `PROJECT#{project_id}` | Tenant-owned project configuration used for authorization |
+| Project (legacy) | `PROJECT#{project_id}` | `PROJECT` | Migration-compatible unqualified project configuration |
 | User Config | `USER#{user_id}` | `CONFIG` | User budget and model access settings |
 | Feedback | `FEEDBACK#{request_id}` | `FEEDBACK#{timestamp}` | Per-request thumbs up/down |
-| API Key | `APIKEY#{key_id}` | `APIKEY` | Hashed key record with scopes, expiry, revocation |
-| API Key lookup | `APIKEY_HASH#{hash}` | `LOOKUP` | Reverse index, so authentication is a `get_item` rather than a scan |
+| API Key (tenant) | `TENANT#{tenant_id}#APIKEY#{key_id}` | `METADATA` | Tenant-qualified hashed key record with scopes, expiry, revocation |
+| API Key project edge | `TENANT#{tenant_id}#PROJECT#{project_id}` | `APIKEY#{key_id}` | Tenant/project key listing without a scan |
+| API Key (legacy) | `APIKEY#{key_id}` | `APIKEY` | Migration-compatible unqualified key row |
+| API Key project edge (legacy) | `PROJECT#{project_id}` | `APIKEY#{key_id}` | Migration-compatible unqualified project listing |
+| API Key lookup | `APIKEY_HASH#{hash}` | `LOOKUP` | Global secret-hash reverse index pointing to the tenant-qualified primary row |
 | Audit Record | `AUDIT#{project_id}` | `AUDIT#{timestamp}#{record_id}` | Hash-chain entries, ordered so the chain can be replayed and verified |
 | Policy Node | `POLICY_NODE#{node_id}` | `CONFIG` | One node of the org → BU → project → env hierarchy |
 | Policy Edge | `POLICY_NODE#{parent_id}` | `CHILD#{node_id}` | Parent-to-child edge, so a subtree loads without a scan |
@@ -905,7 +913,8 @@ Single-table design using composite keys:
 | SCIM Group | `SCIM#GROUP#{id}` | `SCIM_GROUP` | SCIM-provisioned group |
 | Event Destinations | `EVENT_DESTINATIONS` | `CONFIG` | The whole destination set in one item |
 | Region Topology | `REGION_TOPOLOGY` | `CONFIG` | The whole spoke topology in one item |
-| Revocation Epoch | `REVOCATION` | `EPOCH` | One counter bumped on every key revocation, polled by each instance so a revoked key stops working fleet-wide |
+| Revocation Epoch (tenant) | `TENANT#{tenant_id}` | `AUTHZ#EPOCH` | Counter advanced atomically with revocation and polled by each instance |
+| Revocation Epoch (legacy) | `REVOCATION` | `EPOCH` | Migration-compatible global counter for unqualified keys |
 | Spend Counter | `SPEND#{scope}#{id}` | `TOTAL` | Fleet-wide spend, so a budget limit is a limit across every instance rather than per instance |
 
 `EVENT_DESTINATIONS` and `REGION_TOPOLOGY` are deliberately single items holding
@@ -913,18 +922,21 @@ an entire set rather than a row per member: a row per destination cannot express
 *deletion* without a read-diff-write, which is how a repeated
 `POST /admin/webhooks` came to double-deliver every event before it was fixed.
 
-The last two exist because per-process state answers differently depending on
-which task the load balancer picked. Both are updated with an atomic `ADD` rather
-than a read-modify-write, and the spend counter's `ADD` returns the post-update
-total, so an instance learns the fleet figure from a write it was already making
-instead of paying for a read on the request path. `{scope}` is `quota` for the
-enforcing counter, `project`/`user` for the reported ones — separate keys because
-both are charged on the same request and one key would double every cost.
+Revocation epochs and spend counters exist because per-process state answers
+differently depending on which task the load balancer picked. Epoch updates use
+atomic `ADD` inside the revocation transaction; spend updates also use `ADD` and
+return the post-update total, so an instance learns the fleet figure from a
+write it was already making instead of paying for a read on the request path.
+`{scope}` is `quota` for the enforcing counter and `project`/`user` for the
+reported ones. They use separate keys because both are charged on the same
+request and one key would double every cost.
 
-All writes are fire-and-forget with a warning log on failure — a provider call
-should not 500 because DynamoDB hiccuped. The consequence is that an unreachable
-table loses every billing record with no request-visible symptom, which is what
-the readiness checklist's persistence check exists to surface.
+Telemetry and several configuration writes are fire-and-forget with a warning
+log on failure so a completed provider call is not converted into a 500.
+Authority is different: canonical principal/project reads fail closed,
+API-key issue/revoke transactions surface failure, and AgentCore refuses startup
+or readiness when required DynamoDB state is unavailable. The checklist still
+surfaces dropped non-authoritative writes and unreachable persistence.
 
 ---
 
@@ -944,10 +956,11 @@ the readiness checklist's persistence check exists to surface.
 | Layer | Mechanism |
 |-------|-----------|
 | **Model Access Control** | Per-project and per-user allowed model lists enforced at gateway level (HTTP 403 rejection). |
+| **Canonical Tenant RBAC** | Strongly consistent principal and tenant/project resolution precedes default-deny action authorization. Cross-tenant or ungranted resources are concealed as 404; an unavailable ownership store returns 503. |
 | **Policy Hierarchy** | `org > business_unit > project > environment`, resolved leaf-to-root with child-tightens-only semantics (see §6.4.1). Numeric limits take the minimum, lists take the intersection. |
 | **Cedar Policies** | Fine-grained authorization via Cedar policy language. Policies evaluate (principal, action, resource) tuples. ENFORCE and LOG_ONLY modes. |
 | **Admin RBAC** | `middleware/admin_rbac.py` gates `/admin/*` on the caller's roles and API-key scopes. |
-| **API key scopes** | Enforced on the control plane only. A low-scope key still reaches `/v1/*` — see FR-AC6 and the "Known" section of `SECURITY.md`. Not an oversight in the docs; a documented gap in the code. |
+| **API key scopes** | Legacy key scopes are control-plane only. Canonical mode replaces them with server-held service-principal action scopes for mapped data-plane actions; see FR-AC6. |
 | **Budget Enforcement** | Budget limits function as financial authorization gates. Over-budget requests are rejected (HTTP 429). |
 
 ### 11.3 Content Safety
@@ -980,8 +993,8 @@ the readiness checklist's persistence check exists to surface.
 
 | Option | Description | Use Case |
 |--------|-------------|----------|
-| **ECS Fargate via CDK** | `./deploy-fargate.sh <region>`. The stack in `infra/stack.py` provisions CloudFront/WAF, an internal TLS ALB, private Fargate tasks, DynamoDB and IAM roles, and sets `AXON_AUTH_MODE=ENFORCE`. Tenant-qualified ownership and ALB authentication remain release blockers. | Reference / isolated staging |
-| **Amazon Bedrock AgentCore** | `agentcore configure` + `agentcore launch` against `agentcore_agent.py`; hardening preview with `chat`, `list_models`, and `health` (liveness only). | Evaluation |
+| **ECS Fargate via CDK** | `./deploy-fargate.sh <region>`. The stack provisions CloudFront/WAF, an internal TLS ALB, private Fargate tasks, DynamoDB/IAM, retained ALB/CloudFront access logs, rollback-enabled deployments, and an ALB `/ready` gate for DynamoDB reachability. ALB authentication and tenant-scoped admin state remain release blockers. | Reference / isolated staging |
+| **Amazon Bedrock AgentCore** | `agentcore configure` + `agentcore launch` against `agentcore_agent.py`; hardening preview with `chat`, `list_models`, `health` liveness, and a distinct dependency-aware `GET /ready`. | Evaluation |
 | **AWS App Runner** | Docker container deployed via ECR + App Runner (`deploy.sh`). Semi-managed with container-level configuration; it does not close the shared-tenancy blockers. | Reference / isolated staging |
 | **Docker / Compose** | `docker build` + `docker run`, or `docker compose up` using `docker-compose.yml` (gateway + DynamoDB Local). | Staging, on-premises |
 | **Local development** | `uv run python serve_dashboard.py`. Uvicorn dev server with demo data seeded and `AXON_AUTH_MODE=LOG_ONLY`. | Development |
@@ -990,9 +1003,13 @@ the readiness checklist's persistence check exists to surface.
 The AgentCore preview does not mount the Starlette application or expose its
 HTTP/admin console. The repository has no checked-in production AgentCore IaC,
 JWT authorizer, resource policy, or private-network topology, and it does not
-wire `SessionManager` or AgentCore Memory. Initialization is lazy, `health` is
-not a dependency-readiness probe, and distributed controls plus tenant-qualified
-persistence remain production blockers.
+wire `SessionManager` or AgentCore Memory. Initialization now runs explicitly in
+the SDK lifespan, request admission has a deadline, and OIDC/JWKS and DynamoDB
+are verified before traffic. A synchronous bootstrap worker cannot be forcibly
+cancelled if it hangs, so production needs process-level startup containment.
+Shutdown closes provider HTTP and OTLP resources. `health` remains liveness and
+`GET /ready` is the dependency probe. Distributed controls and non-project
+tenant-qualified persistence remain production blockers.
 
 ### 12.1.1 CLI
 
@@ -1207,7 +1224,7 @@ call. With no URL and no registered sink, the forwarder is inert.
 | AWS Bedrock | Provider | Bedrock models unavailable; fallback to direct Anthropic/OpenAI if configured |
 | Anthropic API | Provider | Direct Anthropic models unavailable; fallback to Bedrock-hosted Claude |
 | OpenAI API | Provider | OpenAI models unavailable; no fallback (provider-exclusive models) |
-| DynamoDB | Persistence | State not persisted; in-memory operation continues (graceful degradation) |
+| DynamoDB | Persistence and canonical authority | Legacy/local operation can continue in memory, but canonical identity/project authorization, durable API-key lifecycle, and AgentCore readiness fail closed |
 | boto3 | SDK | Bedrock provider non-functional |
 | tiktoken | Library | Token estimation falls back to character-based approximation |
 
@@ -1217,7 +1234,8 @@ call. With no URL and no registered sink, the forwarder is inert.
 |------|-----------|--------|------------|
 | Provider API breaking changes | Medium | High | Adapter pattern isolates changes to single module; monitoring catches format drift |
 | In-memory state loss on restart (without DynamoDB) | High | Medium | DynamoDB persistence is available; document as required for production |
-| Rate limiter/cache not shared across instances | Medium | Medium | Per-instance state documented; shared DynamoDB backend available for multi-instance |
+| Rate limiter/response cache not shared across instances | Medium | Medium | Tenant isolation is enforced inside each process; deployment-wide rate semantics and cache consistency still require a shared backend or conservative per-replica limits |
+| Tenant-global admin data | High | High | Keep the legacy admin plane isolated until users, usage, quotas, policies, webhooks, SCIM, and audit records are tenant-qualified and filtered |
 | Cost tracking accuracy drift from pricing changes | Medium | Low | Pricing config is externalized in YAML; update cadence tracked |
 | Single-region deployment limits availability | Low | High | Architecture supports multi-region; future milestone |
 
@@ -1249,12 +1267,21 @@ call. With no URL and no registered sink, the forwarder is inert.
 - [x] Immutable SHA-256 hash-chain audit trail
 - [x] Policy hierarchy (org → BU → project → environment) with quota enforcement
 - [x] API key issue / rotate / revoke, and admin RBAC
-- [x] 2,763 unit, integration, end-to-end, and property-based tests
+- [x] Canonical principal resolution and authoritative tenant/project lookup for
+      mapped HTTP and AgentCore data-plane actions
+- [x] Tenant-qualified exact/semantic cache namespaces and API-key persistence;
+      atomic key issue and revoke
+- [x] 2,844 unit, integration, end-to-end, and property-based tests
 
 ### Phase 2: Production Hardening
 
 - [ ] Production AgentCore IaC, JWT authorizer, resource policy, private
-      networking, dependency readiness, and failure-safe initialization
+      networking, and deployment wiring for the implemented `/ready` contract
+- [x] AgentCore explicit initialization with an admission deadline,
+      OIDC/DynamoDB dependency readiness, authoritative project resolution, and
+      graceful provider/OTLP shutdown
+- [ ] Process-level containment or an async/cancellable replacement for a
+      synchronous AgentCore bootstrap worker that can outlive its timeout
 - [ ] Active tenant-isolated AgentCore Memory integration; `SessionManager`
       exists but is not wired into the runtime
 - [ ] Azure OpenAI, Vertex AI, Cohere adapters fully validated with live providers
@@ -1265,6 +1292,9 @@ call. With no URL and no registered sink, the forwarder is inert.
       deployments — still in-process dicts in `rate_limiter.py` and
       `quota_enforcer.py`, so limits are per-task and a 2-task Fargate service
       enforces roughly double the configured RPM
+- [ ] Tenant-qualified admin authorization and persistence for users, usage,
+      quotas, policies, webhooks, SCIM, and audit; canonical principal lifecycle
+      integration for SCIM and API keys; atomic key rotation
 - [ ] CloudWatch metrics emission and alarms — *partial*: CloudWatch **Logs**
       emission ships via the event dispatcher, and OTLP span export plus a trace
       forwarder ship a full tracing path. Metrics and alarms proper are not built
@@ -1524,5 +1554,5 @@ scripts/
 tests/
   |- unit/                       # 88 files
   |- property/                   # 19 files, Hypothesis property-based
-  |- conftest.py                 # Shared fixtures for the 2,763-test suite
+  |- conftest.py                 # Shared fixtures for the 2,844-test suite
 ```

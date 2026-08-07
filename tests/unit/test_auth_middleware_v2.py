@@ -62,12 +62,14 @@ def _build_app(oidc_service=None, api_key_service=None, policy_service=None, mod
         return JSONResponse({
             "user_id": ctx.user_id,
             "project_id": ctx.project_id,
+            "tenant_id": ctx.tenant_id,
             "auth_method": ctx.auth_method.value,
         })
 
     app = Starlette(routes=[
         Route("/api/chat", protected, methods=["POST"]),
         Route("/health", protected, methods=["GET"]),
+        Route("/ready", protected, methods=["GET"]),
     ])
     app.add_middleware(
         AuthMiddleware,
@@ -89,6 +91,13 @@ class TestPublicPaths:
         resp = client.get("/health")
         assert resp.status_code == 200
         assert resp.json()["auth_method"] == "anonymous"
+
+    def test_ready_bypasses_auth(self):
+        app = _build_app(mode="ENFORCE")
+        response = TestClient(app).get("/ready")
+
+        assert response.status_code == 200
+        assert response.json()["auth_method"] == "anonymous"
 
 
 class TestOIDCAuth:
@@ -131,6 +140,7 @@ class TestAPIKeyAuth:
         key = APIKey(
             key_id="axk_123", key_hash="h", project_id="proj-3",
             name="test", scopes=["chat:invoke"], created_by="admin",
+            tenant_id="tenant-3",
         )
         api_key_svc = FakeAPIKeyService(valid_keys={"axon_" + "a" * 64: key})
         app = _build_app(api_key_service=api_key_svc, mode="ENFORCE")
@@ -139,6 +149,7 @@ class TestAPIKeyAuth:
         resp = client.post("/api/chat", headers={"X-Api-Key": "axon_" + "a" * 64})
         assert resp.status_code == 200
         assert resp.json()["user_id"] == "apikey:axk_123"
+        assert resp.json()["tenant_id"] == "tenant-3"
         assert resp.json()["auth_method"] == "api_key"
 
     def test_bearer_api_key_authenticates(self):

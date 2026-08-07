@@ -380,6 +380,31 @@ class TestSemanticCacheBasics:
         await cache.put(req, "proj-a", _resp("a's answer"), 300)
         assert await cache.get(req, "proj-b") is None
 
+    async def test_same_project_id_is_isolated_between_tenants(self):
+        emb = FakeEmbedder()
+        cache = SemanticCache(emb)
+        req = _req("what is our refund policy for annual plans")
+        await cache.put(
+            req,
+            "shared-project",
+            _resp("tenant a's answer"),
+            300,
+            tenant_id="tenant-a",
+        )
+
+        assert await cache.get(
+            req,
+            "shared-project",
+            tenant_id="tenant-b",
+        ) is None
+        hit = await cache.get(
+            req,
+            "shared-project",
+            tenant_id="tenant-a",
+        )
+        assert hit is not None
+        assert hit.choices[0]["message"]["content"] == "tenant a's answer"
+
     async def test_a_dissimilar_prompt_misses(self):
         emb = FakeEmbedder(vectors={
             "what is our refund policy for annual plans": [1.0, 0.0],
@@ -563,7 +588,7 @@ class TestExpiryAndEviction:
         # Reach in and backdate rather than sleep: the behaviour under test is
         # the expiry comparison, and a real wait would make the suite slower for
         # no extra coverage.
-        entry = next(iter(cache._entries["p1"].values()))
+        entry = next(iter(cache._entries[(None, "p1")].values()))
         entry.expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
 
         assert await cache.get(req, "p1") is None
@@ -576,7 +601,10 @@ class TestExpiryAndEviction:
             await cache.put(_req(f"question number {i} about the policy"), "p1", _resp(), 300)
         assert cache.entry_count("p1") == 2
         assert cache.stats.evictions == 1
-        assert ("claude-sonnet", "question number 0 about the policy") not in cache._entries["p1"]
+        assert (
+            "claude-sonnet",
+            "question number 0 about the policy",
+        ) not in cache._entries[(None, "p1")]
 
     async def test_the_same_prompt_twice_updates_one_entry(self):
         """Otherwise duplicates accumulate and compete in the linear scan."""
@@ -685,6 +713,32 @@ class TestInvalidation:
 
         assert cache.invalidate() == 3
         assert cache.entry_count() == 0
+
+    async def test_tenant_qualified_invalidation_leaves_other_tenant(self):
+        cache = SemanticCache(FakeEmbedder())
+        req = _req("a question long enough to cache")
+        await cache.put(req, "shared-project", _resp(), 300, tenant_id="tenant-a")
+        await cache.put(req, "shared-project", _resp(), 300, tenant_id="tenant-b")
+
+        assert cache.invalidate("shared-project", tenant_id="tenant-a") == 1
+        assert cache.entry_count("shared-project", tenant_id="tenant-a") == 0
+        assert cache.entry_count("shared-project", tenant_id="tenant-b") == 1
+
+    async def test_legacy_project_invalidation_clears_all_tenant_namespaces(self):
+        cache = SemanticCache(FakeEmbedder())
+        req = _req("a question long enough to cache")
+        await cache.put(req, "shared-project", _resp(), 300, tenant_id="tenant-a")
+        await cache.put(req, "shared-project", _resp(), 300, tenant_id="tenant-b")
+        await cache.put(req, "other-project", _resp(), 300, tenant_id="tenant-a")
+
+        assert cache.invalidate("shared-project") == 2
+        assert cache.entry_count("shared-project") == 0
+        assert cache.entry_count("other-project") == 1
+
+    async def test_tenant_only_invalidation_is_rejected(self):
+        cache = SemanticCache(FakeEmbedder())
+        with pytest.raises(ValueError, match="project_id"):
+            cache.invalidate(tenant_id="tenant-a")
 
     async def test_invalidating_an_unknown_project_is_not_an_error(self):
         assert SemanticCache(FakeEmbedder()).invalidate("nope") == 0

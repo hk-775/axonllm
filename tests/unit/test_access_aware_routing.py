@@ -288,6 +288,28 @@ class TestClientAgentListModels:
             project_id="default-proj", user_id="default-user",
         )
 
+    @pytest.mark.asyncio
+    async def test_forwards_authoritative_tenant_project(self):
+        from src.gateway.chat.client_agent import ClientAgent
+
+        mock_gateway = MagicMock()
+        mock_gateway.handle_list_models = AsyncMock(return_value={"models": []})
+        project = _make_project(tenant_id="tenant-a")
+        client = ClientAgent(mock_gateway)
+
+        await client.list_models(
+            project_id="proj-1",
+            user_id="user-1",
+            authorized_project=project,
+        )
+
+        mock_gateway.handle_list_models.assert_awaited_once_with(
+            project_id="proj-1",
+            user_id="user-1",
+            tenant_id="tenant-a",
+            authorized_project=project,
+        )
+
 
 # ---------------------------------------------------------------------------
 # handle_list_models filtering
@@ -347,3 +369,69 @@ class TestHandleListModelsFiltering:
         result = await agent.handle_list_models()
         names = {m["name"] for m in result["models"]}
         assert names == {"gpt-4", "claude-3"}
+
+    @pytest.mark.asyncio
+    async def test_same_project_id_uses_the_authorized_tenant_copy(self):
+        registry = _build_registry()
+        mock_router = MagicMock(spec=Router)
+        mock_router.model_registry = registry
+        wrong_tenant = _make_project(
+            tenant_id="tenant-b",
+            allowed_models=["claude-3"],
+        )
+        authorized = _make_project(
+            tenant_id="tenant-a",
+            allowed_models=["gpt-4"],
+        )
+        agent = _make_agent(
+            projects={"proj-1": wrong_tenant},
+            router=mock_router,
+        )
+
+        result = await agent.handle_list_models(
+            project_id="proj-1",
+            user_id="user-1",
+            tenant_id="tenant-a",
+            authorized_project=authorized,
+        )
+
+        assert {model["name"] for model in result["models"]} == {"gpt-4"}
+
+    @pytest.mark.asyncio
+    async def test_compatibility_tenant_keeps_legacy_project_controls(self):
+        registry = _build_registry()
+        mock_router = MagicMock(spec=Router)
+        mock_router.model_registry = registry
+        legacy = _make_project(allowed_models=["gpt-4"])
+        agent = _make_agent(
+            projects={"proj-1": legacy},
+            router=mock_router,
+        )
+
+        result = await agent.handle_list_models(
+            project_id="proj-1",
+            user_id="user-1",
+            tenant_id="tenant-a",
+            allow_legacy_project_lookup=True,
+        )
+
+        assert {model["name"] for model in result["models"]} == {"gpt-4"}
+
+    @pytest.mark.asyncio
+    async def test_tenant_without_compatibility_or_authority_fails_closed(self):
+        registry = _build_registry()
+        mock_router = MagicMock(spec=Router)
+        mock_router.model_registry = registry
+        legacy = _make_project(allowed_models=["gpt-4"])
+        agent = _make_agent(
+            projects={"proj-1": legacy},
+            router=mock_router,
+        )
+
+        result = await agent.handle_list_models(
+            project_id="proj-1",
+            user_id="user-1",
+            tenant_id="tenant-a",
+        )
+
+        assert result == {"models": []}

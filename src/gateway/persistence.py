@@ -26,6 +26,16 @@ from src.gateway.models import (
 logger = logging.getLogger(__name__)
 
 
+def tenant_project_partition_key(tenant_id: str) -> str:
+    """DynamoDB partition key for one tenant's project namespace."""
+    return f"TENANT#{tenant_id}"
+
+
+def tenant_project_sort_key(project_id: str) -> str:
+    """DynamoDB sort key for a project inside a tenant namespace."""
+    return f"PROJECT#{project_id}"
+
+
 class DynamoPersistence:
     """DynamoDB persistence layer for LLM Router state."""
 
@@ -257,9 +267,16 @@ class DynamoPersistence:
             }
             for rule in project.guardrail_rules
         ]
-        return {
-            "PK": f"PROJECT#{project.project_id}",
-            "SK": "PROJECT",
+        if project.tenant_id is None:
+            partition_key = f"PROJECT#{project.project_id}"
+            sort_key = "PROJECT"
+        else:
+            partition_key = tenant_project_partition_key(project.tenant_id)
+            sort_key = tenant_project_sort_key(project.project_id)
+
+        item = {
+            "PK": partition_key,
+            "SK": sort_key,
             "entity_type": "project",
             "project_id": project.project_id,
             "name": project.name,
@@ -279,6 +296,9 @@ class DynamoPersistence:
             "members": json.dumps(project.members),
             "created_at": project.created_at.isoformat(),
         }
+        if project.tenant_id is not None:
+            item["tenant_id"] = project.tenant_id
+        return item
 
     @staticmethod
     def deserialize_project(item: dict) -> Project:
@@ -314,6 +334,7 @@ class DynamoPersistence:
         return Project(
             project_id=item["project_id"],
             name=item["name"],
+            tenant_id=item.get("tenant_id"),
             budget_limit=float(item["budget_limit"]) if item.get("budget_limit") is not None else None,
             alert_threshold=float(item["alert_threshold"]) if item.get("alert_threshold") is not None else None,
             allowed_models=allowed_models,
@@ -541,7 +562,11 @@ class DynamoPersistence:
             return
         await self.bump_config_version()
 
-    async def get_project(self, project_id: str) -> Project | None:
+    async def get_project(
+        self,
+        project_id: str,
+        tenant_id: str | None = None,
+    ) -> Project | None:
         """Read a single project by id.
 
         A point read rather than a filtered scan: the caller is resolving one
@@ -560,19 +585,51 @@ class DynamoPersistence:
 
         def _get():
             table = self._get_table()
-            resp = table.get_item(Key={"PK": f"PROJECT#{project_id}", "SK": "PROJECT"})
+            if tenant_id is None:
+                key = {"PK": f"PROJECT#{project_id}", "SK": "PROJECT"}
+            else:
+                key = {
+                    "PK": tenant_project_partition_key(tenant_id),
+                    "SK": tenant_project_sort_key(project_id),
+                }
+            resp = table.get_item(Key=key)
             return resp.get("Item")
 
         try:
             item = await asyncio.to_thread(_get)
             if item:
-                return self.deserialize_project(self._convert_decimals_to_native(item))
+                project = self.deserialize_project(
+                    self._convert_decimals_to_native(item)
+                )
+                if tenant_id is not None and project.tenant_id != tenant_id:
+                    logger.error(
+                        "Tenant project key returned mismatched owner project=%s "
+                        "expected_tenant=%s actual_tenant=%s",
+                        project_id,
+                        tenant_id,
+                        project.tenant_id,
+                    )
+                    return None
+                return project
         except Exception:
-            logger.warning("Failed to load project %s from DynamoDB", project_id, exc_info=True)
+            logger.warning(
+                "Failed to load project %s for tenant %s from DynamoDB",
+                project_id,
+                tenant_id,
+                exc_info=True,
+            )
         return None
 
     async def load_projects(self) -> dict[str, Project]:
-        """Scan DynamoDB for all projects and deserialize them."""
+        """Load legacy globally keyed projects for the legacy control plane.
+
+        Canonical tenant-owned projects cannot be represented by this
+        ``dict[project_id, Project]`` contract: two tenants may intentionally use
+        the same project id. Those rows are resolved only through
+        ``get_project(project_id, tenant_id)`` and ``DynamoProjectRepository``.
+        Mixing them into this map would let scan order decide which tenant's
+        project survives.
+        """
         if not self._enabled:
             return {}
 
@@ -599,6 +656,8 @@ class DynamoPersistence:
             for item in raw_items:
                 item = self._convert_decimals_to_native(item)
                 project = self.deserialize_project(item)
+                if project.tenant_id is not None:
+                    continue
                 projects[project.project_id] = project
             self._last_project_scan_failed = False
             return projects
@@ -823,10 +882,75 @@ class DynamoPersistence:
     # --- APIKey persistence ---
 
     @staticmethod
-    def serialize_api_key(key: APIKey) -> dict:
+    def _api_key_primary_key(
+        key_id: str,
+        tenant_id: str | None,
+    ) -> dict[str, str]:
+        if tenant_id is None:
+            return {"PK": f"APIKEY#{key_id}", "SK": "APIKEY"}
         return {
-            "PK": f"APIKEY#{key.key_id}",
-            "SK": "APIKEY",
+            "PK": f"TENANT#{tenant_id}#APIKEY#{key_id}",
+            "SK": "METADATA",
+        }
+
+    @staticmethod
+    def _api_key_project_partition(
+        project_id: str,
+        tenant_id: str | None,
+    ) -> str:
+        if tenant_id is None:
+            return f"PROJECT#{project_id}"
+        return f"TENANT#{tenant_id}#PROJECT#{project_id}"
+
+    @staticmethod
+    def _api_key_epoch_key(tenant_id: str | None) -> dict[str, str]:
+        if tenant_id is None:
+            return {"PK": "REVOCATION", "SK": "EPOCH"}
+        return {"PK": f"TENANT#{tenant_id}", "SK": "AUTHZ#EPOCH"}
+
+    @staticmethod
+    def _serialize_dynamo_map(values: dict) -> dict:
+        from boto3.dynamodb.types import TypeSerializer
+
+        serializer = TypeSerializer()
+        return {name: serializer.serialize(value) for name, value in values.items()}
+
+    @staticmethod
+    def _api_key_transaction_token(action: str) -> str:
+        import secrets
+
+        # Unique per application attempt, but stable across botocore's retries
+        # of this one request. Reusing a key-derived token would make a second
+        # concurrent call look like an idempotent success instead of a conflict.
+        return f"{action}-{secrets.token_hex(14)}"
+
+    @staticmethod
+    def _api_key_condition_failed(exc: Exception, item_index: int) -> bool:
+        response = getattr(exc, "response", None)
+        if not isinstance(response, dict):
+            return False
+        error = response.get("Error")
+        if not isinstance(error, dict):
+            return False
+        if error.get("Code") == "ConditionalCheckFailedException":
+            return True
+        if error.get("Code") != "TransactionCanceledException":
+            return False
+        reasons = response.get("CancellationReasons")
+        return (
+            isinstance(reasons, list)
+            and len(reasons) > item_index
+            and isinstance(reasons[item_index], dict)
+            and reasons[item_index].get("Code") == "ConditionalCheckFailed"
+        )
+
+    @staticmethod
+    def serialize_api_key(key: APIKey) -> dict:
+        item = {
+            **DynamoPersistence._api_key_primary_key(
+                key.key_id,
+                key.tenant_id,
+            ),
             "entity_type": "api_key",
             "key_id": key.key_id,
             "key_hash": key.key_hash,
@@ -840,6 +964,9 @@ class DynamoPersistence:
             "revoked_at": key.revoked_at.isoformat() if key.revoked_at else None,
             "last_used_at": key.last_used_at.isoformat() if key.last_used_at else None,
         }
+        if key.tenant_id is not None:
+            item["tenant_id"] = key.tenant_id
+        return item
 
     @staticmethod
     def deserialize_api_key(item: dict) -> APIKey:
@@ -852,6 +979,7 @@ class DynamoPersistence:
             name=item["name"],
             scopes=scopes,
             created_by=item["created_by"],
+            tenant_id=item.get("tenant_id"),
             created_at=datetime.fromisoformat(item["created_at"]),
             expires_at=datetime.fromisoformat(item["expires_at"]) if item.get("expires_at") else None,
             revoked=bool(item.get("revoked", False)),
@@ -863,27 +991,81 @@ class DynamoPersistence:
         if not self._enabled:
             return
 
-        def _put():
+        def _put() -> None:
             table = self._get_table()
             item = self.serialize_api_key(key)
-            table.put_item(Item=item)
-            # Hash lookup index
-            table.put_item(Item={
+            primary_key = self._api_key_primary_key(key.key_id, key.tenant_id)
+            hash_lookup = {
                 "PK": f"APIKEY_HASH#{key.key_hash}",
                 "SK": "LOOKUP",
+                "entity_type": "api_key_hash_lookup",
                 "key_id": key.key_id,
-            })
-            # Project membership
-            table.put_item(Item={
-                "PK": f"PROJECT#{key.project_id}",
+                "key_pk": primary_key["PK"],
+                "key_sk": primary_key["SK"],
+            }
+            project_edge = {
+                "PK": self._api_key_project_partition(
+                    key.project_id,
+                    key.tenant_id,
+                ),
                 "SK": f"APIKEY#{key.key_id}",
+                "entity_type": "project_api_key",
                 "key_id": key.key_id,
-            })
+                "project_id": key.project_id,
+                "key_pk": primary_key["PK"],
+                "key_sk": primary_key["SK"],
+            }
+            if key.tenant_id is not None:
+                hash_lookup["tenant_id"] = key.tenant_id
+                project_edge["tenant_id"] = key.tenant_id
+
+            condition = "attribute_not_exists(PK) AND attribute_not_exists(SK)"
+            client = getattr(getattr(table, "meta", None), "client", None)
+            if client is None:
+                # Compatibility for existing in-process table fakes. Every
+                # boto3 DynamoDB Table has meta.client and therefore cannot take
+                # this non-transactional branch.
+                for row in (item, hash_lookup, project_edge):
+                    table.put_item(Item=row)
+                return
+            client.transact_write_items(
+                TransactItems=[
+                    {
+                        "Put": {
+                            "TableName": self._table_name,
+                            "Item": self._serialize_dynamo_map(item),
+                            "ConditionExpression": condition,
+                        }
+                    },
+                    {
+                        "Put": {
+                            "TableName": self._table_name,
+                            "Item": self._serialize_dynamo_map(hash_lookup),
+                            "ConditionExpression": condition,
+                        }
+                    },
+                    {
+                        "Put": {
+                            "TableName": self._table_name,
+                            "Item": self._serialize_dynamo_map(project_edge),
+                            "ConditionExpression": condition,
+                        }
+                    },
+                ],
+                ClientRequestToken=self._api_key_transaction_token("issue"),
+            )
 
         try:
             await asyncio.to_thread(_put)
-        except Exception:
+        except Exception as exc:
+            if self._api_key_condition_failed(exc, 0):
+                raise RuntimeError("API key already exists") from exc
+            if self._api_key_condition_failed(exc, 1):
+                raise RuntimeError("API key hash already exists") from exc
+            if self._api_key_condition_failed(exc, 2):
+                raise RuntimeError("API key project edge already exists") from exc
             self._record_write_failure("API key", key.key_id)
+            raise RuntimeError("API key transaction failed") from exc
 
     async def get_api_key_by_hash(self, key_hash: str) -> APIKey | None:
         if not self._enabled:
@@ -891,40 +1073,92 @@ class DynamoPersistence:
 
         def _get():
             table = self._get_table()
-            resp = table.get_item(Key={"PK": f"APIKEY_HASH#{key_hash}", "SK": "LOOKUP"})
-            item = resp.get("Item")
-            if not item:
+            lookup_response = table.get_item(
+                Key={"PK": f"APIKEY_HASH#{key_hash}", "SK": "LOOKUP"},
+                ConsistentRead=True,
+            )
+            lookup = lookup_response.get("Item")
+            if not lookup:
                 return None
-            key_id = item["key_id"]
-            key_resp = table.get_item(Key={"PK": f"APIKEY#{key_id}", "SK": "APIKEY"})
-            return key_resp.get("Item")
+            key_id = lookup.get("key_id")
+            tenant_id = lookup.get("tenant_id")
+            if not isinstance(key_id, str) or not key_id:
+                raise ValueError("API key hash lookup has no key_id")
+            if tenant_id is not None and (
+                not isinstance(tenant_id, str) or not tenant_id
+            ):
+                raise ValueError("API key hash lookup has an invalid tenant_id")
+            key = self._api_key_primary_key(key_id, tenant_id)
+            if (
+                ("key_pk" in lookup and lookup["key_pk"] != key["PK"])
+                or ("key_sk" in lookup and lookup["key_sk"] != key["SK"])
+            ):
+                raise ValueError("API key hash lookup points outside its namespace")
+            key_response = table.get_item(Key=key, ConsistentRead=True)
+            item = key_response.get("Item")
+            if item is not None and (
+                item.get("PK") != key["PK"]
+                or item.get("SK") != key["SK"]
+                or item.get("key_id") != key_id
+                or item.get("tenant_id") != tenant_id
+            ):
+                raise ValueError(
+                    "API key hash lookup returned a mismatched key row"
+                )
+            return item
 
         try:
             item = await asyncio.to_thread(_get)
             if item:
-                return self.deserialize_api_key(item)
+                key = self.deserialize_api_key(
+                    self._convert_decimals_to_native(item)
+                )
+                if key.key_hash != key_hash:
+                    raise ValueError("API key hash lookup returned a mismatched key")
+                return key
         except Exception:
             logger.warning("Failed to lookup API key by hash", exc_info=True)
         return None
 
-    async def get_api_key(self, key_id: str) -> APIKey | None:
+    async def get_api_key(
+        self,
+        key_id: str,
+        tenant_id: str | None = None,
+    ) -> APIKey | None:
         if not self._enabled:
             return None
 
         def _get():
             table = self._get_table()
-            resp = table.get_item(Key={"PK": f"APIKEY#{key_id}", "SK": "APIKEY"})
+            resp = table.get_item(
+                Key=self._api_key_primary_key(key_id, tenant_id),
+                ConsistentRead=True,
+            )
             return resp.get("Item")
 
         try:
             item = await asyncio.to_thread(_get)
             if item:
-                return self.deserialize_api_key(item)
+                key = self.deserialize_api_key(
+                    self._convert_decimals_to_native(item)
+                )
+                if key.key_id != key_id or key.tenant_id != tenant_id:
+                    raise ValueError("API key row does not match its storage key")
+                return key
         except Exception:
-            logger.warning("Failed to get API key %s", key_id, exc_info=True)
+            logger.warning(
+                "Failed to get API key %s for tenant %s",
+                key_id,
+                tenant_id,
+                exc_info=True,
+            )
         return None
 
-    async def list_api_keys_for_project(self, project_id: str) -> list[APIKey]:
+    async def list_api_keys_for_project(
+        self,
+        project_id: str,
+        tenant_id: str | None = None,
+    ) -> list[APIKey]:
         if not self._enabled:
             return []
 
@@ -933,12 +1167,26 @@ class DynamoPersistence:
 
             table = self._get_table()
             resp = table.query(
-                KeyConditionExpression=Key("PK").eq(f"PROJECT#{project_id}") & Key("SK").begins_with("APIKEY#")
+                KeyConditionExpression=Key("PK").eq(
+                    self._api_key_project_partition(project_id, tenant_id)
+                )
+                & Key("SK").begins_with("APIKEY#"),
+                ConsistentRead=True,
             )
-            key_ids = [item["key_id"] for item in resp.get("Items", [])]
             keys = []
-            for kid in key_ids:
-                key_resp = table.get_item(Key={"PK": f"APIKEY#{kid}", "SK": "APIKEY"})
+            for edge in resp.get("Items", []):
+                key_id = edge.get("key_id")
+                if not isinstance(key_id, str) or not key_id:
+                    raise ValueError("project API key edge has no key_id")
+                key = self._api_key_primary_key(key_id, tenant_id)
+                if (
+                    ("key_pk" in edge and edge["key_pk"] != key["PK"])
+                    or ("key_sk" in edge and edge["key_sk"] != key["SK"])
+                ):
+                    raise ValueError(
+                        "project API key edge points outside its namespace"
+                    )
+                key_resp = table.get_item(Key=key, ConsistentRead=True)
                 item = key_resp.get("Item")
                 if item:
                     keys.append(item)
@@ -946,13 +1194,104 @@ class DynamoPersistence:
 
         try:
             items = await asyncio.to_thread(_query)
-            return [self.deserialize_api_key(item) for item in items]
+            keys = [
+                self.deserialize_api_key(self._convert_decimals_to_native(item))
+                for item in items
+            ]
+            if any(
+                key.project_id != project_id or key.tenant_id != tenant_id
+                for key in keys
+            ):
+                raise ValueError("project API key edge returned a mismatched key")
+            return keys
         except Exception:
-            logger.warning("Failed to list API keys for project %s", project_id, exc_info=True)
+            logger.warning(
+                "Failed to list API keys for project %s in tenant %s",
+                project_id,
+                tenant_id,
+                exc_info=True,
+            )
             return []
 
     async def update_api_key(self, key: APIKey) -> None:
-        await self.save_api_key(key)
+        if not key.revoked:
+            raise ValueError("only revocation updates are supported")
+        if not await self.revoke_api_key(key):
+            raise RuntimeError("API key is missing or already revoked")
+
+    async def revoke_api_key(self, key: APIKey) -> bool:
+        """Atomically revoke a key and advance its cache-invalidation epoch."""
+        if not self._enabled:
+            return False
+        if not key.revoked or key.revoked_at is None:
+            raise ValueError("revocation requires revoked=True and revoked_at")
+
+        def _revoke() -> None:
+            table = self._get_table()
+            primary_key = self._api_key_primary_key(key.key_id, key.tenant_id)
+            epoch_key = self._api_key_epoch_key(key.tenant_id)
+            client = getattr(getattr(table, "meta", None), "client", None)
+            if client is None:
+                # See save_api_key: this preserves old table-only test doubles;
+                # a real DynamoDB Table always takes the transaction below.
+                table.put_item(Item=self.serialize_api_key(key))
+                update_item = getattr(table, "update_item", None)
+                if update_item is not None:
+                    update_item(
+                        Key=epoch_key,
+                        UpdateExpression="ADD #epoch :one",
+                        ExpressionAttributeNames={"#epoch": "epoch"},
+                        ExpressionAttributeValues={":one": 1},
+                    )
+                return
+            client.transact_write_items(
+                TransactItems=[
+                    {
+                        "Update": {
+                            "TableName": self._table_name,
+                            "Key": self._serialize_dynamo_map(primary_key),
+                            "UpdateExpression": (
+                                "SET revoked = :true, revoked_at = :revoked_at"
+                            ),
+                            "ConditionExpression": (
+                                "attribute_exists(PK) AND attribute_exists(SK) "
+                                "AND key_hash = :key_hash "
+                                "AND (attribute_not_exists(revoked) "
+                                "OR revoked = :false)"
+                            ),
+                            "ExpressionAttributeValues": self._serialize_dynamo_map(
+                                {
+                                    ":true": True,
+                                    ":false": False,
+                                    ":revoked_at": key.revoked_at.isoformat(),
+                                    ":key_hash": key.key_hash,
+                                }
+                            ),
+                        }
+                    },
+                    {
+                        "Update": {
+                            "TableName": self._table_name,
+                            "Key": self._serialize_dynamo_map(epoch_key),
+                            "UpdateExpression": "ADD #epoch :one",
+                            "ExpressionAttributeNames": {"#epoch": "epoch"},
+                            "ExpressionAttributeValues": self._serialize_dynamo_map(
+                                {":one": 1}
+                            ),
+                        }
+                    },
+                ],
+                ClientRequestToken=self._api_key_transaction_token("revoke"),
+            )
+
+        try:
+            await asyncio.to_thread(_revoke)
+            return True
+        except Exception as exc:
+            if self._api_key_condition_failed(exc, 0):
+                return False
+            self._record_write_failure("API key revocation", key.key_id)
+            raise RuntimeError("API key revocation transaction failed") from exc
 
     # --- Cross-instance revocation signal ---
     #
@@ -962,14 +1301,11 @@ class DynamoPersistence:
     # revocation and each instance polls it cheaply: a changed value means "some
     # key you may be caching was revoked", and the instance drops its cache.
     #
-    # Deliberately a single counter rather than a per-key tombstone. It costs one
-    # small point read per instance per poll interval no matter how many keys
-    # exist, and the false positive it can produce — clearing cache entries for
-    # keys that were not the revoked one — costs a DynamoDB read on their next
-    # use. Getting revocation wrong in the other direction leaves a key that an
-    # operator revoked still working.
+    # Deliberately one counter per tenant rather than a per-key tombstone. It
+    # costs one small point read per active tenant and poll interval no matter
+    # how many keys exist. Legacy unqualified keys retain their global counter.
 
-    async def bump_revocation_epoch(self) -> None:
+    async def bump_revocation_epoch(self, tenant_id: str | None = None) -> None:
         """Signal that a key was revoked. Called on the revoking instance."""
         if not self._enabled:
             return
@@ -977,8 +1313,9 @@ class DynamoPersistence:
         def _bump():
             table = self._get_table()
             table.update_item(
-                Key={"PK": "REVOCATION", "SK": "EPOCH"},
-                UpdateExpression="ADD epoch :one",
+                Key=self._api_key_epoch_key(tenant_id),
+                UpdateExpression="ADD #epoch :one",
+                ExpressionAttributeNames={"#epoch": "epoch"},
                 ExpressionAttributeValues={":one": 1},
             )
 
@@ -990,7 +1327,10 @@ class DynamoPersistence:
             # happen when it did. Other instances fall back to CACHE_TTL_SECONDS.
             self._record_write_failure("revocation_epoch", "EPOCH")
 
-    async def get_revocation_epoch(self) -> int | None:
+    async def get_revocation_epoch(
+        self,
+        tenant_id: str | None = None,
+    ) -> int | None:
         """Current revocation counter, or None if it could not be read.
 
         None is distinct from 0: 0 means "no revocation has ever happened", while
@@ -1003,7 +1343,7 @@ class DynamoPersistence:
         def _get():
             table = self._get_table()
             resp = table.get_item(
-                Key={"PK": "REVOCATION", "SK": "EPOCH"},
+                Key=self._api_key_epoch_key(tenant_id),
                 ConsistentRead=True,
             )
             return resp.get("Item")

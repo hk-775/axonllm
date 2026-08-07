@@ -29,19 +29,37 @@ class _FakeClientAgent:
         self.chat_extra = chat_extra or {}
         self.stream_chunks = stream_chunks
 
-    def _record(self, model, user_id, project_id, smart_routing, tools, tool_choice,
-                top_p, stop, system):
+    def _record(
+        self,
+        model,
+        user_id,
+        project_id,
+        smart_routing,
+        tools,
+        tool_choice,
+        top_p,
+        stop,
+        system,
+        tenant_id,
+        authorized_project,
+        allow_legacy_project_lookup,
+    ):
         self.last_call = {"user_id": user_id, "project_id": project_id,
                           "model": model, "smart_routing": smart_routing,
                           "tools": tools, "tool_choice": tool_choice,
-                          "top_p": top_p, "stop": stop, "system": system}
+                          "top_p": top_p, "stop": stop, "system": system,
+                          "tenant_id": tenant_id,
+                          "authorized_project": authorized_project,
+                          "allow_legacy_project_lookup": allow_legacy_project_lookup}
 
     async def chat(self, model, messages, temperature=None, max_tokens=None,
                    top_p=None, stop=None, system=None,
                    user_id=None, project_id=None, smart_routing=False,
-                   tools=None, tool_choice=None):
+                   tools=None, tool_choice=None, tenant_id=None,
+                   authorized_project=None, allow_legacy_project_lookup=False):
         self._record(model, user_id, project_id, smart_routing, tools, tool_choice,
-                     top_p, stop, system)
+                     top_p, stop, system, tenant_id, authorized_project,
+                     allow_legacy_project_lookup)
         return {
             "id": "internal-1", "model": model or "auto-selected", "provider": "test",
             "content": "hello there",
@@ -52,9 +70,11 @@ class _FakeClientAgent:
     async def chat_stream(self, model, messages, temperature=None, max_tokens=None,
                           top_p=None, stop=None, system=None,
                           user_id=None, project_id=None, smart_routing=False,
-                          tools=None, tool_choice=None):
+                          tools=None, tool_choice=None, tenant_id=None,
+                          authorized_project=None, allow_legacy_project_lookup=False):
         self._record(model, user_id, project_id, smart_routing, tools, tool_choice,
-                     top_p, stop, system)
+                     top_p, stop, system, tenant_id, authorized_project,
+                     allow_legacy_project_lookup)
         if self.stream_chunks is not None:
             for chunk in self.stream_chunks:
                 yield chunk
@@ -64,11 +84,27 @@ class _FakeClientAgent:
             yield {"id": "internal-1", "model": model, "content": tok, "is_final": False}
         yield {"done": True}
 
-    async def list_models(self, project_id=None, user_id=None):
+    async def list_models(
+        self,
+        project_id=None,
+        user_id=None,
+        tenant_id=None,
+        authorized_project=None,
+        allow_legacy_project_lookup=False,
+    ):
+        self.last_call = {
+            "action": "list_models",
+            "project_id": project_id,
+            "user_id": user_id,
+            "tenant_id": tenant_id,
+            "authorized_project": authorized_project,
+            "allow_legacy_project_lookup": allow_legacy_project_lookup,
+        }
         return [{"name": "claude-sonnet"}, {"name": "gpt-4"}]
 
 
 def _make_client(auth_method="api_key", user_id="apikey:k1", project_id="proj-b",
+                 tenant_id=None, authorized_project=None,
                  chat_extra=None, stream_chunks=None):
     from src.gateway.models import AuthMethod, RequestContext
 
@@ -82,6 +118,8 @@ def _make_client(auth_method="api_key", user_id="apikey:k1", project_id="proj-b"
             request.state.context = RequestContext(
                 user_id=user_id, project_id=project_id, roles=[], scopes=[],
                 auth_method=AuthMethod(auth_method),
+                tenant_id=tenant_id,
+                authorized_project=authorized_project,
             )
             return await call_next(request)
 
@@ -120,21 +158,36 @@ class TestChatCompletions:
 
     def test_identity_from_context_not_body(self):
         # Body claims a different tenant; must be ignored in favor of the token.
-        client, agent = _make_client(user_id="apikey:real", project_id="proj-real")
+        client, agent = _make_client(
+            user_id="apikey:real",
+            project_id="proj-real",
+            tenant_id="tenant-real",
+        )
         client.post("/v1/chat/completions", json={
             "model": "m", "messages": [{"role": "user", "content": "hi"}],
             "user_id": "victim", "project_id": "proj-victim",
+            "tenant_id": "tenant-victim",
         })
         assert agent.last_call["user_id"] == "apikey:real"
         assert agent.last_call["project_id"] == "proj-real"
+        assert agent.last_call["tenant_id"] == "tenant-real"
+        assert agent.last_call["authorized_project"] is None
+        assert agent.last_call["allow_legacy_project_lookup"] is True
 
     def test_anonymous_context_falls_back(self):
-        client, agent = _make_client(auth_method="anonymous", user_id="anonymous", project_id="")
+        client, agent = _make_client(
+            auth_method="anonymous",
+            user_id="anonymous",
+            project_id="",
+            tenant_id="ignored-tenant",
+        )
         client.post("/v1/chat/completions", json={
             "model": "m", "messages": [{"role": "user", "content": "hi"}],
         })
         assert agent.last_call["user_id"] is None
         assert agent.last_call["project_id"] is None
+        assert agent.last_call["tenant_id"] is None
+        assert agent.last_call["allow_legacy_project_lookup"] is True
 
     def test_missing_or_auto_model_triggers_smart_routing(self):
         # Empty/missing model and model="auto" now opt into smart routing rather
@@ -186,6 +239,20 @@ class TestStreaming:
         assert sum(1 for c in chunks if c["choices"][0]["finish_reason"] == "stop") == 1
         content = "".join(c["choices"][0]["delta"].get("content", "") for c in chunks)
         assert content == "one two three"
+
+    def test_authenticated_tenant_is_forwarded_without_project_object(self):
+        client, agent = _make_client(tenant_id="tenant-stream")
+
+        with client.stream("POST", "/v1/chat/completions", json={
+            "model": "m",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": True,
+        }) as response:
+            response.read()
+
+        assert agent.last_call["tenant_id"] == "tenant-stream"
+        assert agent.last_call["authorized_project"] is None
+        assert agent.last_call["allow_legacy_project_lookup"] is True
 
 
 _WEATHER_TOOL = {
@@ -482,6 +549,22 @@ class TestModels:
         assert d["object"] == "list"
         assert {m["id"] for m in d["data"]} == {"claude-sonnet", "gpt-4"}
         assert all(m["object"] == "model" and m["owned_by"] == "axonllm" for m in d["data"])
+
+    def test_authenticated_tenant_is_forwarded_without_project_object(self):
+        client, agent = _make_client(
+            project_id="shared-project",
+            tenant_id="tenant-models",
+        )
+
+        assert client.get("/v1/models").status_code == 200
+        assert agent.last_call == {
+            "action": "list_models",
+            "project_id": "shared-project",
+            "user_id": "apikey:k1",
+            "tenant_id": "tenant-models",
+            "authorized_project": None,
+            "allow_legacy_project_lookup": True,
+        }
 
 
 class TestCacheMetadata:

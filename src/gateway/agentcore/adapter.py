@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncIterator
 from typing import Any, Protocol
 
@@ -11,18 +12,31 @@ from src.gateway.auth.authorization import (
     ResourceRef,
     require_authorized,
 )
+from src.gateway.auth.project_repository import ProjectStoreUnavailable
+from src.gateway.models import Project
 
 from .errors import AgentCoreAdapterError
 from .identity import InvocationIdentity, resolve_invocation_identity
-from .runtime import RuntimeServices
+from .runtime import RuntimeReadiness, RuntimeServices
 from .schemas import InvocationAction, parse_invocation_payload
+
+logger = logging.getLogger(__name__)
 
 
 class RuntimeProviderProtocol(Protocol):
     async def get(self) -> RuntimeServices: ...
 
+    async def initialize(self) -> RuntimeServices: ...
 
-def _gateway_context(identity: InvocationIdentity) -> dict[str, Any]:
+    async def readiness(self, *, force: bool = False) -> RuntimeReadiness: ...
+
+    async def close(self) -> None: ...
+
+
+def _gateway_context(
+    identity: InvocationIdentity,
+    project: Project,
+) -> dict[str, Any]:
     context = identity.request_context
     return {
         "user_id": context.user_id,
@@ -33,6 +47,7 @@ def _gateway_context(identity: InvocationIdentity) -> dict[str, Any]:
         "auth_method": context.auth_method.value,
         "principal_id": context.principal_id,
         "authorization_version": context.authorization_version,
+        "authorized_project": project,
     }
 
 
@@ -48,6 +63,18 @@ class AgentCoreAdapter:
 
     def __init__(self, runtime_provider: RuntimeProviderProtocol) -> None:
         self._runtime_provider = runtime_provider
+
+    async def initialize(self) -> None:
+        """Initialize and verify runtime dependencies before serving."""
+        await self._runtime_provider.initialize()
+
+    async def readiness(self) -> dict[str, Any]:
+        """Return sanitized dependency readiness without authenticating a user."""
+        return (await self._runtime_provider.readiness()).as_dict()
+
+    async def close(self) -> None:
+        """Close runtime-owned resources during graceful shutdown."""
+        await self._runtime_provider.close()
 
     async def invoke(self, payload: Any, context: Any) -> Any:
         parsed = parse_invocation_payload(payload)
@@ -74,11 +101,33 @@ class AgentCoreAdapter:
             runtime.token_verifier,
             runtime.principal_resolver,
         )
-        action = Action.MODEL_LIST if parsed.action is InvocationAction.LIST_MODELS else Action.INFERENCE_INVOKE
+        try:
+            project = await runtime.project_resolver.resolve(
+                identity.tenant_id,
+                identity.project_id,
+            )
+        except ProjectStoreUnavailable as exc:
+            raise AgentCoreAdapterError(
+                503,
+                "project_resolver_unavailable",
+                "Project authorization is temporarily unavailable.",
+            ) from exc
+        if project is None:
+            raise AgentCoreAdapterError(
+                404,
+                "resource_not_found",
+                "Resource not found.",
+            )
+
+        action = (
+            Action.MODEL_LIST
+            if parsed.action is InvocationAction.LIST_MODELS
+            else Action.INFERENCE_INVOKE
+        )
         resource = ResourceRef(
             resource_type="project",
             resource_id=identity.project_id,
-            tenant_id=identity.tenant_id,
+            tenant_id=project.tenant_id,
             project_id=identity.project_id,
         )
         try:
@@ -91,10 +140,54 @@ class AgentCoreAdapter:
                 message,
             ) from exc
 
+        if runtime.policy_service is not None:
+            refresh = getattr(runtime.policy_service, "refresh_if_stale", None)
+            if callable(refresh):
+                try:
+                    await refresh()
+                except Exception:
+                    logger.warning(
+                        "AgentCore policy refresh failed; using compiled policy",
+                        exc_info=True,
+                    )
+
+            policy_action, policy_resource = (
+                ("get", "/v1/models")
+                if parsed.action is InvocationAction.LIST_MODELS
+                else ("post", "/v1/chat/completions")
+            )
+            try:
+                policy_decision = await runtime.policy_service.evaluate(
+                    identity.request_context,
+                    policy_action,
+                    policy_resource,
+                )
+            except Exception as exc:
+                raise AgentCoreAdapterError(
+                    503,
+                    "policy_evaluation_failed",
+                    "Authorization is temporarily unavailable.",
+                ) from exc
+
+            if policy_decision == "DENY":
+                raise AgentCoreAdapterError(
+                    403,
+                    "authorization_denied",
+                    "Access denied by policy.",
+                )
+            if policy_decision != "ALLOW":
+                raise AgentCoreAdapterError(
+                    503,
+                    "policy_evaluation_failed",
+                    "Authorization is temporarily unavailable.",
+                )
+
         if parsed.action is InvocationAction.LIST_MODELS:
             return await runtime.gateway.handle_list_models(
                 project_id=identity.project_id,
                 user_id=identity.principal.principal_id,
+                tenant_id=identity.tenant_id,
+                authorized_project=project,
             )
 
         if parsed.request_data is None:
@@ -105,7 +198,7 @@ class AgentCoreAdapter:
             )
         result = await runtime.gateway.handle_chat_completion(
             parsed.request_data,
-            _gateway_context(identity),
+            _gateway_context(identity, project),
         )
         if hasattr(result, "__aiter__"):
             return _forward_stream(result)

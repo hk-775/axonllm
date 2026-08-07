@@ -61,7 +61,8 @@ install paths — local or AWS, seeded or clean — and which flag decides.
 - **Event dispatcher** — webhook, AWS SNS, CloudWatch Logs. Fire-and-forget on security events.
 
 ### Caching & Cost Reduction
-- **Exact response cache** — SHA-256 of the request, per-project TTL.
+- **Exact response cache** — SHA-256 of the request, tenant/project namespace,
+  and per-project TTL.
 - **Semantic cache (opt-in)** — serves a cached answer to a *reworded* question, tried only after the exact key misses. Off unless a project enables it, because a false hit returns a confident wrong answer with nothing to indicate it was substituted. Guarded four ways: a 0.90 cosine threshold (set for its distance from the highest-scoring *different*-question pair at 0.7476, not for a target hit rate), exact agreement on literal tokens so `17*23` never matches `17*24`, polar-axis comparison so "enable" never matches "disable", and skipping non-zero temperature, tool calls and streaming outright. Needs Bedrock for Titan embeddings.
 - **Token efficiency analytics** — flags waste, recommends cheaper models, scores prompt quality.
 - **Semantic efficiency engine** — prompt-complexity scoring and model right-sizing, output-utilization analysis (are responses truncated or ignored?), prompt-compression detection, and per-user historical pattern learning. Surfaces on the Efficiency page.
@@ -79,14 +80,18 @@ install paths — local or AWS, seeded or clean — and which flag decides.
   consistent, server-held DynamoDB principals. Production readiness requires
   this gate; see [Enterprise hardening](ENTERPRISE_HARDENING.md).
 - **Tenant data-plane RBAC** — active tenant members can list models and invoke
-  inference only for explicitly granted projects; tenant admins currently need
-  the same project grant until project ownership is tenant-qualified. Service
-  principals also need an explicit server-held action scope. Cross-tenant and
-  ungranted-project resources return 404. Canonical data-plane requests without
-  an explicit project context fail with `400 project_context_required`.
+  inference only after a strongly consistent lookup proves the project belongs
+  to their tenant and an explicit project grant allows the action. Tenant admins
+  currently need the same grant. Service principals also need an explicit
+  server-held action scope. Cross-tenant and ungranted-project resources return
+  404; an unavailable ownership store returns 503. Canonical data-plane
+  requests without an explicit project context fail with
+  `400 project_context_required`.
 - **SAML 2.0 SSO** — SP-initiated login + ACS with pure-Python signed-assertion verification (no xmlsec1 system dependency)
 - **SCIM 2.0 provisioning** — `/scim/v2/Users` + `/scim/v2/Groups` for IdP-driven joiner/mover/leaver (Okta, Entra ID, …)
-- **API key management** — issue, rotate, revoke, with optional expiry
+- **API key management** — tenant-qualified key storage, atomic issue/revoke,
+  rotate, and optional expiry. Rotation is revoke-then-create rather than one
+  transaction.
 - **Legacy HTTP admin RBAC** — current `/admin/*` endpoints require the legacy
   `admin` role or an `admin:*` scope. Those endpoints and their backing records
   are not yet tenant-scoped; canonical `tenant_admin` does not imply access to
@@ -101,8 +106,9 @@ fleet-wide records are not tenant-qualified.
 > `AXON_REQUIRE_CANONICAL_IDENTITY=true`, a key must resolve to a canonical
 > `service` principal with both a project grant and a server-held
 > `model.list`/`inference.invoke` scope. Existing key records are not migrated
-> automatically. Keys still default to no expiry, and rotation preserves the old
-> expiry.
+> automatically. Issuance and revocation are durable DynamoDB transactions, but
+> neither creates or updates that canonical principal. Keys still default to no
+> expiry, and rotation preserves the old expiry.
 
 ### Observability
 - **Admin dashboard** — 20 pages in four groups. *Observe:* Overview, Traces, Efficiency, Audit Log. *Configure:* Models, Projects, Users, API Keys. *Govern:* Policies, Hierarchy, Quotas, Regions, Webhooks. *System:* Health, Configuration, Architecture, Pricing, Catalogue, Readiness. Plus Sandbox, a live playground that issues real requests through the gateway.
@@ -352,8 +358,8 @@ and **no fabricated data**.
 > **This is not yet the enterprise multi-tenant install.** The checked-in CDK
 > stack does not enable canonical identity, provision canonical principals, or
 > configure an ALB OIDC authentication action and its validator trust values.
-> Project ownership and several stores are still globally keyed. It therefore
-> fails the production readiness checklist. Use these steps to stand up the
+> The admin plane and several non-project stores are still globally keyed. It
+> therefore fails the production readiness checklist. Use these steps to stand up the
 > reference environment, keep it isolated, and complete
 > [ENTERPRISE_HARDENING.md](ENTERPRISE_HARDENING.md) before real traffic.
 
@@ -1122,10 +1128,11 @@ non-authoritative: access comes from the canonical principal row.
 
 > **Provisioning is not yet an authorization transaction.** Creating,
 > suspending, or deprovisioning a SCIM user does not create or update the
-> canonical principal record, and API-key issue/revoke has the same gap. Until
-> those lifecycles are coupled transactionally, update the principal repository
-> through the controlled migration process and verify deprovisioning with a
-> denied canary.
+> canonical principal record. API-key storage now issues and revokes its own
+> rows atomically, but those transactions still do not create or version the
+> canonical service principal. Until those lifecycles are coupled, update the
+> principal repository through the controlled migration process and verify
+> deprovisioning with a denied canary.
 
 ### Putting it together — a minimal production config
 
@@ -1446,7 +1453,8 @@ Notes that matter in practice:
 ## Architecture
 
 ```
-Request → Auth (OIDC/API Key) → Quota Enforcement (policy hierarchy)
+Request → Auth (OIDC/API Key) → Tenant Project Resolution → Tenant RBAC
+  → Quota Enforcement (policy hierarchy)
   → Injection Detection → PII Redaction → Rate Limit → Access Check
   → Budget Check → Guardrails → Cache Check → Region Route
   → Provider Route (strategy) → Response Guardrails → PII Re-injection
@@ -1463,7 +1471,7 @@ Request → Auth (OIDC/API Key) → Quota Enforcement (policy hierarchy)
 6. **Access checks** — project and user model restrictions
 7. **Budget check** — project and user spend limits
 8. **Guardrails** — content policy evaluation
-9. **Cache** — exact-match response cache (SHA-256 of model + messages + params), then an optional semantic match on the reworded question. Written back after guardrails and PII re-injection, so a hit cannot bypass either. A hit is labelled on the way out: `x_cached: true` plus `x_cache_type` of `exact` or `semantic` (absent on a provider call)
+9. **Cache** — tenant/project-qualified exact-match response cache (SHA-256 of model + messages + params), then an optional semantic match in the same tenant/project namespace. Written back after guardrails and PII re-injection, so a hit cannot bypass either. A hit is labelled on the way out: `x_cached: true` plus `x_cache_type` of `exact` or `semantic` (absent on a provider call)
 10. **Region routing** — select spoke based on health, data residency, model availability
 11. **Provider routing** — strategy-based model selection + fallback
 12. **Response guardrails** — output filtering
@@ -1481,8 +1489,8 @@ Request → Auth (OIDC/API Key) → Quota Enforcement (policy hierarchy)
 | `/admin/quotas/{project_id}/reset` | POST | Reset spend counter |
 | `/admin/quotas/simulate` | POST | Test if a request would be allowed |
 | `/admin/projects/{id}/keys` | GET/POST | List a project's API keys, or issue one. The raw key is returned by `POST` only, once |
-| `/admin/keys/{key_id}/rotate` | POST | Rotate an API key |
-| `/admin/keys/{key_id}` | DELETE | Revoke an API key |
+| `/admin/keys/{key_id}/rotate` | POST | Rotate an API key by revoking it and then creating a replacement; replacement failure leaves the old key revoked |
+| `/admin/keys/{key_id}` | DELETE | Atomically revoke an API key and advance its tenant revocation epoch |
 | `/admin/policies` | GET/POST | List or create **Cedar authorization** policies (see the note below — not the quota hierarchy) |
 | `/admin/policies/hierarchy` | GET/POST | List or create **quota policy** nodes |
 | `/admin/policies/hierarchy/{node_id}` | GET/PUT | Read or replace a quota node. `PUT` replaces `limits` wholesale rather than merging, so send every field you want to keep. No `DELETE` |
@@ -1554,8 +1562,8 @@ ALB happened to pick.
 
 | State | Shared across instances | How |
 |-------|------------------------|-----|
-| API keys | ✅ | Read through to DynamoDB, cached for 5 min |
-| Key revocations | ✅ | A revocation counter in the table, polled every 5 s |
+| API keys | ✅ | Tenant-qualified DynamoDB rows and project edges, read strongly and cached for 5 min |
+| Key revocations | ✅ | Key state and tenant epoch update in one transaction; epochs are polled every 5 s |
 | Projects | ✅ | A version counter in the table, polled every 5 s — see below |
 | Per-user config (budgets, allowed models) | ✅ | The same version counter — see below |
 | Usage/cost records — **the write** | ✅ | Every record goes to the table, so nothing is lost |
@@ -1975,8 +1983,10 @@ Three things worth knowing before you rely on it:
 
 The HTTP `/health` route is liveness only. AgentCore's `health` action is also
 liveness only and deliberately returns `ready: false` with dependencies
-unchecked. Neither substitutes for this checklist plus an authenticated
-model-list and completion canary.
+unchecked. AgentCore separately exposes `GET /ready`, which returns 200 only
+after explicit lifespan initialization and successful bounded OIDC/JWKS and
+DynamoDB checks. It complements rather than replaces this checklist plus an
+authenticated model-list and completion canary.
 
 Coverage spans three authentication styles, not just bearer tokens: API-key
 providers over HTTP, **Bedrock** through boto3, and **Bedrock Mantle** through a
@@ -2034,7 +2044,7 @@ uv sync --extra dev
 uv run pytest tests/ -x -q
 ```
 
-2,763 tests including unit, integration, end-to-end, and Hypothesis
+2,844 tests including unit, integration, end-to-end, and Hypothesis
 property-based tests.
 
 ## Deployment
@@ -2053,9 +2063,12 @@ export AXON_APPROVED_HTTPS_PREFIX_LIST_ID=pl-0123456789abcdef0
 This deploys AxonLLM as a Fargate service (via CDK) with:
 - CloudFront VPC Origin to an internal TLS ALB
 - TLS 1.2+, WAF IP-reputation filtering, and per-IP rate limiting
+- Private retained ALB and CloudFront access logs with 365-day expiry
 - Private tasks with customer-approved HTTPS egress
 - Sticky sessions and a 5-minute ALB idle timeout for SSE streaming
 - Auto-scaling (2-10 tasks) on CPU and request count
+- ECS deployment rollback with 100% minimum healthy capacity
+- An ALB `GET /ready` gate that fails when enabled DynamoDB is unavailable
 - DynamoDB tables for persistence (audit trail, API keys, policies)
 - Secrets Manager for provider API keys
 - IAM role with Bedrock invoke permissions
@@ -2087,18 +2100,23 @@ production deployment.
 
 `agentcore_agent.py` now has a fail-closed adapter for `chat`, `list_models`, and
 liveness. It accepts identity only from the SDK runtime context, re-verifies the
-JWT, resolves a canonical principal, applies tenant/project RBAC, preserves all
-chat fields, and uses native async streaming. Configured response guardrails or
-output PII controls intentionally buffer the complete response before release.
-It does **not** host the HTTP admin console.
+JWT, resolves a canonical principal and the authoritative tenant/project row,
+applies RBAC, preserves all chat fields, and uses native async streaming.
+Configured response guardrails or output PII controls intentionally buffer the
+complete response before release. The SDK application initializes dependencies
+in its lifespan, exposes a bounded `GET /ready` check, and closes provider HTTP
+and OTLP resources on shutdown. Request admission has a startup deadline, but
+Python cannot forcibly cancel the synchronous bootstrap worker if it hangs; the
+deployment must enforce a process-level startup/termination deadline. It does
+**not** host the HTTP admin console.
 
 Do not launch the current local AgentCore configuration as production. A release
 deployment still needs a checked-in IaC definition with a JWT authorizer,
 `Authorization` header forwarding (or a trusted signed facade using the custom
-identity-token header), private networking, scoped IAM, dependency readiness,
-and tenant-safe memory design. Initialization is still lazy, persisted control
-state can fail open during hydration, retained usage/audit history is scanned at
-startup, and rate limits, cache, and audit serialization are not distributed.
+identity-token header), private networking, scoped IAM, readiness-route wiring,
+and tenant-safe memory design. Non-project control state can still fail open
+during hydration, retained usage/audit history is scanned at startup, and rate
+limits, cache, and audit serialization are not distributed.
 AgentCore dependencies, including its OIDC HTTP client, are hash-pinned in
 `requirements.txt`. The exact header contract, environment, and preflight are in
 [ENTERPRISE_HARDENING.md](ENTERPRISE_HARDENING.md).

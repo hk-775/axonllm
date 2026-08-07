@@ -1,4 +1,4 @@
-"""Response cache with per-project TTL configuration."""
+"""Response cache with per-tenant, per-project TTL configuration."""
 
 import hashlib
 import json
@@ -40,12 +40,17 @@ class CacheManager:
             self._cache.popitem(last=False)
 
     def compute_cache_key(
-        self, request: ChatCompletionRequest, project_id: str
+        self,
+        request: ChatCompletionRequest,
+        project_id: str,
+        tenant_id: str | None = None,
     ) -> str:
         """Generate deterministic cache key from request parameters.
 
         Uses SHA-256 hash of (model, messages, system, temperature, max_tokens,
-        top_p, stop, tools, tool_choice, project_id) serialized as sorted JSON.
+        top_p, stop, tools, tool_choice, tenant_id, project_id) serialized as
+        sorted JSON. ``tenant_id`` remains optional for legacy single-tenant
+        callers, but authenticated requests must provide it.
 
         ``tools``/``tool_choice`` are part of the key because they change the
         answer: the same prompt sent with a tool list can return a tool call and
@@ -62,6 +67,7 @@ class CacheManager:
             "stop": request.stop,
             "tools": request.tools,
             "tool_choice": request.tool_choice,
+            "tenant_id": tenant_id,
             "project_id": project_id,
         }
         canonical = json.dumps(key_data, sort_keys=True, separators=(",", ":"))
