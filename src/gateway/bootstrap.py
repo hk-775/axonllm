@@ -485,7 +485,19 @@ def build_starlette_app(app_config: AppConfig | None = None) -> Starlette:
     # with no policies had no evaluator to recompile, so the first policy an
     # operator added did nothing until a restart. An empty set governs no action,
     # so wiring it changes no decision.
-    cedar_service = CedarPolicyService(comp.policies)
+    # Persistence is passed so the evaluator can adopt a policy another instance
+    # wrote: without it, POST /admin/policies recompiled only the task that
+    # served the write, and behind desired_count=2 the same request was governed
+    # or ungoverned depending on the load balancer.
+    cedar_service = CedarPolicyService(comp.policies, persistence=comp.persistence)
+    # Adopt the version those policies were loaded at, so the first request does
+    # not re-scan to discover the set startup already has. Read here rather than
+    # in _load_persisted_state because it must be the version *after* the load:
+    # a bump in between leaves _known_version behind and self-corrects on the
+    # next poll, whereas one ahead would skip a change.
+    if comp.persistence.enabled:
+        cedar_service.note_local_version(
+            asyncio.run(comp.persistence.get_policy_version()))
 
     admin_api = AdminAPI(
         cost_tracker=comp.cost_tracker,

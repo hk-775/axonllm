@@ -260,12 +260,22 @@ class AdminAPI:
         self.cost_tracker = cost_tracker
         self.health_tracker = health_tracker
         self.model_registry = model_registry
-        self.projects: dict[str, Project] = projects or {}
-        self.policies: list[dict] = policies or []
+        # `x if x is not None`, not `x or {}`: an empty container is falsy, so the
+        # latter quietly substituted a *different* object whenever the caller
+        # passed an empty one — which is every gateway that boots without demo
+        # seed data, i.e. the production path. These three are all shared with
+        # something else (the projects dict with GatewayAgent, the policy list
+        # with CedarPolicyService, user_configs with the agent), so a broken
+        # reference means an admin write updates a copy nobody reads: a project
+        # created through the API stayed invisible to the request path until
+        # restart.
+        self.projects: dict[str, Project] = projects if projects is not None else {}
+        self.policies: list[dict] = policies if policies is not None else []
         # The live evaluator, so POST /admin/policies can recompile it. None when
         # no Cedar service is wired (auth middleware built without one).
         self._policy_service = policy_service
-        self._user_configs: dict[str, dict] = user_configs or {}
+        self._user_configs: dict[str, dict] = (
+            user_configs if user_configs is not None else {})
         self._config_path = config_path
         self._persistence = persistence
         self._catalog = catalog if catalog is not None else PROVIDER_MODEL_CATALOG
@@ -967,7 +977,23 @@ class AdminAPI:
     # ------------------------------------------------------------------
 
     async def list_policies(self, request: Request) -> JSONResponse:
-        """Return stored Cedar policies."""
+        """Return stored Cedar policies, including any another instance wrote.
+
+        Reads through the evaluator's refresh rather than answering from the
+        local list: a policy created on the other task was invisible here, so an
+        operator checking their work saw it missing and reasonably concluded the
+        write had failed.
+        """
+        if self._policy_service is not None:
+            refresh = getattr(self._policy_service, "refresh_if_stale", None)
+            if refresh is not None:
+                try:
+                    await refresh()
+                except Exception:
+                    logger.warning(
+                        "Policy refresh failed; listing this instance's set",
+                        exc_info=True,
+                    )
         return JSONResponse(self.policies)
 
     # ------------------------------------------------------------------
@@ -1024,12 +1050,20 @@ class AdminAPI:
         else:
             self.policies.append(policy)
 
+        version = None
         if self._persistence is not None:
             await self._persistence.save_cedar_policy(policy)
+            # The write bumped the shared version; read it back so this instance
+            # does not see its own change as a remote one and re-scan to learn
+            # what it already knows.
+            version = await self._persistence.get_policy_version()
         # Statements are compiled once, so without this the policy sits in the
         # list without affecting a single request until the process restarts.
         if self._policy_service is not None:
             self._policy_service.reload(self.policies)
+            note = getattr(self._policy_service, "note_local_version", None)
+            if note is not None:
+                note(version)
 
         return JSONResponse({"name": name, "status": status}, status_code=code)
 

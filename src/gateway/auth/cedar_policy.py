@@ -34,8 +34,10 @@ This is a pure-Python evaluator — no native Cedar dependency.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
+import time
 from dataclasses import dataclass
 
 from src.gateway.models import RequestContext
@@ -211,13 +213,121 @@ class CedarPolicyService:
     a policy must not be able to change any decision.
     """
 
-    def __init__(self, policies: list[dict]) -> None:
-        """Build from a list of policy dicts ({name, policy_text, mode, ...})."""
+    # How long an instance may keep enforcing a policy set without checking
+    # whether the fleet's has moved. The check is one small GetItem on a single
+    # counter, not a scan of the policy table, so this can be tight; 5s bounds
+    # the window in which two instances disagree about an authorization rule
+    # while still collapsing a burst of requests into one read.
+    POLICY_SYNC_TTL_SECONDS = 5.0
+
+    def __init__(
+        self,
+        policies: list[dict],
+        persistence=None,
+    ) -> None:
+        """Build from a list of policy dicts ({name, policy_text, mode, ...}).
+
+        ``persistence`` is optional so single-instance and no-DynamoDB
+        deployments construct exactly as before and never poll.
+        """
         self._statements: list[tuple[_Statement, dict]] = []
         # Actions some enforcing statement governs; None means "every action",
         # contributed by a statement with no action clause.
         self._governed: set[str | None] = set()
+        self._persistence = persistence
+        # The list object the admin API also holds, so a local write and a
+        # fleet-wide reload converge on one source rather than two.
+        self._policies = policies
+        # The set this process booted with, kept so a fleet reload can merge over
+        # it rather than replace it. Seed-file policies are not in DynamoDB — only
+        # ones written through POST /admin/policies are — so adopting the stored
+        # set wholesale would silently drop every seeded policy, including a
+        # seeded forbid. Bootstrap already merges the two by name; this keeps the
+        # reload consistent with that.
+        self._seeded = [dict(p) for p in policies]
+        self._last_version_check = float("-inf")
+        self._known_version: int | None = None
+        self._refresh_task: asyncio.Task | None = None
         self.reload(policies)
+
+    async def refresh_if_stale(self) -> bool:
+        """Re-adopt the fleet's policy set if another instance changed it.
+
+        Returns whether a reload happened. Cheap by design: a version ``GetItem``
+        at most once per ``POLICY_SYNC_TTL_SECONDS``, and the policy scan only
+        when that number has actually moved.
+
+        Single-flighted for the same reason the admin usage refresh is — the TTL
+        check straddles an await, so without it a burst of concurrent requests
+        would each pass the check and issue its own scan.
+        """
+        if self._persistence is None or not self._persistence.enabled:
+            return False
+
+        now = time.monotonic()
+        if now - self._last_version_check < self.POLICY_SYNC_TTL_SECONDS:
+            return False
+
+        if self._refresh_task is None or self._refresh_task.done():
+            self._refresh_task = asyncio.create_task(self._refresh(now))
+        try:
+            return await asyncio.shield(self._refresh_task)
+        except Exception:
+            logger.warning("Cedar policy refresh failed", exc_info=True)
+            return False
+
+    async def _refresh(self, now: float) -> bool:
+        version = await self._persistence.get_policy_version()
+        if version is None:
+            # Unreadable, or nothing has ever been written through the API. Keep
+            # enforcing what we have and retry on the next request rather than
+            # advancing the clock — an outage must not buy a full window of
+            # divergence, and it must never look like "no policies".
+            return False
+
+        self._last_version_check = now
+        if version == self._known_version:
+            return False
+
+        policies = await self._persistence.load_all_cedar_policies_or_none()
+        if policies is None:
+            # The version moved but the scan failed. Do NOT adopt an empty set:
+            # that would drop every enforced policy fleet-wide because one scan
+            # timed out. Leave _known_version alone so the next request retries.
+            logger.error(
+                "Policy version moved to %s but the policy scan failed; "
+                "continuing to enforce the previously loaded set", version,
+            )
+            return False
+
+        # Merge by name over the seeded set, matching bootstrap's merge and
+        # POST /admin/policies' update-by-name identity: a stored policy replaces
+        # the seeded one it shares a name with, and seeded policies with no stored
+        # counterpart survive. Replacing outright would drop them.
+        by_name = {p["name"]: p for p in self._seeded}
+        by_name.update({p["name"]: p for p in policies})
+        merged = list(by_name.values())
+
+        logger.info(
+            "Adopting fleet policy set: version %s -> %s (%d stored, %d effective)",
+            self._known_version, version, len(policies), len(merged),
+        )
+        # Mutated in place, not rebound: AdminAPI holds a reference to this same
+        # list, and GET /admin/policies must not keep answering from a stale one.
+        self._policies[:] = merged
+        self.reload(merged)
+        self._known_version = version
+        return True
+
+    def note_local_version(self, version: int | None) -> None:
+        """Record the version this instance just produced by writing a policy.
+
+        Without this the writing instance would see its own bump as a remote
+        change on the next poll and re-scan to learn what it already knows.
+        """
+        if version is not None:
+            self._known_version = version
+            self._last_version_check = time.monotonic()
 
     def reload(self, policies: list[dict]) -> None:
         """Re-parse the policy set, replacing the compiled statements.

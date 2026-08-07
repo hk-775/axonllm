@@ -157,6 +157,21 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
         # Policy evaluation
         if self.policy_service:
+            # Adopt any policy another instance wrote before deciding this
+            # request. Statements are compiled once, so a policy written through
+            # POST /admin/policies previously took effect only on the task that
+            # served the write — behind desired_count=2 an operator's forbid was
+            # enforced by one task and ignored by the other, per request, decided
+            # by the load balancer. Rate-limited to one counter read per
+            # POLICY_SYNC_TTL_SECONDS and a no-op without persistence.
+            refresh = getattr(self.policy_service, "refresh_if_stale", None)
+            if refresh is not None:
+                try:
+                    await refresh()
+                except Exception:
+                    # Never fail a request because the refresh failed; the
+                    # already-compiled set still decides it.
+                    logger.warning("Policy refresh failed", exc_info=True)
             action = request.method.lower()
             resource = path
             decision = await self.policy_service.evaluate(context, action, resource)
