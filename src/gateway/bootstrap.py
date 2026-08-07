@@ -282,6 +282,15 @@ def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComp
         ) = asyncio.run(_load_persisted_state(persistence))
         projects.update(loaded_projects)
         user_configs.update(loaded_user_configs)
+        # Loading the dicts is not the same as arming enforcement. Budget limits
+        # live in cost_tracker._budgets / ._user_budgets and in the policy
+        # resolver's nodes, none of which a dict update touches — so a limit set
+        # through the admin API was written to DynamoDB, read back on restart,
+        # displayed correctly on the dashboard, and enforced by nothing.
+        # _apply_seed_data does this registration for seeded entities; persisted
+        # ones need the same treatment or they are decorative.
+        _register_persisted_budgets(
+            cost_tracker, policy_resolver, loaded_projects, loaded_user_configs)
         # Merge by name, matching POST /admin/policies' update-by-name identity: a
         # persisted policy replaces the seeded one it shares a name with rather
         # than being evaluated alongside it, which for a permit/forbid pair would
@@ -852,6 +861,57 @@ async def _load_persisted_state(persistence: DynamoPersistence):
         loaded_destinations,
         loaded_topology,
     )
+
+
+def _register_persisted_budgets(
+    cost_tracker: CostTracker,
+    policy_resolver: PolicyHierarchyResolver,
+    loaded_projects: dict[str, Project] | None,
+    loaded_user_configs: dict[str, dict] | None,
+) -> None:
+    """Arm enforcement for budgets that came back from DynamoDB.
+
+    Mirrors what ``_apply_seed_data`` does for seeded projects and users, because
+    the two paths must not disagree about what a budget means: a limit set via
+    ``PUT /admin/projects/{id}`` and one written in the seed file should behave
+    identically after a restart, and before this they did not — the persisted one
+    was displayed but never checked.
+
+    The policy node is only created where one does not already exist. A real
+    hierarchy (org → team → project) carries limits the flat per-project node
+    would flatten away, and the persisted project's own limit is already enforced
+    through ``cost_tracker``; overwriting a tree node here would raise the
+    effective limit to the project's own, discarding the tighter parent cap.
+    """
+    for project in (loaded_projects or {}).values():
+        if project.budget_limit is None and project.alert_threshold is None:
+            continue
+        cost_tracker.register_project(
+            project.project_id,
+            budget_limit=project.budget_limit,
+            alert_threshold=project.alert_threshold,
+        )
+        if project.budget_limit is not None and (
+            project.project_id not in policy_resolver._nodes
+        ):
+            policy_resolver._nodes[project.project_id] = PolicyNode(
+                node_id=project.project_id,
+                node_type="project",
+                parent_id=None,
+                display_name=project.name,
+                limits={"budget_limit": project.budget_limit},
+            )
+
+    for user_id, config in (loaded_user_configs or {}).items():
+        # Registered even when both limits are None, matching _apply_seed_data:
+        # a config row exists because someone configured the user, and clearing a
+        # limit to None is a deliberate act that should survive a restart rather
+        # than silently reverting to a seeded value.
+        cost_tracker.register_user(
+            user_id,
+            budget_limit=config.get("budget_limit"),
+            alert_threshold=config.get("alert_threshold"),
+        )
 
 
 def _apply_persisted_infrastructure(
