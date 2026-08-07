@@ -30,6 +30,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A Cedar policy written through the API governed only the task that served the
+  write.** Statements are compiled once, so `POST /admin/policies` recompiled the
+  local evaluator and nothing else. Behind the shipped `desired_count=2` an
+  operator's `forbid` was enforced by one task and ignored by the other, decided
+  per request by the load balancer:
+
+  ```
+  task A denies DELETE: DENY
+  task B denies DELETE: ALLOW
+  task B's policy list: []
+  in the store: ['no-delete']
+  ```
+
+  Same shape as the admin-read divergence above, but it fails open on an
+  authorization control rather than misreporting a number, and it does not
+  self-correct: the policy is in the table, so a restart fixes it and nothing
+  short of one does. `GET /admin/policies` on the other task also reported the
+  policy missing, which reads as a failed write and invites writing it again.
+
+  Writes now bump a shared version counter; each instance reads that counter at
+  most once every 5 seconds and re-scans the policy table only when it moves. The
+  steady-state cost is one small `GetItem` per instance per window rather than a
+  scan per request, single-flighted so a burst of concurrent requests cannot each
+  trigger their own.
+
+  Three ways this fix could have been worse than the bug, all closed and tested:
+  a failed policy scan is **not** adopted as an empty set (that would convert one
+  timed-out read into a fleet-wide bypass — `load_all_cedar_policies` returns `[]`
+  on failure, which is right for startup and catastrophic for a live reload); a
+  failed *write* does not bump the version, so the fleet is not told to reload a
+  change that never landed; and a refresh merges the stored set over the seeded
+  one by name instead of replacing it, since `demo_seed.yaml` policies are not in
+  DynamoDB and adopting the stored set wholesale silently un-enforced every one of
+  them.
+- **`AdminAPI` and `GatewayAgent` stopped sharing state when a container was
+  empty.** `self.projects = projects or {}` substitutes a *new* dict whenever the
+  caller passes an empty one, and an empty dict is falsy — so on any gateway
+  booting without demo seed data, which is the production path, the admin API and
+  the request path held different objects:
+
+  ```
+  no seed projects:  admin sees ['acme'], the dict the agent holds sees []
+  one seed project:  admin sees ['acme', 'seed'], the dict the agent holds sees ['acme', 'seed']
+  ```
+
+  `POST /admin/projects` returned 201 for a project no chat request could resolve
+  until restart. Found while fixing the policy divergence above, where the same
+  expression broke the policy list the evaluator refreshes into. Fixed for
+  `projects`, `policies`, and `user_configs` on both classes — the seeded path
+  worked, which is why it survived: the bug is only reachable through the falsy
+  case.
 - **Budgets set through the admin API stopped being enforced after a restart.**
   `PUT /admin/users/{id}/budget` and `POST`/`PUT /admin/projects/{id}` write the
   limit to DynamoDB, and the next boot read it back into the `projects` and

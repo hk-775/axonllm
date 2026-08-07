@@ -187,9 +187,14 @@ class GatewayAgent:
         self.cache_manager = cache_manager
         self.cost_tracker = cost_tracker
         self.session_manager = session_manager
-        self._projects: dict[str, Project] = projects or {}
+        # `x if x is not None`, not `x or {}`: both dicts are shared with AdminAPI
+        # so an admin write is visible to the request path without a restart, and
+        # an empty dict is falsy — so the `or {}` form broke exactly that sharing
+        # on a gateway booting without seed data.
+        self._projects: dict[str, Project] = projects if projects is not None else {}
         self.provider_fn_factory = provider_fn_factory
-        self._user_configs: dict[str, dict] = user_configs or {}
+        self._user_configs: dict[str, dict] = (
+            user_configs if user_configs is not None else {})
         self.request_validator = request_validator
         self._smart_routing_enabled = smart_routing_enabled
         self._quota_enforcer = quota_enforcer

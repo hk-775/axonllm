@@ -56,6 +56,9 @@ class DynamoPersistence:
         # ``load_usage_records_or_none`` distinguish an outage from an empty table
         # without changing ``load_usage_records``' return-[] contract.
         self._last_scan_failed = False
+        # Same idea for the Cedar policy scan, where mistaking an outage for an
+        # empty set would drop every enforced policy rather than lose a count.
+        self._last_policy_scan_failed = False
 
     @property
     def enabled(self) -> bool:
@@ -1159,6 +1162,85 @@ class DynamoPersistence:
             await asyncio.to_thread(_put)
         except Exception:
             self._record_write_failure("cedar policy", policy.get("name", "?"))
+            # Don't advertise a change that isn't in the table: a bumped version
+            # would make every other instance re-scan and adopt a set that does
+            # not include this policy, reporting a successful reload of the old
+            # rules.
+            return
+        await self.bump_policy_version()
+
+    async def bump_policy_version(self) -> int | None:
+        """Atomically increment the shared policy version, returning the new one.
+
+        The signal other instances poll instead of re-scanning the policy table
+        on every request: one small ``GetItem`` per instance per window, and a
+        full reload only when the number actually moves. Same ``ADD`` pattern as
+        the spend counters, and atomic for the same reason — two operators
+        writing different policies concurrently must produce two distinct
+        versions, or one write is invisible to the fleet.
+        """
+        if not self._enabled:
+            return None
+
+        def _add():
+            resp = self._get_table().update_item(
+                Key={"PK": "CEDAR_POLICY#VERSION", "SK": "TOTAL"},
+                UpdateExpression="ADD #v :one",
+                ExpressionAttributeNames={"#v": "version"},
+                ExpressionAttributeValues={":one": Decimal("1")},
+                ReturnValues="UPDATED_NEW",
+            )
+            return resp.get("Attributes", {}).get("version")
+
+        try:
+            version = await asyncio.to_thread(_add)
+            return int(version) if version is not None else None
+        except Exception:
+            self._record_write_failure("cedar policy version", "TOTAL")
+            return None
+
+    async def get_policy_version(self) -> int | None:
+        """Read the shared policy version, or None if it could not be read.
+
+        Absent returns 0, not None: no policy has ever been written through the
+        API, which is a *known* state and the one every gateway starts in.
+        Conflating it with "unreadable" would mean the caller never records a
+        successful check, so it would re-read this counter on every single request
+        for the whole life of a deployment that only uses seed-file policies.
+
+        None is reserved for a genuine read failure, so the caller can keep
+        enforcing what it has and retry rather than advance its clock.
+        """
+        if not self._enabled:
+            return None
+
+        def _get():
+            resp = self._get_table().get_item(
+                Key={"PK": "CEDAR_POLICY#VERSION", "SK": "TOTAL"}
+            )
+            item = resp.get("Item")
+            return item.get("version", 0) if item else 0
+
+        try:
+            return int(await asyncio.to_thread(_get))
+        except Exception:
+            logger.warning("Failed to read the shared policy version", exc_info=True)
+            return None
+
+    async def load_all_cedar_policies_or_none(self) -> list[dict] | None:
+        """Like ``load_all_cedar_policies``, but None on failure instead of ``[]``.
+
+        The original returns ``[]`` on failure so a Dynamo outage cannot block
+        startup, accepting that the Cedar layer fails open. That trade is wrong
+        for a live reload: adopting ``[]`` would *drop every policy the fleet is
+        enforcing* because a scan timed out, turning a read failure into a
+        fleet-wide authorization bypass.
+        """
+        if not self._enabled:
+            return None
+        self._last_policy_scan_failed = False
+        policies = await self.load_all_cedar_policies()
+        return None if self._last_policy_scan_failed else policies
 
     async def load_all_cedar_policies(self) -> list[dict]:
         if not self._enabled:
@@ -1181,14 +1263,21 @@ class DynamoPersistence:
 
         try:
             raw_items = await asyncio.to_thread(_scan)
-            return [self.deserialize_cedar_policy(item) for item in raw_items]
+            policies = [self.deserialize_cedar_policy(item) for item in raw_items]
+            self._last_policy_scan_failed = False
+            return policies
         except Exception:
             # Returning [] rather than raising keeps a Dynamo outage from blocking
             # startup. It does mean booting with no policies, which — because an
             # ungoverned action is ALLOW — fails open on the Cedar layer while
             # auth, admin RBAC, and quotas stay enforced. Logged at ERROR because
             # that difference matters to whoever reads the boot log.
+            #
+            # A live reload must NOT accept that trade, which is what
+            # ``load_all_cedar_policies_or_none`` is for: dropping the enforced
+            # set because a scan failed is a bypass, not a degraded boot.
             logger.error("Failed to load Cedar policies from DynamoDB", exc_info=True)
+            self._last_policy_scan_failed = True
             return []
 
     # --- Event destinations (webhooks / SNS / CloudWatch) ---

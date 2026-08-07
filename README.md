@@ -1443,6 +1443,7 @@ ALB happened to pick.
 | Usage/cost records — **the write** | ✅ | Every record goes to the table, so nothing is lost |
 | Usage/cost records — **the admin read** | ✅ | Costs read the shared counter; counts refresh from the table every 10 s — see below |
 | Budget **enforcement** | ✅ | Atomic counter in the table — see below |
+| Cedar policies | ✅ | A version counter in the table, polled every 5 s — see below |
 | Rate limits (policy RPM) | ❌ | Per-process window; divide `rate_limit_rpm` by `desired_count` |
 | Provider health, caches | ❌ | Per-process by design; each instance probes for itself |
 
@@ -1495,6 +1496,27 @@ zero. Making it exact would mean a consistent read on every proxied call. Second
 if DynamoDB is unreachable the counter update fails and enforcement degrades to
 per-process — the old behaviour — rather than to unlimited; watch
 `last_write_error` in `/health` for that.
+
+**Cedar policies converge across the fleet within 5 seconds.** Statements are
+compiled once rather than parsed per request, so before v0.2.2 a policy written
+through `POST /admin/policies` recompiled only the task that served the write. On
+the default two-task deployment that meant an operator's `forbid` was enforced by
+one task and ignored by the other, chosen per request by the ALB — and because the
+policy *was* in the table, a restart fixed it and nothing short of one did.
+
+Writes now bump a shared version counter, and each instance reads that counter at
+most once every 5 seconds, re-scanning the policy table only when the number
+moves. So the steady-state cost is one small `GetItem` per instance per 5 s, not a
+scan per request.
+
+Two failure modes are handled deliberately, because a policy layer that fails open
+is worse than one that is briefly stale. If the policy scan fails, the instance
+keeps enforcing the set it already has rather than adopting an empty one — the
+alternative turns a single timed-out read into a fleet-wide authorization bypass.
+And if the *write* to DynamoDB fails, the version is not bumped, so other
+instances are not told to reload a change that is not there. Policies from
+`demo_seed.yaml` are not in DynamoDB at all, so a refresh merges the stored set
+over the seeded one by name rather than replacing it.
 
 **Rate limits are still per-process**, both the hierarchy's `rate_limit_rpm` and
 `SlidingWindowRateLimiter`, so those do need dividing by `desired_count`: two
