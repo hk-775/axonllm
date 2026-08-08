@@ -10,11 +10,12 @@ The AgentCore application and private-network CDK stack are implemented.
 consistent snapshot reads used during startup and runtime convergence.
 
 Focused hardening regressions are green locally. The release workflow records
-Fargate and AgentCore as distinct schema-v2 targets, and deployment verification
-can select and verify the AgentCore ARM64 target. This is not a production
-certification. Required CI must be green for the exact release commit. A real
-tagged private-ECR/Sigstore flow for the AgentCore digest and a real AWS restore
-exercise remain externally unverified.
+Fargate and AgentCore as distinct schema-v2 targets, controlled publication
+copies both signed OCI archives to immutable private ECR repositories, and
+deployment verification can select and verify the AgentCore ARM64 target. This
+is not a production certification. Required CI must be green for the exact
+release commit. A real tagged private-ECR/Sigstore flow for the AgentCore digest
+and a real AWS restore exercise remain externally unverified.
 
 ## Runtime Surface
 
@@ -142,13 +143,20 @@ ECR digest to the AgentCore subject, ARM64 platform, metadata, scan, SBOM, sourc
 commit, release tag, CI result, and target-specific Sigstore bundle, verifies the
 remote digest and attestation, and performs a fresh image scan.
 
-The workflow does not publish either image. Use a controlled private-ECR
-publication step and deploy only the verified digest. The first real tagged
-private-ECR/Sigstore execution remains externally unverified.
+`publish-release.yml` verifies the tagged release lineage and both signed target
+records, then copies the original OCI archives into the release-foundation
+repositories without rebuilding. It verifies the remote digest and target
+attestation before emitting the immutable image references. Deploy only the
+AgentCore reference that subsequently passes `deploy-verification.yml`. The
+first real tagged private-ECR/Sigstore execution remains externally unverified.
 
 ## CDK Setup
 
-After CI is green and the `agentcore` target has passed deployment verification:
+Deploy the release foundation and configure the protected `release` and
+`production` GitHub environments as described in the
+[production runbook](PRODUCTION_RUNBOOK.md#release-foundation). After a tagged
+release is published, CI is green, and the `agentcore` target has passed
+deployment verification:
 
 ```bash
 cd infra

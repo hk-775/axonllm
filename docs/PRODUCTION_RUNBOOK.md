@@ -10,10 +10,12 @@ transactions advance `SCIM#VERSION`, and `DynamoPersistence` provides strongly
 consistent tenant version and snapshot reads.
 
 Focused hardening regressions are green locally. Release evidence uses
-schema-v2 with distinct Fargate and AgentCore targets, and deployment verification
-selects and verifies either target. This is not a release certification. Obtain
-green required CI for the exact commit, then execute and retain the real tagged
-private-ECR/Sigstore flow for the selected image digest.
+schema-v2 with distinct Fargate and AgentCore targets. Controlled publication
+copies both signed OCI archives into retained immutable private ECR
+repositories, and deployment verification selects and verifies either target.
+This is not a release certification. Obtain green required CI for the exact
+commit, then execute and retain the real tagged private-ECR/Sigstore flow for
+the selected image digest.
 
 The operational workflow implements daily recovery metadata audits and a
 monthly temporary-table PITR exercise with separate audit and recovery roles.
@@ -96,6 +98,49 @@ only for noncanonical migration mode.
 `query.select` is authorization vocabulary only. AxonLLM ships no SQL parser,
 datasource adapter, HTTP route, AgentCore action, or backend query contract.
 `query.mutate` always denies.
+
+## Release Foundation
+
+`infra/release_foundation_stack.py` is restricted to `us-east-1` and creates:
+
+- retained `axonllm/fargate` and `axonllm/agentcore` private ECR repositories;
+- immutable tags, scan-on-push, and a retained rotation-enabled KMS key;
+- an account-global GitHub Actions OIDC provider;
+- an `AxonLLMReleasePublisher` role trusted only by the protected GitHub
+  `release` environment; and
+- an `AxonLLMReleaseVerifier` role trusted only by the protected GitHub
+  `production` environment.
+
+The publisher can upload and read image layers but cannot delete images or
+repositories. The verifier is read-only. Deploy this stack once per target
+account:
+
+```bash
+cd infra
+npx cdk deploy AxonLLMReleaseFoundationStack \
+  -c deployment_target=release-foundation \
+  -c region=us-east-1
+```
+
+Create two protected GitHub environments:
+
+- `release`: require approval and restrict deployment refs to version tags;
+- `production`: require approval and restrict deployment refs to protected
+  production branches and tags.
+
+Configure `release` with:
+
+| Kind | Name | Value |
+|---|---|---|
+| Secret | `AXON_RELEASE_PUBLISH_ROLE_ARN` | `ReleasePublisherRoleArn` output |
+| Variable | `AXON_AWS_ACCOUNT_ID` | Twelve-digit deployment account |
+| Variable | `AXON_FARGATE_ECR_REPOSITORY` | `FargateRepositoryUri` output |
+| Variable | `AXON_AGENTCORE_ECR_REPOSITORY` | `AgentCoreRepositoryUri` output |
+
+Configure `production` with the same three variables and set secret
+`AWS_ROLE_ARN` to the `ReleaseVerifierRoleArn` output. The operations roles and
+data-key variables described in [Backup And Restore](#backup-and-restore) are
+additional production-environment settings.
 
 ## Fargate Deployment
 
@@ -291,8 +336,14 @@ It:
   identities and keylessly attests both image digests and the manifest;
 - stores private evidence for 90 days.
 
-The workflow does not publish an image. Publication to private ECR is a separate
-controlled operation.
+`.github/workflows/publish-release.yml` is the controlled publication step. It
+runs only in the protected `release` environment, validates the exact tag,
+commit, release workflow run and attempt, successful CI, signed manifest, both
+target identities, and fixed account/region repository names. It then uses a
+checksum-pinned ORAS client to copy each signed OCI digest without rebuilding,
+verifies both remote digests and Sigstore bundles, and emits immutable
+`@sha256` references. Existing immutable tags are accepted only when their
+digest already matches; AWS lookup failures fail closed.
 
 `.github/workflows/deploy-verification.yml` requires a release tag, successful
 CI for the exact commit, signed evidence, an immutable private ECR digest, and a
@@ -305,8 +356,9 @@ attestation, then rescans that exact image.
 Never deploy a mutable tag or bypass a failing CI/evidence check. Record the
 commit, release tag, workflow run, ECR URI and digest, SBOMs, scan results,
 attestation verification, selected target, approvals, and canary results. The
-workflows implement this gate but do not publish or deploy either image. A real
-tagged private-ECR/Sigstore execution remains externally unverified.
+workflows publish and verify images but do not deploy either runtime. A real
+tagged private-ECR/Sigstore execution remains externally unverified until its
+workflow evidence is retained.
 
 ## Readiness And Traffic Shift
 

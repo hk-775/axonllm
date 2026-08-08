@@ -62,6 +62,11 @@ def test_workflow_enforces_each_release_gate() -> None:
         'AxonLLMAgentCoreStack.template.json"'
         in workflow
     )
+    assert (
+        '"${CDK_CI_OUTDIR}/release-foundation/'
+        'AxonLLMReleaseFoundationStack.template.json"'
+        in workflow
+    )
 
 
 def test_secret_baseline_contains_only_verified_fingerprints() -> None:

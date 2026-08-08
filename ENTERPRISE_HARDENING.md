@@ -1,8 +1,8 @@
 # AxonLLM Enterprise Hardening Status
 
-This document describes `hardening/enterprise-production-sweep-3` as of
-2026-08-07. It separates controls implemented in the repository from deployment
-and operational evidence that must still be produced in the target AWS account.
+This document describes the current repository as of 2026-08-07. It separates
+controls implemented in the repository from deployment and operational evidence
+that must still be produced in the target AWS account.
 
 Use these documents for detailed procedures:
 
@@ -206,9 +206,12 @@ attestations. Deployment verification binds a selected private-ECR digest to the
 exact commit, release tag, workflow run, target, and Sigstore bundle before a
 fresh image scan.
 
-Neither workflow publishes or deploys an image automatically. Use controlled
-private-ECR publication and deploy only the digest returned by deployment
-verification.
+The release-foundation stack creates retained KMS-encrypted immutable ECR
+repositories plus separate GitHub OIDC publisher and verifier roles. The
+protected publication workflow copies the original signed OCI archives without
+rebuilding, validates fixed destinations, and verifies both remote digests and
+attestations. No workflow deploys a runtime automatically; deploy only the
+digest returned by deployment verification.
 
 ## Known Design Residuals
 
@@ -231,7 +234,9 @@ These limitations are explicit and must not be represented as completed:
 
 Before production traffic:
 
-1. Configure the protected GitHub production environment, including
+1. Deploy the release foundation. Configure the protected `release` environment
+   with the publisher role and fixed ECR variables, and configure the protected
+   `production` environment with the verifier role, including
    `AXON_OPERATIONS_AUDIT_ROLE_ARN`,
    `AXON_OPERATIONS_RECOVERY_ROLE_ARN`, `AXON_AWS_ACCOUNT_ID`, and
    both target data-key variables: `AXON_DATA_KMS_KEY_ARN` and
