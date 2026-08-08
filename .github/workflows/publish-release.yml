@@ -114,10 +114,12 @@ jobs:
           [[ "${fargate_digest}" =~ ^sha256:[0-9a-f]{64}$ ]]
           [[ "${agentcore_digest}" =~ ^sha256:[0-9a-f]{64}$ ]]
 
-          printf 'agentcore_digest=%s\n' "${agentcore_digest}" >>"${GITHUB_OUTPUT}"
-          printf 'fargate_digest=%s\n' "${fargate_digest}" >>"${GITHUB_OUTPUT}"
-          printf 'release_ref=%s\n' "${release_ref}" >>"${GITHUB_OUTPUT}"
-          printf 'run_attempt=%s\n' "${run_attempt}" >>"${GITHUB_OUTPUT}"
+          {
+            printf 'agentcore_digest=%s\n' "${agentcore_digest}"
+            printf 'fargate_digest=%s\n' "${fargate_digest}"
+            printf 'release_ref=%s\n' "${release_ref}"
+            printf 'run_attempt=%s\n' "${run_attempt}"
+          } >>"${GITHUB_OUTPUT}"
 
       - name: Verify manifest attestation and release lineage
         env:
@@ -317,8 +319,12 @@ jobs:
           set -euo pipefail
           agentcore_image="${AGENTCORE_REPOSITORY}@${AGENTCORE_DIGEST}"
           fargate_image="${FARGATE_REPOSITORY}@${FARGATE_DIGEST}"
-          printf 'agentcore_image=%s\n' "${agentcore_image}" >>"${GITHUB_OUTPUT}"
-          printf 'fargate_image=%s\n' "${fargate_image}" >>"${GITHUB_OUTPUT}"
-          printf '### Immutable release images\n\n' >>"${GITHUB_STEP_SUMMARY}"
-          printf -- '- AgentCore: `%s`\n' "${agentcore_image}" >>"${GITHUB_STEP_SUMMARY}"
-          printf -- '- Fargate: `%s`\n' "${fargate_image}" >>"${GITHUB_STEP_SUMMARY}"
+          {
+            printf 'agentcore_image=%s\n' "${agentcore_image}"
+            printf 'fargate_image=%s\n' "${fargate_image}"
+          } >>"${GITHUB_OUTPUT}"
+          {
+            printf '### Immutable release images\n\n'
+            printf -- '- AgentCore: \x60%s\x60\n' "${agentcore_image}"
+            printf -- '- Fargate: \x60%s\x60\n' "${fargate_image}"
+          } >>"${GITHUB_STEP_SUMMARY}"
