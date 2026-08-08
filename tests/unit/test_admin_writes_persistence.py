@@ -26,6 +26,11 @@ resources the delete is the security-relevant direction.
 
 from __future__ import annotations
 
+import asyncio
+from copy import deepcopy
+from dataclasses import replace
+from types import SimpleNamespace
+
 import pytest
 from starlette.applications import Starlette
 from starlette.testclient import TestClient
@@ -41,7 +46,7 @@ from src.gateway.bootstrap import (
 from src.gateway.cost_tracker import CostTracker
 from src.gateway.health_tracker import ProviderHealthTracker
 from src.gateway.model_registry import ModelRegistry
-from src.gateway.models import Project
+from src.gateway.models import AuthMethod, Project, RequestContext
 from src.gateway.multi_region.health_monitor import SpokeHealthMonitor
 from src.gateway.multi_region.region_config import (
     HubConfig,
@@ -50,7 +55,7 @@ from src.gateway.multi_region.region_config import (
     SpokeStatus,
 )
 from src.gateway.multi_region.region_router import RegionRouter
-from src.gateway.persistence import DynamoPersistence
+from src.gateway.persistence import DynamoPersistence, PersistenceConflictError
 from src.gateway.security.event_dispatcher import (
     DestinationType,
     EventDestination,
@@ -64,10 +69,24 @@ class _FakeTable:
     def __init__(self, rows: dict) -> None:
         self._rows = rows
 
-    def put_item(self, Item):  # noqa: N803 — boto3's parameter name
+    def put_item(  # noqa: N803 — boto3's parameter names
+        self,
+        Item,
+        ConditionExpression=None,
+        ExpressionAttributeNames=None,
+        ExpressionAttributeValues=None,
+    ):
+        current = self._rows.get((Item["PK"], Item["SK"]))
+        if ConditionExpression == "attribute_not_exists(#revision)":
+            if current is not None and "revision" in current:
+                raise _ConditionalFailure
+        elif ConditionExpression == "#revision = :expected":
+            expected = ExpressionAttributeValues[":expected"]
+            if current is None or current.get("revision") != expected:
+                raise _ConditionalFailure
         self._rows[(Item["PK"], Item["SK"])] = dict(Item)
 
-    def get_item(self, Key):  # noqa: N803
+    def get_item(self, Key, **kwargs):  # noqa: N803
         item = self._rows.get((Key["PK"], Key["SK"]))
         return {"Item": item} if item else {}
 
@@ -92,21 +111,77 @@ class _TablePersistence(DynamoPersistence):
         return _FakeTable(self.rows)
 
 
+class _ConditionalFailure(Exception):
+    response = {
+        "Error": {
+            "Code": "ConditionalCheckFailedException",
+        }
+    }
+
+
 class _FailingPersistence(_TablePersistence):
     """Writes raise, as during a Dynamo outage."""
 
     def _get_table(self):
         class _Table:
-            def put_item(self, Item):  # noqa: N803
+            def put_item(self, **kwargs):
                 raise RuntimeError("dynamo is down")
 
-            def get_item(self, Key):  # noqa: N803
+            def get_item(self, **kwargs):
                 raise RuntimeError("dynamo is down")
 
             def delete_item(self, Key):  # noqa: N803
                 raise RuntimeError("dynamo is down")
 
         return _Table()
+
+
+class _RevisionProjectPersistence:
+    """Revision-aware route store without emulating boto3 transactions."""
+
+    enabled = True
+
+    def __init__(
+        self,
+        projects: dict[str, Project] | None = None,
+        *,
+        fail_writes: bool = False,
+    ) -> None:
+        self.projects = deepcopy(projects or {})
+        self.fail_writes = fail_writes
+        self.writes = 0
+
+    async def save_project(
+        self,
+        project: Project,
+        *,
+        expected_revision: int,
+    ) -> int:
+        self.writes += 1
+        if self.fail_writes:
+            raise RuntimeError("dynamo is down")
+        current = self.projects.get(project.project_id)
+        if current is None or current.revision != expected_revision:
+            raise PersistenceConflictError("project changed concurrently")
+        committed = replace(
+            deepcopy(project),
+            revision=expected_revision + 1,
+        )
+        self.projects[project.project_id] = committed
+        return committed.revision
+
+    async def get_project(
+        self,
+        project_id: str,
+        tenant_id: str | None = None,
+    ) -> Project | None:
+        project = self.projects.get(project_id)
+        if project is None or project.tenant_id != tenant_id:
+            return None
+        return deepcopy(project)
+
+    async def load_projects(self) -> dict[str, Project]:
+        return deepcopy(self.projects)
 
 
 # --------------------------------------------------------------------------
@@ -128,7 +203,6 @@ def _admin_client(persistence, projects):
 @pytest.fixture
 def members_wired(monkeypatch):
     monkeypatch.delenv("LLM_ROUTER_DYNAMODB_ENABLED", raising=False)
-    persistence = _TablePersistence()
     projects = {
         "proj-alpha": Project(
             project_id="proj-alpha",
@@ -136,11 +210,14 @@ def members_wired(monkeypatch):
             members=["keep@example.com", "doomed@example.com"],
         )
     }
+    persistence = _RevisionProjectPersistence(projects)
     return _admin_client(persistence, projects), persistence, projects
 
 
 def _stored_members(persistence, project_id="proj-alpha"):
     """Read membership back out of the table, through the real deserializer."""
+    if isinstance(persistence, _RevisionProjectPersistence):
+        return persistence.projects[project_id].members
     row = next(
         (r for r in persistence.rows.values()
          if r.get("entity_type") == "project" and r.get("project_id") == project_id),
@@ -186,7 +263,7 @@ class TestMembershipSurvivesARestart:
             json={"user_id": "keep@example.com"},
         )
 
-        assert persistence.rows == {}
+        assert persistence.writes == 0
         assert projects["proj-alpha"].members.count("keep@example.com") == 1
 
     def test_a_no_op_remove_writes_nothing(self, members_wired):
@@ -194,15 +271,19 @@ class TestMembershipSurvivesARestart:
 
         client.delete("/admin/projects/proj-alpha/members/never@example.com")
 
-        assert persistence.rows == {}
+        assert persistence.writes == 0
 
-    def test_a_write_failure_does_not_fail_the_request(self, monkeypatch):
-        """The in-memory change already succeeded and the caller cannot undo it,
-        so a 500 here would be a lie in the other direction. `last_write_error` is
-        what surfaces the drop to a health probe."""
+    def test_a_write_failure_fails_closed_without_changing_live_state(
+        self,
+        monkeypatch,
+    ):
+        """A failed commit cannot leak into the shared enforcement object."""
         monkeypatch.delenv("LLM_ROUTER_DYNAMODB_ENABLED", raising=False)
-        persistence = _FailingPersistence()
         projects = {"proj-alpha": Project(project_id="proj-alpha", name="Alpha")}
+        persistence = _RevisionProjectPersistence(
+            projects,
+            fail_writes=True,
+        )
         client = _admin_client(persistence, projects)
 
         resp = client.post(
@@ -210,9 +291,9 @@ class TestMembershipSurvivesARestart:
             json={"user_id": "new@example.com"},
         )
 
-        assert resp.status_code == 200
-        assert projects["proj-alpha"].members == ["new@example.com"]
-        assert persistence.last_write_error is not None
+        assert resp.status_code == 503
+        assert projects["proj-alpha"].members == []
+        assert persistence.projects["proj-alpha"].members == []
 
     def test_no_persistence_configured_still_works(self, monkeypatch):
         """The default single-node deploy has no table; the routes must not
@@ -230,9 +311,377 @@ class TestMembershipSurvivesARestart:
         assert projects["proj-alpha"].members == ["new@example.com"]
 
 
+class TestProjectOptimisticConcurrency:
+    def test_conflict_reloads_authoritative_project_and_allows_retry(self):
+        stale = Project(
+            project_id="proj-alpha",
+            name="Stale",
+            members=["keep@example.com"],
+        )
+        projects = {"proj-alpha": stale}
+        persistence = _RevisionProjectPersistence(projects)
+        persistence.projects["proj-alpha"] = replace(
+            stale,
+            name="Committed elsewhere",
+            revision=1,
+        )
+        client = _admin_client(persistence, projects)
+
+        conflict = client.post(
+            "/admin/projects/proj-alpha/members",
+            json={"user_id": "new@example.com"},
+        )
+
+        assert conflict.status_code == 409
+        assert conflict.json()["error"]["code"] == "project_write_conflict"
+        assert conflict.json()["error"]["revision"] == 1
+        assert conflict.headers["etag"] == '"1"'
+        assert projects["proj-alpha"].name == "Committed elsewhere"
+        assert projects["proj-alpha"].revision == 1
+        assert stale.members == ["keep@example.com"]
+
+        retried = client.post(
+            "/admin/projects/proj-alpha/members",
+            json={"user_id": "new@example.com"},
+            headers={"If-Match": '"1"'},
+        )
+        assert retried.status_code == 200
+        assert retried.json()["revision"] == 2
+        assert retried.headers["etag"] == '"2"'
+        assert projects["proj-alpha"].members == [
+            "keep@example.com",
+            "new@example.com",
+        ]
+
+    def test_project_get_and_update_expose_revision_etags(self):
+        projects = {
+            "proj-alpha": Project(project_id="proj-alpha", name="Alpha")
+        }
+        client = _admin_client(None, projects)
+
+        loaded = client.get("/admin/projects/proj-alpha")
+        updated = client.put(
+            "/admin/projects/proj-alpha",
+            json={"name": "Updated"},
+            headers={"If-Match": loaded.headers["etag"]},
+        )
+        stale = client.put(
+            "/admin/projects/proj-alpha",
+            json={"name": "Must not publish"},
+            headers={"If-Match": loaded.headers["etag"]},
+        )
+
+        assert loaded.json()["revision"] == 0
+        assert loaded.headers["etag"] == '"0"'
+        assert updated.status_code == 200
+        assert updated.json()["revision"] == 1
+        assert updated.headers["etag"] == '"1"'
+        assert stale.status_code == 409
+        assert stale.json()["error"]["code"] == "project_write_conflict"
+        assert projects["proj-alpha"].name == "Updated"
+
+    def test_update_outage_does_not_publish_or_register_candidate_budget(self):
+        project = Project(
+            project_id="proj-alpha",
+            name="Alpha",
+            budget_limit=10.0,
+        )
+        projects = {"proj-alpha": project}
+        persistence = _RevisionProjectPersistence(
+            projects,
+            fail_writes=True,
+        )
+        tracker = CostTracker(pricing_config={})
+        tracker.register_project("proj-alpha", budget_limit=10.0)
+        api = AdminAPI(
+            cost_tracker=tracker,
+            health_tracker=ProviderHealthTracker(),
+            model_registry=ModelRegistry(),
+            projects=projects,
+            persistence=persistence,
+        )
+        client = TestClient(Starlette(routes=create_admin_routes(api)))
+
+        response = client.put(
+            "/admin/projects/proj-alpha",
+            json={"name": "Rejected", "budget_limit": 999.0},
+        )
+
+        assert response.status_code == 503
+        assert projects["proj-alpha"] is project
+        assert project.name == "Alpha"
+        assert project.budget_limit == 10.0
+        status = asyncio.run(tracker.check_budget("proj-alpha"))
+        assert status.budget_limit == 10.0
+
+
+class _RevisionUserConfigPersistence:
+    enabled = True
+
+    def __init__(
+        self,
+        configs: dict[str, dict] | None = None,
+        *,
+        fail_writes: bool = False,
+    ) -> None:
+        self.configs = deepcopy(configs or {})
+        self.fail_writes = fail_writes
+        self.expected_revisions: list[int] = []
+
+    async def save_user_config(
+        self,
+        user_id: str,
+        config: dict,
+        *,
+        expected_revision: int,
+    ) -> int:
+        self.expected_revisions.append(expected_revision)
+        if self.fail_writes:
+            raise RuntimeError("dynamo is down")
+        current = self.configs.get(user_id, {"revision": 0})
+        if current.get("revision", 0) != expected_revision:
+            raise PersistenceConflictError("user config changed concurrently")
+        revision = expected_revision + 1
+        self.configs[user_id] = {
+            **deepcopy(config),
+            "revision": revision,
+        }
+        return revision
+
+    async def load_user_configs_or_none(self) -> dict[str, dict]:
+        return deepcopy(self.configs)
+
+
+def _user_config_client(persistence, configs):
+    tracker = CostTracker(pricing_config={})
+    api = AdminAPI(
+        cost_tracker=tracker,
+        health_tracker=ProviderHealthTracker(),
+        model_registry=ModelRegistry(),
+        user_configs=configs,
+        persistence=persistence,
+    )
+    client = TestClient(Starlette(routes=create_admin_routes(api)))
+    return client, api, tracker
+
+
+class TestUserConfigOptimisticConcurrency:
+    def test_success_publishes_revision_and_preserves_other_fields(self):
+        configs = {
+            "alice": {
+                "allowed_models": ["model-a"],
+                "budget_limit": None,
+                "alert_threshold": None,
+                "revision": 0,
+            }
+        }
+        persistence = _RevisionUserConfigPersistence(configs)
+        client, api, tracker = _user_config_client(persistence, configs)
+
+        budget = client.put(
+            "/admin/users/alice/budget",
+            json={"budget_limit": 25.0, "alert_threshold": 20.0},
+            headers={"If-Match": '"0"'},
+        )
+        models = client.put(
+            "/admin/users/alice/allowed-models",
+            json={"allowed_models": ["model-b"]},
+            headers={"If-Match": budget.headers["etag"]},
+        )
+
+        assert budget.status_code == 200
+        assert budget.json()["revision"] == 1
+        assert models.status_code == 200
+        assert models.json()["revision"] == 2
+        assert persistence.expected_revisions == [0, 1]
+        assert api._user_configs["alice"] == {
+            "allowed_models": ["model-b"],
+            "budget_limit": 25.0,
+            "alert_threshold": 20.0,
+            "revision": 2,
+        }
+        assert tracker.get_user_budget("alice")["budget_limit"] == 25.0
+
+    def test_conflict_reloads_config_without_registering_rejected_budget(self):
+        stale = {
+            "allowed_models": ["model-a"],
+            "budget_limit": 10.0,
+            "alert_threshold": 8.0,
+            "revision": 0,
+        }
+        configs = {"alice": deepcopy(stale)}
+        persistence = _RevisionUserConfigPersistence(configs)
+        persistence.configs["alice"] = {
+            **stale,
+            "budget_limit": 15.0,
+            "alert_threshold": 12.0,
+            "revision": 1,
+        }
+        client, api, tracker = _user_config_client(persistence, configs)
+        tracker.register_user(
+            "alice",
+            budget_limit=stale["budget_limit"],
+            alert_threshold=stale["alert_threshold"],
+        )
+
+        response = client.put(
+            "/admin/users/alice/budget",
+            json={"budget_limit": 999.0, "alert_threshold": 900.0},
+        )
+
+        assert response.status_code == 409
+        assert response.json()["error"]["code"] == (
+            "user_config_write_conflict"
+        )
+        assert response.json()["error"]["revision"] == 1
+        assert response.headers["etag"] == '"1"'
+        assert api._user_configs["alice"]["budget_limit"] == 15.0
+        assert tracker.get_user_budget("alice") == {
+            "budget_limit": 15.0,
+            "alert_threshold": 12.0,
+        }
+
+    def test_outage_does_not_publish_or_register_budget(self):
+        config = {
+            "allowed_models": ["model-a"],
+            "budget_limit": 10.0,
+            "alert_threshold": 8.0,
+            "revision": 3,
+        }
+        configs = {"alice": deepcopy(config)}
+        persistence = _RevisionUserConfigPersistence(
+            configs,
+            fail_writes=True,
+        )
+        client, api, tracker = _user_config_client(persistence, configs)
+        tracker.register_user(
+            "alice",
+            budget_limit=10.0,
+            alert_threshold=8.0,
+        )
+
+        response = client.put(
+            "/admin/users/alice/budget",
+            json={"budget_limit": 999.0, "alert_threshold": 900.0},
+        )
+
+        assert response.status_code == 503
+        assert api._user_configs["alice"] == config
+        assert tracker.get_user_budget("alice") == {
+            "budget_limit": 10.0,
+            "alert_threshold": 8.0,
+        }
+
+    def test_allowed_models_outage_keeps_live_config(self):
+        config = {
+            "allowed_models": ["model-a"],
+            "budget_limit": 10.0,
+            "alert_threshold": 8.0,
+            "revision": 3,
+        }
+        configs = {"alice": deepcopy(config)}
+        persistence = _RevisionUserConfigPersistence(
+            configs,
+            fail_writes=True,
+        )
+        client, api, _tracker = _user_config_client(
+            persistence,
+            configs,
+        )
+
+        response = client.put(
+            "/admin/users/alice/allowed-models",
+            json={"allowed_models": ["rejected-model"]},
+        )
+
+        assert response.status_code == 503
+        assert api._user_configs["alice"] == config
+
+
+class _FailingTenantProjectPersistence:
+    enabled = True
+
+    async def get_project(self, project_id, tenant_id):
+        assert project_id == "project-a"
+        assert tenant_id == "tenant-a"
+        return Project(
+            project_id="project-a",
+            name="Project A",
+            tenant_id="tenant-a",
+            allowed_models=["model-a"],
+        )
+
+    async def save_project(self, project, *, expected_revision):
+        return False
+
+
+class _TenantProjectRequest:
+    def __init__(self, body, path_params):
+        self._body = body
+        self.path_params = path_params
+        self.state = SimpleNamespace(
+            context=RequestContext(
+                user_id="admin-a",
+                project_id="project-a",
+                roles=["tenant_admin"],
+                scopes=[],
+                auth_method=AuthMethod.OIDC_JWT,
+                tenant_id="tenant-a",
+                principal_id="principal:admin-a",
+            )
+        )
+
+    async def json(self):
+        return self._body
+
+
+class TestCanonicalProjectWritesFailClosed:
+    @staticmethod
+    def _api():
+        return AdminAPI(
+            cost_tracker=CostTracker(pricing_config={}),
+            health_tracker=ProviderHealthTracker(),
+            model_registry=ModelRegistry(),
+            projects={},
+            persistence=_FailingTenantProjectPersistence(),
+        )
+
+    def test_project_update_reports_durable_store_failure(self):
+        response = asyncio.run(self._api().update_project(
+            _TenantProjectRequest(
+                {"name": "Changed"},
+                {"id": "project-a"},
+            )
+        ))
+
+        assert response.status_code == 503
+
+    def test_project_model_update_reports_durable_store_failure(self):
+        response = asyncio.run(self._api().add_project_model(
+            _TenantProjectRequest(
+                {"model": "model-b"},
+                {"id": "project-a"},
+            )
+        ))
+
+        assert response.status_code == 503
+
+
 # --------------------------------------------------------------------------
 # Event destinations (webhooks)
 # --------------------------------------------------------------------------
+
+
+async def _safe_webhook_resolver(hostname, port):
+    return ("93.184.216.34",)
+
+
+def _webhook_dispatcher():
+    return EventDispatcher(
+        resolver=_safe_webhook_resolver,
+        aws_region="us-east-1",
+        aws_account_id="123456789012",
+    )
 
 
 def _webhook_client(dispatcher, persistence):
@@ -243,14 +692,14 @@ def _webhook_client(dispatcher, persistence):
 @pytest.fixture
 def webhooks_wired(monkeypatch):
     monkeypatch.delenv("LLM_ROUTER_DYNAMODB_ENABLED", raising=False)
-    dispatcher = EventDispatcher()
+    dispatcher = _webhook_dispatcher()
     persistence = _TablePersistence()
     return _webhook_client(dispatcher, persistence), dispatcher, persistence
 
 
 def _post_dest(client, name, dtype="webhook", **extra):
     body = {"name": name, "type": dtype,
-            "config": {"url": f"https://{name}.invalid/hook"}}
+            "config": {"url": f"https://{name}.webhook.example.com/hook"}}
     body.update(extra)
     return client.post("/admin/webhooks", json=body)
 
@@ -269,7 +718,9 @@ class TestDestinationsSurviveARestart:
 
         stored = _stored_dests(persistence)
         assert [d["name"] for d in stored] == ["alerts"]
-        assert stored[0]["config"] == {"url": "https://alerts.invalid/hook"}
+        assert stored[0]["config"] == {
+            "url": "https://alerts.webhook.example.com/hook"
+        }
 
     def test_removing_a_destination_reaches_the_table(self, webhooks_wired):
         client, _, persistence = webhooks_wired
@@ -321,19 +772,27 @@ class TestDestinationsSurviveARestart:
 
         assert _stored_dests(persistence)[0]["enabled"] is False
 
-    def test_a_write_failure_does_not_fail_the_request(self, monkeypatch):
+    def test_store_failure_fails_closed_without_advancing_memory(
+        self,
+        monkeypatch,
+    ):
         monkeypatch.delenv("LLM_ROUTER_DYNAMODB_ENABLED", raising=False)
-        dispatcher = EventDispatcher()
+        dispatcher = _webhook_dispatcher()
         persistence = _FailingPersistence()
         client = _webhook_client(dispatcher, persistence)
 
-        assert _post_dest(client, "alerts").status_code == 201
-        assert [d.name for d in dispatcher.destinations] == ["alerts"]
-        assert persistence.last_write_error is not None
+        response = _post_dest(client, "alerts")
+
+        assert response.status_code == 503
+        assert dispatcher.destinations == []
+        assert response.json()["error"]["type"] == (
+            "webhook_store_unavailable"
+        )
+        assert "dynamo" not in response.text.lower()
 
     def test_no_persistence_configured_still_works(self, monkeypatch):
         monkeypatch.delenv("LLM_ROUTER_DYNAMODB_ENABLED", raising=False)
-        dispatcher = EventDispatcher()
+        dispatcher = _webhook_dispatcher()
         client = _webhook_client(dispatcher, None)
 
         assert _post_dest(client, "alerts").status_code == 201
@@ -351,7 +810,7 @@ class TestReAddingADestinationReplacesIt:
 
         resp = client.post("/admin/webhooks", json={
             "name": "alerts", "type": "webhook",
-            "config": {"url": "https://moved.invalid/hook"},
+            "config": {"url": "https://moved.webhook.example.com/hook"},
         })
 
         assert resp.status_code == 200, "an update is not a creation"
@@ -359,7 +818,9 @@ class TestReAddingADestinationReplacesIt:
         assert [d.name for d in dispatcher.destinations] == ["alerts"]
         stored = _stored_dests(persistence)
         assert len(stored) == 1
-        assert stored[0]["config"] == {"url": "https://moved.invalid/hook"}
+        assert stored[0]["config"] == {
+            "url": "https://moved.webhook.example.com/hook"
+        }
 
     def test_a_first_post_reports_created(self, webhooks_wired):
         client, _, _ = webhooks_wired
@@ -429,7 +890,7 @@ class TestApplyingPersistedDestinationsAtStartup:
         _post_dest(client, "narrow", event_filter=["injection_blocked"],
                    enabled=False)
         _post_dest(client, "sns", dtype="sns",
-                   config={"topic_arn": "arn:aws:sns:us-east-1:000000000000:x"})
+                   config={"topic_arn": "arn:aws:sns:us-east-1:123456789012:x"})
 
         fresh = EventDispatcher()
         _apply_persisted_destinations(fresh, _stored_dests(persistence))
@@ -569,8 +1030,8 @@ class TestTopologySurvivesARestart:
 
         resp = client.post("/admin/regions/spokes", json={"region": "eu-west-1"})
 
-        assert resp.status_code == 201
-        assert [s.region for s in hub.spokes] == ["us-east-1", "eu-west-1"]
+        assert resp.status_code == 503
+        assert [s.region for s in hub.spokes] == ["us-east-1"]
         assert persistence.last_write_error is not None
 
     def test_no_persistence_configured_still_works(self, monkeypatch):
@@ -581,6 +1042,43 @@ class TestTopologySurvivesARestart:
         assert client.post("/admin/regions/spokes",
                            json={"region": "eu-west-1"}).status_code == 201
         assert [s.region for s in hub.spokes] == ["us-east-1", "eu-west-1"]
+
+    def test_concurrent_full_set_writes_do_not_drop_a_spoke(self):
+        rows: dict = {}
+        persistence_a = _TablePersistence(rows)
+        persistence_b = _TablePersistence(rows)
+        hub_a = _hub(
+            SpokeConfig(region="us-east-1", role=SpokeRole.PRIMARY)
+        )
+        hub_b = _hub(
+            SpokeConfig(region="us-east-1", role=SpokeRole.PRIMARY)
+        )
+        client_a = _region_client(hub_a, persistence_a)
+        client_b = _region_client(hub_b, persistence_b)
+
+        assert client_a.post(
+            "/admin/regions/spokes",
+            json={"region": "eu-west-1"},
+        ).status_code == 201
+
+        conflict = client_b.post(
+            "/admin/regions/spokes",
+            json={"region": "ap-south-1"},
+        )
+        assert conflict.status_code == 409
+        assert [spoke.region for spoke in hub_b.spokes] == [
+            "us-east-1",
+            "eu-west-1",
+        ]
+
+        assert client_b.post(
+            "/admin/regions/spokes",
+            json={"region": "ap-south-1"},
+        ).status_code == 201
+        assert [
+            spoke["region"]
+            for spoke in _stored_topology(persistence_b)["spokes"]
+        ] == ["us-east-1", "eu-west-1", "ap-south-1"]
 
 
 class TestApplyingPersistedTopologyAtStartup:
@@ -640,22 +1138,30 @@ class TestApplyingPersistedTopologyAtStartup:
 
         assert hub.spokes[0].status is SpokeStatus.HEALTHY
 
-    def test_an_unknown_role_is_skipped_not_fatal(self):
-        hub = _hub()
+    def test_an_unknown_role_rejects_the_snapshot_atomically(self):
+        hub = _hub(
+            SpokeConfig(region="original", role=SpokeRole.PRIMARY),
+        )
 
-        _apply_persisted_topology(hub, {
-            "hub_region": "us-east-1",
-            "health_check_interval_seconds": 30,
-            "failover_threshold_consecutive": 3,
-            "failover_cooldown_seconds": 60,
-            "data_residency_strict": False,
-            "spokes": [
-                {"region": "weird", "role": "sideways", "weight": 10},
-                {"region": "us-east-1", "role": "primary", "weight": 100},
-            ],
-        })
+        with pytest.raises(ValueError, match="unknown role"):
+            _apply_persisted_topology(hub, {
+                "hub_region": "eu-west-1",
+                "health_check_interval_seconds": 15,
+                "failover_threshold_consecutive": 2,
+                "failover_cooldown_seconds": 45,
+                "data_residency_strict": True,
+                "spokes": [
+                    {"region": "weird", "role": "sideways", "weight": 10},
+                    {"region": "eu-west-1", "role": "primary", "weight": 100},
+                ],
+            })
 
-        assert [s.region for s in hub.spokes] == ["us-east-1"]
+        assert hub.hub_region == "us-east-1"
+        assert [s.region for s in hub.spokes] == ["original"]
+        assert hub.health_check_interval_seconds == 30
+        assert hub.failover_threshold_consecutive == 3
+        assert hub.failover_cooldown_seconds == 60
+        assert hub.data_residency_strict is False
 
     def test_a_round_trip_preserves_every_routable_field(self, regions_wired):
         """What comes back out of the table must route identically to what went

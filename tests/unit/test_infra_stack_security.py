@@ -22,6 +22,8 @@ _REQUIRED_PARAMETERS = {
     "OriginDomainName",
     "OriginCertificateArn",
     "ApprovedHttpsPrefixListId",
+    "BedrockInvokeResourceArns",
+    "VerifiedImageUri",
 }
 _DEPLOY_ENV_BY_PARAMETER = {
     "ViewerDomainName": "AXON_VIEWER_DOMAIN_NAME",
@@ -29,6 +31,8 @@ _DEPLOY_ENV_BY_PARAMETER = {
     "OriginDomainName": "AXON_ORIGIN_DOMAIN_NAME",
     "OriginCertificateArn": "AXON_ORIGIN_CERTIFICATE_ARN",
     "ApprovedHttpsPrefixListId": "AXON_APPROVED_HTTPS_PREFIX_LIST_ID",
+    "BedrockInvokeResourceArns": "AXON_BEDROCK_INVOKE_RESOURCE_ARNS",
+    "VerifiedImageUri": "AXON_VERIFIED_IMAGE_URI",
 }
 
 
@@ -44,6 +48,13 @@ def _one_resource(template: dict, resource_type: str) -> dict:
     resources = _resources(template, resource_type)
     assert len(resources) == 1, f"expected one {resource_type}, got {len(resources)}"
     return resources[0]
+
+
+def _actions(statement: dict) -> set[str]:
+    actions = statement["Action"]
+    if isinstance(actions, str):
+        return {actions}
+    return set(actions)
 
 
 def _values_for_key(value: object, wanted: str) -> list[object]:
@@ -105,8 +116,9 @@ def test_required_inputs_have_no_source_defaults():
         ):
             parameters[node.args[1].value] = node
 
-    assert set(parameters) == _REQUIRED_PARAMETERS
-    for name, call in parameters.items():
+    assert _REQUIRED_PARAMETERS <= set(parameters)
+    for name in _REQUIRED_PARAMETERS:
+        call = parameters[name]
         assert all(keyword.arg != "default" for keyword in call.keywords), (
             f"{name} must remain a required deployment input"
         )
@@ -122,6 +134,9 @@ def test_required_inputs_have_no_template_defaults(synthesized_template):
     assert parameters["ApprovedHttpsPrefixListId"]["AllowedPattern"] == (
         "^pl-[0-9a-fA-F]+$"
     )
+    bedrock = parameters["BedrockInvokeResourceArns"]
+    assert bedrock["Type"] == "CommaDelimitedList"
+    assert "without wildcards" in bedrock["ConstraintDescription"]
 
 
 def test_deploy_wrapper_requires_and_passes_every_stack_parameter():
@@ -219,7 +234,9 @@ def test_origin_transport_is_tls_only(synthesized_template):
     assert vpc_origin["OriginSSLProtocols"] == ["TLSv1.2"]
 
 
-def test_task_egress_is_explicitly_bounded(synthesized_template):
+def test_task_egress_and_aws_endpoints_are_explicitly_bounded(
+    synthesized_template,
+):
     assert "0.0.0.0/0" not in _values_for_key(synthesized_template, "CidrIp")
     assert "::/0" not in _values_for_key(synthesized_template, "CidrIpv6")
 
@@ -242,7 +259,8 @@ def test_task_egress_is_explicitly_bounded(synthesized_template):
         for resource in _resources(
             synthesized_template, "AWS::EC2::SecurityGroupEgress"
         )
-        if "DestinationPrefixListId" in resource["Properties"]
+        if resource["Properties"].get("Description")
+        == "HTTPS to explicitly approved destinations"
     ]
     assert len(prefix_list_rules) == 1
     rule = prefix_list_rules[0]
@@ -255,6 +273,67 @@ def test_task_egress_is_explicitly_bounded(synthesized_template):
     task_group_ref = rule["GroupId"]["Fn::GetAtt"]
     assert task_group_ref[0].startswith("TaskSecurityGroup")
     assert task_group_ref[1] == "GroupId"
+
+    aws_endpoints = [
+        endpoint["Properties"]
+        for endpoint in _resources(
+            synthesized_template,
+            "AWS::EC2::VPCEndpoint",
+        )
+    ]
+    assert len(aws_endpoints) == 3
+    assert all(
+        endpoint["VpcEndpointType"] == "Interface"
+        and endpoint["PrivateDnsEnabled"] is True
+        and len(endpoint["SubnetIds"]) == 2
+        and all(
+            subnet["Ref"].startswith("VpcApplicationSubnet")
+            for subnet in endpoint["SubnetIds"]
+        )
+        for endpoint in aws_endpoints
+    )
+    sqs_endpoint = next(
+        endpoint
+        for endpoint in aws_endpoints
+        if endpoint["ServiceName"].endswith(".sqs")
+    )
+    sns_endpoint = next(
+        endpoint
+        for endpoint in aws_endpoints
+        if endpoint["ServiceName"].endswith(".sns")
+    )
+    logs_endpoint = next(
+        endpoint
+        for endpoint in aws_endpoints
+        if endpoint["ServiceName"].endswith(".logs")
+    )
+    sqs_statement = sqs_endpoint["PolicyDocument"]["Statement"][0]
+    assert _actions(sqs_statement) == {
+        "sqs:ChangeMessageVisibility",
+        "sqs:DeleteMessage",
+        "sqs:GetQueueAttributes",
+        "sqs:ReceiveMessage",
+        "sqs:SendMessage",
+    }
+    assert sqs_statement["Resource"]["Fn::GetAtt"][0].startswith(
+        "SecurityEventOutboxQueue"
+    )
+    sns_statement = sns_endpoint["PolicyDocument"]["Statement"][0]
+    assert _actions(sns_statement) == {"sns:Publish"}
+    assert sns_statement["Resource"]["Ref"].startswith(
+        "SecurityEventTopic"
+    )
+    logs_statement = logs_endpoint["PolicyDocument"]["Statement"][0]
+    assert _actions(logs_statement) == {
+        "logs:CreateLogStream",
+        "logs:PutLogEvents",
+    }
+    assert logs_statement["Resource"][0]["Fn::GetAtt"][0].startswith(
+        "SecurityEventLogGroup"
+    )
+    assert "SecurityEventLogGroup" in json.dumps(
+        logs_statement["Resource"][1]
+    )
 
 
 def test_cloudfront_has_tls_waf_and_preserved_behaviors(synthesized_template):
@@ -431,3 +510,622 @@ def test_health_check_and_streaming_settings_are_preserved(
     origin = distribution["Origins"][0]["VpcOriginConfig"]
     assert origin["OriginKeepaliveTimeout"] == 60
     assert origin["OriginReadTimeout"] == 60
+
+
+def test_production_oidc_is_conditional_and_bound_to_the_alb(
+    synthesized_template,
+):
+    parameters = synthesized_template["Parameters"]
+    assert parameters["DeploymentMode"]["Default"] == "staging"
+    assert parameters["DeploymentMode"]["AllowedValues"] == [
+        "staging",
+        "production",
+    ]
+    assert parameters["OidcClientSecret"]["NoEcho"] is True
+
+    identity_rule = synthesized_template["Rules"]["ProductionIdentityInputs"]
+    assert identity_rule["RuleCondition"] == {
+        "Fn::Equals": [{"Ref": "DeploymentMode"}, "production"]
+    }
+    asserted_parameters = {
+        assertion["Assert"]["Fn::Not"][0]["Fn::Equals"][0]["Ref"]
+        for assertion in identity_rule["Assertions"]
+    }
+    assert asserted_parameters == {
+        "OidcIssuer",
+        "OidcAuthorizationEndpoint",
+        "OidcTokenEndpoint",
+        "OidcUserInfoEndpoint",
+        "OidcClientId",
+        "OidcClientSecret",
+        "OidcAudience",
+    }
+
+    listener_rule = _one_resource(
+        synthesized_template,
+        "AWS::ElasticLoadBalancingV2::ListenerRule",
+    )
+    listener_rule_id = next(
+        logical_id
+        for logical_id, resource in synthesized_template["Resources"].items()
+        if resource is listener_rule
+    )
+    assert listener_rule["Condition"] == "ProductionMode"
+    properties = listener_rule["Properties"]
+    assert properties["Conditions"] == [
+        {
+            "Field": "path-pattern",
+            "PathPatternConfig": {
+                "Values": [
+                    "/admin",
+                    "/admin/*",
+                    "/oauth2/idpresponse",
+                ]
+            },
+        }
+    ]
+    oidc = properties["Actions"][0]["AuthenticateOidcConfig"]
+    assert oidc["ClientSecret"] == {"Ref": "OidcClientSecret"}
+    assert oidc["OnUnauthenticatedRequest"] == "authenticate"
+    assert oidc["SessionTimeout"] == 28800
+    assert properties["Actions"][-1]["Type"] == "forward"
+
+    task_definition = _one_resource(
+        synthesized_template,
+        "AWS::ECS::TaskDefinition",
+    )["Properties"]
+    environment = {
+        item["Name"]: item["Value"]
+        for item in task_definition["ContainerDefinitions"][0]["Environment"]
+    }
+    assert environment["AXON_OIDC_ISSUER"]["Fn::If"] == [
+        "ProductionMode",
+        {"Ref": "OidcIssuer"},
+        "",
+    ]
+    assert environment["AXON_OIDC_AUDIENCE"]["Fn::If"] == [
+        "ProductionMode",
+        {"Ref": "OidcAudience"},
+        "",
+    ]
+    assert environment["AXON_ALB_CLIENT_ID"]["Fn::If"] == [
+        "ProductionMode",
+        {"Ref": "OidcClientId"},
+        "",
+    ]
+    assert environment["AXON_REQUIRE_CANONICAL_IDENTITY"]["Fn::If"] == [
+        "ProductionMode",
+        "true",
+        "false",
+    ]
+    assert environment["AXON_DEPLOYMENT_PROFILE"]["Fn::If"] == [
+        "ProductionMode",
+        "production",
+        "development",
+    ]
+    assert environment["AXON_AWS_ACCOUNT_ID"] == {
+        "Ref": "AWS::AccountId"
+    }
+    assert environment["AXON_EVENT_OUTBOX_QUEUE_URL"]["Ref"].startswith(
+        "SecurityEventOutboxQueue"
+    )
+    assert environment["AXON_SECURITY_EVENT_SNS_TOPIC_ARN"][
+        "Ref"
+    ].startswith("SecurityEventTopic")
+    assert environment["AXON_SECURITY_EVENT_LOG_GROUP_ARN"][
+        "Fn::GetAtt"
+    ][0].startswith("SecurityEventLogGroup")
+    signer = environment["AXON_ALB_SIGNER_ARN"]["Fn::If"]
+    assert signer[0] == "ProductionMode"
+    assert signer[1]["Ref"].startswith("LoadBalancer")
+    assert signer[2] == ""
+
+    service = _one_resource(synthesized_template, "AWS::ECS::Service")
+    assert listener_rule_id not in service.get("DependsOn", [])
+
+
+def test_alb_only_trusts_cloudfront_and_uses_bounded_egress(
+    synthesized_template,
+):
+    groups = _resources(synthesized_template, "AWS::EC2::SecurityGroup")
+    alb_group = next(
+        resource
+        for resource in groups
+        if resource["Properties"]["GroupDescription"].startswith("AxonLLM ALB")
+    )
+    alb_group_id = next(
+        logical_id
+        for logical_id, resource in synthesized_template["Resources"].items()
+        if resource is alb_group
+    )
+    assert {
+        (rule["IpProtocol"], rule["FromPort"])
+        for rule in alb_group["Properties"]["SecurityGroupEgress"]
+    } == {("tcp", 53), ("udp", 53)}
+
+    ingress = _resources(
+        synthesized_template,
+        "AWS::EC2::SecurityGroupIngress",
+    )
+    cloudfront_ingress = next(
+        rule["Properties"]
+        for rule in ingress
+        if rule["Properties"].get("Description", "").startswith(
+            "TLS from the CloudFront"
+        )
+    )
+    assert cloudfront_ingress["FromPort"] == 443
+    assert cloudfront_ingress["GroupId"]["Fn::GetAtt"][0] == alb_group_id
+    assert cloudfront_ingress["SourcePrefixListId"]["Fn::GetAtt"][1] == (
+        "PrefixLists.0.PrefixListId"
+    )
+    assert all(
+        "CidrIp" not in rule["Properties"]
+        for rule in ingress
+        if rule["Properties"].get("FromPort") == 443
+    )
+
+    egress = [
+        resource["Properties"]
+        for resource in _resources(
+            synthesized_template,
+            "AWS::EC2::SecurityGroupEgress",
+        )
+        if resource["Properties"]["GroupId"]["Fn::GetAtt"][0] == alb_group_id
+    ]
+    assert {rule["Description"] for rule in egress} == {
+        "HTTPS to the approved OIDC identity provider",
+        "Application traffic to AxonLLM tasks",
+    }
+    https_rule = next(rule for rule in egress if rule["FromPort"] == 443)
+    assert https_rule["DestinationPrefixListId"] == {
+        "Ref": "ApprovedHttpsPrefixListId"
+    }
+
+
+def test_private_networking_is_multi_az_and_production_protected(
+    synthesized_template,
+):
+    assert len(_resources(synthesized_template, "AWS::EC2::NatGateway")) == 2
+
+    load_balancer = _one_resource(
+        synthesized_template,
+        "AWS::ElasticLoadBalancingV2::LoadBalancer",
+    )["Properties"]
+    attributes = {
+        item["Key"]: item["Value"]
+        for item in load_balancer["LoadBalancerAttributes"]
+    }
+    assert attributes["routing.http.desync_mitigation_mode"] == "strictest"
+    assert attributes["deletion_protection.enabled"] == {
+        "Fn::If": ["ProductionMode", "true", "false"]
+    }
+    assert all(
+        subnet["Ref"].startswith("VpcApplicationSubnet")
+        for subnet in load_balancer["Subnets"]
+    )
+
+
+def test_optional_public_dns_uses_the_exact_viewer_name(
+    synthesized_template,
+):
+    assert synthesized_template["Rules"]["PublicDnsInputs"]
+    records = _resources(synthesized_template, "AWS::Route53::RecordSet")
+    assert len(records) == 2
+    assert {record["Properties"]["Type"] for record in records} == {
+        "A",
+        "AAAA",
+    }
+    for record in records:
+        assert record["Condition"] == "ManagePublicDns"
+        properties = record["Properties"]
+        assert properties["Name"] == {"Ref": "ViewerDomainName"}
+        assert properties["HostedZoneId"] == {"Ref": "PublicHostedZoneId"}
+        assert properties["AliasTarget"]["HostedZoneId"] == "Z2FDTNDATAQYW2"
+        assert properties["AliasTarget"]["DNSName"]["Fn::GetAtt"][1] == (
+            "DomainName"
+        )
+
+
+def test_state_is_kms_encrypted_protected_and_backed_up(
+    synthesized_template,
+):
+    table = _one_resource(synthesized_template, "AWS::DynamoDB::Table")
+    properties = table["Properties"]
+    assert properties["DeletionProtectionEnabled"] is True
+    assert properties["PointInTimeRecoverySpecification"] == {
+        "PointInTimeRecoveryEnabled": True
+    }
+    assert properties["SSESpecification"]["SSEEnabled"] is True
+    assert properties["SSESpecification"]["SSEType"] == "KMS"
+    assert properties["TimeToLiveSpecification"] == {
+        "AttributeName": "expires_at",
+        "Enabled": True,
+    }
+    assert table["DeletionPolicy"] == "Retain"
+
+    keys = _resources(synthesized_template, "AWS::KMS::Key")
+    assert len(keys) == 2
+    assert all(key["Properties"]["EnableKeyRotation"] is True for key in keys)
+    assert all(key["DeletionPolicy"] == "Retain" for key in keys)
+
+    vault = _one_resource(synthesized_template, "AWS::Backup::BackupVault")
+    assert vault["DeletionPolicy"] == "Retain"
+    assert vault["UpdateReplacePolicy"] == "Retain"
+    vault_name = vault["Properties"]["BackupVaultName"]
+    assert vault_name["Fn::Join"][1][0] == "axon-state"
+    assert {"Ref": "AWS::StackId"} in _values_for_key(
+        vault_name,
+        "Fn::Split",
+    )[0]
+    plan = _one_resource(synthesized_template, "AWS::Backup::BackupPlan")
+    rule = plan["Properties"]["BackupPlan"]["BackupPlanRule"][0]
+    assert rule["ScheduleExpression"] == "cron(0 5 * * ? *)"
+    assert rule["Lifecycle"] == {
+        "DeleteAfterDays": 365,
+        "MoveToColdStorageAfterDays": 30,
+    }
+    selection = _one_resource(
+        synthesized_template,
+        "AWS::Backup::BackupSelection",
+    )
+    assert selection["Properties"]["BackupSelection"]["Resources"][0][
+        "Fn::GetAtt"
+    ][1] == "Arn"
+
+    secret = _one_resource(
+        synthesized_template,
+        "AWS::SecretsManager::Secret",
+    )
+    assert secret["DeletionPolicy"] == "Retain"
+    assert secret["UpdateReplacePolicy"] == "Retain"
+    assert "Name" not in secret["Properties"]
+    assert "ProviderSecretArn" in synthesized_template["Outputs"]
+
+
+def test_task_container_enforces_runtime_hardening(synthesized_template):
+    task = _one_resource(
+        synthesized_template,
+        "AWS::ECS::TaskDefinition",
+    )["Properties"]
+    container = task["ContainerDefinitions"][0]
+
+    assert container["ReadonlyRootFilesystem"] is True
+    assert container["LinuxParameters"] == {
+        "Capabilities": {"Drop": ["ALL"]},
+        "InitProcessEnabled": True,
+    }
+    assert container["MountPoints"] == [
+        {
+            "ContainerPath": "/tmp",
+            "ReadOnly": False,
+            "SourceVolume": "tmp",
+        }
+    ]
+    assert task["Volumes"] == [{"Name": "tmp"}]
+
+
+def test_security_event_outbox_is_fifo_encrypted_and_redriven(
+    synthesized_template,
+):
+    queues = _resources(synthesized_template, "AWS::SQS::Queue")
+    assert len(queues) == 2
+    assert all(queue["Properties"]["FifoQueue"] is True for queue in queues)
+    assert all(
+        queue["Properties"]["ContentBasedDeduplication"] is False
+        for queue in queues
+    )
+    assert all("KmsMasterKeyId" in queue["Properties"] for queue in queues)
+    outbox = next(
+        queue
+        for queue in queues
+        if "RedrivePolicy" in queue["Properties"]
+    )
+    assert outbox["Properties"]["MessageRetentionPeriod"] == 1209600
+    assert outbox["Properties"]["ReceiveMessageWaitTimeSeconds"] == 20
+    assert outbox["Properties"]["VisibilityTimeout"] == 120
+    assert outbox["Properties"]["RedrivePolicy"]["maxReceiveCount"] == 5
+    assert outbox["DeletionPolicy"] == "Retain"
+    assert outbox["UpdateReplacePolicy"] == "Retain"
+
+    queue_policies = _resources(
+        synthesized_template,
+        "AWS::SQS::QueuePolicy",
+    )
+    assert len(queue_policies) == 2
+    for policy in queue_policies:
+        statement = policy["Properties"]["PolicyDocument"]["Statement"][0]
+        assert statement["Effect"] == "Deny"
+        assert statement["Condition"] == {
+            "Bool": {"aws:SecureTransport": "false"}
+        }
+
+    security_topic = next(
+        topic
+        for topic in _resources(synthesized_template, "AWS::SNS::Topic")
+        if topic["Properties"].get("DisplayName")
+        == "AxonLLM durable security events"
+    )
+    assert security_topic["Properties"]["FifoTopic"] is True
+    assert security_topic["Properties"]["ContentBasedDeduplication"] is False
+    assert "KmsMasterKeyId" in security_topic["Properties"]
+    security_topic_policy = next(
+        policy
+        for policy in _resources(
+            synthesized_template,
+            "AWS::SNS::TopicPolicy",
+        )
+        if policy["Properties"]["PolicyDocument"]["Statement"][0].get("Sid")
+        == "AllowPublishThroughSSLOnly"
+    )
+    transport_statement = security_topic_policy["Properties"][
+        "PolicyDocument"
+    ]["Statement"][0]
+    assert transport_statement["Effect"] == "Deny"
+    assert transport_statement["Condition"] == {
+        "Bool": {"aws:SecureTransport": "false"}
+    }
+
+    security_log = next(
+        log_group
+        for log_group in _resources(
+            synthesized_template,
+            "AWS::Logs::LogGroup",
+        )
+        if log_group["Properties"].get("RetentionInDays") == 365
+    )
+    assert "KmsKeyId" in security_log["Properties"]
+    assert security_log["DeletionPolicy"] == "Retain"
+    assert security_log["UpdateReplacePolicy"] == "Retain"
+
+    outputs = synthesized_template["Outputs"]
+    assert outputs["SecurityEventOutboxQueueUrl"]["Value"]["Ref"].startswith(
+        "SecurityEventOutboxQueue"
+    )
+    assert outputs["SecurityEventDeadLetterQueueUrl"]["Value"][
+        "Ref"
+    ].startswith("SecurityEventDeadLetterQueue")
+    assert outputs["SecurityEventTopicArn"]["Value"]["Ref"].startswith(
+        "SecurityEventTopic"
+    )
+    assert outputs["SecurityEventLogGroupArn"]["Value"]["Fn::GetAtt"][
+        0
+    ].startswith("SecurityEventLogGroup")
+
+
+def test_inference_iam_is_least_privilege(synthesized_template):
+    statements = [
+        statement
+        for policy in _resources(
+            synthesized_template,
+            "AWS::IAM::Policy",
+        )
+        for statement in policy["Properties"]["PolicyDocument"]["Statement"]
+    ]
+    bedrock = next(
+        statement
+        for statement in statements
+        if "bedrock:InvokeModel" in (
+            statement["Action"]
+            if isinstance(statement["Action"], list)
+            else [statement["Action"]]
+        )
+    )
+    assert set(bedrock["Action"]) == {
+        "bedrock:InvokeModel",
+        "bedrock:InvokeModelWithResponseStream",
+    }
+    assert bedrock["Resource"] == {
+        "Ref": "BedrockInvokeResourceArns"
+    }
+
+    mantle = next(
+        statement
+        for statement in statements
+        if "bedrock-mantle:CreateInference" in (
+            statement["Action"]
+            if isinstance(statement["Action"], list)
+            else [statement["Action"]]
+        )
+    )
+    assert set(mantle["Action"]) == {
+        "bedrock-mantle:CreateInference",
+        "bedrock-mantle:ListModels",
+    }
+    assert "bedrock-mantle:*" not in mantle["Action"]
+
+
+def test_task_role_has_item_permissions_for_atomic_state_transactions(
+    synthesized_template,
+):
+    policies = _resources(synthesized_template, "AWS::IAM::Policy")
+    statements = [
+        statement
+        for policy in policies
+        for statement in policy["Properties"]["PolicyDocument"]["Statement"]
+    ]
+    state_access = next(
+        statement
+        for statement in statements
+        if "dynamodb:ConditionCheckItem"
+        in (
+            statement["Action"]
+            if isinstance(statement["Action"], list)
+            else [statement["Action"]]
+        )
+    )
+    assert {
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:GetItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+    } <= set(state_access["Action"])
+    assert state_access["Resource"][0]["Fn::GetAtt"][0].startswith(
+        "StateTable"
+    )
+    assert state_access["Resource"][0]["Fn::GetAtt"][1] == "Arn"
+    all_actions = {
+        action
+        for statement in statements
+        for action in (
+            statement["Action"]
+            if isinstance(statement["Action"], list)
+            else [statement["Action"]]
+        )
+    }
+    assert "dynamodb:TransactGetItems" not in all_actions
+    assert "dynamodb:TransactWriteItems" not in all_actions
+
+    publish = next(
+        statement
+        for statement in statements
+        if _actions(statement) == {"sns:Publish"}
+    )
+    assert publish["Resource"]["Ref"].startswith("SecurityEventTopic")
+    security_log_write = next(
+        statement
+        for statement in statements
+        if _actions(statement)
+        == {"logs:CreateLogStream", "logs:PutLogEvents"}
+        and isinstance(statement["Resource"], dict)
+        and "Fn::GetAtt" in statement["Resource"]
+        and statement["Resource"]["Fn::GetAtt"][0].startswith(
+            "SecurityEventLogGroup"
+        )
+    )
+    assert security_log_write["Resource"]["Fn::GetAtt"][1] == "Arn"
+
+
+def test_runtime_uses_only_the_release_verified_ecr_digest(
+    synthesized_template,
+):
+    image_parameter = synthesized_template["Parameters"]["VerifiedImageUri"]
+    assert "Default" not in image_parameter
+    assert image_parameter["AllowedPattern"].endswith(
+        r"@sha256:[0-9a-f]{64}$"
+    )
+
+    task = _one_resource(
+        synthesized_template,
+        "AWS::ECS::TaskDefinition",
+    )["Properties"]
+    assert task["ContainerDefinitions"][0]["Image"] == {
+        "Ref": "VerifiedImageUri"
+    }
+    assert synthesized_template["Outputs"]["RuntimeImageUri"]["Value"] == {
+        "Ref": "VerifiedImageUri"
+    }
+    assert "DockerImageAsset" not in _STACK.read_text(encoding="utf-8")
+
+    execution_policy = next(
+        resource
+        for logical_id, resource in synthesized_template["Resources"].items()
+        if logical_id.startswith("ServiceTaskDefExecutionRoleDefaultPolicy")
+    )
+    statements = execution_policy["Properties"]["PolicyDocument"]["Statement"]
+    pull = next(
+        statement
+        for statement in statements
+        if "ecr:BatchGetImage"
+        in (
+            statement["Action"]
+            if isinstance(statement["Action"], list)
+            else [statement["Action"]]
+        )
+    )
+    assert set(pull["Action"]) == {
+        "ecr:BatchCheckLayerAvailability",
+        "ecr:BatchGetImage",
+        "ecr:GetDownloadUrlForLayer",
+    }
+    assert "VerifiedImageUri" in json.dumps(pull["Resource"])
+    assert ":repository/" in pull["Resource"]["Fn::Join"][1]
+
+    authorization = next(
+        statement
+        for statement in statements
+        if statement["Action"] == "ecr:GetAuthorizationToken"
+    )
+    assert authorization["Resource"] == "*"
+
+
+def test_operational_alarms_are_actionable(synthesized_template):
+    topics = _resources(synthesized_template, "AWS::SNS::Topic")
+    assert len(topics) == 2
+    alarm_topic = next(
+        topic
+        for topic in topics
+        if topic["Properties"].get("DisplayName")
+        == "AxonLLM production alarms"
+    )
+    assert "KmsMasterKeyId" in alarm_topic["Properties"]
+
+    data_key = next(
+        key
+        for key in _resources(synthesized_template, "AWS::KMS::Key")
+        if key["Properties"]["Description"].startswith("Encrypts AxonLLM DynamoDB")
+    )
+    key_statements = data_key["Properties"]["KeyPolicy"]["Statement"]
+    cloudwatch_key_access = next(
+        statement
+        for statement in key_statements
+        if statement.get("Sid") == "AllowCloudWatchAlarmEncryption"
+    )
+    assert cloudwatch_key_access["Principal"] == {
+        "Service": "cloudwatch.amazonaws.com"
+    }
+    assert set(cloudwatch_key_access["Action"]) == {
+        "kms:Decrypt",
+        "kms:GenerateDataKey*",
+    }
+
+    topic_policy = next(
+        policy
+        for policy in _resources(
+            synthesized_template,
+            "AWS::SNS::TopicPolicy",
+        )
+        if policy["Properties"]["PolicyDocument"]["Statement"][0].get("Sid")
+        == "AllowAccountCloudWatchAlarms"
+    )["Properties"]["PolicyDocument"]["Statement"][0]
+    assert topic_policy["Action"] == "sns:Publish"
+    assert topic_policy["Principal"] == {
+        "Service": "cloudwatch.amazonaws.com"
+    }
+    assert topic_policy["Condition"]["StringEquals"][
+        "aws:SourceAccount"
+    ] == {"Ref": "AWS::AccountId"}
+
+    alarms = _resources(synthesized_template, "AWS::CloudWatch::Alarm")
+    assert len(alarms) == 10
+    assert all(alarm["Properties"]["AlarmActions"] for alarm in alarms)
+    assert all(alarm["Properties"]["OKActions"] for alarm in alarms)
+    metric_names = {
+        metric["MetricStat"]["Metric"]["MetricName"]
+        for alarm in alarms
+        for metric in alarm["Properties"].get("Metrics", [])
+        if "MetricStat" in metric
+    }
+    simple_metric_names = {
+        alarm["Properties"].get("MetricName") for alarm in alarms
+    }
+    assert "RunningTaskCount" in simple_metric_names
+    assert "ApproximateNumberOfMessagesVisible" in simple_metric_names
+    assert {"ThrottledRequests", "SystemErrors"} <= metric_names
+    monitored_operations = {
+        dimension["Value"]
+        for alarm in alarms
+        for metric in alarm["Properties"].get("Metrics", [])
+        for dimension in metric.get("MetricStat", {})
+        .get("Metric", {})
+        .get("Dimensions", [])
+        if dimension["Name"] == "Operation"
+    }
+    assert {
+        "TransactGetItems",
+        "TransactWriteItems",
+    } <= monitored_operations
+    assert len(
+        _resources(synthesized_template, "AWS::CloudWatch::Dashboard")
+    ) == 1

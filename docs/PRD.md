@@ -6,9 +6,9 @@
 |--------------------|--------------------------------------------|
 | **Product Name**   | AxonLLM                                    |
 | **Author**         | Amazon Bedrock Product Management           |
-| **Status**         | Draft                                       |
-| **Version**        | 1.1                                         |
-| **Date**           | 2026-08-05 (reconciled against the code)    |
+| **Status**         | Draft; release blocked by current test failures |
+| **Version**        | 1.2                                         |
+| **Date**           | 2026-08-07 (reconciled against the code)    |
 | **Target Launch**  | TBD                                         |
 | **Classification** | Internal / Confidential                     |
 
@@ -43,7 +43,16 @@ Organizations adopting large language models face compounding operational comple
 
 AxonLLM is a unified gateway that sits between applications and LLM providers, giving platform teams a single control plane for intelligent request routing, cost tracking, budget enforcement, access control, content guardrails, and observability. Applications send requests to AxonLLM using a standard OpenAI-compatible API. AxonLLM handles everything else: translating requests to the target provider's format, routing to the optimal provider based on configurable strategies, retrying on failures, falling back to alternative providers, tracking costs per request/user/project, enforcing budgets, applying content guardrails, and surfacing real-time usage analytics through a web-based admin console.
 
-AxonLLM's full HTTP and admin surface runs as a Starlette application. A separate Amazon Bedrock AgentCore adapter currently provides a hardening preview for chat, model listing, and liveness; it is not a production-complete deployment.
+AxonLLM's full HTTP and admin surface runs as a Starlette application. A
+separate Amazon Bedrock AgentCore adapter and CDK stack provide chat, model
+listing, liveness, dependency readiness, canonical identity, private networking,
+backup, and monitoring. Canonical SCIM convergence, schema-v2 evidence for both
+image targets, and target-aware Fargate/AgentCore deployment verification are
+implemented. Focused hardening regressions are green locally, but promotion
+still requires green CI for the exact release commit. The first real tagged
+private-ECR/Sigstore flow for a deployed digest and the first real AWS restore
+exercise remain externally unverified, so the implementation is not itself a
+production certification.
 
 ---
 
@@ -89,7 +98,7 @@ A single gateway endpoint that applications target instead of individual provide
 | G5 | **Content safety** | Configurable guardrail rules (keyword blocking, regex matching, content category filtering) inspect requests and responses, with block/warn/redact actions. |
 | G6 | **High availability** | Automatic retry with exponential backoff on transient failures, multi-provider fallback chains, and health-aware routing ensure application continuity during provider outages. |
 | G7 | **Operational visibility** | A web-based admin console provides real-time dashboards for usage monitoring, cost analytics, project management, and provider health status. |
-| G8 | **Managed AgentCore deployment** | Graduate the current three-action AgentCore hardening preview to a production deployment with reviewed infrastructure, identity, networking, readiness, and distributed-state controls. |
+| G8 | **Managed AgentCore deployment** | Provide target-specific release evidence and deployment verification for the checked-in private-networked stack and its JWT, readiness, backup, and monitoring controls. |
 
 ### 3.2 Non-Goals
 
@@ -99,7 +108,7 @@ A single gateway endpoint that applications target instead of individual provide
 | NG2 | Fine-tuning or model training | The gateway operates on inference endpoints only. Model customization is handled by the underlying providers. |
 | NG3 | Replacing provider-native SDKs for all use cases | Applications with deep provider-specific requirements (e.g., fine-tuned model deployments, provider-native tooling) may still use provider SDKs directly. |
 | NG4 | End-user authentication | AxonLLM handles service-to-service authentication and authorization. End-user identity management is the responsibility of the consuming application. |
-| NG5 | ~~Multi-region active-active deployment~~ **No longer a non-goal — shipped.** | `multi_region/` implements hub-and-spoke in single-region, active-passive and active-active weighted modes, with spoke health monitoring, failover and data-residency filtering. What remains out of scope is *shared runtime state* across regions: the cache, rate limiter, quota counters and health tracker are per-task, so a multi-region deployment enforces its limits per instance. |
+| NG5 | ~~Multi-region active-active deployment~~ **No longer a non-goal — shipped.** | `multi_region/` implements hub-and-spoke in single-region, active-passive and active-active weighted modes, with spoke health monitoring, failover and data-residency filtering. With DynamoDB enabled, rate and budget enforcement is shared across replicas; provider health and response-cache contents remain process-local, and no cross-region Global Table topology is provisioned. |
 
 ---
 
@@ -215,11 +224,14 @@ Stakeholders who need visibility into LLM spend and assurance that usage complie
 | FR-AC2 | **User model access lists** | Individual users have configurable allowed model lists. The effective allowed set is the intersection of project and user lists when both are set. |
 | FR-AC3 | **JWT authentication** | Requests carry OIDC JWTs, verified in `auth/oidc_service.py` against the issuer's JWKS using `python-jose`. Claims are extracted into a RequestContext (user_id, project_id, roles, scopes). Verification is **fail-closed**: if `python-jose` is absent, decoding is refused rather than falling back to an unverified read of the token. |
 | FR-AC4 | **Cedar policy evaluation** | Fine-grained authorization via Cedar policies evaluated against (principal, action, resource) tuples. Policies support ENFORCE and LOG_ONLY modes. |
-| FR-AC5 | **API keys** | `auth/api_key_service.py` issues project-scoped `axon_`-prefixed keys, stored as SHA-256 hashes; the plaintext is returned once and never persisted. Tenant-qualified production issuance conditionally creates the primary row, global hash lookup, and tenant/project edge in one DynamoDB transaction. Revocation atomically changes key state and advances a per-tenant epoch used to evict replica caches. Supports validate and non-atomic revoke-then-create rotation, with a 300s validation cache and five-second epoch polling. With persistence disabled, keys live in an in-memory store for local development. |
-| FR-AC6 | **Scope enforcement depends on identity mode** | In legacy mode, request-context scopes gate `/admin/*`; `/v1/*` and `/api/chat` do not consult them, so project model and budget controls are the effective data-plane boundary. In canonical mode, a key must resolve to a server-held `service` principal and its stored action scopes gate mapped data-plane actions. Key metadata is not automatically converted into that principal. Keys default to **no expiry**, and rotation carries the old `expires_at` through. Reported by `/admin/production-checklist` and documented in `SECURITY.md`. |
-| FR-AC7 | **Enterprise identity** | SAML 2.0 SSO (`auth/saml_service.py`, assertion signature verification via `signxml`) and SCIM 2.0 user/group provisioning (`auth/scim_service.py`) are exposed at `/saml/*` and `/scim/v2/*`. |
+| FR-AC5 | **API keys** | `auth/api_key_service.py` issues project-scoped `axon_` keys stored only as SHA-256 hashes. In canonical tenant context, issue, revoke, and rotate transactionally update the tenant key, lookup/edge rows, revocation epoch, and canonical service principal. Tenant keys default to 90 days and cannot exceed 365 days. Legacy/in-memory rotation remains revoke then issue. Validation uses a 300-second cache and polls tenant revocation epochs every five seconds. |
+| FR-AC6 | **Scope enforcement depends on identity mode** | In legacy mode, request-context scopes gate `/admin/*`; `/v1/*` and `/api/chat` do not consult them. In canonical mode, a key resolves to a server-held `service` principal whose project grants and `model.list`, `inference.invoke`, or reserved `query.select` scopes gate mapped actions. Legacy key records are not automatically migrated. |
+| FR-AC7 | **Enterprise identity** | SAML 2.0 SSO (`auth/saml_service.py`, assertion signature verification via `signxml`) and SCIM 2.0 user/group provisioning (`auth/scim_service.py`) are exposed at `/saml/*` and `/scim/v2/*`. Canonical deployments require tenant-bound `AXON_SCIM_TENANTS` credentials. Canonical rows use `PK=TENANT#{tenant_id}` with `SK=SCIM#USER#{id}`, `SCIM#GROUP#{id}`, `SCIM#USERNAME#{hash}`, or `SCIM#VERSION`. User/group mutations transactionally update affected principals and the tenant version; replicas use strongly consistent version and tenant-snapshot reads. |
 | FR-AC8 | **Canonical tenant identity** | With `AXON_REQUIRE_CANONICAL_IDENTITY=true`, verified credential hints resolve through strongly consistent DynamoDB reads to an active server-held principal. Credential roles, scopes, project grants, principal id, and authorization version are replaced rather than merged. Missing, inactive, ambiguous, or malformed authority fails closed. |
 | FR-AC9 | **Authoritative project ownership** | Canonical HTTP and AgentCore requests strongly resolve `PK=TENANT#{tenant_id}`, `SK=PROJECT#{project_id}` before RBAC. Missing ownership is concealed as 404; an unavailable or malformed store returns 503. The exact resolved project is propagated through model listing and inference so colliding project ids cannot select another tenant's configuration. |
+| FR-AC10 | **Tenant admin and viewer roles** | `tenant_admin` reads and writes tenant control-plane resources; `tenant_member` and `tenant_auditor` are read-only/viewer roles; canonical `service` identities have no control-plane access. All require explicit project grants for project actions, and services also require server-held action scopes. Canonical roles are authoritative: legacy `admin` and `admin:*` authority cannot elevate a canonical viewer or service identity, and canonical key issuance rejects legacy admin scopes. That compatibility remains only for noncanonical migration contexts. Region topology is platform-global and rejects tenant roles. |
+| FR-AC11 | **Reserved query vocabulary** | `query.select` exists only as an authorization action name. No SQL parser, datasource adapter, HTTP/AgentCore query route, or query backend contract ships. `query.mutate` always denies. |
+| FR-AC12 | **Atomic canonical project grants** | In canonical mode, `POST /admin/projects/{id}/members` accepts a SCIM resource id as `user_id`; POST/DELETE member operations use one CAS-guarded transaction to update `Project.members`, `ScimUser.project_ids`, authoritative `Principal.project_ids`, both authorization versions, and tenant `SCIM#VERSION`. Stored and returned members use `scim:<id>`. Project creation rejects a non-empty `members` list, and project PUT rejects any `members` field, so canonical grants cannot bypass the dedicated routes. Legacy member routes update only `Project.members`. |
 
 ### 6.4.1 Policy Hierarchy and Quotas
 
@@ -228,7 +240,7 @@ Stakeholders who need visibility into LLM spend and assurance that usage complie
 | FR-PH1 | **Four-level hierarchy** | `auth/policy_hierarchy.py` resolves effective policy across `org > business_unit > project > environment`, walking leaf to root. |
 | FR-PH2 | **Child tightens only** | The invariant is that a child can never exceed its parent. Numeric limits resolve to `min(parent, child)`; model and provider lists resolve to the intersection. A business unit cannot grant itself more budget than its org allows. |
 | FR-PH3 | **Resolution caching** | Resolved policies are cached for 300s, so the hierarchy walk is not repeated per request. |
-| FR-PH4 | **Quota enforcement** | `quota_enforcer.py` turns a `ResolvedPolicy` into request-time checks: `rate_limit_rpm` (its own sliding window keyed by project), `budget_limit` against projected spend, `max_tokens_per_request` as a cap on the requested `max_tokens`, and `allowed_models` / `allowed_providers` as rejections. |
+| FR-PH4 | **Quota enforcement** | `quota_enforcer.py` turns a `ResolvedPolicy` into request-time checks: shared fixed-window `rate_limit_rpm` and atomic idempotent budget reserve/finalize when persistence is enabled, `max_tokens_per_request`, and allowed-model/provider rejection. Persistence failures in shared rate or budget admission fail closed. |
 | FR-PH5 | **Budget alert thresholds** | Alerts fire at 80%, 90% and 100% of the hierarchy budget (`BUDGET_ALERT_THRESHOLDS`), distinct from the per-project `alert_threshold` in FR-C3. |
 | FR-PH6 | **Striped locking** | Quota and rate-limit counters are guarded by `striped_lock.py` — per-key locks rather than one global lock, so requests for different projects are not serialized behind each other on the hot path. |
 | FR-PH7 | **Node ids are addressing, not labels** | `get_ancestry` is entered by *project id* and constructs an environment key as `f"{project_id}:{environment}"`. So a project node's `node_id` must equal the project id and an environment node's must be `{project_id}:{env}`; the `org:`/`bu:` prefixes in the seeded tree are convention only, since nothing enters the walk at those levels. A project id with no matching node yields an empty ancestry and therefore a `ResolvedPolicy` with every field `None` — and `GET /admin/quotas/{project_id}` returns that as **200 with null limits**, indistinguishable from a project deliberately left unlimited. A misnamed node reads as an absent policy, not as an error. |
@@ -257,7 +269,7 @@ Stakeholders who need visibility into LLM spend and assurance that usage complie
 
 | ID | Requirement | Details |
 |----|-------------|---------|
-| FR-RL1 | **Sliding window rate limiter** | Per-user (default 60 RPM) and per-project (default 600 RPM) rate limits using a sliding window algorithm. The more restrictive limit applies when both are active. |
+| FR-RL1 | **Mode-aware rate limiter** | Per-user (default 60 RPM) and per-project (default 600 RPM) limits use a local sliding window without persistence and atomic tenant-qualified DynamoDB fixed windows with persistence. Shared enforcement fails closed; the more restrictive applicable limit wins. |
 | FR-RL2 | **Rate limit headers** | All responses include `X-RateLimit-Limit`, `X-RateLimit-Remaining`, and `X-RateLimit-Reset` headers. Rejected requests include a `Retry-After` header. |
 
 ### 6.8 Request Validation
@@ -273,7 +285,7 @@ Stakeholders who need visibility into LLM spend and assurance that usage complie
 | ID | Requirement | Details |
 |----|-------------|---------|
 | FR-AD1 | **Dashboard overview** | Real-time stats: total requests, total cost, active projects, active users, cache hit rate, provider health. |
-| FR-AD2 | **Project management** | CRUD operations for projects including budget configuration, member management, model access lists, cache and semantic-cache settings, and guardrail rules — all via `PUT /admin/projects/{id}`. Changes are hot-reloaded without restart: the admin API and the request pipeline hold the *same* `projects` dict, and the pipeline reads `project.guardrail_rules` fresh per request, so a rule added mid-flight blocks the very next call. |
+| FR-AD2 | **Project management** | Project CRUD covers budget configuration, model access lists, cache and semantic-cache settings, and guardrail rules through `PUT /admin/projects/{id}`. Membership uses the dedicated POST/DELETE routes in FR-AC12; canonical create/PUT bulk member writes are rejected. Configuration changes are hot-reloaded without restart: the admin API and request pipeline hold the *same* legacy `projects` dict, and the pipeline reads `project.guardrail_rules` fresh per request. |
 | FR-AD3 | **User management** | View users with usage, set individual budgets and model access restrictions. |
 | FR-AD4 | **Model management** | View, create, update, and delete model configurations. Changes persist to YAML and optionally to DynamoDB. |
 | FR-AD5 | **Usage analytics** | Filterable usage data with breakdowns by time range, provider, model, project, and user, plus CSV export. |
@@ -301,8 +313,8 @@ Stakeholders who need visibility into LLM spend and assurance that usage complie
 
 | ID | Requirement | Details |
 |----|-------------|---------|
-| FR-P1 | **DynamoDB persistence** | Optional persistence layer using a single DynamoDB table with composite keys (PK/SK pattern). Stores usage records, project configurations, and user configurations. Enabled via `LLM_ROUTER_DYNAMODB_ENABLED=true`. |
-| FR-P2 | **State recovery** | On startup, persisted projects, user configs, and usage records are loaded from DynamoDB to restore full state. |
+| FR-P1 | **DynamoDB persistence** | Optional single-table persistence enabled by `LLM_ROUTER_DYNAMODB_ENABLED=true`. It stores projects, user configuration, usage and spend, policy and quota state, event destinations, audit chains, API keys and canonical principals, SCIM state, convergence counters, and shared rate/budget admission state. Canonical multi-tenant mode requires it. |
+| FR-P2 | **State recovery and convergence** | Startup and bounded refresh paths restore persisted configuration and usage. Canonical authority uses strongly consistent point reads or tenant queries; project/config, Cedar, SCIM, and API-key revocation versions converge replicas without trusting process-local authority. |
 | FR-P3 | **PAY_PER_REQUEST billing** | DynamoDB table uses on-demand billing to match the serverless deployment model. |
 
 ### 6.12 Token Efficiency and Right-Sizing
@@ -337,7 +349,7 @@ stored and no request is slowed.
 
 | ID | Requirement | Target |
 |----|-------------|--------|
-| NFR-A1 | Gateway uptime | 99.9% production target; not yet established for the AgentCore preview |
+| NFR-A1 | Gateway uptime | 99.9% target; establish the baseline only after green release evidence and production canaries |
 | NFR-A2 | Provider failover time | < 2s (retry + fallback to next provider) |
 | NFR-A3 | Health check interval | Configurable (default 30s) |
 
@@ -345,8 +357,8 @@ stored and no request is slowed.
 
 | ID | Requirement | Target |
 |----|-------------|--------|
-| NFR-S1 | Horizontal scaling | Runtime scaling must be validated only after readiness and distributed-control blockers are closed |
-| NFR-S2 | Per-instance and persisted state | Rate limits, health state, response caches, and parts of audit/accounting coordination remain per-instance. Projects and API keys have tenant-qualified canonical storage; other persisted customer records are not comprehensively tenant-qualified |
+| NFR-S1 | Horizontal scaling | Fargate scales from two to ten tasks; AgentCore scales runtime sessions. Release requires cross-replica identity, rate, budget, audit, revocation, and readiness canaries. |
+| NFR-S2 | Per-instance and persisted state | With persistence, tenant-qualified projects, usage/spend, policies, quotas, user config, webhooks, audit, API keys, SCIM, and shared rate/budget controls use DynamoDB. Provider health and exact/semantic response-cache contents remain per-process but tenant/project isolated. |
 
 ### 7.4 Reliability
 
@@ -354,13 +366,13 @@ stored and no request is slowed.
 |----|-------------|--------|
 | NFR-R1 | Retry behavior | Jittered backoff (base 1s, doubling, each delay drawn from `[0.5·full, full]`) with max 3 retries on transient errors |
 | NFR-R2 | Fallback depth | Full fallback chain traversal before returning error to caller |
-| NFR-R3 | Mode-aware failure behavior | Non-authoritative telemetry writes may degrade with warning logs. Canonical principal/project reads, API-key lifecycle transactions, and AgentCore startup/readiness fail closed on DynamoDB outage |
+| NFR-R3 | Mode-aware failure behavior | Non-authoritative telemetry writes may degrade with warning logs. Canonical principal/project reads, API-key lifecycle transactions, shared rate/budget admission, and AgentCore startup/readiness fail closed on DynamoDB outage. |
 
 ### 7.5 Testability
 
 | ID | Requirement | Target |
 |----|-------------|--------|
-| NFR-T1 | Automated test coverage | 2,844 passing tests across unit, integration, end-to-end, and property-based suites |
+| NFR-T1 | Automated test coverage | Unit, integration, end-to-end, release-security, synthesized-infrastructure, and property-based suites |
 | NFR-T2 | Property-based tests | Hypothesis-driven validation of formal correctness properties (routing fairness, cost accuracy, cache determinism, retry behavior) |
 | NFR-T3 | Integration test scenarios | Automated test traffic covering: normal chat, multi-turn, rate limiting, budget enforcement, model access control, guardrail violations |
 
@@ -425,13 +437,13 @@ stored and no request is slowed.
 | **CostTracker** | Usage recording, cost calculation, budget enforcement | `cost_tracker.py` |
 | **QuotaEnforcer** | Applies a `ResolvedPolicy` at request time — RPM, budget, token cap, model and provider allow-lists | `quota_enforcer.py` |
 | **PolicyHierarchyResolver** | Leaf-to-root walk of org/BU/project/environment, child-tightens-only | `auth/policy_hierarchy.py` |
-| **RateLimiter** | Sliding window per-user/per-project rate limiting | `rate_limiter.py` |
+| **RateLimiter** | Local sliding-window or persistence-backed fleet fixed-window rate limiting | `rate_limiter.py` |
 | **StripedLock** | Per-key async locks so limit state does not serialize the hot path | `striped_lock.py` |
 | **GuardrailEngine** | Request/response content inspection against configurable rules | `guardrail_engine.py` |
 | **PIIRedactor / PIINER** | Regex redaction with reversible mapping, plus a Comprehend layer for shapeless PII | `security/pii_redactor.py`, `security/pii_ner.py` |
 | **InjectionDetector** | Heuristic prompt-injection scoring to a five-level threat rating | `security/injection_detector.py` |
 | **AuditTrail** | Append-only compliance records with a SHA-256 hash chain | `security/audit_trail.py` |
-| **EventDispatcher** | Fire-and-forget security-event fan-out to webhook, CloudWatch or SNS | `security/event_dispatcher.py` |
+| **EventDispatcher** | Tenant-scoped webhook, CloudWatch, or SNS delivery through an optional durable FIFO SQS outbox with retries, DLQ redrive, and AWS destination allowlists | `security/event_dispatcher.py` |
 | **CacheManager** | In-memory TTL-based exact-match response cache | `cache_manager.py` |
 | **SemanticCache** | Embedding-similarity second-chance lookup with literal and polar-axis guards | `semantic_cache.py`, `embeddings.py` |
 | **EfficiencyAnalyzer** | Level 1 token-waste heuristics over `UsageRecord` data | `efficiency_analyzer.py` |
@@ -439,7 +451,7 @@ stored and no request is slowed.
 | **HealthTracker** | Provider health tracking with cooldown periods and latency recording | `health_tracker.py` |
 | **ModelRegistry** | Model configuration loading and validation from YAML | `model_registry.py` |
 | **RequestValidator** | Structural, semantic, and token-limit request validation | `request_validator.py` |
-| **DynamoPersistence** | DynamoDB single-table read/write across 14 entity types | `persistence.py` |
+| **DynamoPersistence** | Tenant-aware DynamoDB single-table state, transactions, shared limits, backup source | `persistence.py` |
 | **AuthMiddleware** | API key or OIDC JWT validation + Cedar policy evaluation | `middleware/auth.py` |
 | **AdminRBAC** | Role and scope gate on `/admin/*` | `middleware/admin_rbac.py` |
 | **APIKeyService** | Issue, validate, revoke, rotate `axon_` keys; hashes only at rest | `auth/api_key_service.py` |
@@ -447,7 +459,7 @@ stored and no request is slowed.
 | **RegionRouter** | Hub-and-spoke region selection with health, failover and residency filtering | `multi_region/` |
 | **TraceForwarder** | Emits per-request traces to Ostiari; OTLP export alongside | `observability/` |
 | **SessionManager (inactive)** | AgentCore Memory abstraction exists but is not wired into bootstrap or the AgentCore entrypoint | `session_manager.py` |
-| **AdminAPI** | Admin REST API (69 method+path routes) and the server-rendered dashboard | `admin/` |
+| **AdminAPI** | Admin REST API and the server-rendered dashboard | `admin/` |
 | **ChatAPI** | Client-facing chat API, OpenAI-compatible API, and web interfaces | `chat/` |
 | **CLI** | `axon` entry point — `demo`, `serve`, `issue-key`, `chat`, `models` | `cli.py` |
 | **Bootstrap** | Centralized dependency injection and component wiring | `bootstrap.py` |
@@ -509,12 +521,12 @@ Dataclass Configurations (runtime)
 
 | Method | Path | Description | Auth |
 |--------|------|-------------|------|
-| `GET` | `/api/models` | List available models (filtered by project/user access) | Optional |
-| `GET` | `/api/users` | List known users | Optional |
-| `POST` | `/api/chat` | Non-streaming chat completion | Required |
-| `POST` | `/api/chat/stream` | Streaming chat completion (SSE) | Required |
-| `POST` | `/v1/chat/completions` | **OpenAI-compatible** chat completion, streaming or not. This is the migration path referenced by OQ6: point an existing OpenAI SDK at this base URL and the application needs no code change | Required |
-| `GET` | `/v1/models` | OpenAI-compatible model list | Required |
+| `GET` | `/api/models` | List models filtered by canonical project/user access | Required under `ENFORCE` |
+| `GET` | `/api/users` | Legacy user selector. Canonical mode default-denies it because no action is mapped and the handler is not tenant-filtered | Required under `ENFORCE`; unavailable in canonical mode |
+| `POST` | `/api/chat` | Non-streaming chat completion | Required under `ENFORCE` |
+| `POST` | `/api/chat/stream` | Streaming chat completion (SSE) | Required under `ENFORCE` |
+| `POST` | `/v1/chat/completions` | **OpenAI-compatible** chat completion, streaming or not. This is the migration path referenced by OQ6: point an existing OpenAI SDK at this base URL and the application needs no code change | Required under `ENFORCE` |
+| `GET` | `/v1/models` | OpenAI-compatible model list | Required under `ENFORCE` |
 
 On both `/api/chat` and `/v1/chat/completions`, a `user_id` or `project_id` in the
 request *body* is deliberately **ignored**. Identity comes from the authenticated
@@ -557,6 +569,10 @@ settings.
 
 `tools` and `tool_choice` are optional and OpenAI-shaped; the target provider's
 dialect is AxonLLM's concern, not the caller's (§6.10).
+
+`db_query` is a caller-owned example tool. AxonLLM transports the definition and
+tool call but does not execute SQL or expose a query endpoint. It is unrelated
+to the reserved `query.select` authorization vocabulary.
 
 #### POST /api/chat — Response
 
@@ -635,11 +651,11 @@ data: [DONE]
 |--------|------|-------------|
 | `GET` | `/admin/overview` | Dashboard stats (requests, cost, active projects/users, cache hit rate) |
 | `GET` | `/admin/projects` | List all projects |
-| `POST` | `/admin/projects` | Create project |
+| `POST` | `/admin/projects` | Create project; canonical mode rejects a non-empty `members` list |
 | `GET` | `/admin/projects/{id}` | Get project details |
-| `PUT` | `/admin/projects/{id}` | Update project |
-| `POST` | `/admin/projects/{id}/members` | Add project member |
-| `DELETE` | `/admin/projects/{id}/members/{user_id}` | Remove project member |
+| `PUT` | `/admin/projects/{id}` | Update project; canonical mode rejects any `members` field |
+| `POST` | `/admin/projects/{id}/members` | Add member; canonical `user_id` is a SCIM resource id and the response stores `scim:<id>` |
+| `DELETE` | `/admin/projects/{id}/members/{user_id}` | Remove member through the canonical transaction |
 | `GET` | `/admin/projects/{id}/models` | List project allowed models |
 | `POST` | `/admin/projects/{id}/models` | Add model to project access list |
 | `DELETE` | `/admin/projects/{id}/models/{model_name}` | Remove model from project access list |
@@ -672,8 +688,8 @@ data: [DONE]
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` `POST` | `/admin/projects/{id}/keys` | List / issue keys for a project |
-| `POST` | `/admin/keys/{key_id}/rotate` | Rotate — note it carries the old `expires_at` through |
-| `DELETE` | `/admin/keys/{key_id}` | Revoke. The only mechanism that reliably stops a key |
+| `POST` | `/admin/keys/{key_id}/rotate` | Canonical tenant rotation atomically revokes/deprovisions the old key/principal, creates the replacement key/principal, and advances the epoch. Legacy rotation is revoke then issue |
+| `DELETE` | `/admin/keys/{key_id}` | Revoke; canonical tenant revocation also deprovisions the service principal and advances the tenant epoch |
 
 **Audit and PII**
 
@@ -732,6 +748,7 @@ data: [DONE]
 | Playground | `/playground` | Clean chat with routing decision visibility |
 | Routing Explorer | `/routing` | Prompt-only routing explorer; shows model and provider selection logic |
 | Health | `/health` | Unauthenticated liveness probe, for the ALB target group |
+| Ready | `/ready` | Unauthenticated persistence readiness; 503 when enabled DynamoDB is unavailable |
 | SAML | `/saml/login`, `/saml/acs`, `/saml/metadata` | SP-initiated login, assertion consumer, SP metadata |
 | SCIM | `/scim/v2/Users`, `/scim/v2/Groups` | User and group provisioning (own bearer-token auth) |
 
@@ -821,7 +838,7 @@ Project
   |- ltm_enabled: bool                 # Reserved; no active AgentCore Memory wiring
   |- retention_period_hours: int       # 24
   |- rate_limit_rpm: int?
-  |- members: list[str]
+  |- members: list[str]                  # Canonical entries are scim:<resource-id>
   |- created_at: datetime
 
 UserConfig
@@ -854,10 +871,10 @@ APIKey                                 # Plaintext is never stored; hash only
   |- project_id: str
   |- tenant_id: str?                   # Tenant-qualified production namespace
   |- name: str
-  |- scopes: list[str]                 # Control plane only — see FR-AC6
+  |- scopes: list[str]                 # Legacy admin scopes or canonical service actions
   |- created_by: str
   |- created_at: datetime
-  |- expires_at: datetime?             # None by default, and rotation carries it through
+  |- expires_at: datetime?             # Tenant default 90 days, maximum 365; legacy optional
   |- revoked: bool
   |- revoked_at: datetime?
   |- last_used_at: datetime?
@@ -866,6 +883,7 @@ UsageRecord
   |- request_id: str
   |- project_id: str
   |- user_id: str
+  |- tenant_id: str?                   # Present on canonical tenant records
   |- provider: str
   |- model: str
   |- prompt_tokens: int
@@ -891,52 +909,39 @@ the same record as the cost.
 
 ### 10.2 DynamoDB Schema
 
-Single-table design using composite keys:
+The following rows are representative current contracts, not an exhaustive
+inventory of the single table:
 
 | Entity | PK | SK | Purpose |
 |--------|----|----|---------|
-| Usage Record | `USAGE#{request_id}` | `USAGE#{timestamp}` | Per-request cost and token tracking |
-| Project (canonical) | `TENANT#{tenant_id}` | `PROJECT#{project_id}` | Tenant-owned project configuration used for authorization |
-| Project (legacy) | `PROJECT#{project_id}` | `PROJECT` | Migration-compatible unqualified project configuration |
-| User Config | `USER#{user_id}` | `CONFIG` | User budget and model access settings |
-| Feedback | `FEEDBACK#{request_id}` | `FEEDBACK#{timestamp}` | Per-request thumbs up/down |
-| API Key (tenant) | `TENANT#{tenant_id}#APIKEY#{key_id}` | `METADATA` | Tenant-qualified hashed key record with scopes, expiry, revocation |
-| API Key project edge | `TENANT#{tenant_id}#PROJECT#{project_id}` | `APIKEY#{key_id}` | Tenant/project key listing without a scan |
-| API Key (legacy) | `APIKEY#{key_id}` | `APIKEY` | Migration-compatible unqualified key row |
-| API Key project edge (legacy) | `PROJECT#{project_id}` | `APIKEY#{key_id}` | Migration-compatible unqualified project listing |
-| API Key lookup | `APIKEY_HASH#{hash}` | `LOOKUP` | Global secret-hash reverse index pointing to the tenant-qualified primary row |
-| Audit Record | `AUDIT#{project_id}` | `AUDIT#{timestamp}#{record_id}` | Hash-chain entries, ordered so the chain can be replayed and verified |
-| Policy Node | `POLICY_NODE#{node_id}` | `CONFIG` | One node of the org → BU → project → env hierarchy |
-| Policy Edge | `POLICY_NODE#{parent_id}` | `CHILD#{node_id}` | Parent-to-child edge, so a subtree loads without a scan |
-| Cedar Policy | `CEDAR_POLICY#{policy_id}` | `CONFIG` | Cedar policy source |
-| SCIM User | `SCIM#USER#{id}` | `SCIM_USER` | SCIM-provisioned user |
-| SCIM Group | `SCIM#GROUP#{id}` | `SCIM_GROUP` | SCIM-provisioned group |
-| Event Destinations | `EVENT_DESTINATIONS` | `CONFIG` | The whole destination set in one item |
-| Region Topology | `REGION_TOPOLOGY` | `CONFIG` | The whole spoke topology in one item |
-| Revocation Epoch (tenant) | `TENANT#{tenant_id}` | `AUTHZ#EPOCH` | Counter advanced atomically with revocation and polled by each instance |
-| Revocation Epoch (legacy) | `REVOCATION` | `EPOCH` | Migration-compatible global counter for unqualified keys |
-| Spend Counter | `SPEND#{scope}#{id}` | `TOTAL` | Fleet-wide spend, so a budget limit is a limit across every instance rather than per instance |
+| Canonical principal | `IDENTITY#{sha256(issuer + NUL + subject)}` | `TENANT#{tenant_id}` | Server-held role, status, scopes, project grants, and authorization version |
+| Canonical project | `TENANT#{tenant_id}` | `PROJECT#{project_id}` | Tenant-owned project used for authorization |
+| Tenant user config | `TENANT#{tenant_id}` | `USER_CONFIG#{user_id}` | Tenant user budget and model restrictions |
+| Canonical usage | `TENANT#{tenant_id}#USAGE#{request_id}` | `USAGE#{timestamp}` | Tenant-qualified cost/token record; a tenant/month GSI supports scoped reads |
+| Tenant policy hierarchy | `TENANT#{tenant_id}` | `POLICY_NODE#{node_id}` | Tenant quota/policy node |
+| Tenant Cedar policy/version | `TENANT#{tenant_id}` | `CEDAR_POLICY#{name}` / `CEDAR_POLICY#VERSION` | Tenant authorization source and convergence counter |
+| Tenant event destinations | `TENANT#{tenant_id}` | `EVENT_DESTINATIONS#CONFIG` | Authoritative tenant webhook/SNS/Logs destination set |
+| Tenant audit record/head | `TENANT#{tenant_id}` | `AUDIT#RECORD#{timestamp}#{id}` / `AUDIT#HEAD` | Transactional tenant hash chain and compare-and-swap head |
+| Tenant SCIM user/group | `TENANT#{tenant_id}` | `SCIM#USER#{id}` / `SCIM#GROUP#{id}` | Provisioned tenant identity |
+| Tenant SCIM username/version | `TENANT#{tenant_id}` | `SCIM#USERNAME#{hash}` / `SCIM#VERSION` | Uniqueness edge and replica-convergence counter |
+| Tenant API key | `TENANT#{tenant_id}#APIKEY#{key_id}` | `METADATA` | Hashed key, expiry, scopes, and revocation state |
+| Tenant API-key project edge | `TENANT#{tenant_id}#PROJECT#{project_id}` | `APIKEY#{key_id}` | Tenant/project key listing |
+| API-key hash lookup | `APIKEY_HASH#{hash}` | `LOOKUP` | Global secret-hash lookup that points to the tenant-qualified primary row |
+| Tenant revocation epoch | `TENANT#{tenant_id}` | `AUTHZ#EPOCH` | Replica key-cache invalidation counter |
+| Rate window | `RATE_LIMIT#{sha256(namespace, tenant, resource)}` | `WINDOW#{start}` | Atomic fixed-window user/project admission; tenant is included in the digest and row metadata |
+| Spend/reservation | `SPEND#{scope}#{tenant-scoped-id}` | `TOTAL` / `RESERVATION#{request-hash}` | Atomic idempotent project/user budget admission and finalization |
+| Region topology | `REGION_TOPOLOGY` | `CONFIG` | Platform-global spoke topology |
 
-`EVENT_DESTINATIONS` and `REGION_TOPOLOGY` are deliberately single items holding
-an entire set rather than a row per member: a row per destination cannot express a
-*deletion* without a read-diff-write, which is how a repeated
-`POST /admin/webhooks` came to double-deliver every event before it was fixed.
+Legacy rows remain for isolated migration mode. Canonical configuration,
+identity, API-key, SCIM, audit, usage, rate, and budget paths either use tenant
+partitions directly or collision-safe tenant-scoped identifiers. Region
+topology intentionally remains platform-global.
 
-Revocation epochs and spend counters exist because per-process state answers
-differently depending on which task the load balancer picked. Epoch updates use
-atomic `ADD` inside the revocation transaction; spend updates also use `ADD` and
-return the post-update total, so an instance learns the fleet figure from a
-write it was already making instead of paying for a read on the request path.
-`{scope}` is `quota` for the enforcing counter and `project`/`user` for the
-reported ones. They use separate keys because both are charged on the same
-request and one key would double every cost.
-
-Telemetry and several configuration writes are fire-and-forget with a warning
-log on failure so a completed provider call is not converted into a 500.
-Authority is different: canonical principal/project reads fail closed,
-API-key issue/revoke transactions surface failure, and AgentCore refuses startup
-or readiness when required DynamoDB state is unavailable. The checklist still
-surfaces dropped non-authoritative writes and unreachable persistence.
+Canonical principal/project reads, API-key and membership transactions, tenant
+audit writes, and shared rate/budget admission fail closed on authority-store
+failure. Some non-authoritative telemetry and legacy configuration writes log
+and degrade instead; `/ready`, the production checklist, canaries, and alarms
+must therefore be evaluated separately.
 
 ---
 
@@ -973,7 +978,7 @@ surfaces dropped non-authoritative writes and unreachable persistence.
 | **Named-entity PII** | `security/pii_ner.py` adds a second detector for PII that has no *shape* — names, addresses, ages — which no regex can match. Backed by Amazon Comprehend, chosen over spaCy/Presidio because `boto3` is already in the image while `en_core_web_sm` adds ~148MB and 1.35s of start-up, and because it tags `Jenkins`, `Django` and `UserService` as PERSON/ORG. The two detectors are a **union**, not a replacement: Comprehend missed `10.0.0.7`, which the `ip_address` pattern catches trivially. |
 | **Prompt injection detection** | `security/injection_detector.py` scores prompts across role-override attempts, system-prompt extraction, delimiter escape, and base64-encoded payloads, returning a five-level `ThreatLevel` (none → critical) after Unicode normalization. |
 | **Audit trail** | `security/audit_trail.py` records every request/response pair append-only: who asked, the redacted prompt and the response, security events, and the policy state at the time. Each record carries a SHA-256 hash of its predecessor, so any retroactive edit breaks the chain and is detectable. |
-| **Security event fan-out** | `security/event_dispatcher.py` pushes security events to webhooks (Slack, PagerDuty, custom), CloudWatch Logs, or SNS. Fire-and-forget: a failing destination is logged and never blocks the request. |
+| **Security event fan-out** | `security/event_dispatcher.py` snapshots each matching tenant destination into a strict FIFO SQS envelope. A worker delivers to HTTPS webhooks, CloudWatch Logs, or SNS with deterministic idempotency identities, bounded visibility retries, native DLQ redrive, same-account/region checks, and managed AWS destination allowlists. Without an outbox URL, local/development deployments retain direct best-effort delivery. |
 
 ### 11.4 Data Protection
 
@@ -993,23 +998,28 @@ surfaces dropped non-authoritative writes and unreachable persistence.
 
 | Option | Description | Use Case |
 |--------|-------------|----------|
-| **ECS Fargate via CDK** | `./deploy-fargate.sh <region>`. The stack provisions CloudFront/WAF, an internal TLS ALB, private Fargate tasks, DynamoDB/IAM, retained ALB/CloudFront access logs, rollback-enabled deployments, and an ALB `/ready` gate for DynamoDB reachability. ALB authentication and tenant-scoped admin state remain release blockers. | Reference / isolated staging |
-| **Amazon Bedrock AgentCore** | `agentcore configure` + `agentcore launch` against `agentcore_agent.py`; hardening preview with `chat`, `list_models`, `health` liveness, and a distinct dependency-aware `GET /ready`. | Evaluation |
-| **AWS App Runner** | Docker container deployed via ECR + App Runner (`deploy.sh`). Semi-managed with container-level configuration; it does not close the shared-tenancy blockers. | Reference / isolated staging |
+| **ECS Fargate via CDK** | `infra/stack.py` requires a private regional ECR `@sha256` image. Production mode adds ALB OIDC and canonical identity to CloudFront/WAF, an internal TLS ALB, private tasks, DynamoDB/PITR/AWS Backup, a KMS/TLS FIFO event outbox and DLQ, managed SNS/Logs sinks over private endpoints, alarms, rollback, and an ALB `/ready` gate. Use the parameterized CDK command in the production runbook; `deploy-fargate.sh` does not supply the production identity or verified-image parameters. | Production candidate after release and operational gates |
+| **Amazon Bedrock AgentCore via CDK** | `infra/agentcore_stack.py` deploys the ARM64 action runtime with a JWT authorizer, `Authorization` forwarding, private VPC mode, DynamoDB/Bedrock/SQS/SNS/Logs endpoints, canonical identity, digest-only image input, backups, a KMS/TLS FIFO event outbox and DLQ, managed SNS/Logs sinks, alarms, and `GET /ready`. | Production candidate after a successful `agentcore` target verification and operational gates |
+| **AWS App Runner** | `deploy.sh` remains a legacy reference path without the canonical identity, private-network, digest-verification, backup, and readiness controls of the CDK stacks. | Evaluation only |
 | **Docker / Compose** | `docker build` + `docker run`, or `docker compose up` using `docker-compose.yml` (gateway + DynamoDB Local). | Staging, on-premises |
 | **Local development** | `uv run python serve_dashboard.py`. Uvicorn dev server with demo data seeded and `AXON_AUTH_MODE=LOG_ONLY`. | Development |
 | **CLI** | `uv run axon serve` (or `uv run axon demo`) after `uv sync`. Same app, argparse front end. | Development, scripted runs |
 
-The AgentCore preview does not mount the Starlette application or expose its
-HTTP/admin console. The repository has no checked-in production AgentCore IaC,
-JWT authorizer, resource policy, or private-network topology, and it does not
-wire `SessionManager` or AgentCore Memory. Initialization now runs explicitly in
-the SDK lifespan, request admission has a deadline, and OIDC/JWKS and DynamoDB
-are verified before traffic. A synchronous bootstrap worker cannot be forcibly
-cancelled if it hangs, so production needs process-level startup containment.
-Shutdown closes provider HTTP and OTLP resources. `health` remains liveness and
-`GET /ready` is the dependency probe. Distributed controls and non-project
-tenant-qualified persistence remain production blockers.
+AgentCore does not mount the Starlette application or admin console. Its
+invocation surface is `chat`, `list_models`, and liveness-only `health`; a
+separate `GET /ready` checks runtime initialization, OIDC/JWKS, the canonical
+principal store, and the configured event outbox. It accepts OIDC JWTs, not Axon
+API keys, and ships no query action or AgentCore Memory wiring. The stack
+injects no non-Bedrock provider secrets. A synchronous bootstrap worker cannot
+be forcibly cancelled if it outlives its deadline, so deployment must retain
+process-level startup containment.
+
+Both stacks require pre-provisioned canonical identity and alarm subscriptions.
+Fargate injects only Anthropic/OpenAI provider secrets and does not inject
+`AXON_SCIM_TENANTS`; Vault Lock is external to both stacks. See the
+[Production Runbook](PRODUCTION_RUNBOOK.md) and
+[AgentCore Runbook](AGENTCORE_RUNBOOK.md) for release, recovery, and incident
+procedures.
 
 ### 12.1.1 CLI
 
@@ -1032,6 +1042,7 @@ so invoke it as `uv run axon <subcommand>` (or activate the venv first):
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `AXON_AUTH_MODE` | `ENFORCE` | `ENFORCE` requires an `axon_` key or JWT on every request; `LOG_ONLY` serves anonymous requests and only logs what it would have denied. **The single most consequential variable here** — `serve_dashboard.py` sets `LOG_ONLY`, so a local gateway is open by default and a Fargate one is not. |
+| `AXON_REQUIRE_CANONICAL_IDENTITY` | `false` | Require credentials to resolve through active server-held tenant principals. Requires `AXON_AUTH_MODE=ENFORCE` and DynamoDB; production Fargate and AgentCore set it to `true`. |
 | `AXON_LOAD_DEMO_DATA` | `false` in code, **`true` in `serve_dashboard.py`** | Seeds `config/demo_seed.yaml`. Also the gate on reading `.env` — two behaviours on one flag. |
 | `AWS_DEFAULT_REGION` | `us-east-1` | AWS region |
 | `AXON_BEDROCK_REGION` | `us-east-1` | Bedrock-specific region |
@@ -1070,12 +1081,16 @@ so invoke it as `uv run axon <subcommand>` (or activate the venv first):
 | `AXON_PII_NER_TYPES` | — | Restrict entity types (default: name, address, age) |
 | `AXON_OIDC_ISSUER` | — | OIDC issuer, for JWKS discovery |
 | `AXON_OIDC_AUDIENCE` | — | Expected `aud` claim |
+| `AXON_ALB_SIGNER_ARN` | — | Exact trusted ALB ARN when accepting ALB OIDC headers |
+| `AXON_ALB_CLIENT_ID` | — | Client id configured on the trusted ALB OIDC action |
+| `AXON_ALB_ISSUER` | — | Exact regional ALB public-key issuer |
 | `AXON_SAML_IDP_ENTITY_ID` | — | SAML IdP entity id |
 | `AXON_SAML_IDP_SSO_URL` | — | SAML IdP SSO endpoint |
 | `AXON_SAML_IDP_CERT` / `_CERT_FILE` | — | IdP signing certificate, inline or by path |
 | `AXON_SAML_SP_ENTITY_ID` | — | This gateway's SP entity id |
 | `AXON_SAML_ACS_URL` | — | Assertion consumer service URL |
-| `AXON_SCIM_TOKEN` | — | Bearer token for `/scim/v2/*` |
+| `AXON_SCIM_TENANTS` | — | Canonical JSON map of tenant ids to unique `{issuer, token}` SCIM credentials |
+| `AXON_SCIM_TOKEN` | — | Legacy single-trust-domain SCIM bearer token; rejected when canonical identity is required |
 
 **Caching**
 
@@ -1156,6 +1171,13 @@ All events are emitted as structured JSON with the following event types:
 - Latency is recorded per-request for the least-latency routing strategy
 - In a multi-region deployment, `multi_region/health_monitor.py` tracks spoke
   health separately and drives failover between regions
+- Starlette `/health` is process liveness; `/ready` checks enabled DynamoDB and
+  the configured security-event outbox
+- AgentCore `health` is liveness without dependency checks; AgentCore `/ready`
+  checks runtime initialization, OIDC/JWKS, principal-store reachability, and
+  the configured security-event outbox
+- `/admin/production-checklist` reports configuration posture, not liveness or
+  dependency readiness; release still requires authenticated end-to-end canaries
 
 ### 13.4 Trace Export
 
@@ -1220,11 +1242,11 @@ call. With no URL and no registered sink, the forwarder is inert.
 
 | Dependency | Type | Impact if Unavailable |
 |------------|------|----------------------|
-| Amazon Bedrock AgentCore Runtime | Optional preview infrastructure | AgentCore evaluation is unavailable; Starlette deployment modes are unaffected |
+| Amazon Bedrock AgentCore Runtime | Optional managed runtime | AgentCore deployment is unavailable; Starlette deployment modes are unaffected |
 | AWS Bedrock | Provider | Bedrock models unavailable; fallback to direct Anthropic/OpenAI if configured |
 | Anthropic API | Provider | Direct Anthropic models unavailable; fallback to Bedrock-hosted Claude |
 | OpenAI API | Provider | OpenAI models unavailable; no fallback (provider-exclusive models) |
-| DynamoDB | Persistence and canonical authority | Legacy/local operation can continue in memory, but canonical identity/project authorization, durable API-key lifecycle, and AgentCore readiness fail closed |
+| DynamoDB | Persistence and canonical authority | Legacy/local operation can continue in memory, but canonical identity/project authorization, SCIM convergence, durable API-key and audit lifecycle, shared rate/budget admission, and AgentCore readiness fail closed |
 | boto3 | SDK | Bedrock provider non-functional |
 | tiktoken | Library | Token estimation falls back to character-based approximation |
 
@@ -1234,8 +1256,10 @@ call. With no URL and no registered sink, the forwarder is inert.
 |------|-----------|--------|------------|
 | Provider API breaking changes | Medium | High | Adapter pattern isolates changes to single module; monitoring catches format drift |
 | In-memory state loss on restart (without DynamoDB) | High | Medium | DynamoDB persistence is available; document as required for production |
-| Rate limiter/response cache not shared across instances | Medium | Medium | Tenant isolation is enforced inside each process; deployment-wide rate semantics and cache consistency still require a shared backend or conservative per-replica limits |
-| Tenant-global admin data | High | High | Keep the legacy admin plane isolated until users, usage, quotas, policies, webhooks, SCIM, and audit records are tenant-qualified and filtered |
+| Process-local provider health and response caches | Medium | Medium | Cache namespaces include tenant/project, but hit rates and provider-health routing can differ by replica; use fleet canaries and do not treat cache contents as durable state |
+| Canonical bootstrap and secret delivery are operator-owned | High | High | Provision tenant projects/principals before enabling canonical mode; add reviewed `AXON_SCIM_TENANTS` delivery because the Fargate stack does not inject it |
+| Tagged private-ECR/Sigstore release flow is not externally verified | High | High | Run the schema-v2 gate for each selected target against a real `v*` release and private ECR digest, then retain the target-specific attestation, scan, approval, and canary evidence |
+| Real AWS restore exercise is not externally verified | High | High | Configure the audit/recovery roles and KMS key, execute the PITR restore workflow in the production account, validate tenant integrity, and retain recovery evidence |
 | Cost tracking accuracy drift from pricing changes | Medium | Low | Pricing config is externalized in YAML; update cadence tracked |
 | Single-region deployment limits availability | Low | High | Architecture supports multi-region; future milestone |
 
@@ -1252,16 +1276,16 @@ call. With no URL and no registered sink, the forwarder is inert.
 - [x] Project and user budget enforcement
 - [x] Per-project and per-user model access control
 - [x] Content guardrails (keyword, regex, category)
-- [x] Sliding window rate limiting
+- [x] Local sliding-window and DynamoDB-backed fleet fixed-window rate limiting
 - [x] Response caching with TTL
 - [x] Provider-level prompt caching (Anthropic/Bedrock)
 - [x] Tool calling (function calling) with per-provider dialect translation
 - [x] Admin dashboard with real-time analytics
 - [x] Chat, Playground, and Routing Explorer web interfaces
 - [x] DynamoDB persistence layer
-- [x] AgentCore action adapter hardening preview
-- [x] App Runner / Docker deployment
-- [x] ECS Fargate via CDK (`infra/stack.py`, `./deploy-fargate.sh`)
+- [x] AgentCore action adapter and private-network CDK stack
+- [x] App Runner / Docker reference deployment
+- [x] ECS Fargate production/staging CDK stack (`infra/stack.py`)
 - [x] PII redaction with re-injection, plus optional Comprehend entity detection
 - [x] Prompt injection detection
 - [x] Immutable SHA-256 hash-chain audit trail
@@ -1269,35 +1293,43 @@ call. With no URL and no registered sink, the forwarder is inert.
 - [x] API key issue / rotate / revoke, and admin RBAC
 - [x] Canonical principal resolution and authoritative tenant/project lookup for
       mapped HTTP and AgentCore data-plane actions
-- [x] Tenant-qualified exact/semantic cache namespaces and API-key persistence;
-      atomic key issue and revoke
-- [x] 2,844 unit, integration, end-to-end, and property-based tests
+- [x] Tenant-qualified control-plane state, usage, exact/semantic cache
+      namespaces, audit chains, and API-key persistence
+- [x] Atomic canonical API-key issue/revoke/rotation, SCIM principal
+      convergence, and project membership/grant synchronization
+- [x] Unit, integration, end-to-end, release-security, infrastructure, and
+      property-based test suites
 
 ### Phase 2: Production Hardening
 
-- [ ] Production AgentCore IaC, JWT authorizer, resource policy, private
-      networking, and deployment wiring for the implemented `/ready` contract
+- [x] Fargate and AgentCore IaC with private networking, digest-only images,
+      canonical identity, readiness, PITR/AWS Backup, logs, alarms, and
+      dashboards
 - [x] AgentCore explicit initialization with an admission deadline,
       OIDC/DynamoDB dependency readiness, authoritative project resolution, and
       graceful provider/OTLP shutdown
+- [x] Schema-v2 release evidence and target-aware deployment verification for
+      Fargate and AgentCore image identities
+- [ ] Obtain and retain a green required CI run for the exact release commit
+- [ ] Execute and retain a real tagged private-ECR/Sigstore verification flow
+      for each deployment target
+- [ ] Execute and retain the first real AWS restore exercise and application
+      recovery rehearsal
 - [ ] Process-level containment or an async/cancellable replacement for a
       synchronous AgentCore bootstrap worker that can outlive its timeout
 - [ ] Active tenant-isolated AgentCore Memory integration; `SessionManager`
       exists but is not wired into the runtime
 - [ ] Azure OpenAI, Vertex AI, Cohere adapters fully validated with live providers
-- [x] End-to-end integration test suite in CI/CD — `.github/workflows/ci.yml` runs
-      the full suite on 3.11 and 3.12 with lint and a `uv lock --check`, including
-      `tests/unit/test_e2e_starlette.py`
-- [ ] Shared rate limiter and cache state via DynamoDB for multi-instance
-      deployments — still in-process dicts in `rate_limiter.py` and
-      `quota_enforcer.py`, so limits are per-task and a 2-task Fargate service
-      enforces roughly double the configured RPM
-- [ ] Tenant-qualified admin authorization and persistence for users, usage,
-      quotas, policies, webhooks, SCIM, and audit; canonical principal lifecycle
-      integration for SCIM and API keys; atomic key rotation
-- [ ] CloudWatch metrics emission and alarms — *partial*: CloudWatch **Logs**
-      emission ships via the event dispatcher, and OTLP span export plus a trace
-      forwarder ship a full tracing path. Metrics and alarms proper are not built
+- [x] CI/CD workflow runs the full suite on Python 3.11 and 3.12 with lint,
+      lock validation, release-security tests, and infrastructure synthesis
+- [x] Shared DynamoDB rate and budget admission for multi-instance deployments
+- [x] Tenant-aware admin authorization and persistence for projects, users,
+      usage, quotas/policies, webhooks, SCIM, audit, and API keys
+- [ ] Supported tenant/principal bootstrap tooling and reviewed Fargate
+      `AXON_SCIM_TENANTS` secret delivery
+- [x] AWS service metrics, alarms, and operations dashboards in both CDK stacks
+- [ ] Confirmed alarm-topic subscriptions and delivery exercises; neither stack
+      creates a subscriber
 - [ ] Usage export to S3 for long-term analytics
 - [ ] Budget reset schedules (daily, weekly, monthly) — *partial*: manual reset
       ships as `POST /admin/quotas/{project_id}/reset`; there is no scheduler
@@ -1318,8 +1350,8 @@ call. With no URL and no registered sink, the forwarder is inert.
       `GET /admin/usage/export?format=csv|json&level=records|breakdown`, with 14
       chargeback columns. PDF is not built
 - [ ] API versioning and backward compatibility guarantees
-- [x] CDK infrastructure-as-code templates — `infra/stack.py` (CloudFront + ALB +
-      ECS Fargate + DynamoDB + Secrets Manager). Terraform is not built
+- [x] CDK infrastructure-as-code templates — `infra/stack.py` for Fargate and
+      `infra/agentcore_stack.py` for AgentCore. Terraform is not built
 
 ### Phase 4: Intelligence
 
@@ -1356,10 +1388,10 @@ call. With no URL and no registered sink, the forwarder is inert.
 | ID | Question | Context |
 |----|----------|---------|
 | OQ1 | Should AxonLLM support custom provider plugins via a public adapter SDK? | The adapter pattern is clean and extensible. A public SDK would enable customers to add proprietary or self-hosted model providers. |
-| OQ2 | What is the strategy for multi-region active-active deployment? | **Partly resolved**: `multi_region/` ships active-active weighted routing, spoke health monitoring, failover and residency filtering. The open half is unchanged and is the harder one — in-memory state (cache, rate limiter, quota, health tracker) is still per-task, so limits are enforced per instance rather than per deployment. DynamoDB Global Tables could address persistence; real-time state sync adds complexity. |
+| OQ2 | What is the durable multi-region replication strategy? | **Partly resolved**: `multi_region/` ships active-active weighted routing, health monitoring, failover, and residency filtering, while DynamoDB-backed rate/budget admission is shared within the configured table. The CDK stacks do not provision Global Tables or cross-region state replication; provider health and response caches remain process-local. |
 | OQ3 | Should budget enforcement support *scheduled* resets? | Manual reset ships (`POST /admin/quotas/{project_id}/reset`), so the question is now specifically about a scheduler: budgets are otherwise cumulative, and monthly/weekly resets would align with typical FinOps cadences. |
 | OQ4 | How should AxonLLM handle provider pricing changes? | Pricing YAML is manual. Automated pricing feeds from providers could reduce drift risk. |
-| OQ5 | ~~Should the admin console support RBAC?~~ **Resolved: yes, shipped.** | `AdminRBACMiddleware` gates every `/admin/*` path on the `admin` role or an `admin:*` / `admin:<resource>` scope, with ENFORCE and LOG_ONLY modes. Remaining question: scopes are enforced on the admin plane only — nothing consults them on `/v1/*`, so a key issued `["models:read"]` can still spend money. Whether to enforce scopes on the data plane, or to keep `allowed_models` and budget as the only data-plane bound, is open. |
+| OQ5 | ~~Should the admin console support RBAC?~~ **Resolved: yes, shipped.** | Canonical `tenant_admin` is read/write, `tenant_member` and `tenant_auditor` are read-only, and `service` has no admin access. Canonical viewers and services cannot elevate through legacy `admin` roles/scopes; canonical key issuance rejects those scopes. Platform-resource writes and region topology require `platform_admin`; that role needs an explicit break-glass header for tenant control-plane paths. Canonical service scopes gate mapped model-list/inference actions; unmapped `/api/*` and `/v1/*` routes deny. The remaining decision is when to remove legacy compatibility from noncanonical mode. |
 | OQ6 | What is the migration path for teams currently using provider SDKs directly? | OpenAI SDK compatibility minimizes migration effort. Documentation and tooling for gradual adoption should be prioritized. |
 | OQ7 | ~~Should AxonLLM support tool use / function calling pass-through?~~ **Resolved: yes, shipped.** | Implemented as bidirectional per-provider translation rather than pass-through (§6.10) — pass-through alone is not possible, since only OpenAI-style providers accept OpenAI's shape. Remaining question: whether to advertise per-model tool support in the registry so smart routing can avoid models that lack it. |
 
@@ -1464,7 +1496,7 @@ Enumerated from the tree rather than remembered, because the earlier version of
 this appendix had drifted to about two-thirds of the modules that exist.
 
 ```
-src/gateway/                     # 40 top-level modules + 8 packages
+src/gateway/
   |- agent.py                    # GatewayAgent orchestration — the 21-step pipeline in §8.1
   |- router.py                   # Retry with jittered backoff, fallback, strategy selection
   |- routing.py                  # The 4 base routing strategies
@@ -1484,7 +1516,7 @@ src/gateway/                     # 40 top-level modules + 8 packages
   |- dev_env.py                  # Reads .env for demos only, gated on AXON_LOAD_DEMO_DATA
   |- cost_tracker.py             # Usage, cost calculation, budgets
   |- quota_enforcer.py           # Turns a ResolvedPolicy into request-time limits
-  |- rate_limiter.py             # Sliding window rate limiter
+  |- rate_limiter.py             # Local sliding window / shared fixed-window limits
   |- striped_lock.py             # Per-key async locks, so one lock doesn't serialize the hot path
   |- guardrail_engine.py         # Content guardrails
   |- cache_manager.py            # Exact-match in-memory response cache
@@ -1496,7 +1528,7 @@ src/gateway/                     # 40 top-level modules + 8 packages
   |- health_check_task.py        # Background health monitoring
   |- request_validator.py        # Request validation
   |- model_registry.py           # YAML model config loader
-  |- persistence.py              # DynamoDB single-table persistence (14 entity types)
+  |- persistence.py              # Tenant-aware DynamoDB single-table persistence
   |- streaming.py                # Streaming helpers; simulated streaming is the fallback
   |- session_manager.py          # Inactive AgentCore Memory abstraction
   |- models.py                   # All dataclasses and enums
@@ -1511,15 +1543,19 @@ src/gateway/                     # 40 top-level modules + 8 packages
   |    openai_responses.py, gemini_tools.py, and one adapter each for
   |    ai21, anthropic, azure, bedrock, cohere, fireworks, google_ai,
   |    groq, mantle, openai, together, vertex, xai
-  |- admin/                      # Admin API (69 method+path routes) + server-rendered dashboard
+  |- admin/                      # Admin API + server-rendered dashboard
   |    routes.py, key_routes.py, policy_routes.py, quota_routes.py,
   |    region_routes.py, webhook_routes.py, audit_routes.py,
   |    production_checklist.py, catalog_drift.py, pricing_drift.py,
   |    model_availability.py, page_style.py
   |- auth/                       # Identity and authorization
-  |    api_key_service.py, cedar_policy.py, oidc_service.py,
+  |    api_key_service.py, authorization.py, cedar_policy.py,
+  |    dynamo_principal_repository.py, principal.py, project_repository.py,
+  |    oidc_service.py,
   |    policy_hierarchy.py, saml_service.py, saml_routes.py,
   |    scim_service.py, scim_routes.py
+  |- agentcore/                  # Action adapter, identity, schemas, lifecycle/readiness
+  |    adapter.py, identity.py, runtime.py, schemas.py, errors.py, sdk_compat.py
   |- chat/                       # Chat API, OpenAI-compatible API, web UI
   |    routes.py, openai_routes.py, client_agent.py
   |- middleware/                 # auth.py (JWT/API key), admin_rbac.py, security.py
@@ -1539,20 +1575,25 @@ config/
   |- spokes.yaml.example         # Multi-region spoke topology template
   |- demo_seed.yaml              # Demo data for development
 
-infra/                           # AWS CDK app for the ECS Fargate stack
-  |- app.py, stack.py, cdk.json
+infra/                           # AWS CDK app for Fargate and AgentCore
+  |- app.py, stack.py, agentcore_stack.py, cdk.json
+  |- agentcore-image/            # ARM64 AgentCore runtime image
 
 scripts/
   |- demo_client.py              # Demo traffic generator
   |- seed_demo_data.py           # Comprehensive data seeder
   |- run_test_traffic.py         # Integration test scenarios
   |- demo.sh                     # One-shot local demo
+  |- ci/                         # CI tool installation and workflow validation
+  |- operations/                 # Recovery and secret-rotation validation
+  |- release/                    # Source archive, evidence, and ECR verification
   |- build_architecture_assets.sh, build_narration_audio.sh
   |- demo/                       # Demo film pipeline: record.py, synthesize.py,
   |                              # make_captions.py, encode.py, paths.py, narration.json
 
 tests/
-  |- unit/                       # 88 files
-  |- property/                   # 19 files, Hypothesis property-based
-  |- conftest.py                 # Shared fixtures for the 2,844-test suite
+  |- unit/                       # Unit, integration-style, and infrastructure tests
+  |- property/                   # Hypothesis property-based tests
+  |- release_security/           # Release evidence and workflow contracts
+  |- conftest.py                 # Shared fixtures
 ```

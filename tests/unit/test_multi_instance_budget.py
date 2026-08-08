@@ -455,7 +455,9 @@ class TestBudgetAlertsFireOncePerFleet:
         table = SharedCounters()
         first, second = QuotaEnforcer(persistence=table), QuotaEnforcer(persistence=table)
         alerts = []
-        second.on_budget_alert(lambda pid, thr, spend, limit: alerts.append(thr))
+        second.on_budget_alert(
+            lambda pid, thr, spend, limit, tenant, epoch: alerts.append(thr)
+        )
 
         _run(first.record_spend("p1", 85.0, budget_limit=100.0))  # fleet crosses 80%
         _run(second.record_spend("p1", 1.0, budget_limit=100.0))  # 85 -> 86, no crossing
@@ -467,7 +469,11 @@ class TestBudgetAlertsFireOncePerFleet:
         table = SharedCounters()
         first, second = QuotaEnforcer(persistence=table), QuotaEnforcer(persistence=table)
         alerts = []
-        second.on_budget_alert(lambda pid, thr, spend, limit: alerts.append((thr, spend)))
+        second.on_budget_alert(
+            lambda pid, thr, spend, limit, tenant, epoch: alerts.append(
+                (thr, spend)
+            )
+        )
 
         _run(first.record_spend("p1", 70.0, budget_limit=100.0))
         _run(second.record_spend("p1", 15.0, budget_limit=100.0))  # 70 -> 85 crosses 80%
@@ -588,7 +594,9 @@ class TestConcurrentBillingIsNotLost:
         table = SharedCounters()
         enforcer = QuotaEnforcer(persistence=table)
         alerts = []
-        enforcer.on_budget_alert(lambda pid, thr, spend, limit: alerts.append(thr))
+        enforcer.on_budget_alert(
+            lambda pid, thr, spend, limit, tenant, epoch: alerts.append(thr)
+        )
 
         async def _bill_all():
             await asyncio.gather(*(

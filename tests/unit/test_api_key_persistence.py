@@ -8,12 +8,19 @@ import threading
 from dataclasses import replace
 from datetime import datetime, timezone
 from types import SimpleNamespace
+from uuid import UUID
 
 import pytest
 from boto3.dynamodb.types import TypeDeserializer
 
 from src.gateway.auth.api_key_service import APIKeyService
-from src.gateway.models import APIKey
+from src.gateway.auth.dynamo_principal_repository import (
+    DynamoPrincipalRepository,
+    identity_partition_key,
+    membership_sort_key,
+)
+from src.gateway.auth.principal import API_KEY_ISSUER, CredentialIdentity
+from src.gateway.models import APIKey, AuthMethod, MembershipStatus
 from src.gateway.persistence import DynamoPersistence
 
 
@@ -80,8 +87,32 @@ class _TransactionalClient:
                     changed = copy.deepcopy(current)
                     changed["revoked"] = values[":true"]
                     changed["revoked_at"] = values[":revoked_at"]
+                    changed["revoked_by"] = values[":revoked_by"]
+                    staged[storage_key] = changed
+                elif update["UpdateExpression"].startswith(
+                    "SET membership_status"
+                ):
+                    current = staged.get(storage_key)
+                    if (
+                        current is None
+                        or current.get("entity_type")
+                        != values[":entity_type"]
+                        or current.get("tenant_id") != values[":tenant_id"]
+                        or current.get("subject") != values[":key_id"]
+                        or current.get("issuer") != values[":issuer"]
+                        or current.get("auth_method")
+                        != values[":auth_method"]
+                        or current.get("credential_id") != values[":key_id"]
+                        or current.get("membership_status")
+                        != values[":active"]
+                    ):
+                        raise _TransactionCanceled(len(items), index)
+                    changed = copy.deepcopy(current)
+                    changed["membership_status"] = values[":deprovisioned"]
+                    changed["authorization_version"] += values[":one"]
                     staged[storage_key] = changed
                 else:
+                    assert update["UpdateExpression"].startswith("ADD #epoch")
                     current = copy.deepcopy(
                         staged.get(
                             storage_key,
@@ -157,6 +188,20 @@ class TestTenantQualifiedSerialization:
         assert restored.tenant_id is None
 
 
+class TestTransactionTokens:
+    def test_tokens_fit_dynamodb_limit_and_remain_unique(self):
+        tokens = {
+            DynamoPersistence._api_key_transaction_token(
+                "project-membership"
+            )
+            for _ in range(32)
+        }
+
+        assert len(tokens) == 32
+        assert all(len(token) == 36 for token in tokens)
+        assert all(UUID(token).version == 4 for token in tokens)
+
+
 class TestFailClosedLookup:
     def test_hash_lookup_rejects_mismatched_tenant_metadata(self):
         client = _TransactionalClient()
@@ -217,6 +262,70 @@ class TestAtomicIssuance:
         assert "already exists" in str(failures[0])
         assert len(client.rows) == 3
 
+    def test_tenant_service_issuance_creates_canonical_principal(self):
+        client = _TransactionalClient()
+        persistence = _Persistence(client)
+        service = APIKeyService(persistence)
+
+        key, _ = asyncio.run(
+            service.issue_key(
+                "project-a",
+                "Production key",
+                ["chat:invoke"],
+                "principal-a",
+                tenant_id="tenant-a",
+            )
+        )
+
+        principal_key = (
+            identity_partition_key(API_KEY_ISSUER, key.key_id),
+            membership_sort_key("tenant-a"),
+        )
+        assert len(client.transactions[0]["TransactItems"]) == 4
+        assert set(client.rows) == {
+            ("TENANT#tenant-a#APIKEY#" + key.key_id, "METADATA"),
+            ("APIKEY_HASH#" + key.key_hash, "LOOKUP"),
+            ("TENANT#tenant-a#PROJECT#project-a", "APIKEY#" + key.key_id),
+            principal_key,
+        }
+        principal = client.rows[principal_key]
+        assert principal["roles"] == ["service"]
+        assert principal["project_ids"] == ["project-a"]
+        assert principal["scopes"] == ["chat:invoke"]
+        assert principal["membership_status"] == "active"
+
+    def test_issued_tenant_key_resolves_immediately(self):
+        client = _TransactionalClient()
+        persistence = _Persistence(client)
+        service = APIKeyService(persistence)
+        key, _ = asyncio.run(
+            service.issue_key(
+                "project-a",
+                "Production key",
+                ["chat:invoke"],
+                "principal-a",
+                tenant_id="tenant-a",
+            )
+        )
+        repository = DynamoPrincipalRepository(persistence)
+
+        principal = asyncio.run(
+            repository.resolve(
+                CredentialIdentity(
+                    issuer=API_KEY_ISSUER,
+                    subject=key.key_id,
+                    auth_method=AuthMethod.API_KEY,
+                    tenant_hint="tenant-a",
+                    project_hint="project-a",
+                    credential_id=key.key_id,
+                )
+            )
+        )
+
+        assert principal is not None
+        assert principal.principal_id == f"apikey:{key.key_id}"
+        assert principal.authorization_version == 1
+
 
 class TestAtomicRevocation:
     def test_key_and_tenant_epoch_change_in_one_transaction(self):
@@ -229,6 +338,7 @@ class TestAtomicRevocation:
             key,
             revoked=True,
             revoked_at=datetime(2026, 8, 7, 12, tzinfo=timezone.utc),
+            revoked_by="principal-b",
         )
         assert asyncio.run(persistence.revoke_api_key(revoked)) is True
 
@@ -238,6 +348,7 @@ class TestAtomicRevocation:
         epoch = client.rows[("TENANT#tenant-a", "AUTHZ#EPOCH")]
         assert primary["revoked"] is True
         assert primary["revoked_at"] == revoked.revoked_at.isoformat()
+        assert primary["revoked_by"] == "principal-b"
         assert epoch["epoch"] == 1
         transaction = client.transactions[-1]["TransactItems"]
         assert len(transaction) == 2
@@ -256,6 +367,7 @@ class TestAtomicRevocation:
             key,
             revoked=True,
             revoked_at=datetime(2026, 8, 7, 12, tzinfo=timezone.utc),
+            revoked_by="principal-b",
         )
         with pytest.raises(
             RuntimeError,
@@ -275,6 +387,7 @@ class TestAtomicRevocation:
             key,
             revoked=True,
             revoked_at=datetime(2026, 8, 7, 12, tzinfo=timezone.utc),
+            revoked_by="principal-b",
         )
 
         results = _run_concurrently(
@@ -294,6 +407,7 @@ class TestAtomicRevocation:
             key,
             revoked=True,
             revoked_at=datetime(2026, 8, 7, 12, tzinfo=timezone.utc),
+            revoked_by="principal-b",
         )
 
         assert asyncio.run(persistence.revoke_api_key(revoked)) is True
@@ -301,7 +415,73 @@ class TestAtomicRevocation:
 
         assert loaded is not None
         assert loaded.revoked is True
+        assert loaded.revoked_by == "principal-b"
         assert asyncio.run(persistence.get_revocation_epoch("tenant-a")) == 1
+
+    def test_tenant_service_revocation_deprovisions_principal(self):
+        client = _TransactionalClient()
+        persistence = _Persistence(client)
+        service = APIKeyService(persistence)
+        key, _ = asyncio.run(
+            service.issue_key(
+                "project-a",
+                "Production key",
+                ["chat:invoke"],
+                "principal-a",
+                tenant_id="tenant-a",
+            )
+        )
+
+        assert asyncio.run(
+            service.revoke_key(
+                key.key_id,
+                "tenant-a",
+                revoked_by="principal-b",
+            )
+        ) is True
+
+        principal_key = (
+            identity_partition_key(API_KEY_ISSUER, key.key_id),
+            membership_sort_key("tenant-a"),
+        )
+        principal = client.rows[principal_key]
+        assert principal["membership_status"] == (
+            MembershipStatus.DEPROVISIONED.value
+        )
+        assert principal["authorization_version"] == 2
+        assert client.rows[("TENANT#tenant-a", "AUTHZ#EPOCH")]["epoch"] == 1
+        assert len(client.transactions[-1]["TransactItems"]) == 3
+
+    @pytest.mark.parametrize("failed_index", [0, 1, 2])
+    def test_canonical_revoke_failure_is_all_or_nothing(self, failed_index):
+        client = _TransactionalClient()
+        persistence = _Persistence(client)
+        service = APIKeyService(persistence)
+        key, _ = asyncio.run(
+            service.issue_key(
+                "project-a",
+                "Production key",
+                ["chat:invoke"],
+                "principal-a",
+                tenant_id="tenant-a",
+            )
+        )
+        before = copy.deepcopy(client.rows)
+        client.fail_at = failed_index
+
+        with pytest.raises(
+            RuntimeError,
+            match="API key revocation transaction failed",
+        ):
+            asyncio.run(
+                service.revoke_key(
+                    key.key_id,
+                    "tenant-a",
+                    revoked_by="principal-b",
+                )
+            )
+
+        assert client.rows == before
 
     def test_tenant_epoch_evicts_another_services_cached_key(self):
         client = _TransactionalClient()
@@ -319,7 +499,13 @@ class TestAtomicRevocation:
         )
 
         assert asyncio.run(other_replica.validate_key(raw)) is not None
-        assert asyncio.run(issuer.revoke_key(key.key_id, "tenant-a")) is True
+        assert asyncio.run(
+            issuer.revoke_key(
+                key.key_id,
+                "tenant-a",
+                revoked_by="principal-b",
+            )
+        ) is True
         other_replica._tenant_revocation_checked_at["tenant-a"] = 0.0
 
         assert asyncio.run(other_replica.validate_key(raw)) is None
@@ -342,7 +528,13 @@ class TestAtomicRevocation:
         # The issuer has the active object cached but has never read the tenant
         # epoch. Revocation by another replica must not become its baseline and
         # leave that stale object usable for the full cache TTL.
-        assert asyncio.run(revoker.revoke_key(key.key_id, "tenant-a")) is True
+        assert asyncio.run(
+            revoker.revoke_key(
+                key.key_id,
+                "tenant-a",
+                revoked_by="principal-b",
+            )
+        ) is True
         assert issuer._tenant_revocation_epochs == {}
 
         assert asyncio.run(issuer.validate_key(raw)) is None
@@ -383,7 +575,11 @@ class TestAtomicRevocation:
             nonlocal revoked_between_reads
             if not revoked_between_reads:
                 revoked_between_reads = True
-                assert await revoker.revoke_key(key.key_id, "tenant-a") is True
+                assert await revoker.revoke_key(
+                    key.key_id,
+                    "tenant-a",
+                    revoked_by="principal-b",
+                ) is True
             return await original_epoch_read(tenant_id)
 
         persistence.get_api_key_by_hash = _counted_key_read
@@ -393,3 +589,82 @@ class TestAtomicRevocation:
         assert revoked_between_reads is True
         assert key_reads == 2
         assert key.key_hash not in validator._cache
+
+
+class TestAtomicRotation:
+    def test_rotation_replaces_key_and_principal_in_one_transaction(self):
+        client = _TransactionalClient()
+        persistence = _Persistence(client)
+        service = APIKeyService(persistence)
+        old_key, _ = asyncio.run(
+            service.issue_key(
+                "project-a",
+                "Production key",
+                ["chat:invoke"],
+                "principal-a",
+                tenant_id="tenant-a",
+            )
+        )
+
+        result = asyncio.run(
+            service.rotate_key(old_key.key_id, "principal-b", "tenant-a")
+        )
+
+        assert result is not None
+        replacement, _ = result
+        old_principal_key = (
+            identity_partition_key(API_KEY_ISSUER, old_key.key_id),
+            membership_sort_key("tenant-a"),
+        )
+        new_principal_key = (
+            identity_partition_key(API_KEY_ISSUER, replacement.key_id),
+            membership_sort_key("tenant-a"),
+        )
+        assert client.rows[
+            ("TENANT#tenant-a#APIKEY#" + old_key.key_id, "METADATA")
+        ]["revoked"] is True
+        assert client.rows[
+            ("TENANT#tenant-a#APIKEY#" + old_key.key_id, "METADATA")
+        ]["revoked_by"] == "principal-b"
+        assert client.rows[old_principal_key]["membership_status"] == (
+            MembershipStatus.DEPROVISIONED.value
+        )
+        assert client.rows[new_principal_key]["membership_status"] == (
+            MembershipStatus.ACTIVE.value
+        )
+        assert client.rows[("TENANT#tenant-a", "AUTHZ#EPOCH")]["epoch"] == 1
+        assert len(client.transactions[-1]["TransactItems"]) == 7
+
+    @pytest.mark.parametrize("failed_index", range(7))
+    def test_rotation_failure_leaves_source_and_replacement_absent(
+        self,
+        failed_index,
+    ):
+        client = _TransactionalClient()
+        persistence = _Persistence(client)
+        service = APIKeyService(persistence)
+        old_key, _ = asyncio.run(
+            service.issue_key(
+                "project-a",
+                "Production key",
+                ["chat:invoke"],
+                "principal-a",
+                tenant_id="tenant-a",
+            )
+        )
+        before = copy.deepcopy(client.rows)
+        client.fail_at = failed_index
+
+        with pytest.raises(
+            RuntimeError,
+            match="API key rotation transaction failed",
+        ):
+            asyncio.run(
+                service.rotate_key(
+                    old_key.key_id,
+                    "principal-b",
+                    "tenant-a",
+                )
+            )
+
+        assert client.rows == before

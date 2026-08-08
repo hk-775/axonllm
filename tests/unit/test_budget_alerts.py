@@ -15,7 +15,11 @@ class TestBudgetAlerts:
     def test_fires_at_80_percent(self):
         enforcer = QuotaEnforcer()
         alerts = []
-        enforcer.on_budget_alert(lambda pid, thr, spend, limit: alerts.append((pid, thr)))
+        enforcer.on_budget_alert(
+            lambda pid, thr, spend, limit, tenant, epoch: alerts.append(
+                (pid, thr)
+            )
+        )
 
         _run(enforcer.record_spend("proj-1", 79.0, budget_limit=100.0))
         assert len(alerts) == 0
@@ -26,7 +30,9 @@ class TestBudgetAlerts:
     def test_fires_at_90_and_100(self):
         enforcer = QuotaEnforcer()
         alerts = []
-        enforcer.on_budget_alert(lambda pid, thr, spend, limit: alerts.append(thr))
+        enforcer.on_budget_alert(
+            lambda pid, thr, spend, limit, tenant, epoch: alerts.append(thr)
+        )
 
         _run(enforcer.record_spend("proj-1", 89.0, budget_limit=100.0))
         _run(enforcer.record_spend("proj-1", 2.0, budget_limit=100.0))
@@ -39,7 +45,9 @@ class TestBudgetAlerts:
     def test_no_duplicate_alerts(self):
         enforcer = QuotaEnforcer()
         alerts = []
-        enforcer.on_budget_alert(lambda pid, thr, spend, limit: alerts.append(thr))
+        enforcer.on_budget_alert(
+            lambda pid, thr, spend, limit, tenant, epoch: alerts.append(thr)
+        )
 
         _run(enforcer.record_spend("proj-1", 85.0, budget_limit=100.0))
         _run(enforcer.record_spend("proj-1", 5.0, budget_limit=100.0))
@@ -49,7 +57,9 @@ class TestBudgetAlerts:
     def test_reset_clears_thresholds(self):
         enforcer = QuotaEnforcer()
         alerts = []
-        enforcer.on_budget_alert(lambda pid, thr, spend, limit: alerts.append(thr))
+        enforcer.on_budget_alert(
+            lambda pid, thr, spend, limit, tenant, epoch: alerts.append(thr)
+        )
 
         _run(enforcer.record_spend("proj-1", 85.0, budget_limit=100.0))
         assert 0.8 in alerts
@@ -62,7 +72,9 @@ class TestBudgetAlerts:
     def test_no_alert_without_budget_limit(self):
         enforcer = QuotaEnforcer()
         alerts = []
-        enforcer.on_budget_alert(lambda pid, thr, spend, limit: alerts.append(thr))
+        enforcer.on_budget_alert(
+            lambda pid, thr, spend, limit, tenant, epoch: alerts.append(thr)
+        )
 
         _run(enforcer.record_spend("proj-1", 1000.0))
         assert len(alerts) == 0
@@ -70,3 +82,42 @@ class TestBudgetAlerts:
     def test_no_alert_without_callbacks(self):
         enforcer = QuotaEnforcer()
         _run(enforcer.record_spend("proj-1", 100.0, budget_limit=50.0))
+
+    def test_waits_for_async_alert_callback(self):
+        enforcer = QuotaEnforcer()
+        alerts = []
+
+        async def record_alert(
+            project_id,
+            threshold,
+            spend,
+            limit,
+            tenant_id,
+            billing_epoch,
+        ):
+            await asyncio.sleep(0)
+            alerts.append(
+                (
+                    project_id,
+                    threshold,
+                    spend,
+                    limit,
+                    tenant_id,
+                    billing_epoch,
+                )
+            )
+
+        enforcer.on_budget_alert(record_alert)
+
+        _run(
+            enforcer.record_spend(
+                "proj-1",
+                85.0,
+                budget_limit=100.0,
+                tenant_id="tenant-a",
+            )
+        )
+
+        assert alerts == [
+            ("proj-1", 0.8, 85.0, 100.0, "tenant-a", 0)
+        ]

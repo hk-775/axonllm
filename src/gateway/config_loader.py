@@ -13,7 +13,7 @@ from pathlib import Path
 
 import yaml
 
-from src.gateway.config import AppConfig
+from src.gateway.config import AppConfig, VALID_PROVIDERS
 from src.gateway.models import TokenPricing
 
 logger = logging.getLogger(__name__)
@@ -50,12 +50,14 @@ class DemoSeedData:
 def load_app_config() -> AppConfig:
     """Build an AppConfig from environment variables, falling back to defaults."""
     return AppConfig(
+        deployment_profile=_load_deployment_profile(),
         aws_region=os.environ.get("AWS_DEFAULT_REGION", "us-east-1"),
         bedrock_region=os.environ.get("AXON_BEDROCK_REGION", "us-east-1"),
         server_host=os.environ.get("AXON_SERVER_HOST", "0.0.0.0"),
         server_port=int(os.environ.get("AXON_SERVER_PORT", "8000")),
         models_config_path=os.environ.get("AXON_MODELS_CONFIG", "config/models.yaml"),
         providers_config_path=os.environ.get("AXON_PROVIDERS_CONFIG", "config/providers.yaml"),
+        enabled_providers=_load_enabled_providers(),
         pricing_config_path=os.environ.get("AXON_PRICING_CONFIG", "config/pricing.yaml"),
         demo_seed_config_path=os.environ.get("AXON_DEMO_SEED_CONFIG", "config/demo_seed.yaml"),
         catalog_config_path=os.environ.get("AXON_CATALOG_CONFIG", "config/catalog.yaml"),
@@ -71,6 +73,9 @@ def load_app_config() -> AppConfig:
         canonical_identity_required=os.environ.get(
             "AXON_REQUIRE_CANONICAL_IDENTITY", "false"
         ).lower() == "true",
+        durable_persistence_enabled=os.environ.get(
+            "LLM_ROUTER_DYNAMODB_ENABLED", "false"
+        ).lower() == "true",
         semantic_cache_enabled=os.environ.get(
             "AXON_SEMANTIC_CACHE", "false"
         ).lower() == "true",
@@ -80,6 +85,43 @@ def load_app_config() -> AppConfig:
         semantic_cache_model=os.environ.get("AXON_SEMANTIC_CACHE_MODEL", ""),
         semantic_cache_threshold=_load_semantic_threshold(),
     )
+
+
+def _load_enabled_providers() -> frozenset[str] | None:
+    raw = os.environ.get("AXON_ENABLED_PROVIDERS")
+    if raw is None:
+        return None
+    providers = frozenset(
+        provider.strip()
+        for provider in raw.split(",")
+        if provider.strip()
+    )
+    if not providers:
+        raise ValueError("AXON_ENABLED_PROVIDERS must name at least one provider")
+    unknown = providers.difference(VALID_PROVIDERS)
+    if unknown:
+        raise ValueError(
+            "AXON_ENABLED_PROVIDERS contains unknown providers: "
+            + ", ".join(sorted(unknown))
+        )
+    return providers
+
+
+def _load_deployment_profile() -> str:
+    """Load the explicit runtime security profile, rejecting unsafe typos."""
+    configured = os.environ.get("AXON_DEPLOYMENT_PROFILE")
+    if configured is None:
+        # Demo tooling may load config without going through serve_dashboard.py.
+        # Every ordinary runtime still defaults to the production contract.
+        if os.environ.get("AXON_LOAD_DEMO_DATA", "false").lower() == "true":
+            return "development"
+        return "production"
+    raw = configured.strip().lower()
+    if raw not in {"development", "production"}:
+        raise ValueError(
+            "AXON_DEPLOYMENT_PROFILE must be 'development' or 'production'"
+        )
+    return raw
 
 
 def _load_semantic_threshold() -> float | None:

@@ -125,7 +125,10 @@ class TestSmartRoute:
 
         # Verify select_model was called with the prompt
         mock_smart_strategy.select_model.assert_awaited_once_with(
-            "Write a Python function", None, None, None,
+            "Write a Python function",
+            {"claude-sonnet", "gpt-4o"},
+            None,
+            None,
         )
         # Verify request.model was updated
         assert request.model == "claude-sonnet"
@@ -204,7 +207,10 @@ class TestSmartRoute:
         )
 
         mock_smart_strategy.select_model.assert_awaited_once_with(
-            "Test", None, "proj-1", "user-1",
+            "Test",
+            {"claude-sonnet", "gpt-4o"},
+            "proj-1",
+            "user-1",
         )
 
     @pytest.mark.asyncio

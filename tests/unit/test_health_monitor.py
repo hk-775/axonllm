@@ -141,3 +141,46 @@ class TestCheckAll:
         assert len(summary["spokes"]) == 2
         assert summary["spokes"][0]["role"] == "primary"
         assert summary["spokes"][0]["status"] == "healthy"
+
+
+class TestHealthCheckIntervalValidation:
+    @pytest.mark.parametrize("interval", [0, -1, True, 1.5])
+    def test_hub_rejects_nonpositive_or_noninteger_interval(
+        self,
+        interval,
+    ):
+        with pytest.raises(
+            ValueError,
+            match=(
+                "health_check_interval_seconds must be a positive integer"
+            ),
+        ):
+            HubConfig(
+                hub_region="us-east-1",
+                health_check_interval_seconds=interval,
+            )
+
+    def test_hub_rejects_nonpositive_interval_mutation(self):
+        config = HubConfig(hub_region="us-east-1")
+
+        with pytest.raises(
+            ValueError,
+            match=(
+                "health_check_interval_seconds must be a positive integer"
+            ),
+        ):
+            config.health_check_interval_seconds = 0
+
+        assert config.health_check_interval_seconds == 30
+
+    def test_monitor_revalidates_supplied_config(self):
+        config = HubConfig(hub_region="us-east-1")
+        vars(config)["health_check_interval_seconds"] = 0
+
+        with pytest.raises(
+            ValueError,
+            match=(
+                "health_check_interval_seconds must be a positive integer"
+            ),
+        ):
+            SpokeHealthMonitor(config)

@@ -136,12 +136,14 @@ DEFAULT_CONFIG = GatewayConfig()
 class AppConfig:
     """Runtime application settings loaded from environment variables."""
 
+    deployment_profile: str = "development"
     aws_region: str = "us-east-1"
     bedrock_region: str = "us-east-1"
     server_host: str = "0.0.0.0"
     server_port: int = 8000
     models_config_path: str = "config/models.yaml"
     providers_config_path: str = "config/providers.yaml"
+    enabled_providers: frozenset[str] | None = None
     pricing_config_path: str = "config/pricing.yaml"
     demo_seed_config_path: str = "config/demo_seed.yaml"
     catalog_config_path: str = "config/catalog.yaml"
@@ -158,6 +160,7 @@ class AppConfig:
     # authenticated credential must resolve through durable canonical identity
     # storage; startup refuses an in-memory-only configuration.
     canonical_identity_required: bool = False
+    durable_persistence_enabled: bool = False
     # Semantic cache. Off by default at the gateway level *as well as* per
     # project: a project flag can only take effect once an embedder exists, and
     # building one costs a Bedrock dependency at startup. Both must say yes.
@@ -167,3 +170,34 @@ class AppConfig:
     # None means "use semantic_cache.DEFAULT_SIMILARITY_THRESHOLD". Not 0.0,
     # which would make every comparison a hit.
     semantic_cache_threshold: float | None = None
+
+    def __post_init__(self) -> None:
+        if self.enabled_providers is not None:
+            if not self.enabled_providers:
+                raise ValueError("enabled_providers must not be empty")
+            unknown = self.enabled_providers.difference(VALID_PROVIDERS)
+            if unknown:
+                raise ValueError(
+                    "enabled_providers contains unknown providers: "
+                    + ", ".join(sorted(unknown))
+                )
+        if self.deployment_profile not in {"development", "production"}:
+            raise ValueError(
+                "deployment_profile must be 'development' or 'production'"
+            )
+        if self.deployment_profile != "production":
+            return
+        if self.auth_mode != "ENFORCE":
+            raise RuntimeError(
+                "production profile requires AXON_AUTH_MODE=ENFORCE"
+            )
+        if not self.canonical_identity_required:
+            raise RuntimeError(
+                "production profile requires "
+                "AXON_REQUIRE_CANONICAL_IDENTITY=true"
+            )
+        if not self.durable_persistence_enabled:
+            raise RuntimeError(
+                "production profile requires "
+                "LLM_ROUTER_DYNAMODB_ENABLED=true"
+            )

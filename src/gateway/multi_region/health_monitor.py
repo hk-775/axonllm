@@ -40,6 +40,7 @@ class SpokeHealthMonitor:
     """
 
     def __init__(self, hub_config: HubConfig) -> None:
+        hub_config.validate()
         self._config = hub_config
         self._consecutive_failures: dict[str, int] = {}
         self._last_check: dict[str, HealthCheckResult] = {}
@@ -54,6 +55,10 @@ class SpokeHealthMonitor:
     @property
     def last_checks(self) -> dict[str, HealthCheckResult]:
         return dict(self._last_check)
+
+    @property
+    def is_running(self) -> bool:
+        return self._running
 
     async def check_spoke(self, spoke: SpokeConfig) -> HealthCheckResult:
         """Check a single spoke's health endpoint."""
@@ -98,10 +103,19 @@ class SpokeHealthMonitor:
     async def check_all(self) -> list[HealthCheckResult]:
         """Check all spokes and update their status."""
         results = []
-        for spoke in self._config.spokes:
+        # A topology refresh can replace the spoke objects while a network check
+        # is in flight. Always apply the result to the current object for that
+        # region so a delayed check cannot update an orphaned pre-refresh copy.
+        for spoke in list(self._config.spokes):
             result = await self.check_spoke(spoke)
             self._last_check[spoke.region] = result
-            self._update_spoke_status(spoke, result)
+            current = self._config.get_spoke(spoke.region)
+            if (
+                current is not None
+                and current.health_check_url == spoke.health_check_url
+                and current.max_latency_ms == spoke.max_latency_ms
+            ):
+                self._update_spoke_status(current, result)
             results.append(result)
         return results
 
@@ -158,6 +172,7 @@ class SpokeHealthMonitor:
 
     async def start(self) -> None:
         """Start the background health monitoring loop."""
+        self._config.validate()
         if self._running:
             return
         self._running = True
@@ -173,6 +188,14 @@ class SpokeHealthMonitor:
             except asyncio.CancelledError:
                 pass
             self._task = None
+
+    async def reconcile(self) -> None:
+        """Run monitoring exactly while the live topology is multi-region."""
+        self._config.validate()
+        if self._config.is_single_region:
+            await self.stop()
+        else:
+            await self.start()
 
     async def _monitor_loop(self) -> None:
         """Periodic health check loop."""

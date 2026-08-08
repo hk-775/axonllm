@@ -204,11 +204,18 @@ class Project:
     retention_period_hours: int = 24
     rate_limit_rpm: int | None = None
     members: list[str] = field(default_factory=list)
+    revision: int = 0
     created_at: datetime = field(default_factory=_utcnow)
 
     def __post_init__(self) -> None:
         if self.tenant_id is not None and not self.tenant_id.strip():
             raise ValueError("tenant_id must be None or non-empty")
+        if (
+            not isinstance(self.revision, int)
+            or isinstance(self.revision, bool)
+            or self.revision < 0
+        ):
+            raise ValueError("revision must be a non-negative integer")
 
 
 @dataclass
@@ -255,6 +262,7 @@ class UsageRecord:
     total_tokens: int
     cost: float
     timestamp: datetime
+    tenant_id: str | None = None
     cached_tokens: int = 0
     cache_creation_tokens: int = 0
     image_tokens: int = 0
@@ -296,6 +304,7 @@ class UsageFilters:
     model: str | None = None
     project_id: str | None = None
     user_id: str | None = None
+    tenant_id: str | None = None
 
 
 @dataclass
@@ -331,6 +340,29 @@ class RateLimitResult:
     remaining: int
     reset_at: datetime
     retry_after_seconds: int | None = None
+
+
+@dataclass
+class BudgetReservationResult:
+    """Outcome of an atomic multi-scope budget reservation or finalization."""
+
+    allowed: bool
+    request_id: str
+    reserved_amount: float
+    totals: dict[str, float] = field(default_factory=dict)
+    epochs: dict[str, int] = field(default_factory=dict)
+    state: str = "reserved"
+    denied_scope: str | None = None
+    idempotent: bool = False
+    crossed_thresholds: tuple[float, ...] = ()
+
+
+@dataclass(frozen=True)
+class SpendCounterState:
+    """One billing-cycle spend total and its monotonic reset epoch."""
+
+    total: float
+    epoch: int
 
 
 # --- Auth ---
@@ -506,6 +538,7 @@ class APIKey:
     expires_at: datetime | None = None
     revoked: bool = False
     revoked_at: datetime | None = None
+    revoked_by: str | None = None
     last_used_at: datetime | None = None
 
 
@@ -775,13 +808,15 @@ class ScimUser:
     """A SCIM 2.0 User resource (IdP-provisioned identity).
 
     ``active`` drives joiner/mover/leaver: an IdP deprovision sends
-    ``active=false`` (or DELETE), which revokes the user's access. ``groups`` is
-    the set of group ids the user belongs to; group→roles mapping produces the
-    roles surfaced in RequestContext.
+    ``active=false`` (or DELETE), which revokes the user's access. In canonical
+    mode, ``groups`` is a read-only projection derived from ``Group.members``.
     """
 
     id: str
     user_name: str
+    tenant_id: str = ""
+    issuer: str = ""
+    subject: str = ""
     active: bool = True
     external_id: str | None = None
     display_name: str = ""
@@ -789,6 +824,9 @@ class ScimUser:
     groups: list[str] = field(default_factory=list)   # group ids
     roles: list[str] = field(default_factory=list)
     project_id: str = ""
+    project_ids: list[str] = field(default_factory=list)
+    authorization_version: int = 1
+    deleted: bool = False
     created_at: datetime = field(default_factory=_utcnow)
     updated_at: datetime = field(default_factory=_utcnow)
 
@@ -806,8 +844,11 @@ class ScimGroup:
 
     id: str
     display_name: str
+    tenant_id: str = ""
     external_id: str | None = None
     members: list[str] = field(default_factory=list)  # user ids
     roles: list[str] = field(default_factory=list)
+    authorization_version: int = 1
+    deleted: bool = False
     created_at: datetime = field(default_factory=_utcnow)
     updated_at: datetime = field(default_factory=_utcnow)

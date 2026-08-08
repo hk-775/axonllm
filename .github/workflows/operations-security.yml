@@ -1,0 +1,169 @@
+name: Validate production recovery and secrets
+
+on:
+  schedule:
+    - cron: "30 10 * * *"
+    - cron: "30 11 1 * *"
+  workflow_dispatch:
+    inputs:
+      require_vault_lock:
+        description: Fail unless AWS Backup Vault Lock is enabled
+        required: false
+        default: false
+        type: boolean
+      exercise_restore:
+        description: Run the PITR restore exercise in addition to metadata auditing
+        required: false
+        default: false
+        type: boolean
+      require_automatic_rotation:
+        description: Fail unless Secrets Manager automatic rotation is enabled
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-operations-validation
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    name: Audit ${{ matrix.target }} recovery metadata
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.schedule == '30 10 * * *'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: production
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: fargate
+            stack_name: AxonLLMStack
+            table_name: axonllm-state
+            vault_prefix: axon-state-
+            kms_key_arn: ${{ vars.AXON_DATA_KMS_KEY_ARN }}
+            validate_secret: true
+          - target: agentcore
+            stack_name: AxonLLMAgentCoreStack
+            table_name: axonllm-agentcore-state
+            vault_prefix: axon-agent-
+            kms_key_arn: ${{ vars.AXON_AGENTCORE_DATA_KMS_KEY_ARN }}
+            validate_secret: false
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Check out operational checks
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+
+      - name: Configure read-only AWS credentials
+        uses: aws-actions/configure-aws-credentials@00943011d9042930efac3dcd3a170e4273319bc8 # v5.1.0
+        with:
+          aws-region: us-east-1
+          role-to-assume: ${{ secrets.AXON_OPERATIONS_AUDIT_ROLE_ARN }}
+          role-session-name: AxonLLMOperationsValidation
+          allowed-account-ids: ${{ vars.AXON_AWS_ACCOUNT_ID }}
+          mask-aws-account-id: true
+          inline-session-policy: >-
+            {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["backup:DescribeBackupVault","backup:ListRecoveryPointsByBackupVault"],"Resource":"arn:aws:backup:us-east-1:${{ vars.AXON_AWS_ACCOUNT_ID }}:backup-vault:${{ matrix.vault_prefix }}*"},{"Effect":"Allow","Action":["cloudformation:DescribeStacks","cloudformation:ListStackResources"],"Resource":"arn:aws:cloudformation:us-east-1:${{ vars.AXON_AWS_ACCOUNT_ID }}:stack/${{ matrix.stack_name }}/*"},{"Effect":"Allow","Action":["dynamodb:DescribeContinuousBackups","dynamodb:DescribeTable"],"Resource":"arn:aws:dynamodb:us-east-1:${{ vars.AXON_AWS_ACCOUNT_ID }}:table/${{ matrix.table_name }}"},{"Effect":"Allow","Action":["secretsmanager:DescribeSecret","secretsmanager:ListSecretVersionIds"],"Resource":"arn:aws:secretsmanager:us-east-1:${{ vars.AXON_AWS_ACCOUNT_ID }}:secret:AxonLLMStack-*"},{"Effect":"Allow","Action":["kms:DescribeKey","kms:GetKeyRotationStatus"],"Resource":"${{ matrix.kms_key_arn }}"}]}
+
+      - name: Validate state recovery controls
+        env:
+          REQUIRE_VAULT_LOCK: ${{ github.event_name == 'schedule' || inputs.require_vault_lock }}
+        run: |
+          set -euo pipefail
+          arguments=()
+          if [[ "${REQUIRE_VAULT_LOCK}" == "true" ]]; then
+            arguments+=(--require-vault-lock)
+          fi
+          python scripts/operations/validate_state_recovery.py \
+            --stack-name "${{ matrix.stack_name }}" \
+            "${arguments[@]}"
+
+      - name: Validate provider-secret rotation
+        if: ${{ matrix.validate_secret && !cancelled() }}
+        env:
+          REQUIRE_AUTOMATIC_ROTATION: ${{ inputs.require_automatic_rotation || false }}
+        run: |
+          set -euo pipefail
+          arguments=()
+          if [[ "${REQUIRE_AUTOMATIC_ROTATION}" == "true" ]]; then
+            arguments+=(--require-automatic-rotation)
+          fi
+          python scripts/operations/check_secret_rotation.py \
+            --stack-name "${{ matrix.stack_name }}" \
+            "${arguments[@]}"
+
+  recovery:
+    name: Exercise ${{ matrix.target }} point-in-time recovery
+    if: >-
+      github.event.schedule == '30 11 1 * *' ||
+      (github.event_name == 'workflow_dispatch' && inputs.exercise_restore)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    environment: production
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: fargate
+            stack_name: AxonLLMStack
+            table_name: axonllm-state
+            vault_prefix: axon-state-
+            kms_key_arn: ${{ vars.AXON_DATA_KMS_KEY_ARN }}
+          - target: agentcore
+            stack_name: AxonLLMAgentCoreStack
+            table_name: axonllm-agentcore-state
+            vault_prefix: axon-agent-
+            kms_key_arn: ${{ vars.AXON_AGENTCORE_DATA_KMS_KEY_ARN }}
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Check out recovery tooling
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+
+      - name: Configure recovery AWS credentials
+        uses: aws-actions/configure-aws-credentials@00943011d9042930efac3dcd3a170e4273319bc8 # v5.1.0
+        with:
+          aws-region: us-east-1
+          role-to-assume: ${{ secrets.AXON_OPERATIONS_RECOVERY_ROLE_ARN }}
+          role-session-name: AxonLLMRecoveryExercise
+          allowed-account-ids: ${{ vars.AXON_AWS_ACCOUNT_ID }}
+          mask-aws-account-id: true
+          inline-session-policy: >-
+            {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["backup:DescribeBackupVault","backup:ListRecoveryPointsByBackupVault"],"Resource":"arn:aws:backup:us-east-1:${{ vars.AXON_AWS_ACCOUNT_ID }}:backup-vault:${{ matrix.vault_prefix }}*"},{"Effect":"Allow","Action":["cloudformation:DescribeStacks","cloudformation:ListStackResources"],"Resource":"arn:aws:cloudformation:us-east-1:${{ vars.AXON_AWS_ACCOUNT_ID }}:stack/${{ matrix.stack_name }}/*"},{"Effect":"Allow","Action":["dynamodb:DescribeContinuousBackups","dynamodb:DescribeTable","dynamodb:RestoreTableToPointInTime","dynamodb:Scan"],"Resource":"arn:aws:dynamodb:us-east-1:${{ vars.AXON_AWS_ACCOUNT_ID }}:table/${{ matrix.table_name }}"},{"Effect":"Allow","Action":["dynamodb:BatchWriteItem","dynamodb:DeleteItem","dynamodb:DeleteTable","dynamodb:DescribeTable","dynamodb:GetItem","dynamodb:PutItem","dynamodb:Query","dynamodb:Scan","dynamodb:UpdateItem","dynamodb:UpdateTable"],"Resource":"arn:aws:dynamodb:us-east-1:${{ vars.AXON_AWS_ACCOUNT_ID }}:table/${{ matrix.table_name }}-restore-validation-*"},{"Effect":"Allow","Action":["kms:Decrypt","kms:DescribeKey","kms:Encrypt","kms:GenerateDataKey","kms:GenerateDataKeyWithoutPlaintext","kms:ReEncryptFrom","kms:ReEncryptTo"],"Resource":"${{ matrix.kms_key_arn }}","Condition":{"StringEquals":{"kms:CallerAccount":"${{ vars.AXON_AWS_ACCOUNT_ID }}","kms:ViaService":"dynamodb.us-east-1.amazonaws.com"}}},{"Effect":"Allow","Action":"kms:CreateGrant","Resource":"${{ matrix.kms_key_arn }}","Condition":{"Bool":{"kms:GrantIsForAWSResource":"true"},"StringEquals":{"kms:CallerAccount":"${{ vars.AXON_AWS_ACCOUNT_ID }}","kms:ViaService":"dynamodb.us-east-1.amazonaws.com"}}}]}
+
+      - name: Restore, validate, and remove temporary table
+        env:
+          REQUIRE_VAULT_LOCK: ${{ github.event_name == 'schedule' || inputs.require_vault_lock }}
+        run: |
+          set -euo pipefail
+          arguments=(--exercise-restore)
+          if [[ "${REQUIRE_VAULT_LOCK}" == "true" ]]; then
+            arguments+=(--require-vault-lock)
+          fi
+          python scripts/operations/validate_state_recovery.py \
+            --stack-name "${{ matrix.stack_name }}" \
+            "${arguments[@]}"

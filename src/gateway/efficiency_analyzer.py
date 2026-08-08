@@ -101,15 +101,27 @@ class EfficiencyAnalyzer:
     # Public API
     # ------------------------------------------------------------------
 
-    def analyze_user(self, user_id: str) -> EfficiencyReport:
-        records = [r for r in self._cost_tracker._records if r.user_id == user_id]
+    def analyze_user(
+        self,
+        user_id: str,
+        tenant_id: str | None = None,
+    ) -> EfficiencyReport:
+        records = [
+            r
+            for r in self._records_for_tenant(tenant_id)
+            if r.user_id == user_id
+        ]
         if not records:
             return self._empty_report(user_id, "user")
 
         metrics = self._compute_metrics(records, user_id, "user")
         alerts = self._generate_alerts(metrics, records)
         recommendations = self._generate_recommendations(records)
-        peer_comparison = self._compute_peer_comparison(user_id, records)
+        peer_comparison = self._compute_peer_comparison(
+            user_id,
+            records,
+            tenant_id=tenant_id,
+        )
 
         return EfficiencyReport(
             metrics=metrics,
@@ -118,8 +130,16 @@ class EfficiencyAnalyzer:
             peer_comparison=peer_comparison,
         )
 
-    def analyze_project(self, project_id: str) -> EfficiencyReport:
-        records = [r for r in self._cost_tracker._records if r.project_id == project_id]
+    def analyze_project(
+        self,
+        project_id: str,
+        tenant_id: str | None = None,
+    ) -> EfficiencyReport:
+        records = [
+            r
+            for r in self._records_for_tenant(tenant_id)
+            if r.project_id == project_id
+        ]
         if not records:
             return self._empty_report(project_id, "project")
 
@@ -135,11 +155,23 @@ class EfficiencyAnalyzer:
             peer_comparison=peer_comparison,
         )
 
-    def get_all_user_metrics(self) -> list[EfficiencyMetrics]:
+    def get_all_user_metrics(
+        self,
+        tenant_id: str | None = None,
+    ) -> list[EfficiencyMetrics]:
         users: dict[str, list[UsageRecord]] = defaultdict(list)
-        for r in self._cost_tracker._records:
+        for r in self._records_for_tenant(tenant_id):
             users[r.user_id].append(r)
         return [self._compute_metrics(recs, uid, "user") for uid, recs in users.items()]
+
+    def _records_for_tenant(
+        self,
+        tenant_id: str | None,
+    ) -> list[UsageRecord]:
+        records = self._cost_tracker._records
+        if tenant_id is None:
+            return records
+        return [record for record in records if record.tenant_id == tenant_id]
 
     # ------------------------------------------------------------------
     # Core metrics computation
@@ -444,9 +476,11 @@ class EfficiencyAnalyzer:
         self,
         user_id: str,
         user_records: list[UsageRecord],
+        *,
+        tenant_id: str | None,
     ) -> dict:
         projects = {r.project_id for r in user_records}
-        all_records = self._cost_tracker._records
+        all_records = self._records_for_tenant(tenant_id)
 
         peer_records: dict[str, list[UsageRecord]] = defaultdict(list)
         for r in all_records:

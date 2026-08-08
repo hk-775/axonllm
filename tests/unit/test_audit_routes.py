@@ -1,14 +1,20 @@
 """Tests for audit trail admin API routes."""
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 from starlette.applications import Starlette
+from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
 from src.gateway.admin.audit_routes import AuditAPI, create_audit_routes
-from src.gateway.security.audit_trail import AuditEventType, AuditTrail
+from src.gateway.security.audit_trail import (
+    LEGACY_TENANT_ID,
+    AuditEventType,
+    AuditTrail,
+)
 
 
 def _run(coro):
@@ -24,6 +30,21 @@ def trail():
 def client(trail):
     audit_api = AuditAPI(audit_trail=trail)
     app = Starlette(routes=create_audit_routes(audit_api))
+    return TestClient(app)
+
+
+def _tenant_client(trail, tenant_id, role):
+    class ContextMiddleware(BaseHTTPMiddleware):
+        async def dispatch(self, request, call_next):
+            request.state.context = SimpleNamespace(
+                tenant_id=tenant_id,
+                roles=[role],
+            )
+            return await call_next(request)
+
+    audit_api = AuditAPI(audit_trail=trail)
+    app = Starlette(routes=create_audit_routes(audit_api))
+    app.add_middleware(ContextMiddleware)
     return TestClient(app)
 
 
@@ -123,6 +144,200 @@ class TestSecurityEvents:
         assert "llm_request" not in types
 
 
+class TestTenantScopedAuditRoutes:
+    def test_same_ids_in_two_tenants_never_cross_query_boundary(self, trail):
+        _run(
+            trail.record(
+                AuditEventType.LLM_REQUEST,
+                "same-user",
+                "same-project",
+                "same-request",
+                {"marker": "tenant-a"},
+                tenant_id="tenant-a",
+            )
+        )
+        _run(
+            trail.record(
+                AuditEventType.LLM_REQUEST,
+                "same-user",
+                "same-project",
+                "same-request",
+                {"marker": "tenant-b"},
+                tenant_id="tenant-b",
+            )
+        )
+
+        tenant_a = _tenant_client(trail, "tenant-a", "tenant_auditor")
+        response = tenant_a.get("/admin/audit/records")
+
+        assert response.status_code == 200
+        assert response.json()["tenant_id"] == "tenant-a"
+        assert response.json()["count"] == 1
+        assert response.json()["records"][0]["data"]["marker"] == "tenant-a"
+
+    def test_authenticated_tenant_cannot_override_scope(self, trail):
+        client = _tenant_client(trail, "tenant-a", "tenant_admin")
+
+        response = client.get("/admin/audit/records?tenant_id=tenant-b")
+
+        assert response.status_code == 403
+        assert response.json()["error"]["type"] == "invalid_tenant_scope"
+
+    def test_canonical_role_without_tenant_fails_closed(self, trail):
+        client = _tenant_client(trail, None, "tenant_admin")
+
+        response = client.get("/admin/audit/records?tenant_id=tenant-a")
+
+        assert response.status_code == 400
+        assert response.json()["error"]["type"] == "invalid_tenant_scope"
+
+    def test_direct_stub_without_state_keeps_legacy_scope(self, trail):
+        class RequestStub:
+            query_params = {}
+
+        _run(
+            trail.record(
+                AuditEventType.LLM_REQUEST,
+                "legacy-user",
+                "legacy-project",
+                "legacy-request",
+            )
+        )
+
+        response = _run(AuditAPI(trail).query_records(RequestStub()))
+
+        assert response.status_code == 200
+        assert LEGACY_TENANT_ID.encode() in response.body
+
+    def test_export_stats_and_security_reads_stay_in_tenant(self, trail):
+        for tenant_id in ("tenant-a", "tenant-b"):
+            _run(
+                trail.record(
+                    AuditEventType.AUTH_FAILURE,
+                    "same-user",
+                    "same-project",
+                    "same-request",
+                    {"marker": tenant_id},
+                    tenant_id=tenant_id,
+                )
+            )
+        client = _tenant_client(trail, "tenant-a", "tenant_auditor")
+
+        exported = client.get("/admin/audit/export").json()
+        stats = client.get("/admin/audit/stats").json()
+        security = client.get("/admin/audit/security").json()
+
+        assert exported["tenant_id"] == "tenant-a"
+        assert exported["count"] == 1
+        assert exported["records"][0]["data"]["marker"] == "tenant-a"
+        assert stats["tenant_id"] == "tenant-a"
+        assert stats["total"] == 1
+        assert security["tenant_id"] == "tenant-a"
+        assert security["count"] == 1
+        assert security["records"][0]["data"]["marker"] == "tenant-a"
+
+    def test_reader_redacts_targets_credentials_and_raw_errors(self, trail):
+        _run(
+            trail.record(
+                AuditEventType.AUTH_FAILURE,
+                "same-user",
+                "same-project",
+                "same-request",
+                {
+                    "url": "https://user:secret@example.test/hook?token=value",
+                    "authorization": "Bearer top-secret",
+                    "topic_arn": "arn:aws:sns:us-east-1:123:private",
+                    "log_group": "/private/security",
+                    "error": "request failed with token top-secret",
+                    "safe_status": "failed",
+                },
+                tenant_id="tenant-a",
+            )
+        )
+        client = _tenant_client(trail, "tenant-a", "tenant_auditor")
+
+        data = client.get("/admin/audit/records").json()["records"][0]["data"]
+
+        assert data["url"] == "[REDACTED]"
+        assert data["authorization"] == "[REDACTED]"
+        assert data["topic_arn"] == "[REDACTED]"
+        assert data["log_group"] == "[REDACTED]"
+        assert data["error"] == "[REDACTED]"
+        assert data["safe_status"] == "failed"
+
+    def test_admin_receives_only_non_secret_operational_fields(self, trail):
+        _run(
+            trail.record(
+                AuditEventType.AUTH_FAILURE,
+                "same-user",
+                "same-project",
+                "same-request",
+                {
+                    "url": "https://example.test/hook?token=value",
+                    "headers": {"Authorization": "Bearer top-secret"},
+                    "topic_arn": "arn:aws:sns:us-east-1:123:alerts",
+                    "log_group": "/axon/security",
+                    "error": "raw provider error top-secret",
+                    "safe_status": "failed",
+                },
+                tenant_id="tenant-a",
+            )
+        )
+        client = _tenant_client(trail, "tenant-a", "tenant_admin")
+
+        data = client.get("/admin/audit/records").json()["records"][0]["data"]
+
+        assert data["url"] == "[REDACTED_URL]"
+        assert data["headers"] == "[REDACTED]"
+        assert data["error"] == "[REDACTED]"
+        assert data["topic_arn"].endswith(":alerts")
+        assert data["log_group"] == "/axon/security"
+        assert data["safe_status"] == "failed"
+
+
+class _OutagePersistence:
+    enabled = True
+
+    async def load_tenant_audit_records(self, tenant_id, project_id=None):
+        raise RuntimeError("database host and credentials must not leak")
+
+    async def get_latest_tenant_audit_hash(self, tenant_id):
+        raise RuntimeError("database host and credentials must not leak")
+
+
+class TestAuditStoreOutages:
+    def test_canonical_durable_verification_requires_a_store(self):
+        trail = AuditTrail(persistence=None)
+        client = _tenant_client(trail, "tenant-a", "tenant_auditor")
+
+        response = client.get("/admin/audit/verify?durable=true")
+
+        assert response.status_code == 503
+        assert response.json()["status"] == "unavailable"
+        assert response.json()["chain_valid"] is False
+
+    def test_durable_verification_reports_unavailable(self):
+        trail = AuditTrail(persistence=_OutagePersistence())
+        client = _tenant_client(trail, "tenant-a", "tenant_auditor")
+
+        response = client.get("/admin/audit/verify?durable=true")
+
+        assert response.status_code == 503
+        assert response.json()["status"] == "unavailable"
+        assert response.json()["chain_valid"] is False
+        assert "credentials" not in response.text
+
+    def test_export_reports_unavailable_without_raw_error(self):
+        trail = AuditTrail(persistence=_OutagePersistence())
+        client = _tenant_client(trail, "tenant-a", "tenant_auditor")
+
+        response = client.get("/admin/audit/export")
+
+        assert response.status_code == 503
+        assert response.json()["error"]["type"] == "audit_store_unavailable"
+        assert "credentials" not in response.text
+
+
 class TestPiiPreview:
     """POST /admin/pii/preview — the demo panel's backing endpoint.
 
@@ -132,8 +347,7 @@ class TestPiiPreview:
     """
 
     def test_shows_the_before_and_after(self, client):
-        resp = client.post("/admin/pii/preview", json={
-            "text": "Email me at a@b.com or call 555-234-5678."})
+        resp = client.post("/admin/pii/preview", json={"text": "Email me at a@b.com or call 555-234-5678."})
         assert resp.status_code == 200
         d = resp.json()
         assert "[EMAIL_1]" in d["redacted"]
@@ -153,8 +367,7 @@ class TestPiiPreview:
         # pattern because a name has no shape to match. If someone adds one, the
         # demo panel's whole premise changes and this should force that
         # conversation rather than silently drift.
-        d = client.post("/admin/pii/preview", json={
-            "text": "I am Alice Smith and my email is a@b.com."}).json()
+        d = client.post("/admin/pii/preview", json={"text": "I am Alice Smith and my email is a@b.com."}).json()
         assert "Alice Smith" in d["redacted"]
         assert "[EMAIL_1]" in d["redacted"]
         assert "name" not in d["types_found"]
@@ -167,8 +380,7 @@ class TestPiiPreview:
         assert len(trail._buffer) == before
 
     def test_types_can_be_narrowed(self, client):
-        d = client.post("/admin/pii/preview", json={
-            "text": "a@b.com and 123-45-6789", "types": ["email"]}).json()
+        d = client.post("/admin/pii/preview", json={"text": "a@b.com and 123-45-6789", "types": ["email"]}).json()
         assert "[EMAIL_1]" in d["redacted"]
         assert "123-45-6789" in d["redacted"]
         assert d["types_checked"] == ["email"]
@@ -179,24 +391,26 @@ class TestPiiPreview:
         assert "name" not in d["supported_types"]
         assert "name" in d["supported_ner_types"]
 
-    @pytest.mark.parametrize("payload,fragment", [
-        ({}, "text is required"),
-        ({"text": ""}, "text is required"),
-        ({"text": "   "}, "text is required"),
-        ({"text": 42}, "text is required"),
-        ({"text": "x" * 4001}, "exceeds 4000"),
-        ({"text": "a@b.com", "types": "email"}, "list of strings"),
-        ({"text": "a@b.com", "types": [1, 2]}, "list of strings"),
-        ({"text": "a@b.com", "types": ["nonsense"]}, "unknown PII types"),
-    ])
+    @pytest.mark.parametrize(
+        "payload,fragment",
+        [
+            ({}, "text is required"),
+            ({"text": ""}, "text is required"),
+            ({"text": "   "}, "text is required"),
+            ({"text": 42}, "text is required"),
+            ({"text": "x" * 4001}, "exceeds 4000"),
+            ({"text": "a@b.com", "types": "email"}, "list of strings"),
+            ({"text": "a@b.com", "types": [1, 2]}, "list of strings"),
+            ({"text": "a@b.com", "types": ["nonsense"]}, "unknown PII types"),
+        ],
+    )
     def test_validation(self, client, payload, fragment):
         resp = client.post("/admin/pii/preview", json=payload)
         assert resp.status_code == 400
         assert fragment in resp.json()["error"]["message"]
 
     def test_invalid_json_is_a_400_not_a_500(self, client):
-        resp = client.post("/admin/pii/preview", content=b"{not json",
-                           headers={"Content-Type": "application/json"})
+        resp = client.post("/admin/pii/preview", content=b"{not json", headers={"Content-Type": "application/json"})
         assert resp.status_code == 400
         assert "Invalid JSON" in resp.json()["error"]["message"]
 
@@ -216,10 +430,10 @@ class TestPiiPreview:
                 start = text.find("Alice Smith")
                 return [(start, start + 11, "name")] if start >= 0 else []
 
-        monkeypatch.setattr("src.gateway.security.pii_ner.build_entity_detector",
-                            lambda region="us-east-1": FakeDetector())
-        d = client.post("/admin/pii/preview", json={
-            "text": "I am Alice Smith at a@b.com.", "ner": True}).json()
+        monkeypatch.setattr(
+            "src.gateway.security.pii_ner.build_entity_detector", lambda region="us-east-1": FakeDetector()
+        )
+        d = client.post("/admin/pii/preview", json={"text": "I am Alice Smith at a@b.com.", "ner": True}).json()
         # Left column unchanged — NER supplements rather than replaces.
         assert "Alice Smith" in d["redacted"]
         assert d["ner"]["available"] is True
@@ -232,10 +446,8 @@ class TestPiiPreview:
             async def detect(self, text, active_types):
                 raise RuntimeError("Throttling: rate exceeded")
 
-        monkeypatch.setattr("src.gateway.security.pii_ner.build_entity_detector",
-                            lambda region="us-east-1": Boom())
-        d = client.post("/admin/pii/preview", json={
-            "text": "I am Alice Smith at a@b.com.", "ner": True}).json()
+        monkeypatch.setattr("src.gateway.security.pii_ner.build_entity_detector", lambda region="us-east-1": Boom())
+        d = client.post("/admin/pii/preview", json={"text": "I am Alice Smith at a@b.com.", "ner": True}).json()
         # Redaction fails open, so this returned available=True with two
         # identical columns until the mapping started carrying the error —
         # which reads as "entity detection found nothing".
@@ -245,10 +457,8 @@ class TestPiiPreview:
         assert "[EMAIL_1]" in d["redacted"]
 
     def test_no_detector_available_is_reported(self, client, monkeypatch):
-        monkeypatch.setattr("src.gateway.security.pii_ner.build_entity_detector",
-                            lambda region="us-east-1": None)
-        d = client.post("/admin/pii/preview", json={
-            "text": "Alice Smith", "ner": True}).json()
+        monkeypatch.setattr("src.gateway.security.pii_ner.build_entity_detector", lambda region="us-east-1": None)
+        d = client.post("/admin/pii/preview", json={"text": "Alice Smith", "ner": True}).json()
         assert d["ner"]["available"] is False
         assert "boto3" in d["ner"]["reason"]
 
@@ -262,10 +472,8 @@ class TestPiiPreview:
                 return []
 
         fake = FakeDetector()
-        monkeypatch.setattr("src.gateway.security.pii_ner.build_entity_detector",
-                            lambda region="us-east-1": fake)
-        client.post("/admin/pii/preview", json={
-            "text": "Alice Smith", "ner": True, "ner_types": ["name"]})
+        monkeypatch.setattr("src.gateway.security.pii_ner.build_entity_detector", lambda region="us-east-1": fake)
+        client.post("/admin/pii/preview", json={"text": "Alice Smith", "ner": True, "ner_types": ["name"]})
         assert fake.asked == ["name"]
 
     def test_get_is_not_allowed(self, client):

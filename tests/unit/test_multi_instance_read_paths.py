@@ -556,6 +556,19 @@ class TestTheComposeHostPortIsOverridable:
         compose = (_README.parent / "docker-compose.yml").read_text(encoding="utf-8")
         assert "urlopen('http://localhost:8000/health')" in compose
 
+    def test_compose_explicitly_selects_the_development_profile(self):
+        compose = (_README.parent / "docker-compose.yml").read_text(
+            encoding="utf-8"
+        )
+        expected_defaults = (
+            "AXON_DEPLOYMENT_PROFILE="
+            "${AXON_DEPLOYMENT_PROFILE:-development}",
+            "AXON_AUTH_MODE=${AXON_AUTH_MODE:-LOG_ONLY}",
+            "AXON_REQUIRE_CANONICAL_IDENTITY="
+            "${AXON_REQUIRE_CANONICAL_IDENTITY:-false}",
+        )
+        assert all(value in compose for value in expected_defaults)
+
     def test_the_readme_shows_how(self):
         assert "AXON_HOST_PORT=8002 docker compose up" in _README.read_text(encoding="utf-8")
 

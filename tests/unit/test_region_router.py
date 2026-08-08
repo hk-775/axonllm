@@ -207,3 +207,31 @@ class TestConfigHelpers:
     def test_active_active_config(self):
         config = active_active([("us-east-1", 60), ("eu-west-1", 40)])
         assert len(config.active_spokes) == 2
+
+
+class TestTopologyInputValidation:
+    @pytest.mark.parametrize("weight", [-1, -0.5, True, 1.5])
+    def test_spoke_rejects_invalid_weight(self, weight):
+        with pytest.raises(
+            ValueError,
+            match="weight must be a non-negative integer",
+        ):
+            SpokeConfig(region="us-east-1", weight=weight)
+
+    def test_active_active_rejects_negative_weight(self):
+        with pytest.raises(
+            ValueError,
+            match="weight must be a non-negative integer",
+        ):
+            active_active([("us-east-1", 100), ("eu-west-1", -1)])
+
+    def test_spoke_rejects_negative_weight_mutation(self):
+        spoke = SpokeConfig(region="us-east-1", weight=50)
+
+        with pytest.raises(
+            ValueError,
+            match="weight must be a non-negative integer",
+        ):
+            spoke.weight = -1
+
+        assert spoke.weight == 50

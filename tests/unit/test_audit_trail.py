@@ -4,7 +4,12 @@ import asyncio
 
 import pytest
 
-from src.gateway.security.audit_trail import AuditEventType, AuditRecord, AuditTrail
+from src.gateway.security.audit_trail import (
+    AuditEventType,
+    AuditRecord,
+    AuditStoreUnavailable,
+    AuditTrail,
+)
 
 
 def _run(coro):
@@ -18,23 +23,29 @@ def trail():
 
 class TestBasicRecording:
     def test_records_event(self, trail):
-        record = _run(trail.record(
-            event_type=AuditEventType.LLM_REQUEST,
-            user_id="user-1",
-            project_id="proj-1",
-            request_id="req-123",
-            data={"model": "claude-sonnet"},
-        ))
+        record = _run(
+            trail.record(
+                event_type=AuditEventType.LLM_REQUEST,
+                user_id="user-1",
+                project_id="proj-1",
+                request_id="req-123",
+                data={"model": "claude-sonnet"},
+            )
+        )
         assert record.record_id.startswith("aud_")
         assert record.event_type == AuditEventType.LLM_REQUEST
         assert record.user_id == "user-1"
         assert record.data["model"] == "claude-sonnet"
 
     def test_record_has_hash(self, trail):
-        record = _run(trail.record(
-            event_type=AuditEventType.AUTH_SUCCESS,
-            user_id="u", project_id="p", request_id="r",
-        ))
+        record = _run(
+            trail.record(
+                event_type=AuditEventType.AUTH_SUCCESS,
+                user_id="u",
+                project_id="p",
+                request_id="r",
+            )
+        )
         assert record.record_hash != ""
         assert len(record.record_hash) == 64  # SHA-256
 
@@ -42,6 +53,23 @@ class TestBasicRecording:
         r1 = _run(trail.record(AuditEventType.LLM_REQUEST, "u", "p", "r1"))
         r2 = _run(trail.record(AuditEventType.LLM_RESPONSE, "u", "p", "r1"))
         assert r2.prev_hash == r1.record_hash
+
+    def test_break_glass_requires_durable_persistence(self, trail):
+        with pytest.raises(AuditStoreUnavailable):
+            _run(
+                trail.record_break_glass_access(
+                    user_id="operator",
+                    principal_id="principal-1",
+                    tenant_id="tenant-a",
+                    project_id="project-a",
+                    request_id="request-a",
+                    route="/admin/projects",
+                    method="POST",
+                    reason="incident INC-1234",
+                    result="allowed",
+                    access="write",
+                )
+            )
 
 
 class TestHashChain:
@@ -64,16 +92,18 @@ class TestHashChain:
 
 class TestLLMRequestRecording:
     def test_records_llm_request_metadata(self, trail):
-        record = _run(trail.record_llm_request(
-            user_id="user-1",
-            project_id="proj-1",
-            request_id="req-abc",
-            model="claude-opus",
-            provider="anthropic",
-            message_count=3,
-            pii_redacted_count=2,
-            injection_score=0.1,
-        ))
+        record = _run(
+            trail.record_llm_request(
+                user_id="user-1",
+                project_id="proj-1",
+                request_id="req-abc",
+                model="claude-opus",
+                provider="anthropic",
+                message_count=3,
+                pii_redacted_count=2,
+                injection_score=0.1,
+            )
+        )
         assert record.event_type == AuditEventType.LLM_REQUEST
         assert record.data["model"] == "claude-opus"
         assert record.data["pii_redacted_count"] == 2
@@ -82,32 +112,45 @@ class TestLLMRequestRecording:
 
 class TestInjectionRecording:
     def test_records_blocked_injection(self, trail):
-        record = _run(trail.record_injection_event(
-            user_id="u",
-            project_id="p",
-            request_id="r",
-            threat_level="high",
-            patterns=["role_override"],
-            blocked=True,
-        ))
+        record = _run(
+            trail.record_injection_event(
+                user_id="u",
+                project_id="p",
+                request_id="r",
+                threat_level="high",
+                patterns=["role_override"],
+                blocked=True,
+            )
+        )
         assert record.event_type == AuditEventType.INJECTION_BLOCKED
         assert record.data["blocked"] is True
         assert "role_override" in record.data["patterns"]
 
     def test_records_detected_not_blocked(self, trail):
-        record = _run(trail.record_injection_event(
-            user_id="u", project_id="p", request_id="r",
-            threat_level="medium", patterns=["extraction"], blocked=False,
-        ))
+        record = _run(
+            trail.record_injection_event(
+                user_id="u",
+                project_id="p",
+                request_id="r",
+                threat_level="medium",
+                patterns=["extraction"],
+                blocked=False,
+            )
+        )
         assert record.event_type == AuditEventType.INJECTION_DETECTED
 
 
 class TestPIIRedactionRecording:
     def test_records_pii_event(self, trail):
-        record = _run(trail.record_pii_redaction(
-            user_id="u", project_id="p", request_id="r",
-            redacted_types=["email", "ssn"], count=3,
-        ))
+        record = _run(
+            trail.record_pii_redaction(
+                user_id="u",
+                project_id="p",
+                request_id="r",
+                redacted_types=["email", "ssn"],
+                count=3,
+            )
+        )
         assert record.event_type == AuditEventType.PII_REDACTION
         assert record.data["count"] == 3
         assert "email" in record.data["redacted_types"]
@@ -144,3 +187,51 @@ class TestBufferSize:
         for i in range(10):
             _run(trail.record(AuditEventType.LLM_REQUEST, "u", "p", f"r{i}"))
         assert len(trail._buffer) == 5
+
+
+class TestTenantIsolation:
+    def test_same_ids_are_isolated_by_tenant(self, trail):
+        first = _run(
+            trail.record(
+                AuditEventType.LLM_REQUEST,
+                "same-user",
+                "same-project",
+                "same-request",
+                tenant_id="tenant-a",
+            )
+        )
+        second = _run(
+            trail.record(
+                AuditEventType.LLM_REQUEST,
+                "same-user",
+                "same-project",
+                "same-request",
+                tenant_id="tenant-b",
+            )
+        )
+
+        assert first.tenant_id == "tenant-a"
+        assert second.tenant_id == "tenant-b"
+        assert first.prev_hash == "genesis"
+        assert second.prev_hash == "genesis"
+        assert trail.query_recent(tenant_id="tenant-a") == [first]
+        assert trail.query_recent(tenant_id="tenant-b") == [second]
+        assert trail.verify_chain(tenant_id="tenant-a") is True
+        assert trail.verify_chain(tenant_id="tenant-b") is True
+
+    def test_tenant_id_is_part_of_the_canonical_hash(self):
+        from datetime import datetime, timezone
+
+        base = dict(
+            record_id="aud_same",
+            event_type=AuditEventType.AUTH_SUCCESS,
+            timestamp=datetime.now(timezone.utc),
+            user_id="same-user",
+            project_id="same-project",
+            request_id="same-request",
+            prev_hash="genesis",
+        )
+        tenant_a = AuditRecord(**base, tenant_id="tenant-a")
+        tenant_b = AuditRecord(**base, tenant_id="tenant-b")
+
+        assert tenant_a.compute_hash() != tenant_b.compute_hash()

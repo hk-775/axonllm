@@ -36,8 +36,14 @@ def load_provider_configs(config_path: str = "config/providers.yaml") -> dict[st
     """
     configs: dict[str, ProviderConfig] = {}
 
-    # Load YAML if it exists
+    # Production images intentionally exclude providers.yaml because operators
+    # may put secrets in it. The distributable example contains only endpoint
+    # metadata and is safe to combine with injected environment credentials.
     path = Path(config_path)
+    if not path.exists() and path.name == "providers.yaml":
+        example = path.with_name("providers.yaml.example")
+        if example.exists():
+            path = example
     yaml_providers: dict = {}
     if path.exists():
         raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}

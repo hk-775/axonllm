@@ -47,6 +47,10 @@ from src.gateway.config_sync import ConfigSyncService
 from src.gateway.cost_tracker import CostTracker
 from src.gateway.models import TokenPricing, UsageRecord
 from src.gateway.persistence import DynamoPersistence
+from tests.unit.test_persistence_cas_foundations import (
+    _CasDynamoClient,
+    _CasTable,
+)
 
 
 def _run(coro):
@@ -69,9 +73,16 @@ class _FakeTable:
         self._broken = set(broken)
         self._broken_writes = set(broken_writes)
 
-    def put_item(self, Item):  # noqa: N803 — boto3's parameter name
+    def put_item(  # noqa: N803 — boto3's parameter names
+        self,
+        Item,
+        ConditionExpression=None,
+        ExpressionAttributeValues=None,
+    ):
         if Item.get("entity_type") in self._broken_writes:
             raise RuntimeError(f"write of {Item.get('entity_type')} failed")
+        if ConditionExpression and (Item["PK"], Item["SK"]) in self._rows:
+            raise RuntimeError("conditional write rejected")
         self._rows[(Item["PK"], Item["SK"])] = dict(Item)
 
     def get_item(self, Key):  # noqa: N803
@@ -98,6 +109,92 @@ class _FakeTable:
         ]}
 
 
+class _SharedCasClient(_CasDynamoClient):
+    """CAS interpreter that keeps both test instances on one row dict."""
+
+    def __init__(self, rows: dict, broken_writes: set[str]) -> None:
+        super().__init__()
+        self.rows = rows
+        self._broken_writes = broken_writes
+
+    def transact_write_items(self, **request) -> None:
+        for operation in request["TransactItems"]:
+            if "Put" not in operation:
+                continue
+            item = self.decode(operation["Put"]["Item"])
+            if item.get("entity_type") in self._broken_writes:
+                raise RuntimeError(
+                    f"write of {item.get('entity_type')} failed"
+                )
+
+        shared = self.rows
+        super().transact_write_items(**request)
+        committed = self.rows
+        if committed is not shared:
+            shared.clear()
+            shared.update(committed)
+            self.rows = shared
+
+
+class _ConfigCasTable(_CasTable):
+    def __init__(
+        self,
+        client: _SharedCasClient,
+        broken: set[str],
+    ) -> None:
+        super().__init__(client)
+        self._broken = broken
+
+    def scan(self, *, FilterExpression, **kwargs):  # noqa: N803
+        wanted = FilterExpression.get_expression()["values"][1]
+        if wanted in self._broken:
+            raise RuntimeError(f"scan of {wanted} timed out")
+        with self._client._lock:
+            return {
+                "Items": [
+                    dict(row)
+                    for row in self._client.rows.values()
+                    if row.get("entity_type") == wanted
+                ]
+            }
+
+    def update_item(
+        self,
+        *,
+        Key,  # noqa: N803
+        UpdateExpression,  # noqa: N803
+        ExpressionAttributeNames,  # noqa: N803
+        ExpressionAttributeValues,  # noqa: N803
+        ReturnValues,  # noqa: N803
+    ):
+        del ReturnValues
+        key = (Key["PK"], Key["SK"])
+        with self._client._lock:
+            row = self._client.rows.setdefault(key, dict(Key))
+            if "ADD #spend :cost" in UpdateExpression:
+                row["entity_type"] = ExpressionAttributeValues[
+                    ":entity_type"
+                ]
+                row["budget_scope"] = ExpressionAttributeValues[":scope"]
+                row.setdefault("epoch", ExpressionAttributeValues[":zero"])
+                row["spend"] = (
+                    row.get("spend", 0)
+                    + ExpressionAttributeValues[":cost"]
+                )
+                return {
+                    "Attributes": {
+                        "epoch": row["epoch"],
+                        "spend": row["spend"],
+                    }
+                }
+
+            assert UpdateExpression.startswith("ADD ")
+            attribute = next(iter(ExpressionAttributeNames.values()))
+            delta = next(iter(ExpressionAttributeValues.values()))
+            row[attribute] = row.get(attribute, 0) + delta
+            return {"Attributes": {attribute: row[attribute]}}
+
+
 class _Store(DynamoPersistence):
     """The real persistence class with only the boto3 table replaced.
 
@@ -115,9 +212,11 @@ class _Store(DynamoPersistence):
         # the boto3 boundary instead of by stubbing out a persistence method.
         self.broken: set[str] = set()
         self.broken_writes: set[str] = set()
+        self._client = _SharedCasClient(rows, self.broken_writes)
+        self._table = _ConfigCasTable(self._client, self.broken)
 
     def _get_table(self):
-        return _FakeTable(self.rows, self.broken, self.broken_writes)
+        return self._table
 
     async def load_projects(self):
         self.project_scans += 1
@@ -592,15 +691,15 @@ class TestTheWindowBoundsTheReadsNotTheCorrectness:
         _run(a.sync.refresh_if_stale())
         assert a.sync._last_version_check != float("-inf")
 
-    def test_the_writer_does_not_rescan_to_learn_its_own_write(self, fleet):
+    def test_the_writer_reloads_before_acknowledging_its_own_write(self, fleet):
         a, _ = fleet
         a.create_project("acme", budget_limit=100.0)
         scans = a.store.project_scans
 
         a.expire_ttl()
         _run(a.sync.refresh_if_stale())
-        assert a.store.project_scans == scans, (
-            "the writing instance re-scanned to discover its own change"
+        assert a.store.project_scans == scans + 1, (
+            "the writer acknowledged a counter it had not loaded"
         )
 
 

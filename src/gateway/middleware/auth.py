@@ -16,6 +16,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
+from src.gateway.config_sync import RegionTopologyUnavailable
 from src.gateway.models import AuthMethod, RequestContext
 
 if TYPE_CHECKING:
@@ -277,9 +278,28 @@ class AuthMiddleware(BaseHTTPMiddleware):
         if self.config_sync is not None:
             try:
                 await self.config_sync.refresh_if_stale()
+            except RegionTopologyUnavailable:
+                logger.error(
+                    "Authoritative region topology refresh failed",
+                    exc_info=True,
+                )
+                return JSONResponse(
+                    status_code=503,
+                    content={
+                        "error": {
+                            "type": "service_unavailable",
+                            "message": (
+                                "Region routing configuration is temporarily "
+                                "unavailable."
+                            ),
+                            "code": "region_topology_unavailable",
+                        }
+                    },
+                )
             except Exception:
-                # Never fail a request over a refresh; the loaded config still
-                # decides it, which is what happened before this existed.
+                # Project/user refresh retains the last loaded enforcement state.
+                # Topology failures are handled above because stale residency and
+                # failover rules cannot safely authorize routing.
                 logger.warning("Config refresh failed", exc_info=True)
 
         # Policy evaluation
@@ -301,7 +321,30 @@ class AuthMiddleware(BaseHTTPMiddleware):
                     logger.warning("Policy refresh failed", exc_info=True)
             action = request.method.lower()
             resource = path
-            decision = await self.policy_service.evaluate(context, action, resource)
+            try:
+                decision = await self.policy_service.evaluate(
+                    context,
+                    action,
+                    resource,
+                )
+            except Exception:
+                logger.error(
+                    "Policy evaluation unavailable user=%s tenant=%s resource=%s",
+                    context.user_id,
+                    context.tenant_id,
+                    resource,
+                    exc_info=True,
+                )
+                return JSONResponse(
+                    status_code=503,
+                    content={
+                        "error": {
+                            "type": "service_unavailable",
+                            "message": "Authorization is temporarily unavailable.",
+                            "code": "policy_evaluation_unavailable",
+                        }
+                    },
+                )
 
             if decision == "DENY":
                 if self.mode == "ENFORCE":

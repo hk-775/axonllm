@@ -39,6 +39,7 @@ def _make_record(
     completion_tokens=50,
     cost=0.006,
     timestamp=None,
+    tenant_id=None,
 ):
     return UsageRecord(
         request_id=request_id,
@@ -51,6 +52,7 @@ def _make_record(
         total_tokens=prompt_tokens + completion_tokens,
         cost=cost,
         timestamp=timestamp or datetime.utcnow(),
+        tenant_id=tenant_id,
     )
 
 
@@ -183,6 +185,61 @@ class TestCheckBudget:
         await tracker.record_usage(_make_record(project_id="proj-2", cost=999.0))
         status = await tracker.check_budget("proj-1")
         assert status.current_spend == pytest.approx(30.0)
+
+    @pytest.mark.asyncio
+    async def test_identical_project_and_user_ids_are_isolated_by_tenant(self):
+        tracker = CostTracker(_pricing_config())
+        for tenant_id in ("tenant-a", "tenant-b"):
+            tracker.register_project(
+                "shared-project",
+                budget_limit=100.0,
+                tenant_id=tenant_id,
+            )
+            tracker.register_user(
+                "shared-user",
+                budget_limit=100.0,
+                tenant_id=tenant_id,
+            )
+
+        await tracker.record_usage(
+            _make_record(
+                project_id="shared-project",
+                user_id="shared-user",
+                tenant_id="tenant-a",
+                cost=75.0,
+            )
+        )
+        await tracker.record_usage(
+            _make_record(
+                request_id="req-2",
+                project_id="shared-project",
+                user_id="shared-user",
+                tenant_id="tenant-b",
+                cost=5.0,
+            )
+        )
+
+        project_a = await tracker.check_budget(
+            "shared-project",
+            tenant_id="tenant-a",
+        )
+        project_b = await tracker.check_budget(
+            "shared-project",
+            tenant_id="tenant-b",
+        )
+        user_a = await tracker.check_user_budget(
+            "shared-user",
+            tenant_id="tenant-a",
+        )
+        user_b = await tracker.check_user_budget(
+            "shared-user",
+            tenant_id="tenant-b",
+        )
+
+        assert project_a.current_spend == pytest.approx(75.0)
+        assert project_b.current_spend == pytest.approx(5.0)
+        assert user_a.current_spend == pytest.approx(75.0)
+        assert user_b.current_spend == pytest.approx(5.0)
 
 
 # ---------------------------------------------------------------------------

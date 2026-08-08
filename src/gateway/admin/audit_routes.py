@@ -2,16 +2,194 @@
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
-from src.gateway.security.audit_trail import AuditEventType
+from src.gateway.security.audit_trail import (
+    LEGACY_TENANT_ID,
+    AuditEventType,
+    AuditRecord,
+    AuditStoreUnavailable,
+)
 
 if TYPE_CHECKING:
     from src.gateway.security.audit_trail import AuditTrail
+
+
+_READ_ONLY_ROLES = frozenset({"tenant_member", "tenant_auditor"})
+_ADMIN_ROLES = frozenset({"admin", "tenant_admin", "platform_admin"})
+_CANONICAL_ROLES = frozenset(
+    {
+        "tenant_admin",
+        "tenant_member",
+        "tenant_auditor",
+        "platform_admin",
+    }
+)
+_ALWAYS_REDACT_KEYS = (
+    "secret",
+    "token",
+    "password",
+    "api_key",
+    "credential",
+    "authorization",
+    "cookie",
+    "header",
+    "exception",
+    "traceback",
+    "stack_trace",
+    "raw_error",
+    "error",
+)
+_READER_REDACT_KEYS = (
+    "url",
+    "uri",
+    "endpoint",
+    "topic",
+    "log_group",
+    "log_stream",
+    "log_target",
+    "destination",
+    "target",
+    "source_ip",
+)
+
+
+class _TenantScopeError(ValueError):
+    def __init__(self, message: str, status_code: int = 400) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
+def _normalize_tenant_id(value: object) -> str | None:
+    if value is None:
+        return None
+    if (
+        not isinstance(value, str)
+        or not value.strip()
+        or value != value.strip()
+    ):
+        raise _TenantScopeError("tenant_id must be a non-empty string")
+    return value
+
+
+def _request_context(request: Request) -> object | None:
+    state = getattr(request, "state", None)
+    return getattr(state, "context", None)
+
+
+def _context_roles(context: object | None) -> set[str]:
+    raw_roles = getattr(context, "roles", None)
+    if not isinstance(raw_roles, (list, tuple, set, frozenset)):
+        return set()
+    return {role for role in raw_roles if isinstance(role, str)}
+
+
+def _requires_canonical_tenant(context: object | None) -> bool:
+    return bool(
+        context is not None
+        and (
+            getattr(context, "principal_id", None) is not None
+            or _context_roles(context) & _CANONICAL_ROLES
+        )
+    )
+
+
+def _request_tenant_id(request: Request) -> str:
+    """Use canonical tenant scope and reject query-string overrides."""
+    supplied = _normalize_tenant_id(request.query_params.get("tenant_id"))
+    context = _request_context(request)
+    authenticated = _normalize_tenant_id(getattr(context, "tenant_id", None))
+    if authenticated is not None:
+        if supplied is not None and supplied != authenticated:
+            raise _TenantScopeError(
+                "tenant_id does not match the authenticated tenant",
+                status_code=403,
+            )
+        return authenticated
+    if _requires_canonical_tenant(context):
+        raise _TenantScopeError(
+            "authenticated tenant context is missing tenant_id",
+        )
+    return supplied or LEGACY_TENANT_ID
+
+
+def _scope_error_response(exc: _TenantScopeError) -> JSONResponse:
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "error": {
+                "type": "invalid_tenant_scope",
+                "message": str(exc),
+            }
+        },
+    )
+
+
+def _is_restricted_reader(request: Request) -> bool:
+    context = _request_context(request)
+    if context is None:
+        return False
+    roles = _context_roles(context)
+    return bool(roles & _READ_ONLY_ROLES) and not bool(roles & _ADMIN_ROLES)
+
+
+def _redact_audit_value(value, *, restricted: bool, key: str = ""):
+    key_lower = key.lower()
+    if any(part in key_lower for part in _ALWAYS_REDACT_KEYS):
+        return "[REDACTED]"
+    if restricted and any(part in key_lower for part in _READER_REDACT_KEYS):
+        return "[REDACTED]"
+    if isinstance(value, dict):
+        return {
+            child_key: _redact_audit_value(
+                child_value,
+                restricted=restricted,
+                key=str(child_key),
+            )
+            for child_key, child_value in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_audit_value(item, restricted=restricted) for item in value]
+    if isinstance(value, str):
+        lowered = value.lower()
+        if lowered.startswith(("http://", "https://")):
+            return "[REDACTED_URL]"
+        if lowered.startswith(("bearer ", "basic ")):
+            return "[REDACTED]"
+    return value
+
+
+def _serialize_record(record: AuditRecord, *, restricted: bool) -> dict:
+    return {
+        "record_id": record.record_id,
+        "event_type": record.event_type.value,
+        "timestamp": record.timestamp.isoformat(),
+        "tenant_id": record.tenant_id,
+        "user_id": record.user_id,
+        "project_id": record.project_id,
+        "request_id": record.request_id,
+        "data": _redact_audit_value(record.data, restricted=restricted),
+    }
+
+
+def _serialize_export_row(row: dict, *, restricted: bool) -> dict:
+    output = dict(row)
+    raw_data = output.get("data")
+    if isinstance(raw_data, str):
+        try:
+            raw_data = json.loads(raw_data)
+        except (TypeError, ValueError):
+            raw_data = {}
+    output["data"] = _redact_audit_value(
+        raw_data or {},
+        restricted=restricted,
+    )
+    return output
 
 
 class AuditAPI:
@@ -21,10 +199,20 @@ class AuditAPI:
         self.audit_trail = audit_trail
 
     async def query_records(self, request: Request) -> JSONResponse:
-        """GET /admin/audit/records?project_id=&event_type=&limit="""
+        """GET /admin/audit/records?tenant_id=&project_id=&event_type=&limit="""
+        try:
+            tenant_id = _request_tenant_id(request)
+        except _TenantScopeError as exc:
+            return _scope_error_response(exc)
         project_id = request.query_params.get("project_id")
         event_type_str = request.query_params.get("event_type")
-        limit = int(request.query_params.get("limit", "100"))
+        try:
+            limit = min(max(int(request.query_params.get("limit", "100")), 1), 1000)
+        except ValueError:
+            return JSONResponse(
+                status_code=400,
+                content={"error": "limit must be an integer"},
+            )
 
         event_type = None
         if event_type_str:
@@ -33,31 +221,27 @@ class AuditAPI:
             except ValueError:
                 return JSONResponse(
                     status_code=400,
-                    content={"error": f"Invalid event_type: {event_type_str}",
-                             "valid_types": [e.value for e in AuditEventType]},
+                    content={
+                        "error": f"Invalid event_type: {event_type_str}",
+                        "valid_types": [e.value for e in AuditEventType],
+                    },
                 )
 
         records = self.audit_trail.query_recent(
             project_id=project_id,
             event_type=event_type,
             limit=limit,
+            tenant_id=tenant_id,
         )
+        restricted = _is_restricted_reader(request)
 
-        return JSONResponse(content={
-            "count": len(records),
-            "records": [
-                {
-                    "record_id": r.record_id,
-                    "event_type": r.event_type.value,
-                    "timestamp": r.timestamp.isoformat(),
-                    "user_id": r.user_id,
-                    "project_id": r.project_id,
-                    "request_id": r.request_id,
-                    "data": r.data,
-                }
-                for r in records
-            ],
-        })
+        return JSONResponse(
+            content={
+                "tenant_id": tenant_id,
+                "count": len(records),
+                "records": [_serialize_record(record, restricted=restricted) for record in records],
+            }
+        )
 
     async def verify_integrity(self, request: Request) -> JSONResponse:
         """GET /admin/audit/verify[?durable=true][&project_id=]
@@ -65,25 +249,57 @@ class AuditAPI:
         Default verifies the in-memory buffer. ``durable=true`` verifies the
         persisted chain (detects tampering with stored rows / cross-restart gaps).
         """
-        durable = request.query_params.get("durable", "").lower() in ("1", "true", "yes")
+        try:
+            tenant_id = _request_tenant_id(request)
+        except _TenantScopeError as exc:
+            return _scope_error_response(exc)
+        durable = request.query_params.get("durable", "").lower() in (
+            "1",
+            "true",
+            "yes",
+        )
         if durable:
             result = await self.audit_trail.verify_persisted_chain(
-                project_id=request.query_params.get("project_id"))
-            return JSONResponse(content={
-                "scope": "durable",
-                "chain_valid": result["valid"],
-                "checked": result.get("checked", 0),
-                "broken_at": result.get("broken_at"),
-                "reason": result.get("reason"),
-                "status": "intact" if result["valid"] else "TAMPERED",
-            })
-        is_valid = self.audit_trail.verify_chain()
-        return JSONResponse(content={
-            "scope": "buffer",
-            "chain_valid": is_valid,
-            "total_records_in_buffer": len(self.audit_trail._buffer),
-            "status": "intact" if is_valid else "TAMPERED",
-        })
+                project_id=request.query_params.get("project_id"),
+                tenant_id=tenant_id,
+            )
+            if not result.get("available", True):
+                return JSONResponse(
+                    status_code=503,
+                    content={
+                        "tenant_id": tenant_id,
+                        "scope": "durable",
+                        "chain_valid": False,
+                        "checked": result.get("checked", 0),
+                        "status": "unavailable",
+                        "reason": result.get(
+                            "reason",
+                            "durable audit store unavailable",
+                        ),
+                    },
+                )
+            return JSONResponse(
+                content={
+                    "tenant_id": tenant_id,
+                    "scope": "durable",
+                    "chain_valid": result["valid"],
+                    "checked": result.get("checked", 0),
+                    "broken_at": result.get("broken_at"),
+                    "reason": result.get("reason"),
+                    "status": "intact" if result["valid"] else "TAMPERED",
+                }
+            )
+        is_valid = self.audit_trail.verify_chain(tenant_id=tenant_id)
+        buffer = self.audit_trail.buffered_records(tenant_id)
+        return JSONResponse(
+            content={
+                "tenant_id": tenant_id,
+                "scope": "buffer",
+                "chain_valid": is_valid,
+                "total_records_in_buffer": len(buffer),
+                "status": "intact" if is_valid else "TAMPERED",
+            }
+        )
 
     async def export_records(self, request: Request) -> JSONResponse:
         """GET /admin/audit/export[?project_id=]
@@ -91,15 +307,51 @@ class AuditAPI:
         Full audit history (durable store when enabled, else buffer) as JSON with
         chain hashes, for SIEM / S3 / offline verification.
         """
-        records = await self.audit_trail.export_records(
-            project_id=request.query_params.get("project_id"))
-        return JSONResponse(content={"count": len(records), "records": records})
+        try:
+            tenant_id = _request_tenant_id(request)
+        except _TenantScopeError as exc:
+            return _scope_error_response(exc)
+        try:
+            records = await self.audit_trail.export_records(
+                project_id=request.query_params.get("project_id"),
+                tenant_id=tenant_id,
+            )
+        except AuditStoreUnavailable:
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "tenant_id": tenant_id,
+                    "error": {
+                        "type": "audit_store_unavailable",
+                        "message": "Durable audit export is temporarily unavailable.",
+                    },
+                },
+            )
+        restricted = _is_restricted_reader(request)
+        return JSONResponse(
+            content={
+                "tenant_id": tenant_id,
+                "count": len(records),
+                "records": [_serialize_export_row(row, restricted=restricted) for row in records],
+            }
+        )
 
     async def get_stats(self, request: Request) -> JSONResponse:
         """GET /admin/audit/stats"""
-        buffer = self.audit_trail._buffer
+        try:
+            tenant_id = _request_tenant_id(request)
+        except _TenantScopeError as exc:
+            return _scope_error_response(exc)
+        buffer = self.audit_trail.buffered_records(tenant_id)
         if not buffer:
-            return JSONResponse(content={"total": 0, "by_type": {}, "by_project": {}})
+            return JSONResponse(
+                content={
+                    "tenant_id": tenant_id,
+                    "total": 0,
+                    "by_type": {},
+                    "by_project": {},
+                }
+            )
 
         by_type: dict[str, int] = {}
         by_project: dict[str, int] = {}
@@ -107,18 +359,31 @@ class AuditAPI:
             by_type[r.event_type.value] = by_type.get(r.event_type.value, 0) + 1
             by_project[r.project_id] = by_project.get(r.project_id, 0) + 1
 
-        return JSONResponse(content={
-            "total": len(buffer),
-            "by_type": by_type,
-            "by_project": by_project,
-            "oldest": buffer[0].timestamp.isoformat(),
-            "newest": buffer[-1].timestamp.isoformat(),
-        })
+        return JSONResponse(
+            content={
+                "tenant_id": tenant_id,
+                "total": len(buffer),
+                "by_type": by_type,
+                "by_project": by_project,
+                "oldest": buffer[0].timestamp.isoformat(),
+                "newest": buffer[-1].timestamp.isoformat(),
+            }
+        )
 
     async def get_security_events(self, request: Request) -> JSONResponse:
         """GET /admin/audit/security?project_id=&limit="""
+        try:
+            tenant_id = _request_tenant_id(request)
+        except _TenantScopeError as exc:
+            return _scope_error_response(exc)
         project_id = request.query_params.get("project_id")
-        limit = int(request.query_params.get("limit", "50"))
+        try:
+            limit = min(max(int(request.query_params.get("limit", "50")), 1), 1000)
+        except ValueError:
+            return JSONResponse(
+                status_code=400,
+                content={"error": "limit must be an integer"},
+            )
 
         security_types = {
             AuditEventType.INJECTION_DETECTED,
@@ -128,27 +393,22 @@ class AuditAPI:
             AuditEventType.POLICY_DENY,
         }
 
-        records = self.audit_trail._buffer
-        if project_id:
-            records = [r for r in records if r.project_id == project_id]
+        records = self.audit_trail.query_recent(
+            project_id=project_id,
+            limit=limit,
+            tenant_id=tenant_id,
+        )
         records = [r for r in records if r.event_type in security_types]
         records = records[-limit:]
+        restricted = _is_restricted_reader(request)
 
-        return JSONResponse(content={
-            "count": len(records),
-            "records": [
-                {
-                    "record_id": r.record_id,
-                    "event_type": r.event_type.value,
-                    "timestamp": r.timestamp.isoformat(),
-                    "user_id": r.user_id,
-                    "project_id": r.project_id,
-                    "data": r.data,
-                }
-                for r in records
-            ],
-        })
-
+        return JSONResponse(
+            content={
+                "tenant_id": tenant_id,
+                "count": len(records),
+                "records": [_serialize_record(record, restricted=restricted) for record in records],
+            }
+        )
 
     async def preview_pii_redaction(self, request: Request) -> JSONResponse:
         """POST /admin/pii/preview — show what redaction does to a given string.
@@ -167,32 +427,41 @@ class AuditAPI:
         try:
             body = await request.json()
         except Exception:
-            return JSONResponse(status_code=400, content={
-                "error": {"type": "invalid_request", "message": "Invalid JSON body"},
-            })
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "error": {"type": "invalid_request", "message": "Invalid JSON body"},
+                },
+            )
 
         text = body.get("text")
         if not isinstance(text, str) or not text.strip():
-            return JSONResponse(status_code=400, content={
-                "error": {"type": "invalid_request", "message": "text is required"},
-            })
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "error": {"type": "invalid_request", "message": "text is required"},
+                },
+            )
         # Bounded so the panel cannot be used to run regexes over arbitrarily
         # large input. Generous next to any realistic demo prompt.
         if len(text) > 4000:
-            return JSONResponse(status_code=400, content={
-                "error": {"type": "invalid_request",
-                          "message": "text exceeds 4000 characters"},
-            })
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "error": {"type": "invalid_request", "message": "text exceeds 4000 characters"},
+                },
+            )
 
         requested = body.get("types")
         if requested is not None and (
-            not isinstance(requested, list)
-            or not all(isinstance(t, str) for t in requested)
+            not isinstance(requested, list) or not all(isinstance(t, str) for t in requested)
         ):
-            return JSONResponse(status_code=400, content={
-                "error": {"type": "invalid_request",
-                          "message": "types must be a list of strings"},
-            })
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "error": {"type": "invalid_request", "message": "types must be a list of strings"},
+                },
+            )
 
         from src.gateway.models import ResolvedPolicy
         from src.gateway.security.pii_ner import NER_TYPE_MAP, build_entity_detector
@@ -200,20 +469,20 @@ class AuditAPI:
 
         unknown = [t for t in (requested or []) if t not in PII_PATTERNS]
         if unknown:
-            return JSONResponse(status_code=400, content={
-                "error": {"type": "invalid_request",
-                          "message": f"unknown PII types: {', '.join(sorted(unknown))}"},
-                "supported_types": sorted(PII_PATTERNS),
-            })
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "error": {"type": "invalid_request", "message": f"unknown PII types: {', '.join(sorted(unknown))}"},
+                    "supported_types": sorted(PII_PATTERNS),
+                },
+            )
 
         policy = ResolvedPolicy()
         policy.pii_redaction_enabled = True
         policy.pii_redact_types = list(requested) if requested else list(PII_PATTERNS)
 
         redactor = PIIRedactor()
-        redacted_messages, mapping = redactor.redact_messages(
-            [{"role": "user", "content": text}], policy
-        )
+        redacted_messages, mapping = redactor.redact_messages([{"role": "user", "content": text}], policy)
         redacted = redacted_messages[0]["content"]
 
         # Echoing the redacted text back is what a provider that quotes the
@@ -243,24 +512,19 @@ class AuditAPI:
         if body.get("ner"):
             detector = build_entity_detector()
             if detector is None:
-                result["ner"] = {"available": False,
-                                 "reason": "boto3 unavailable in this deploy"}
+                result["ner"] = {"available": False, "reason": "boto3 unavailable in this deploy"}
             else:
                 ner_policy = ResolvedPolicy()
                 ner_policy.pii_redaction_enabled = True
                 ner_policy.pii_redact_types = list(policy.pii_redact_types)
                 ner_policy.pii_ner_enabled = True
                 ner_types = body.get("ner_types")
-                if isinstance(ner_types, list) and all(
-                    isinstance(t, str) for t in ner_types
-                ):
-                    ner_policy.pii_ner_types = [
-                        t for t in ner_types if t in set(NER_TYPE_MAP.values())]
+                if isinstance(ner_types, list) and all(isinstance(t, str) for t in ner_types):
+                    ner_policy.pii_ner_types = [t for t in ner_types if t in set(NER_TYPE_MAP.values())]
                 try:
                     ner_redactor = PIIRedactor(entity_detector=detector)
-                    ner_messages, ner_mapping = (
-                        await ner_redactor.redact_messages_async(
-                            [{"role": "user", "content": text}], ner_policy)
+                    ner_messages, ner_mapping = await ner_redactor.redact_messages_async(
+                        [{"role": "user", "content": text}], ner_policy
                     )
                     ner_redacted = ner_messages[0]["content"]
                     if ner_mapping.ner_error:
@@ -269,21 +533,18 @@ class AuditAPI:
                         # unchecked. Reporting available=False is the honest
                         # answer: two identical columns and no explanation would
                         # read as "entity detection found nothing".
-                        result["ner"] = {"available": False,
-                                         "reason": ner_mapping.ner_error}
+                        result["ner"] = {"available": False, "reason": ner_mapping.ner_error}
                         return JSONResponse(content=result)
                     result["ner"] = {
                         "available": True,
                         "redacted": ner_redacted,
-                        "reinjected": ner_redactor.reinject_response(
-                            ner_redacted, ner_mapping),
+                        "reinjected": ner_redactor.reinject_response(ner_redacted, ner_mapping),
                         "redacted_count": ner_mapping.redacted_count,
                         "types_found": sorted(ner_mapping._counters.keys()),
                         # What NER added over regex alone. The reason the panel
                         # has two columns: this is the answer to "why wasn't the
                         # name redacted", stated as a number.
-                        "additional_count": (
-                            ner_mapping.redacted_count - mapping.redacted_count),
+                        "additional_count": (ner_mapping.redacted_count - mapping.redacted_count),
                     }
                 except Exception as exc:  # pragma: no cover - network dependent
                     # Surfaced rather than 500'd: a detector outage is a fact

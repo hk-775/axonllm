@@ -186,7 +186,7 @@ def budget_enforcement_test(base_url: str) -> tuple[bool, str]:
         data = resp.json()
         error = data.get("error", {})
         if error.get("code") == "budget_exceeded":
-            print(f"  test-user already over budget (429 budget_exceeded)")
+            print("  test-user already over budget (429 budget_exceeded)")
             return True, "429 budget_exceeded returned for over-budget user"
 
     # Not over budget yet — send a few requests to push them over

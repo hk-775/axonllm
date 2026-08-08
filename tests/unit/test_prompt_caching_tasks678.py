@@ -14,6 +14,7 @@ import pytest
 from src.gateway.bedrock_provider import _invoke_converse, _is_anthropic_model
 from src.gateway.http_client import HttpClient
 from src.gateway.models import (
+    BudgetStatus,
     ChatCompletionRequest,
     ChatCompletionResponse,
     Project,
@@ -261,10 +262,24 @@ class TestAgentOrchestrationIntegration:
         cost_tracker.calculate_cost = MagicMock(return_value=0.01)
         cost_tracker.record_usage = AsyncMock()
         cost_tracker.check_budget = AsyncMock(
-            return_value=MagicMock(is_over_budget=False)
+            return_value=BudgetStatus(
+                project_id="proj1",
+                current_spend=0.0,
+                budget_limit=None,
+                alert_threshold=None,
+                is_over_budget=False,
+                is_alert_triggered=False,
+            )
         )
         cost_tracker.check_user_budget = AsyncMock(
-            return_value=MagicMock(is_over_budget=False)
+            return_value=BudgetStatus(
+                project_id="user1",
+                current_spend=0.0,
+                budget_limit=None,
+                alert_threshold=None,
+                is_over_budget=False,
+                is_alert_triggered=False,
+            )
         )
 
         projects = {}

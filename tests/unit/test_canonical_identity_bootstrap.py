@@ -23,15 +23,97 @@ def _minimal_app_config() -> AppConfig:
 def test_canonical_identity_env_is_disabled_during_legacy_migration(
     monkeypatch,
 ) -> None:
+    monkeypatch.setenv("AXON_DEPLOYMENT_PROFILE", "development")
     monkeypatch.delenv("AXON_REQUIRE_CANONICAL_IDENTITY", raising=False)
 
-    assert load_app_config().canonical_identity_required is False
+    config = load_app_config()
+
+    assert config.deployment_profile == "development"
+    assert config.canonical_identity_required is False
 
 
 def test_canonical_identity_env_enables_the_gate(monkeypatch) -> None:
+    monkeypatch.setenv("AXON_DEPLOYMENT_PROFILE", "development")
     monkeypatch.setenv("AXON_REQUIRE_CANONICAL_IDENTITY", "true")
 
     assert load_app_config().canonical_identity_required is True
+
+
+def test_ordinary_runtime_defaults_to_production_and_fails_closed(
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("AXON_DEPLOYMENT_PROFILE", raising=False)
+    monkeypatch.delenv("AXON_LOAD_DEMO_DATA", raising=False)
+    monkeypatch.delenv("AXON_REQUIRE_CANONICAL_IDENTITY", raising=False)
+    monkeypatch.setenv("AXON_AUTH_MODE", "ENFORCE")
+    monkeypatch.setenv("LLM_ROUTER_DYNAMODB_ENABLED", "true")
+
+    with pytest.raises(
+        RuntimeError,
+        match="AXON_REQUIRE_CANONICAL_IDENTITY=true",
+    ):
+        load_app_config()
+
+
+def test_demo_entrypoint_selects_the_development_profile(monkeypatch) -> None:
+    monkeypatch.delenv("AXON_DEPLOYMENT_PROFILE", raising=False)
+    monkeypatch.setenv("AXON_LOAD_DEMO_DATA", "true")
+    monkeypatch.setenv("AXON_AUTH_MODE", "LOG_ONLY")
+    monkeypatch.delenv("AXON_REQUIRE_CANONICAL_IDENTITY", raising=False)
+    monkeypatch.delenv("LLM_ROUTER_DYNAMODB_ENABLED", raising=False)
+
+    config = load_app_config()
+
+    assert config.deployment_profile == "development"
+    assert config.canonical_identity_required is False
+
+
+def test_production_profile_requires_canonical_identity(monkeypatch) -> None:
+    monkeypatch.setenv("AXON_DEPLOYMENT_PROFILE", "production")
+    monkeypatch.setenv("AXON_AUTH_MODE", "ENFORCE")
+    monkeypatch.setenv("LLM_ROUTER_DYNAMODB_ENABLED", "true")
+    monkeypatch.setenv("AXON_REQUIRE_CANONICAL_IDENTITY", "false")
+
+    with pytest.raises(
+        RuntimeError,
+        match="AXON_REQUIRE_CANONICAL_IDENTITY=true",
+    ):
+        load_app_config()
+
+
+def test_production_profile_requires_durable_persistence(monkeypatch) -> None:
+    monkeypatch.setenv("AXON_DEPLOYMENT_PROFILE", "production")
+    monkeypatch.setenv("AXON_AUTH_MODE", "ENFORCE")
+    monkeypatch.setenv("AXON_REQUIRE_CANONICAL_IDENTITY", "true")
+    monkeypatch.setenv("LLM_ROUTER_DYNAMODB_ENABLED", "false")
+
+    with pytest.raises(
+        RuntimeError,
+        match="LLM_ROUTER_DYNAMODB_ENABLED=true",
+    ):
+        load_app_config()
+
+
+def test_production_profile_accepts_the_canonical_durable_contract(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("AXON_DEPLOYMENT_PROFILE", "production")
+    monkeypatch.setenv("AXON_AUTH_MODE", "ENFORCE")
+    monkeypatch.setenv("AXON_REQUIRE_CANONICAL_IDENTITY", "true")
+    monkeypatch.setenv("LLM_ROUTER_DYNAMODB_ENABLED", "true")
+
+    config = load_app_config()
+
+    assert config.deployment_profile == "production"
+    assert config.canonical_identity_required is True
+    assert config.durable_persistence_enabled is True
+
+
+def test_invalid_deployment_profile_is_rejected(monkeypatch) -> None:
+    monkeypatch.setenv("AXON_DEPLOYMENT_PROFILE", "prodution")
+
+    with pytest.raises(ValueError, match="AXON_DEPLOYMENT_PROFILE"):
+        load_app_config()
 
 
 def test_canonical_identity_refuses_non_durable_startup() -> None:

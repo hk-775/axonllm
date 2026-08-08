@@ -24,7 +24,9 @@ from src.gateway.models import (
     ChatCompletionResponse,
     PolicyNode,
     Project,
+    ProviderModelMapping,
     RateLimitConfig,
+    TokenPricing,
     TokenUsage,
 )
 from src.gateway.quota_enforcer import QuotaEnforcer
@@ -81,7 +83,14 @@ class FakeRouter:
         self.health_tracker = FakeHealthTracker()
 
     def get_fallback_chain(self, model):
-        raise KeyError(f"Unknown: {model}")
+        if model != "test-model":
+            raise KeyError(f"Unknown: {model}")
+        return [
+            ProviderModelMapping(
+                provider="test-provider",
+                model_id="test-model",
+            )
+        ]
 
     async def execute_with_fallback(self, request, provider_fn, **kwargs):
         self.last_request = request
@@ -102,6 +111,17 @@ class FakeModelRegistry:
 class FakeHealthTracker:
     def is_healthy(self, provider):
         return True
+
+
+def _test_cost_tracker():
+    return CostTracker(pricing_config={
+        "test-provider": {
+            "test-model": TokenPricing(
+                prompt_token_cost=0.001,
+                completion_token_cost=0.002,
+            )
+        }
+    })
 
 
 @pytest.fixture
@@ -142,7 +162,7 @@ def app_setup():
 
     # Core services
     router = FakeRouter()
-    cost_tracker = CostTracker(pricing_config={})
+    cost_tracker = _test_cost_tracker()
     rate_limiter = SlidingWindowRateLimiter(config=RateLimitConfig())
     guardrails = GuardrailEngine()
     cache = CacheManager()
@@ -376,7 +396,7 @@ def _cedar_app(policies):
         rate_limiter=SlidingWindowRateLimiter(config=RateLimitConfig()),
         guardrail_engine=GuardrailEngine(),
         cache_manager=CacheManager(),
-        cost_tracker=CostTracker(pricing_config={}),
+        cost_tracker=_test_cost_tracker(),
         projects={"proj:ml": Project(project_id="proj:ml", name="ML")},
         quota_enforcer=QuotaEnforcer(),
         policy_resolver=resolver,
@@ -471,7 +491,7 @@ def _caching_app():
         rate_limiter=SlidingWindowRateLimiter(config=RateLimitConfig()),
         guardrail_engine=GuardrailEngine(),
         cache_manager=CacheManager(),
-        cost_tracker=CostTracker(pricing_config={}),
+        cost_tracker=_test_cost_tracker(),
         projects={"proj:ml": Project(
             project_id="proj:ml", name="ML Team", cache_enabled=True,
         )},

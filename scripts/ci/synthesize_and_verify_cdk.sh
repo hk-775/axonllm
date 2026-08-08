@@ -28,12 +28,44 @@ uv pip sync \
   --require-hashes \
   "${repo_root}/infra/requirements.txt"
 
-export CDK_OUTDIR="${out_dir}"
-export JSII_RUNTIME_PACKAGE_CACHE_ROOT="${JSII_RUNTIME_PACKAGE_CACHE_ROOT:-${work_dir}/jsii-cache}"
-(
-  cd "${repo_root}/infra"
-  "${venv_dir}/bin/python" app.py
-)
+mkdir -m 0700 "${out_dir}"
 
-"${repo_root}/scripts/ci/verify_cdk_asset.py" "${out_dir}"
-test -f "${out_dir}/AxonLLMStack.template.json"
+verify_target() {
+  local target=$1
+  local stack_name=$2
+  local target_out="${out_dir}/${target}"
+
+  (
+    export CDK_CONTEXT_JSON="{\"deployment_target\":\"${target}\",\"region\":\"us-east-1\"}"
+    export CDK_OUTDIR="${target_out}"
+    export JSII_RUNTIME_PACKAGE_CACHE_ROOT="${JSII_RUNTIME_PACKAGE_CACHE_ROOT:-${work_dir}/jsii-cache}"
+    cd "${repo_root}/infra"
+    "${venv_dir}/bin/python" app.py
+  )
+
+  local template="${target_out}/${stack_name}.template.json"
+  local asset_manifest="${target_out}/${stack_name}.assets.json"
+  test -f "${template}"
+  test -f "${asset_manifest}"
+  "${venv_dir}/bin/python" -c '
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+target = sys.argv[2]
+manifest = json.loads(path.read_text(encoding="utf-8"))
+docker_images = manifest.get("dockerImages")
+if docker_images != {}:
+    count = len(docker_images) if isinstance(docker_images, dict) else "invalid"
+    raise SystemExit(f"expected zero CDK Docker assets, found {count}")
+print(f"{target} CDK synthesis verified: zero Docker assets")
+' "${asset_manifest}" "${target}"
+
+  # CDK emits redundant DependsOn entries for several L2 constructs. W3005 is
+  # informational; all schema and IAM-action findings remain fatal.
+  "${venv_dir}/bin/cfn-lint" -i W3005 -t "${template}"
+}
+
+verify_target "fargate" "AxonLLMStack"
+verify_target "agentcore" "AxonLLMAgentCoreStack"

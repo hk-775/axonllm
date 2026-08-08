@@ -4,8 +4,9 @@ import asyncio
 
 import pytest
 
-from src.gateway.models import ResolvedPolicy
+from src.gateway.models import Project, ResolvedPolicy
 from src.gateway.quota_enforcer import QuotaEnforcer
+from tests.unit.shared_enforcement_backend import SharedEnforcementBackend
 
 
 def _run(coro):
@@ -219,3 +220,202 @@ class TestSpendTracking:
         _run(enforcer.record_spend("proj-b", 20.0))
         assert enforcer.get_spend("proj-a") == 10.0
         assert enforcer.get_spend("proj-b") == 20.0
+
+
+class TestTenantQualifiedQuotaState:
+    def test_same_project_id_has_independent_local_rate_windows(self, enforcer):
+        policy = ResolvedPolicy(rate_limit_rpm=1)
+
+        assert _run(enforcer.check_rate_limit(
+            "same-project",
+            policy,
+            tenant_id="tenant-a",
+        )).allowed
+        assert not _run(enforcer.check_rate_limit(
+            "same-project",
+            policy,
+            tenant_id="tenant-a",
+        )).allowed
+        assert _run(enforcer.check_rate_limit(
+            "same-project",
+            policy,
+            tenant_id="tenant-b",
+        )).allowed
+
+    def test_same_project_id_has_independent_local_spend(self, enforcer):
+        _run(enforcer.record_spend(
+            "same-project",
+            75.0,
+            tenant_id="tenant-a",
+        ))
+        _run(enforcer.record_spend(
+            "same-project",
+            25.0,
+            tenant_id="tenant-b",
+        ))
+
+        assert enforcer.get_spend(
+            "same-project",
+            tenant_id="tenant-a",
+        ) == 75.0
+        assert enforcer.get_spend(
+            "same-project",
+            tenant_id="tenant-b",
+        ) == 25.0
+        assert enforcer.get_spend("same-project") == 0.0
+
+    def test_shared_spend_and_reset_are_tenant_qualified(self):
+        backend = SharedEnforcementBackend()
+        first = QuotaEnforcer(persistence=backend)
+        second = QuotaEnforcer(persistence=backend)
+
+        _run(first.record_spend(
+            "same-project",
+            80.0,
+            tenant_id="tenant-a",
+        ))
+        _run(second.record_spend(
+            "same-project",
+            30.0,
+            tenant_id="tenant-b",
+        ))
+
+        assert _run(first.current_spend(
+            "same-project",
+            tenant_id="tenant-a",
+        )) == 80.0
+        assert _run(first.current_spend(
+            "same-project",
+            tenant_id="tenant-b",
+        )) == 30.0
+
+        assert _run(first.reset_spend(
+            "same-project",
+            tenant_id="tenant-a",
+        ))
+        assert _run(second.current_spend(
+            "same-project",
+            tenant_id="tenant-a",
+        )) == 0.0
+        assert _run(second.current_spend(
+            "same-project",
+            tenant_id="tenant-b",
+        )) == 30.0
+
+    def test_empty_tenant_id_is_not_legacy_mode(self, enforcer):
+        with pytest.raises(ValueError, match="tenant_id"):
+            enforcer.get_spend("project", tenant_id="")
+
+
+class TestSharedPolicyRateLimit:
+    def test_multiple_instances_enforce_one_policy_window(self):
+        backend = SharedEnforcementBackend()
+        first = QuotaEnforcer(persistence=backend)
+        second = QuotaEnforcer(persistence=backend)
+        policy = ResolvedPolicy(rate_limit_rpm=3)
+
+        async def exercise():
+            return await asyncio.gather(*(
+                (first if index % 2 else second).check_rate_limit(
+                    "same-project",
+                    policy,
+                    tenant_id="tenant-a",
+                )
+                for index in range(12)
+            ))
+
+        decisions = _run(exercise())
+
+        assert sum(decision.allowed for decision in decisions) == 3
+        assert {
+            call["namespace"] for call in backend.rate_calls
+        } == {"policy"}
+
+    def test_identical_project_ids_in_other_tenant_have_full_capacity(self):
+        backend = SharedEnforcementBackend()
+        first = QuotaEnforcer(persistence=backend)
+        second = QuotaEnforcer(persistence=backend)
+        policy = ResolvedPolicy(rate_limit_rpm=1)
+
+        assert _run(first.check_rate_limit(
+            "same-project",
+            policy,
+            tenant_id="tenant-a",
+        )).allowed
+        assert not _run(second.check_rate_limit(
+            "same-project",
+            policy,
+            tenant_id="tenant-a",
+        )).allowed
+        assert _run(second.check_rate_limit(
+            "same-project",
+            policy,
+            tenant_id="tenant-b",
+        )).allowed
+
+    def test_enabled_persistence_without_shared_limiter_fails_closed(self):
+        class SpendOnlyPersistence:
+            enabled = True
+
+        enforcer = QuotaEnforcer(persistence=SpendOnlyPersistence())
+        decision = _run(enforcer.check_rate_limit(
+            "project",
+            ResolvedPolicy(rate_limit_rpm=100),
+            tenant_id="tenant-a",
+        ))
+
+        assert decision.allowed is False
+        assert decision.limit_type == "rate_limit_rpm"
+
+
+class TestCanonicalProjectRateLimit:
+    def test_project_limit_applies_without_hierarchy_rate(self, enforcer):
+        project = Project(
+            project_id="project",
+            name="Project",
+            tenant_id="tenant-a",
+            rate_limit_rpm=1,
+        )
+        policy = ResolvedPolicy()
+
+        assert _run(enforcer.check_rate_limit(
+            "project",
+            policy,
+            project=project,
+        )).allowed
+        decision = _run(enforcer.check_rate_limit(
+            "project",
+            policy,
+            project=project,
+        ))
+
+        assert decision.allowed is False
+        assert decision.limit_value == 1
+
+    def test_project_and_hierarchy_use_the_stricter_rate(self, enforcer):
+        project = Project(
+            project_id="project",
+            name="Project",
+            tenant_id="tenant-a",
+            rate_limit_rpm=10,
+        )
+        policy = ResolvedPolicy(rate_limit_rpm=2)
+
+        assert _run(enforcer.check_rate_limit(
+            "project",
+            policy,
+            project=project,
+        )).allowed
+        assert _run(enforcer.check_rate_limit(
+            "project",
+            policy,
+            project=project,
+        )).allowed
+        decision = _run(enforcer.check_rate_limit(
+            "project",
+            policy,
+            project=project,
+        ))
+
+        assert decision.allowed is False
+        assert decision.limit_value == 2

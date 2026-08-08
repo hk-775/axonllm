@@ -8,6 +8,8 @@
 #   AXON_ORIGIN_DOMAIN_NAME
 #   AXON_ORIGIN_CERTIFICATE_ARN
 #   AXON_APPROVED_HTTPS_PREFIX_LIST_ID
+#   AXON_BEDROCK_INVOKE_RESOURCE_ARNS
+#   AXON_VERIFIED_IMAGE_URI
 #
 # Optional:
 #   AXON_DYNAMODB_TABLE_NAME (defaults to axonllm-state)
@@ -24,7 +26,7 @@
 # question from whether you meant to create those specific roles.
 #
 # Prerequisites:
-#   - Docker running
+#   - A release-verified AMD64 image published to private ECR
 #   - AWS CLI configured
 #   - Node.js 20+ (for CDK; 22 or 24 preferred). 18 works but every cdk call
 #     prints an end-of-life banner that looks like an error and hides the output.
@@ -38,9 +40,9 @@
 # Use `npx cdk`, not `cdk` — the CLI is an npm package and nothing installs it
 # globally.
 #
-# After deploy, set your API keys in Secrets Manager:
+# After deploy, set your API keys in the ProviderSecretArn stack output:
 #   aws secretsmanager put-secret-value \
-#     --secret-id axonllm/api-keys \
+#     --secret-id "$PROVIDER_SECRET_ARN" \
 #     --secret-string '{"ANTHROPIC_API_KEY":"sk-ant-...","OPENAI_API_KEY":"sk-..."}'
 
 set -euo pipefail
@@ -82,9 +84,15 @@ require_env AXON_VIEWER_CERTIFICATE_ARN
 require_env AXON_ORIGIN_DOMAIN_NAME
 require_env AXON_ORIGIN_CERTIFICATE_ARN
 require_env AXON_APPROVED_HTTPS_PREFIX_LIST_ID
+require_env AXON_BEDROCK_INVOKE_RESOURCE_ARNS
+require_env AXON_VERIFIED_IMAGE_URI
 
 if [[ ! "$AXON_APPROVED_HTTPS_PREFIX_LIST_ID" =~ ^pl-[0-9a-fA-F]+$ ]]; then
     echo "AXON_APPROVED_HTTPS_PREFIX_LIST_ID must be an EC2 prefix list id." >&2
+    exit 2
+fi
+if [[ ! "$AXON_VERIFIED_IMAGE_URI" =~ ^[0-9]{12}\.dkr\.ecr\.us-east-1\.amazonaws\.com/[a-z0-9]+([._/-][a-z0-9]+)*@sha256:[0-9a-f]{64}$ ]]; then
+    echo "AXON_VERIFIED_IMAGE_URI must be an immutable private ECR URI in us-east-1." >&2
     exit 2
 fi
 if [[ "$AXON_VIEWER_CERTIFICATE_ARN" != arn:aws:acm:us-east-1:* ]] ||
@@ -129,6 +137,8 @@ npx cdk deploy \
     --parameters "AxonLLMStack:OriginDomainName=${AXON_ORIGIN_DOMAIN_NAME}" \
     --parameters "AxonLLMStack:OriginCertificateArn=${AXON_ORIGIN_CERTIFICATE_ARN}" \
     --parameters "AxonLLMStack:ApprovedHttpsPrefixListId=${AXON_APPROVED_HTTPS_PREFIX_LIST_ID}" \
+    --parameters "AxonLLMStack:BedrockInvokeResourceArns=${AXON_BEDROCK_INVOKE_RESOURCE_ARNS}" \
+    --parameters "AxonLLMStack:VerifiedImageUri=${AXON_VERIFIED_IMAGE_URI}" \
     --require-approval "$APPROVAL" \
     --outputs-file outputs.json
 
@@ -144,6 +154,6 @@ if [ -f outputs.json ]; then
 fi
 
 echo "Next steps:"
-echo "  1. Set API keys: aws secretsmanager put-secret-value --secret-id axonllm/api-keys --secret-string '{\"ANTHROPIC_API_KEY\":\"sk-ant-...\",\"OPENAI_API_KEY\":\"sk-...\"}'"
+echo "  1. Set API keys in the ProviderSecretArn stack output."
 echo "  2. Point ${AXON_VIEWER_DOMAIN_NAME} at the CloudFront distribution."
 echo "  3. Configure OIDC and canonical principals before allowing real traffic."

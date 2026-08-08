@@ -49,7 +49,10 @@ from src.gateway.middleware.admin_rbac import AdminRBACMiddleware
 from src.gateway.middleware.auth import AuthMiddleware
 from src.gateway.middleware.tenant_authorization import TenantAuthorizationMiddleware
 from src.gateway.multi_region.health_monitor import SpokeHealthMonitor
-from src.gateway.multi_region.region_config import HubConfig, SpokeConfig, SpokeRole
+from src.gateway.multi_region.region_config import (
+    HubConfig,
+    apply_persisted_topology,
+)
 from src.gateway.multi_region.region_router import RegionRouter
 from src.gateway.multi_region.spoke_loader import load_hub_config
 from src.gateway.quota_enforcer import QuotaEnforcer
@@ -206,7 +209,12 @@ def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComp
         project_resolver = DynamoProjectRepository(persistence)
 
     # --- Enterprise identity: SCIM provisioning + SAML SSO ---
-    scim_store = ScimStore(persistence=persistence)
+    scim_store = ScimStore(
+        persistence=persistence,
+        canonical_identity_required=(
+            app_config.canonical_identity_required
+        ),
+    )
     if persistence.enabled:
         asyncio.run(scim_store.initialize())
     saml_service = SamlService(config=load_saml_config())
@@ -253,30 +261,36 @@ def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComp
     otlp_exporter = OTLPSpanExporter()
 
     # --- Budget threshold alerting ---
-    def _budget_alert(project_id, threshold_pct, current_spend, budget_limit):
-        import asyncio
+    async def _budget_alert(
+        project_id,
+        threshold_pct,
+        current_spend,
+        budget_limit,
+        tenant_id,
+        billing_epoch,
+    ):
         from src.gateway.security.event_dispatcher import SecurityEvent
+        from src.gateway.security.audit_trail import LEGACY_TENANT_ID
         from datetime import timezone
+        event_tenant_id = tenant_id or LEGACY_TENANT_ID
         event = SecurityEvent(
-            event_id=f"budget_{project_id}_{int(threshold_pct * 100)}",
+            event_id=(
+                f"budget_{event_tenant_id}_{project_id}_"
+                f"{billing_epoch}_{int(threshold_pct * 100)}"
+            ),
             event_type="budget_threshold",
             timestamp=datetime.now(timezone.utc).isoformat(),
             severity="warning" if threshold_pct < 1.0 else "critical",
+            tenant_id=event_tenant_id,
             project_id=project_id,
             data={
                 "threshold_pct": threshold_pct * 100,
                 "current_spend": current_spend,
                 "budget_limit": budget_limit,
+                "billing_epoch": billing_epoch,
             },
         )
-        try:
-            loop = asyncio.get_running_loop()
-            loop.create_task(event_dispatcher.dispatch(event))
-        except RuntimeError:
-            logger.warning(
-                "Budget alert dispatch skipped (no running loop) for %s at %d%%",
-                project_id, int(threshold_pct * 100),
-            )
+        await event_dispatcher.dispatch(event)
 
     quota_enforcer.on_budget_alert(_budget_alert)
 
@@ -340,14 +354,38 @@ def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComp
         # Both trackers are seeded: cost_tracker backs the reported budget status,
         # quota_enforcer backs the block. Without the latter, the first request
         # after a deploy is admitted against a budget the fleet already exhausted.
-        spend_project_ids = set(projects) | {
-            r.project_id for r in loaded_records if r.project_id
-        }
-        asyncio.run(cost_tracker.adopt_fleet_spend(
-            spend_project_ids,
-            {r.user_id for r in loaded_records if r.user_id},
-        ))
-        asyncio.run(quota_enforcer.adopt_fleet_spend(spend_project_ids))
+        spend_projects_by_tenant: dict[str | None, set[str]] = {}
+        spend_users_by_tenant: dict[str | None, set[str]] = {}
+        for project in projects.values():
+            spend_projects_by_tenant.setdefault(
+                project.tenant_id,
+                set(),
+            ).add(project.project_id)
+        for record in loaded_records:
+            if record.project_id:
+                spend_projects_by_tenant.setdefault(
+                    record.tenant_id,
+                    set(),
+                ).add(record.project_id)
+            if record.user_id:
+                spend_users_by_tenant.setdefault(
+                    record.tenant_id,
+                    set(),
+                ).add(record.user_id)
+        for tenant_id, project_ids in spend_projects_by_tenant.items():
+            asyncio.run(
+                cost_tracker.adopt_fleet_spend(
+                    project_ids,
+                    spend_users_by_tenant.get(tenant_id, set()),
+                    tenant_id=tenant_id,
+                )
+            )
+            asyncio.run(
+                quota_enforcer.adopt_fleet_spend(
+                    project_ids,
+                    tenant_id=tenant_id,
+                )
+            )
 
     # --- Smart routing components ---
     leaderboard = ModelLeaderboard()
@@ -382,8 +420,12 @@ def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComp
         smart_strategy=smart_strategy,
         ensemble_config=ensemble_config,
         cost_tracker=cost_tracker,
+        available_providers=None,
     )
-    rate_limiter = SlidingWindowRateLimiter(config=RateLimitConfig())
+    rate_limiter = SlidingWindowRateLimiter(
+        config=RateLimitConfig(),
+        persistence=persistence,
+    )
     guardrail_engine = GuardrailEngine()
     cache_manager = CacheManager()
 
@@ -416,7 +458,9 @@ def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComp
     multi_factory = MultiProviderFactory(
         provider_configs=provider_configs,
         bedrock_region=app_config.bedrock_region,
+        enabled_providers=app_config.enabled_providers,
     )
+    router.available_providers = multi_factory.available_providers
 
     # --- Request validator ---
     request_validator = RequestValidator(model_registry=registry)
@@ -443,6 +487,7 @@ def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComp
         trace_forwarder=trace_forwarder,
         otlp_exporter=otlp_exporter,
         semantic_cache=semantic_cache,
+        persistence=persistence,
     )
 
     # --- Efficiency analysis ---
@@ -561,6 +606,8 @@ def build_starlette_app(app_config: AppConfig | None = None) -> Starlette:
         cost_tracker=comp.cost_tracker,
         persistence=comp.persistence,
         policy_resolver=comp.policy_resolver,
+        region_config=comp.region_router.config,
+        health_monitor=comp.health_monitor,
     )
     if comp.persistence.enabled:
         config_sync.note_local_version(
@@ -597,7 +644,9 @@ def build_starlette_app(app_config: AppConfig | None = None) -> Starlette:
 
     # Key, policy, audit, webhook, region, and quota admin APIs
     key_api = KeyManagementAPI(
-        api_key_service=comp.api_key_service, mode=app_config.auth_mode
+        api_key_service=comp.api_key_service,
+        mode=app_config.auth_mode,
+        audit_trail=comp.audit_trail,
     )
     policy_api = PolicyHierarchyAPI(resolver=comp.policy_resolver)
     audit_api = AuditAPI(audit_trail=comp.audit_trail)
@@ -605,9 +654,19 @@ def build_starlette_app(app_config: AppConfig | None = None) -> Starlette:
         dispatcher=comp.event_dispatcher, persistence=comp.persistence)
     region_api = RegionAPI(
         router=comp.region_router, monitor=comp.health_monitor,
-        persistence=comp.persistence)
-    quota_api = QuotaAPI(quota_enforcer=comp.quota_enforcer, policy_resolver=comp.policy_resolver)
-    scim_api = ScimAPI(store=comp.scim_store)
+        persistence=comp.persistence, config_sync=config_sync,
+        topology_lock=config_sync.region_lock)
+    quota_api = QuotaAPI(
+        quota_enforcer=comp.quota_enforcer,
+        policy_resolver=comp.policy_resolver,
+        cost_tracker=comp.cost_tracker,
+    )
+    scim_api = ScimAPI(
+        store=comp.scim_store,
+        canonical_identity_required=(
+            app_config.canonical_identity_required
+        ),
+    )
     saml_api = SamlAPI(service=comp.saml_service)
 
     # Default chat project is the first demo project or "default"
@@ -625,6 +684,30 @@ def build_starlette_app(app_config: AppConfig | None = None) -> Starlette:
 
     async def readiness_check(request: Request) -> JSONResponse:
         ready, dependencies = await _persistence_readiness(comp.persistence)
+        dispatcher = comp.event_dispatcher
+        if dispatcher is None or not dispatcher.outbox_enabled:
+            dependencies["security_event_outbox"] = "disabled"
+        else:
+            try:
+                outbox_ready = await asyncio.wait_for(
+                    dispatcher.check_readiness(),
+                    timeout=5.0,
+                )
+            except TimeoutError:
+                outbox_ready = False
+                dependencies["security_event_outbox"] = "timeout"
+            except Exception:
+                logger.warning(
+                    "Security event outbox readiness check failed",
+                    exc_info=True,
+                )
+                outbox_ready = False
+                dependencies["security_event_outbox"] = "unavailable"
+            else:
+                dependencies["security_event_outbox"] = (
+                    "ready" if outbox_ready else "unavailable"
+                )
+            ready = ready and outbox_ready
         return JSONResponse(
             {
                 "status": "ready" if ready else "not_ready",
@@ -655,22 +738,32 @@ def build_starlette_app(app_config: AppConfig | None = None) -> Starlette:
         + create_site_routes(admin_api)
     )
 
-    # Lifespan: run the spoke health monitor in the background for real
-    # multi-region deployments. Single-region (one spoke) doesn't need it, so we
-    # skip it there to avoid a pointless timer.
+    # Lifespan: reconcile against the live topology rather than capturing the
+    # startup mode. Fleet refresh can add or remove spokes after boot.
     monitor = comp.health_monitor
-    multi_region = monitor is not None and not monitor.config.is_single_region
+    dispatcher = comp.event_dispatcher
 
     @contextlib.asynccontextmanager
     async def _lifespan(_app):
-        if multi_region:
-            await monitor.start()
-            logger.info("Spoke health monitor started (%d spokes)",
-                        len(monitor.config.spokes))
         try:
+            if dispatcher is not None and dispatcher.outbox_enabled:
+                if not await dispatcher.check_readiness():
+                    raise RuntimeError(
+                        "security event outbox is unavailable"
+                    )
+                await dispatcher.start()
+            if monitor is not None:
+                await monitor.reconcile()
+            if monitor is not None and monitor.is_running:
+                logger.info(
+                    "Spoke health monitor started (%d spokes)",
+                    len(monitor.config.spokes),
+                )
             yield
         finally:
-            if multi_region:
+            if dispatcher is not None:
+                await dispatcher.stop()
+            if monitor is not None:
                 await monitor.stop()
 
     app = Starlette(routes=routes, lifespan=_lifespan)
@@ -679,7 +772,11 @@ def build_starlette_app(app_config: AppConfig | None = None) -> Starlette:
     app.add_middleware(SecurityMiddleware)
 
     # Admin RBAC (runs after auth, checks role/scope on /admin/* paths)
-    app.add_middleware(AdminRBACMiddleware, mode=app_config.auth_mode)
+    app.add_middleware(
+        AdminRBACMiddleware,
+        mode=app_config.auth_mode,
+        audit_trail=comp.audit_trail,
+    )
 
     # Baseline tenant RBAC for the inference and model-list data plane. Added
     # before AuthMiddleware so Starlette wraps it inside auth and a canonical
@@ -959,7 +1056,10 @@ async def _load_persisted_state(persistence: DynamoPersistence):
     loaded_feedback = await persistence.load_feedback_records()
     loaded_policies = await persistence.load_all_cedar_policies()
     loaded_destinations = await persistence.load_event_destinations()
-    loaded_topology = await persistence.load_region_topology()
+    # A topology read failure is not equivalent to "no saved topology": the
+    # latter permits the checked-in config, while the former could bypass a
+    # newer residency or failover rule. Let it fail startup.
+    loaded_topology = await persistence.load_region_topology_snapshot()
     return (
         loaded_projects,
         loaded_user_configs,
@@ -998,6 +1098,7 @@ def _register_persisted_budgets(
             project.project_id,
             budget_limit=project.budget_limit,
             alert_threshold=project.alert_threshold,
+            tenant_id=project.tenant_id,
         )
         if project.budget_limit is not None and (
             project.project_id not in policy_resolver._nodes
@@ -1099,33 +1200,4 @@ def _apply_persisted_topology(hub_config: HubConfig, loaded: dict) -> None:
     spoke list with spokes.yaml would resurrect every spoke an operator had
     removed through the API, which is the bug this persistence is here to fix.
     """
-    hub_config.hub_region = loaded["hub_region"] or hub_config.hub_region
-    hub_config.health_check_interval_seconds = loaded["health_check_interval_seconds"]
-    hub_config.failover_threshold_consecutive = loaded["failover_threshold_consecutive"]
-    hub_config.failover_cooldown_seconds = loaded["failover_cooldown_seconds"]
-    hub_config.data_residency_strict = loaded["data_residency_strict"]
-
-    spokes = []
-    for s in loaded.get("spokes", []):
-        try:
-            role = SpokeRole(s.get("role", "active"))
-        except ValueError:
-            logger.error(
-                "Skipping persisted spoke %s: unknown role %r",
-                s.get("region"), s.get("role"),
-            )
-            continue
-        spokes.append(SpokeConfig(
-            region=s["region"],
-            role=role,
-            weight=s.get("weight", 50),
-            endpoint=s.get("endpoint", ""),
-            providers=s.get("providers", []),
-            models=s.get("models", []),
-            data_residency_zones=s.get("data_residency_zones", []),
-            health_check_url=s.get("health_check_url", ""),
-            max_latency_ms=s.get("max_latency_ms", 5000),
-            failover_priority=s.get("failover_priority", 0),
-            # status left at the dataclass default — see serialize_region_topology.
-        ))
-    hub_config.spokes[:] = spokes
+    apply_persisted_topology(hub_config, loaded)

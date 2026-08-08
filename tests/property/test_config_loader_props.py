@@ -219,6 +219,7 @@ def test_app_config_env_override(env_var: str, data):
 
     try:
         os.environ[env_var] = value
+        os.environ["AXON_DEPLOYMENT_PROFILE"] = "development"
         config = load_app_config()
 
         actual = getattr(config, field_name)

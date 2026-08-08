@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 from src.gateway.auth.principal import CredentialIdentity
@@ -21,6 +22,17 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 1
+
+
+def _dynamo_integer(value: object) -> int | None:
+    """Normalize exact DynamoDB numbers while rejecting bools and fractions."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, Decimal) and value == value.to_integral_value():
+        return int(value)
+    return None
 
 
 class PrincipalRepositoryError(RuntimeError):
@@ -87,12 +99,8 @@ class DynamoPrincipalRepository:
     def deserialize(item: dict[str, Any]) -> Principal:
         if item.get("entity_type") != "tenant_principal":
             raise ValueError("item is not a tenant principal")
-        schema_version = item.get("schema_version")
-        if (
-            not isinstance(schema_version, int)
-            or isinstance(schema_version, bool)
-            or schema_version != SCHEMA_VERSION
-        ):
+        schema_version = _dynamo_integer(item.get("schema_version"))
+        if schema_version != SCHEMA_VERSION:
             raise ValueError("unsupported tenant principal schema version")
 
         roles_raw = item.get("roles")
@@ -125,12 +133,10 @@ class DynamoPrincipalRepository:
                 raise ValueError(f"{name} must be a non-empty string")
             required_strings[name] = value
 
-        authorization_version = item.get("authorization_version")
-        if (
-            not isinstance(authorization_version, int)
-            or isinstance(authorization_version, bool)
-            or authorization_version < 1
-        ):
+        authorization_version = _dynamo_integer(
+            item.get("authorization_version")
+        )
+        if authorization_version is None or authorization_version < 1:
             raise ValueError("authorization_version must be a positive integer")
 
         optional_strings: dict[str, str | None] = {}

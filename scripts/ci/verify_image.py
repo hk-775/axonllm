@@ -36,6 +36,7 @@ def verify_image(image: str) -> None:
         "AXON_AUTH_MODE=ENFORCE",
         "PYTHONDONTWRITEBYTECODE=1",
         "PYTHONUNBUFFERED=1",
+        "UV_NO_CACHE=1",
     }
     missing_environment = required_environment - environment
     if missing_environment:
@@ -91,6 +92,18 @@ import src.gateway  # noqa: F401
         image,
         "-c",
         smoke_test,
+    )
+    _run(
+        "docker",
+        "run",
+        "--rm",
+        "--user",
+        "0",
+        "--entrypoint",
+        "sh",
+        image,
+        "-c",
+        "test ! -e /root/.cache/uv",
     )
 
 

@@ -431,6 +431,20 @@ async def test_production_runtime_probes_and_closes_owned_resources(
         async def health_status(self) -> dict[str, Any]:
             return {"enabled": True, "reachable": True}
 
+        async def get_tenant_cedar_policy_version(
+            self,
+            tenant_id: str,
+        ) -> int:
+            assert tenant_id == "tenant-a"
+            return 1
+
+        async def load_tenant_cedar_policies_or_none(
+            self,
+            tenant_id: str,
+        ) -> list[dict[str, str]]:
+            assert tenant_id == "tenant-a"
+            return policies
+
     class HttpClient:
         async def close(self) -> None:
             events.append("provider_http")
@@ -439,6 +453,29 @@ async def test_production_runtime_probes_and_closes_owned_resources(
         def shutdown(self) -> None:
             events.append("otlp")
 
+    class HealthMonitor:
+        async def stop(self) -> None:
+            events.append("health_monitor")
+
+    class EventDispatcher:
+        outbox_enabled = True
+        worker_running = False
+
+        def set_destination_refresher(self, refresher) -> None:
+            self.refresher = refresher
+
+        async def check_readiness(self) -> bool:
+            events.append("event_outbox_ready")
+            return True
+
+        async def start(self) -> None:
+            events.append("event_outbox_start")
+            self.worker_running = True
+
+        async def stop(self) -> None:
+            events.append("event_outbox_stop")
+            self.worker_running = False
+
     policies = [
         {
             "name": "deny-agentcore-writes",
@@ -446,6 +483,7 @@ async def test_production_runtime_probes_and_closes_owned_resources(
                 'forbid(principal, action == Action::"write", resource);'
             ),
             "mode": "ENFORCE",
+            "tenant_id": "tenant-a",
         }
     ]
     components = SimpleNamespace(
@@ -453,6 +491,15 @@ async def test_production_runtime_probes_and_closes_owned_resources(
         oidc_service=Verifier(),
         principal_resolver=SimpleNamespace(),
         project_resolver=SimpleNamespace(),
+        projects={},
+        user_configs={},
+        cost_tracker=SimpleNamespace(),
+        policy_resolver=None,
+        region_router=SimpleNamespace(
+            config=SimpleNamespace(revision=0)
+        ),
+        health_monitor=HealthMonitor(),
+        event_dispatcher=EventDispatcher(),
         policies=policies,
         persistence=Persistence(),
         multi_factory=SimpleNamespace(_http_client=HttpClient()),
@@ -491,14 +538,21 @@ async def test_production_runtime_probes_and_closes_owned_resources(
         "runtime": "ready",
         "identity_provider": "ready",
         "principal_store": "ready",
+        "security_event_outbox": "ready",
     }
     assert service_report.ready is True
     assert service_report.dependencies == {
         "runtime": "ready",
         "identity_provider": "ready",
         "principal_store": "ready",
+        "security_event_outbox": "ready",
     }
     assert sorted(events) == [
+        "event_outbox_ready",
+        "event_outbox_ready",
+        "event_outbox_start",
+        "event_outbox_stop",
+        "health_monitor",
         "otlp",
         "provider_http",
         "service_jwks",

@@ -13,16 +13,20 @@ git clone https://github.com/AxonLLM/axonllm.git
 cd axonllm
 cp -n config/providers.yaml.example config/providers.yaml
 # Add at least one API key (or just use Bedrock with AWS credentials)
-docker compose up          # needs the Docker daemon running
+docker compose run --rm --service-ports \
+  -e AXON_DEPLOYMENT_PROFILE=development \
+  -e AXON_REQUIRE_CANONICAL_IDENTITY=false \
+  -e AXON_AUTH_MODE=LOG_ONLY \
+  axonllm                   # needs the Docker daemon running
 # Open http://localhost:8000 — the landing page, with the dashboard one click away
 # (or go straight to http://localhost:8000/admin/dashboard)
 ```
 
-Already running something on 8000? `AXON_HOST_PORT=8002 docker compose up`. Worth
-knowing because the clash does not announce itself: Docker binds `::` while a
-local `serve_dashboard.py` binds `0.0.0.0`, so both start, and `localhost` then
-resolves to `::1` first — the container answers and the gateway you started by
-hand goes quietly unreachable.
+Already running something on 8000? Use
+`AXON_HOST_PORT=8002 docker compose up`. Worth knowing because the clash does not announce
+itself: Docker binds `::` while a local `serve_dashboard.py` binds `0.0.0.0`,
+so both start, and `localhost` then resolves to `::1` first — the container
+answers and the gateway you started by hand goes quietly unreachable.
 
 No Docker? Use [path 1 or 2](#quick-start) below, which need only Python and uv.
 
@@ -58,7 +62,10 @@ install paths — local or AWS, seeded or clean — and which flag decides.
 - **Named-entity redaction (opt-in)** — adds AWS Comprehend detection for the shapeless types regex cannot match: names, addresses, ages. Per-node via `pii_ner_enabled`, and billed per request (~$0.0001/100 chars, often more than the model's own input tokens), so it is off by default. Fails open: a Comprehend error leaves the regex types redacted and reports the failure rather than blocking the request.
 - **Prompt injection detection** — pattern-scored heuristics (role override, system-prompt extraction, delimiter escape, base64-encoded payloads). Blocking threshold configurable, defaults to 0.7.
 - **Immutable audit trail** — SHA-256 hash chain, DynamoDB persistence, tamper detection
-- **Event dispatcher** — webhook, AWS SNS, CloudWatch Logs. Fire-and-forget on security events.
+- **Durable event dispatcher** — tenant-scoped webhook, AWS SNS, and CloudWatch
+  Logs delivery through a FIFO SQS outbox with bounded retries, native DLQ
+  redrive, deterministic idempotency keys, and managed AWS destination
+  allowlists.
 
 ### Caching & Cost Reduction
 - **Exact response cache** — SHA-256 of the request, tenant/project namespace,
@@ -75,40 +82,52 @@ install paths — local or AWS, seeded or clean — and which flag decides.
 
 ### Identity & Access
 - **Multi-strategy auth** — ALB OIDC JWT, Bearer token (OIDC or API key), X-Api-Key header
-- **Canonical tenant identity** — optional migration gate that replaces
-  credential-provided roles, scopes, and project authority with strongly
-  consistent, server-held DynamoDB principals. Production readiness requires
-  this gate; see [Enterprise hardening](ENTERPRISE_HARDENING.md).
-- **Tenant data-plane RBAC** — active tenant members can list models and invoke
-  inference only after a strongly consistent lookup proves the project belongs
-  to their tenant and an explicit project grant allows the action. Tenant admins
-  currently need the same grant. Service principals also need an explicit
-  server-held action scope. Cross-tenant and ungranted-project resources return
-  404; an unavailable ownership store returns 503. Canonical data-plane
-  requests without an explicit project context fail with
-  `400 project_context_required`.
+- **Canonical tenant identity** — replaces credential-provided roles, scopes,
+  status, and project grants with strongly consistent server-held DynamoDB
+  principals. Canonical requests require explicit tenant and project context;
+  cross-tenant and ungranted resources are concealed as 404 and authority-store
+  failures return 503.
+- **Tenant admin and viewer RBAC** — `tenant_admin` can read and write
+  tenant-owned configuration. `tenant_member` and `tenant_auditor` are the
+  read-only/viewer roles. All three still need an explicit project grant for
+  model listing, inference, and the reserved `query.select` action. Canonical
+  `service` identities have no control-plane access and additionally need
+  server-held data-plane action scopes. Legacy `admin` and `admin:*`
+  compatibility applies only to noncanonical migration contexts; canonical
+  service and viewer identities cannot use it to elevate. Platform-resource
+  writes and region topology require `platform_admin`; tenant control-plane
+  access by that role requires both a break-glass reason and an explicit
+  `X-Axon-Target-Tenant` selector.
 - **SAML 2.0 SSO** — SP-initiated login + ACS with pure-Python signed-assertion verification (no xmlsec1 system dependency)
 - **SCIM 2.0 provisioning** — `/scim/v2/Users` + `/scim/v2/Groups` for IdP-driven joiner/mover/leaver (Okta, Entra ID, …)
-- **API key management** — tenant-qualified key storage, atomic issue/revoke,
-  rotate, and optional expiry. Rotation is revoke-then-create rather than one
-  transaction.
-- **Legacy HTTP admin RBAC** — current `/admin/*` endpoints require the legacy
-  `admin` role or an `admin:*` scope. Those endpoints and their backing records
-  are not yet tenant-scoped; canonical `tenant_admin` does not imply access to
-  them.
+- **API key management** — canonical issue, revoke, and rotation transactionally
+  update tenant-qualified key and service-principal records. Tenant keys default
+  to 90 days and cannot exceed 365 days. Legacy/in-memory rotation remains
+  revoke then issue.
+- **Tenant-scoped control plane** — projects, usage/spend, user configuration,
+  policies, quotas, webhooks, audit chains, caches, API keys, and SCIM records
+  use tenant-qualified paths when a canonical tenant context is present. Legacy
+  unqualified records and `admin`/`admin:*` authority remain migration
+  compatibility.
 
 Canonical mode default-denies every unmapped `/api/*` and `/v1/*` route.
 `GET /api/users` is intentionally unavailable in that mode because its
-fleet-wide records are not tenant-qualified.
+selector aggregates users without a tenant filter and has no canonical action
+mapping.
 
-> **Canonical identity changes the API-key boundary.** In legacy migration mode,
-> key scopes still constrain `/admin/*` only. With
-> `AXON_REQUIRE_CANONICAL_IDENTITY=true`, a key must resolve to a canonical
-> `service` principal with both a project grant and a server-held
-> `model.list`/`inference.invoke` scope. Existing key records are not migrated
-> automatically. Issuance and revocation are durable DynamoDB transactions, but
-> neither creates or updates that canonical principal. Keys still default to no
-> expiry, and rotation preserves the old expiry.
+> **Current release status.** Focused hardening regressions are green locally,
+> and schema-v2 release evidence plus target-aware deployment verification cover
+> both Fargate and AgentCore. This is not production certification. Green
+> required CI for the exact release commit, a real tagged private-ECR/Sigstore
+> flow for the deployed digest, and a real AWS restore exercise remain
+> externally unverified. See the
+> [Production Runbook](docs/PRODUCTION_RUNBOOK.md#release-status) and
+> [AgentCore Runbook](docs/AGENTCORE_RUNBOOK.md#current-status).
+
+> **`query.select` is vocabulary, not an endpoint.** It is reserved in the
+> authorization kernel for a future read-only query integration. AxonLLM ships
+> no SQL parser, datasource adapter, query route, or backend query contract.
+> `query.mutate` always denies.
 
 ### Observability
 - **Admin dashboard** — 20 pages in four groups. *Observe:* Overview, Traces, Efficiency, Audit Log. *Configure:* Models, Projects, Users, API Keys. *Govern:* Policies, Hierarchy, Quotas, Regions, Webhooks. *System:* Health, Configuration, Architecture, Pricing, Catalogue, Readiness. Plus Sandbox, a live playground that issues real requests through the gateway.
@@ -146,8 +165,8 @@ evidence of a defect and not evidence against one.
 
 ## Quick Start
 
-**Two questions decide everything: where does it run, and do you want the demo
-data?**
+**Start locally for development. AWS promotion is an evidence-gated operation,
+not a quick-start step.**
 
 ```
                       ┌─────────────────────────────┐
@@ -157,28 +176,27 @@ data?**
                 ▼                                         ▼
            Your laptop                               AWS account
                 │                                         │
-       ┌────────┴────────┐                       ┌────────┴────────┐
-       ▼                 ▼                       ▼                 ▼
-     Empty           Full demo                 Empty           Full demo
-    gateway           seeded                  gateway           seeded
-       │                 │                       │                 │
-    PATH 1            PATH 2                  PATH 3            PATH 4
-   real work          a tour                production         a sandbox
-     5 min             5 min                  ~20 min           ~20 min
+       ┌────────┴────────┐                                ▼
+       ▼                 ▼                         Fargate / AgentCore
+     Empty           Full demo                  immutable image digest
+    gateway           seeded                    private network + state
+       │                 │                                │
+    PATH 1            PATH 2                           PATH 3
+   development        a tour                 staging or approved release
+     5 min             5 min                       release-gated
 ```
 
 | | Where | Demo data | Auth | Time | Go to |
 |---|-------|-----------|------|------|-------|
 | **1** | Laptop | No — empty | `LOG_ONLY` | 5 min | [Local, clean](#1-local-clean) |
 | **2** | Laptop | Yes — seeded | `LOG_ONLY` | 5 min | [Local, seeded demo](#2-local-seeded-demo) |
-| **3** | AWS Fargate | No — empty | `ENFORCE`, legacy identity | ~20 min | [AWS, clean](#3-aws-clean) |
-| **4** | AWS Fargate | Yes — seeded | `ENFORCE` | ~20 min | [AWS, seeded demo](#4-aws-seeded-demo) |
+| **3** | AWS Fargate | No — empty | `ENFORCE`; staging uses legacy identity | Varies | [AWS Fargate](#3-aws-fargate) |
 
-**Not sure? Start with path 2**, click around, then throw it away and do path 1
-or 3 for real work. Nothing in path 2 persists unless you enable DynamoDB.
+**Not sure? Start with path 2**, click around, then throw it away and use path 1
+for development. Nothing in path 2 persists unless you enable DynamoDB.
 
-Paths 1 and 3 leave you with an empty gateway, which then needs configuring —
-provider keys, projects, authentication, RBAC. That is
+Paths 1 and 3 leave you with an empty gateway, which then needs configuring:
+provider keys, projects, authentication, and RBAC. That is
 [Configuring a clean install](#configuring-a-clean-install), further down.
 
 ### Prerequisites
@@ -222,13 +240,11 @@ where someone might mistake it for a live tenant.
 | `AXON_LOAD_DEMO_DATA` | `true` in the container, `false` in code | Seeds `config/demo_seed.yaml`: projects, users, policy hierarchy, usage history, audit chain, webhooks. **Also** the gate on reading `.env` |
 | `AXON_AUTH_MODE` | `ENFORCE`, but `serve_dashboard.py` sets `LOG_ONLY` | `ENFORCE` requires an `axon_` key on every request; `LOG_ONLY` accepts anonymous requests and only logs what it would have denied |
 
-> **⚠️ Demo data is opt-*out* in the container, not opt-in.**
+> **Demo data is opt-out in the container, not opt-in.**
 > `serve_dashboard.py` is the Docker `CMD`, and it defaults
-> `AXON_LOAD_DEMO_DATA` to `true` when the variable is absent. The CDK stack sets
-> it to `false`, so **`./deploy-fargate.sh` is clean** — but anything else that
-> starts the image without the variable (`docker compose up`, a hand-written task
-> definition, App Runner) comes up seeded. If you deployed before the stack set
-> it, see [Turning the demo data off](#turning-the-demo-data-off).
+> `AXON_LOAD_DEMO_DATA` to `true` when the variable is absent. Both checked-in
+> AWS stacks set it explicitly to `false`; any other container definition must
+> do the same.
 
 ### 1. Local, clean
 
@@ -349,19 +365,19 @@ variable; see [Provider keys for a demo](#provider-keys-for-a-demo).
 Semantic caching also needs the project to opt in (`semantic_cache_enabled`),
 which the seeded `proj-alpha` does. On a clean install you set it per project.
 
-### 3. AWS, clean
+### 3. AWS Fargate
 
-The reference AWS install: CloudFront and WAF in front of an internal TLS ALB,
-private Fargate tasks, DynamoDB persistence, Secrets Manager, `ENFORCE` auth,
-and **no fabricated data**.
+The checked-in Fargate stack provides CloudFront and WAF, an internal TLS ALB,
+private tasks, DynamoDB persistence and backup, Secrets Manager, alarms,
+`ENFORCE` authentication, and no fabricated data. Production mode additionally
+configures ALB OIDC and canonical identity.
 
-> **This is not yet the enterprise multi-tenant install.** The checked-in CDK
-> stack does not enable canonical identity, provision canonical principals, or
-> configure an ALB OIDC authentication action and its validator trust values.
-> The admin plane and several non-project stores are still globally keyed. It
-> therefore fails the production readiness checklist. Use these steps to stand up the
-> reference environment, keep it isolated, and complete
-> [ENTERPRISE_HARDENING.md](ENTERPRISE_HARDENING.md) before real traffic.
+> `DeploymentMode=staging` preserves claim-derived legacy authority and is only
+> for an isolated trust domain. `DeploymentMode=production` enables ALB OIDC and
+> canonical identity, but it still requires pre-provisioned principals, green CI,
+> verified image evidence, canaries, recovery validation, and operational
+> approval. The current release gates and complete parameter set are in the
+> [Production Runbook](docs/PRODUCTION_RUNBOOK.md).
 
 What the stack builds:
 
@@ -376,10 +392,10 @@ What the stack builds:
  └────────────┘     └────────────┘     └───────┬────────┘     └───────────────┘
                                                │ reads at start
                                                ▼
-                                       ┌────────────────┐
-                                       │ Secrets Manager│
-                                       │axonllm/api-keys│
-                                       └────────────────┘
+                                       ┌───────────────────┐
+                                       │ Secrets Manager   │
+                                       │ ProviderSecretArn │
+                                       └───────────────────┘
 ```
 
 **Step 1 — bootstrap CDK** (first time in this account/region only).
@@ -393,20 +409,26 @@ cd infra && uv venv && uv pip install -r requirements.txt && npx cdk bootstrap &
 > and `infra/` has none on a fresh clone. **`npx cdk`, not `cdk`** — the CDK CLI is
 > an npm package that nothing here installs globally, so a bare `cdk` gives
 > `command not found`; `npx` fetches it on first use, which is why that call takes
-> a minute. And this whole step is optional: `deploy-fargate.sh` creates the venv
-> and installs the requirements itself. Only `cdk bootstrap` is genuinely
-> first-time-per-account/region setup.
+> a minute. `cdk bootstrap` is a first-time-per-account/region operation; the
+> virtual environment and requirements install are one-time-per-checkout setup.
 
-**Step 2 — supply the required network policy and deploy.**
+**Step 2 — supply an immutable image and the required network policy.**
 
 ```bash
-export AXON_VIEWER_DOMAIN_NAME=axon.example.com
-export AXON_VIEWER_CERTIFICATE_ARN=arn:aws:acm:us-east-1:123456789012:certificate/...
-export AXON_ORIGIN_DOMAIN_NAME=origin.axon.internal
-export AXON_ORIGIN_CERTIFICATE_ARN=arn:aws:acm:us-east-1:123456789012:certificate/...
-export AXON_APPROVED_HTTPS_PREFIX_LIST_ID=pl-0123456789abcdef0
+cd infra
+npx cdk synth AxonLLMStack \
+  -c deployment_target=fargate -c region=us-east-1
 
-./deploy-fargate.sh us-east-1
+npx cdk deploy AxonLLMStack \
+  -c deployment_target=fargate -c region=us-east-1 \
+  --parameters AxonLLMStack:DeploymentMode=staging \
+  --parameters AxonLLMStack:VerifiedImageUri="$VERIFIED_IMAGE_URI" \
+  --parameters AxonLLMStack:ViewerDomainName="$VIEWER_DOMAIN_NAME" \
+  --parameters AxonLLMStack:ViewerCertificateArn="$VIEWER_CERTIFICATE_ARN" \
+  --parameters AxonLLMStack:OriginDomainName="$ORIGIN_DOMAIN_NAME" \
+  --parameters AxonLLMStack:OriginCertificateArn="$ORIGIN_CERTIFICATE_ARN" \
+  --parameters AxonLLMStack:ApprovedHttpsPrefixListId="$APPROVED_HTTPS_PREFIX_LIST_ID" \
+  --parameters AxonLLMStack:BedrockInvokeResourceArns="$AXON_BEDROCK_INVOKE_RESOURCE_ARNS"
 ```
 
 The stack deliberately has no plaintext or open-egress fallback. It only
@@ -417,6 +439,25 @@ the approved HTTPS destinations needed by ECS, AWS APIs, OIDC, and configured
 LLM providers; do not put `0.0.0.0/0` in it. After deployment, point the viewer
 name at `CloudFrontDistributionDomain`. The stack also outputs
 `InternalALBDomain` for the private origin DNS record.
+
+The stack creates a KMS-encrypted FIFO security-event outbox and DLQ, a managed
+FIFO SNS event topic, a retained encrypted CloudWatch Logs event group, and
+private SQS/SNS/Logs endpoints scoped to those resources. Resolve
+`SecurityEventOutboxQueueUrl`, `SecurityEventDeadLetterQueueUrl`,
+`SecurityEventTopicArn`, and `SecurityEventLogGroupArn` from the stack outputs.
+The runtime values are delivery controls and allowlists; they do not create a
+tenant event destination. Configure the desired destination through
+`/admin/webhooks`, and use the
+[production runbook](docs/PRODUCTION_RUNBOOK.md#security-event-delivery) for
+monitoring and DLQ recovery.
+
+`BedrockInvokeResourceArns` is required and accepts only a comma-separated list
+of concrete Bedrock model or inference-profile ARNs; wildcards are rejected.
+`deploy-fargate.sh` requires the same value as
+`AXON_BEDROCK_INVOKE_RESOURCE_ARNS` and maps it to that CloudFormation
+parameter. The script also supplies `AXON_VERIFIED_IMAGE_URI`, but leaves
+`DeploymentMode` at its `staging` default and supplies no production OIDC
+parameters. Use the runbook's complete command for production.
 
 CDK pauses partway to show the IAM roles and security-group rules it is about to
 create and asks you to confirm. That prompt needs a terminal, so in CI the deploy
@@ -432,12 +473,19 @@ rather than omitted precisely because omitting it means demo data *on* (the
 container `CMD` supplies the default). `tests/unit/test_infra_stack_env.py`
 asserts it, along with `AXON_AUTH_MODE=ENFORCE`, for the same reason.
 
-**Step 3 — put your provider keys in Secrets Manager.** The stack creates the
-secret with empty values and wires two keys into the container; it cannot know
-yours.
+**Step 3 — put your provider keys in Secrets Manager.** The stack creates a
+retained secret with a CloudFormation-generated physical name, initializes it
+with empty values, and wires two keys into the container. `ProviderSecretArn` is
+the stable stack output for consumers; do not assume or hardcode a secret name.
 
 ```bash
-aws secretsmanager put-secret-value --secret-id axonllm/api-keys --region us-east-1 \
+PROVIDER_SECRET_ARN="$(
+  aws cloudformation describe-stacks --stack-name AxonLLMStack --region us-east-1 \
+    --query "Stacks[0].Outputs[?OutputKey=='ProviderSecretArn'].OutputValue | [0]" \
+    --output text
+)"
+
+aws secretsmanager put-secret-value --secret-id "$PROVIDER_SECRET_ARN" --region us-east-1 \
   --secret-string '{"ANTHROPIC_API_KEY":"sk-ant-...","OPENAI_API_KEY":"sk-..."}'
 
 # Then restart the tasks to pick it up — secrets are read at container start:
@@ -473,10 +521,9 @@ not recognise the key; the CLI warns if persistence is off. `--scopes 'admin:*'`
 matters — without it the key cannot reach any `/admin/*` endpoint. See
 [Authentication and authorization](#authentication-and-authorization).
 
-This bootstrap flow belongs only to the isolated migration environment. Once
-canonical identity is enabled, the API key also needs a canonical `service`
-principal record. Current `/admin/*` storage is not tenant-scoped, so do not
-carry this global `admin:*` key into a shared multi-tenant deployment.
+This bootstrap flow belongs only to isolated legacy/staging mode. Canonical key
+issuance uses a tenant-qualified key and service-principal transaction. Do not
+carry a global legacy `admin:*` key into a shared multi-tenant deployment.
 
 **Step 6 — create the project the key is scoped to.** `issue-key` does **not**
 create it, and the missing project is easy to overlook because nothing fails:
@@ -487,7 +534,7 @@ the deploy printed:
 
 ```bash
 curl -sX POST "$ALB/admin/projects" \
-  -H "Authorization: Bearer axon_xxxxxxxx…" \
+  -H "Authorization: Bearer ${AXON_API_KEY}" \
   -H 'Content-Type: application/json' \
   -d '{"project_id":"my-project","name":"My Project","budget_limit":100.0}'
 ```
@@ -501,36 +548,15 @@ and 2 the ordering is reversed, because auth is `PERMISSIVE` and
 reminder when it mints a key for a project it cannot find.
 
 **Next:** [Configuring a clean install](#configuring-a-clean-install) for the
-legacy reference surface, then complete
-[Enterprise hardening](ENTERPRISE_HARDENING.md) and the
-[Production Checklist](#production-checklist).
+legacy staging surface. The [Production Runbook](docs/PRODUCTION_RUNBOOK.md)
+defines the multi-tenant release gate.
 
-### 4. AWS, seeded demo
+### AWS seeded demos
 
-A deployed environment with the demo data, for a stakeholder walkthrough or a
-shared sandbox. **Not a production configuration** — see the warning below.
-
-Same install as path 3, with the seed turned back on. In `infra/stack.py`:
-
-```python
-"AXON_LOAD_DEMO_DATA": "true",     # ← the stack ships "false"; see path 3
-"AXON_SEMANTIC_CACHE": "true",     # optional; Titan embeddings, needs Bedrock access
-"AXON_PII_REDACTION_DEFAULT": "true",  # optional; regex redaction on every request
-```
-
-`tests/unit/test_infra_stack_env.py` asserts the shipped `false`, so it will fail
-— which is the point: a deployment that seeds fictional tenants should be a
-deliberate edit, not a default. Update the test alongside the stack if this is
-your standing configuration. Then:
-
-```bash
-cd infra && uv venv && uv pip install -r requirements.txt && npx cdk bootstrap && cd ..
-./deploy-fargate.sh us-east-1
-```
-
-Auth stays `ENFORCE` (the stack sets it), so you still need a key — mint it as in
-path 3. Unlike local, there is no `LOG_ONLY` shortcut, and that is deliberate:
-nothing reachable from the internet should accept unauthenticated requests.
+The checked-in AWS stacks intentionally set `AXON_LOAD_DEMO_DATA=false` and do
+not expose a deployment parameter that changes it. Use
+[Local, seeded demo](#2-local-seeded-demo) for walkthroughs. Do not modify and
+promote the production task definition merely to seed fictional tenants.
 
 > **Two things to know before showing this to anyone.**
 >
@@ -543,9 +569,9 @@ nothing reachable from the internet should accept unauthenticated requests.
 >    value — only the hash is stored, exactly as for a real key. Nothing can
 >    authenticate as them.
 
-DynamoDB persistence merges *on top of* the seed, so demo projects and anything
-you create coexist. Which is convenient in a sandbox and the reason a seeded
-environment is awkward to promote: see below.
+DynamoDB persistence merges on top of a seed, so demo projects and anything you
+create coexist. This is convenient in a disposable sandbox and is why a seeded
+environment must never be promoted.
 
 Two exceptions, both deliberate: **event destinations and the region topology
 replace the seed rather than merging with it**, because merging cannot express a
@@ -574,7 +600,9 @@ demo data, and a clean install you never seeded.
 ### Tearing down, and redeploying afterwards
 
 ```bash
-cd infra && npx cdk destroy && cd ..
+cd infra
+npx cdk destroy AxonLLMStack \
+  -c deployment_target=fargate -c region=us-east-1
 ```
 
 That removes everything hourly — Fargate tasks, ALB, CloudFront, and the NAT
@@ -584,7 +612,12 @@ outlive it, and they behave differently:
 | Resource | Policy | After destroy |
 |----------|--------|---------------|
 | `axonllm-state` (DynamoDB) | `RETAIN` | **Survives**, holding every project, key, and audit record |
-| `axonllm/api-keys` (Secrets Manager) | `Delete` | **Gone** — provider keys must be set again |
+| CloudFormation-generated provider secret (`ProviderSecretArn`) | `RETAIN` | **Survives**, holding the provider keys independently of the deleted stack |
+
+A replacement stack creates a new generated provider secret. Read its new
+`ProviderSecretArn` output and deliberately migrate or rotate values; the
+retained secret from the deleted stack is not automatically attached to the new
+tasks.
 
 > **A destroy makes the next deploy fail, and it fails before creating
 > anything.** The retained table keeps its physical name but is no longer owned by
@@ -599,11 +632,9 @@ outlive it, and they behave differently:
 > there is no partial stack to clean up beyond the empty `REVIEW_IN_PROGRESS`
 > shell (`aws cloudformation delete-stack --stack-name AxonLLMStack`).
 >
-> Deploy against a different table rather than deleting the old one:
->
-> ```bash
-> AXON_DYNAMODB_TABLE_NAME=axonllm-state-2 ./deploy-fargate.sh us-east-1
-> ```
+> Deploy against a different table rather than deleting the old one. Add
+> `-c table_name=axonllm-state-2` to the complete parameterized command in the
+> production runbook.
 >
 > The retained table is then untouched — inspect it, migrate from it, or delete it
 > deliberately. Reattaching to it instead (`cdk import`) is the other option, and
@@ -709,7 +740,13 @@ export AWS_PROFILE=my-bedrock-profile      # for Bedrock
 (secrets are read at container start, not re-read live):
 
 ```bash
-aws secretsmanager put-secret-value --secret-id axonllm/api-keys --region us-east-1 \
+PROVIDER_SECRET_ARN="$(
+  aws cloudformation describe-stacks --stack-name AxonLLMStack --region us-east-1 \
+    --query "Stacks[0].Outputs[?OutputKey=='ProviderSecretArn'].OutputValue | [0]" \
+    --output text
+)"
+
+aws secretsmanager put-secret-value --secret-id "$PROVIDER_SECRET_ARN" --region us-east-1 \
   --secret-string '{"ANTHROPIC_API_KEY":"sk-ant-...","OPENAI_API_KEY":"sk-..."}'
 
 aws ecs update-service --cluster axonllm --service axonllm \
@@ -744,6 +781,9 @@ already-enforcing gateway, mint the key first and pass it here.
 
 ### 3. Issue API keys (and the one flag that matters)
 
+The CLI examples below create legacy/single-user keys because the CLI has no
+tenant bootstrap contract:
+
 ```bash
 # A key for calling the gateway
 uv run axon issue-key --project my-project --name app-key
@@ -771,7 +811,13 @@ persisted.** There is no "show key again" — rotate instead (`POST
 carrying the same project and scopes. Because the replacement's raw value *is*
 returned, rotation is restricted: you may rotate a key only if you already hold
 its admin scopes, or hold `admin:*`. See
-[Legacy HTTP admin RBAC](#legacy-http-admin-rbac) for why.
+[Tenant and legacy HTTP admin RBAC](#tenant-and-legacy-http-admin-rbac) for why.
+
+When the caller has a canonical tenant context, issue, revocation, and rotation
+transactionally update the tenant-qualified key and canonical `service`
+principal. Tenant keys default to a 90-day expiry and reject expiries beyond
+365 days. Legacy/in-memory rotation remains revoke then issue and can retain a
+caller-supplied no-expiry value.
 
 For a key to work against a *running* server, the CLI must point at the same
 persistence the server uses:
@@ -790,8 +836,8 @@ Send it as either header, or export `AXON_API_KEY` for `uv run axon chat` /
 `uv run axon models`:
 
 ```bash
--H 'Authorization: Bearer axon_...'    # or
--H 'X-Api-Key: axon_...'
+-H "Authorization: Bearer ${AXON_API_KEY}"    # or
+-H "X-Api-Key: ${AXON_API_KEY}"
 ```
 
 ### Authentication and authorization
@@ -826,19 +872,18 @@ supply legacy authority.
               ┌─────────────────┴──────────────────┐
               ▼                                    ▼
    ┌──────────────────────┐          ┌──────────────────────────┐
-   │ Tenant RBAC          │          │ Legacy AdminRBAC         │
-   │ mapped data plane    │          │ /admin/* only            │
-   │ default deny + 404   │          │ not tenant-scoped yet    │
+   │ Tenant RBAC          │          │ Admin RBAC               │
+   │ mapped data plane    │          │ tenant roles + legacy    │
+   │ default deny + 404   │          │ admin scope migration    │
    └──────────────────────┘          └──────────────────────────┘
 ```
 
-Canonical identity is deliberately off by default for migration compatibility,
-but the production checklist treats that state as a failure. Enabling it requires
-all three of `AXON_AUTH_MODE=ENFORCE`,
-`LLM_ROUTER_DYNAMODB_ENABLED=true`, and
-`AXON_REQUIRE_CANONICAL_IDENTITY=true`; startup refuses the invalid
-combinations. Provision every OIDC and API-key principal first. The complete
-record shape and rollout procedure are in
+Legacy identity is available only under
+`AXON_DEPLOYMENT_PROFILE=development`. The shipped container uses the
+`production` profile, which refuses startup unless all three of
+`AXON_AUTH_MODE=ENFORCE`, `LLM_ROUTER_DYNAMODB_ENABLED=true`, and
+`AXON_REQUIRE_CANONICAL_IDENTITY=true` are active. Provision every OIDC and
+API-key principal first. The complete record shape and rollout procedure are in
 [ENTERPRISE_HARDENING.md](ENTERPRISE_HARDENING.md).
 
 #### Auth modes
@@ -867,18 +912,36 @@ The dashboard *page* is public by design — it is a static shell that fetches i
 data over the same authenticated endpoints, so it renders and then shows errors
 rather than serving anyone else's numbers.
 
-#### Legacy HTTP admin RBAC
+#### Tenant and legacy HTTP admin RBAC
 
-A caller reaches `/admin/*` with **either** the `admin` role **or** a matching
-`admin:` scope:
+Canonical tenant roles are the primary `/admin/*` policy:
 
-> This is the existing single-control-plane authorization layer, not the new
-> tenant RBAC layer. Current admin handlers and persisted projects, users, keys,
-> usage, policies, quotas, webhooks, SCIM records, and audit records are not all
-> tenant-qualified. Do not grant canonical tenant principals legacy `admin` or
-> `admin:*` authority in a multi-tenant deployment. `tenant_admin` is defined in
-> the authorization kernel but intentionally does not unlock `/admin/*` until
-> those routes and stores are tenant-scoped.
+| Role | Tenant-owned resources | Region topology |
+|---|---|---|
+| `tenant_admin` | Read and write | No access |
+| `tenant_member`, `tenant_auditor` | Read only | No access |
+| `service` | No access; canonical legacy admin scopes are ignored and canonical key issuance rejects them | No access |
+| `platform_admin` | Requires a non-empty `X-Axon-Break-Glass-Reason` | Read and write |
+
+Platform resources are architecture, catalogue and drift, health, models,
+pricing drift, production checklist, and region topology. Tenant context is
+propagated to tenant-qualified projects, usage, user configuration, policies,
+quotas, webhooks, audit, API keys, caches, and SCIM state.
+
+In canonical mode, `POST /admin/projects/{id}/members` accepts a SCIM resource
+id in `user_id`; the POST/DELETE member routes transactionally update
+`Project.members`, `ScimUser.project_ids`, the authoritative
+`Principal.project_ids`, their authorization versions, and the tenant
+`SCIM#VERSION`. Project members are normalized to `scim:<id>` in stored and
+returned project data. A non-empty `members` list on canonical project creation,
+or any `members` field on canonical project PUT, returns 400; use the member
+routes so grants cannot bypass the transaction. In legacy mode, the member
+routes update only the project member list.
+
+Canonical roles are authoritative. `tenant_member` and `tenant_auditor` remain
+read-only even if a legacy admin scope is present, and `service` remains denied;
+canonical key issuance rejects `admin:` scopes. The legacy `admin` role and
+matching `admin:` scopes remain supported only in noncanonical migration mode:
 
 | Context | `GET /admin/projects` | `GET /admin/quotas/{project_id}` | `POST /admin/quotas/{project_id}/reset` |
 |---------|----------------------|---------------------------------|----------------------------------------|
@@ -887,14 +950,13 @@ A caller reaches `/admin/*` with **either** the `admin` role **or** a matching
 | `scopes=['admin:*:read']` | ✅ | ✅ | ❌ |
 | `scopes=['admin:quotas']` | ❌ | ✅ | ✅ |
 | `scopes=['admin:quotas:read']` | ❌ | ✅ | ❌ |
-| `roles=['service']` *(what an API key gets)* | ❌ | ❌ | ❌ |
+| `roles=['service']` | ❌ | ❌ | ❌ |
 | nothing | ❌ | ❌ | ❌ |
 
-Scope granularity is one segment: `admin:<resource>` matches `/admin/<resource>/...`.
-In legacy mode, roles come from the IdP (OIDC `custom:roles`, SAML group
-attribute) and scopes come from the API key. Canonical mode replaces both with
-the principal record; canonical role names do not include the legacy `admin`
-role. `/admin/static/*` and `/admin/dashboard` are always public.
+Scope granularity is one segment: `admin:<resource>` matches
+`/admin/<resource>/...`. In legacy mode, roles can come from IdP claims and
+scopes from the API key. Canonical mode replaces both with the principal record.
+`/admin/static/*` and `/admin/dashboard` are always public.
 
 ##### Read-only vs read-write
 
@@ -1011,9 +1073,10 @@ header to ES256, the exact signer, client and regional issuer, checks its expiry
 and requires the signed `sub` to match `X-Amzn-Oidc-Identity`. Key retrieval and
 caching are bounded. Duplicate, incomplete, malformed, or invalid ALB headers
 fail with 401 and never fall through to a Bearer token or API key. The checked-in
-Fargate stack does not yet create the listener auth action or set these values.
-Keep the service reachable only through that ALB and restrict task ingress to
-the load balancer.
+Fargate stack creates the ALB authenticate-OIDC rule for `/admin/*` in
+`DeploymentMode=production` and supplies these validator trust values. Staging
+does not create that rule. Keep the service reachable only through CloudFront
+and the internal ALB.
 
 **Direct OIDC Bearer tokens** — set two variables and the gateway does JWKS
 discovery at `{issuer}/.well-known/openid-configuration`:
@@ -1106,10 +1169,22 @@ login flow cannot require a session it is in the process of creating.
 
 #### SCIM 2.0 — automated user provisioning
 
-Set one token and point your IdP at `/scim/v2`:
+Legacy mode accepts one global token:
 
 ```bash
 AXON_SCIM_TOKEN=$(openssl rand -hex 32)
+```
+
+Canonical mode rejects that global token. Configure a distinct token and
+expected issuer for every tenant:
+
+```bash
+export AXON_SCIM_TENANTS='{
+  "tenant-a": {
+    "issuer": "https://your-tenant.okta.com/oauth2/default",
+    "token": "replace-with-a-random-secret"
+  }
+}'
 ```
 
 | Resource | Operations |
@@ -1118,21 +1193,22 @@ AXON_SCIM_TOKEN=$(openssl rand -hex 32)
 | `/scim/v2/Groups` | GET (filtered, paginated), POST, PUT, DELETE |
 
 `PATCH /scim/v2/Users/{id}` is the one Okta and Entra ID reach for to deprovision
-(`active=false`), which is why Users has it and Groups does not. **`AXON_SCIM_TOKEN`
-unset means disabled — 503, not open** — and a wrong token is 401.
+(`active=false`), which is why Users has it and Groups does not. No configured
+SCIM credential means disabled (503, not open), and a wrong token is 401.
 
 SCIM group membership resolves roles inside the SCIM directory. In legacy mode,
 the authentication chain still reads roles from the JWT/SAML assertion rather
 than that directory. In canonical mode, both SCIM roles and token roles are
 non-authoritative: access comes from the canonical principal row.
 
-> **Provisioning is not yet an authorization transaction.** Creating,
-> suspending, or deprovisioning a SCIM user does not create or update the
-> canonical principal record. API-key storage now issues and revokes its own
-> rows atomically, but those transactions still do not create or version the
-> canonical service principal. Until those lifecycles are coupled, update the
-> principal repository through the controlled migration process and verify
-> deprovisioning with a denied canary.
+Canonical SCIM rows share `PK=TENANT#{tenant_id}` and use
+`SK=SCIM#USER#{id}`, `SCIM#GROUP#{id}`, `SCIM#USERNAME#{hash}`, or
+`SCIM#VERSION`. User/group changes transactionally update affected principals
+and advance the tenant version. Replicas read that version and the tenant
+snapshot with strongly consistent DynamoDB operations, then reload only the
+changed tenant. Canonical startup validates this persistence contract. The
+Fargate stack does not inject `AXON_SCIM_TENANTS`; add reviewed secret delivery
+when SCIM provisioning is part of the deployment.
 
 ### Putting it together — a minimal production config
 
@@ -1153,12 +1229,13 @@ ANTHROPIC_API_KEY=sk-ant-...
 # Identity — OIDC for humans, SCIM for provisioning
 AXON_OIDC_ISSUER=https://your-tenant.okta.com/oauth2/default
 AXON_OIDC_AUDIENCE=api://axonllm
-AXON_SCIM_TOKEN=<32-byte random>
+AXON_SCIM_TENANTS='{"tenant-a":{"issuer":"https://your-tenant.okta.com/oauth2/default","token":"<random-secret>"}}'
 ```
 
-This configuration starts only after canonical principal rows have been
-provisioned. SCIM records and existing API-key records do not create those rows
-automatically; enabling the flag first denies every otherwise valid credential.
+This is a posture template, not a bootstrap procedure. Provision canonical
+tenant, project, principal, membership, role, grant, and service-scope rows
+before enabling it. The repository has no supported principal-bootstrap command,
+and existing legacy records are not migrated automatically.
 
 Then confirm it rather than trusting it: **`GET /admin/production-checklist`**
 checks exactly the states that serve traffic without complaining — unpriced
@@ -1169,26 +1246,28 @@ identity, demo data, unreachable persistence, and non-expiring keys. See
 ### Try it
 
 ```bash
+# Set AXON_API_KEY and AXON_ADMIN_API_KEY in your shell first.
+
 # Simple chat (drop the -H line when hitting the LOG_ONLY dev server)
 curl -X POST http://localhost:8000/api/chat \
   -H 'Content-Type: application/json' \
-  -H 'X-Api-Key: axon_your_key_here' \
+  -H "X-Api-Key: ${AXON_API_KEY}" \
   -d '{"model": "claude-sonnet", "messages": [{"role": "user", "content": "Hello"}]}'
 
 # Ensemble — same prompt to multiple models, judge synthesizes
 curl -X POST http://localhost:8000/api/chat \
   -H 'Content-Type: application/json' \
-  -H 'X-Api-Key: axon_your_key_here' \
+  -H "X-Api-Key: ${AXON_API_KEY}" \
   -d '{"model": "ensemble:quality", "messages": [{"role": "user", "content": "Explain CRDTs"}]}'
 
 # Check quota state — the path takes the bare project id, not a prefixed node id
 curl http://localhost:8000/admin/quotas/my-project \
-  -H 'X-Api-Key: axon_admin_key'
+  -H "X-Api-Key: ${AXON_ADMIN_API_KEY}"
 
 # Simulate a request against quota enforcement
 curl -X POST http://localhost:8000/admin/quotas/simulate \
   -H 'Content-Type: application/json' \
-  -H 'X-Api-Key: axon_admin_key' \
+  -H "X-Api-Key: ${AXON_ADMIN_API_KEY}" \
   -d '{"project_id": "my-project", "model": "claude-opus", "estimated_cost": 0.05}'
 ```
 
@@ -1235,11 +1314,11 @@ Raw HTTP:
 ```bash
 curl -X POST http://localhost:8000/v1/chat/completions \
   -H 'Content-Type: application/json' \
-  -H 'Authorization: Bearer axon_your_key_here' \
+  -H "Authorization: Bearer ${AXON_API_KEY}" \
   -d '{"model": "claude-sonnet", "messages": [{"role": "user", "content": "Hello"}]}'
 
 curl http://localhost:8000/v1/models \
-  -H 'Authorization: Bearer axon_your_key_here'
+  -H "Authorization: Bearer ${AXON_API_KEY}"
 ```
 
 Attribution (user/project for quotas and cost) is taken from the authenticated
@@ -1386,6 +1465,11 @@ provider's dialect on the way out and translates the model's call back into
 `tool_calls` on the way in, so the same loop works whether the request lands on
 Bedrock, Bedrock Mantle, Anthropic, Gemini, or Cohere.
 
+The `db_query` function below belongs to the calling application. AxonLLM only
+transports its schema and the model's arguments; it does not execute SQL and
+does not expose a query endpoint. This example is unrelated to the reserved
+`query.select` authorization action.
+
 ```python
 tools = [{
     "type": "function",
@@ -1489,8 +1573,8 @@ Request → Auth (OIDC/API Key) → Tenant Project Resolution → Tenant RBAC
 | `/admin/quotas/{project_id}/reset` | POST | Reset spend counter |
 | `/admin/quotas/simulate` | POST | Test if a request would be allowed |
 | `/admin/projects/{id}/keys` | GET/POST | List a project's API keys, or issue one. The raw key is returned by `POST` only, once |
-| `/admin/keys/{key_id}/rotate` | POST | Rotate an API key by revoking it and then creating a replacement; replacement failure leaves the old key revoked |
-| `/admin/keys/{key_id}` | DELETE | Atomically revoke an API key and advance its tenant revocation epoch |
+| `/admin/keys/{key_id}/rotate` | POST | Canonical tenant rotation atomically revokes the old key, creates the replacement and principal, and advances the epoch. Legacy/in-memory rotation is revoke then issue |
+| `/admin/keys/{key_id}` | DELETE | Atomically revoke a tenant key and principal and advance its tenant revocation epoch |
 | `/admin/policies` | GET/POST | List or create **Cedar authorization** policies (see the note below — not the quota hierarchy) |
 | `/admin/policies/hierarchy` | GET/POST | List or create **quota policy** nodes |
 | `/admin/policies/hierarchy/{node_id}` | GET/PUT | Read or replace a quota node. `PUT` replaces `limits` wholesale rather than merging, so send every field you want to keep. No `DELETE` |
@@ -1545,12 +1629,13 @@ and a stale `healthy` would send traffic to a region that is still down. Spokes
 come back at their default and the first health check decides. To take a region
 out durably, remove it or set its weight to `0` — both of which persist.
 
-Failures are logged and swallowed rather than returned as a `500`: the in-memory
-change already happened and the caller cannot undo it. `last_write_error` on the
-persistence layer is what surfaces a dropped write to a health probe, and the
-"State survives a restart" row of the
-[production readiness checklist](#production-readiness-checklist) is what reports
-it.
+Topology and event-destination writes are durable first. A store failure returns
+`503` without changing the live snapshot. Revisioned conditional writes prevent
+one task from silently replacing a newer edit; destination writes rebase once,
+while a topology conflict returns `409` for an explicit operator retry.
+Request-path refreshes poll those revisions every 5 seconds. If the
+authoritative topology or destination set cannot be checked, routing or event
+delivery fails closed instead of using an unbounded stale copy.
 
 ### What is shared between instances, and what still isn't
 
@@ -1564,14 +1649,17 @@ ALB happened to pick.
 |-------|------------------------|-----|
 | API keys | ✅ | Tenant-qualified DynamoDB rows and project edges, read strongly and cached for 5 min |
 | Key revocations | ✅ | Key state and tenant epoch update in one transaction; epochs are polled every 5 s |
+| API-key lifecycle audit | ✅ | Tenant hash-chain events record actor, request, outcome, key linkage, and revocation attribution |
 | Projects | ✅ | A version counter in the table, polled every 5 s — see below |
 | Per-user config (budgets, allowed models) | ✅ | The same version counter — see below |
 | Usage/cost records — **the write** | ✅ | Every record goes to the table, so nothing is lost |
 | Usage/cost records — **the admin read** | ✅ | Costs read the shared counter; counts refresh from the table every 10 s — see below |
-| Budget **enforcement** | ✅ | Atomic counter in the table — see below |
+| Budget **enforcement** | ✅ | Atomic idempotent reserve/finalize transactions for project and user counters |
 | Cedar policies | ✅ | A version counter in the table, polled every 5 s — see below |
-| Rate limits (policy RPM) | ❌ | Per-process window; divide `rate_limit_rpm` by `desired_count` |
-| Provider health, caches | ❌ | Per-process by design; each instance probes for itself |
+| Event destinations | ✅ | Tenant and legacy sets use revisioned CAS writes and refresh before dispatch |
+| Region topology | ✅ | Revisioned CAS writes and request-path refresh; stale revisions cannot replace newer live state |
+| Rate limits | ✅ with persistence | Atomic DynamoDB fixed-window counters; local sliding windows only when persistence is disabled |
+| Provider/spoke health, response caches | ❌ | Health is re-probed per process and never persisted; cache keys are tenant/project-qualified |
 
 **Usage aggregates read fleet-wide, from two different sources.** Until v0.2.1
 they did not: every admin aggregate summed an in-memory list loaded once at
@@ -1606,22 +1694,13 @@ usage records in memory and trims the oldest half past that, so count-based
 aggregates under-report once a busy deployment crosses it. Cost figures do not —
 that is a second reason they read the counter rather than the records.
 
-**Budget enforcement is fleet-wide.** A `budget_limit` of `$100` is `$100` across
-the whole deployment, not per task. Spend goes into a DynamoDB counter with an
-atomic `ADD`, and because `ADD` returns the post-update value, the instance
-recording spend learns the fleet total from a write it was already making — no
-extra read on the request path and no lost updates when two tasks bill at once.
-Before deciding, an instance refreshes that figure if its copy is more than two
-seconds old, so a task that has not served a project recently still enforces
-against what everyone else has spent.
-
-Two caveats worth stating plainly. First, the two-second refresh window bounds
-overshoot rather than eliminating it: a limit can be exceeded by whatever the
-fleet bills within one window, which is a few cents at typical rates but is not
-zero. Making it exact would mean a consistent read on every proxied call. Second,
-if DynamoDB is unreachable the counter update fails and enforcement degrades to
-per-process — the old behaviour — rather than to unlimited; watch
-`last_write_error` in `/health` for that.
+**Budget enforcement is fleet-wide and fail-closed with persistence.** Before a
+provider call, the gateway atomically and idempotently reserves estimated spend
+against both project and user counters. It finalizes the same reservation with
+actual cost after the call. A retry cannot reserve twice, concurrent replicas
+cannot each spend the full limit, and an unavailable reservation backend denies
+the request instead of falling back to a local counter. Without persistence,
+legacy single-process in-memory enforcement remains available.
 
 **Cedar policies converge across the fleet within 5 seconds.** Statements are
 compiled once rather than parsed per request, so before v0.2.2 a policy written
@@ -1671,12 +1750,11 @@ dict alone would show the operator a limit that nothing checks. A failed scan is
 not adopted, for the same reason as with policies: the empty result would clear
 every budget limit and model restriction in the fleet.
 
-**Rate limits are still per-process**, both the hierarchy's `rate_limit_rpm` and
-`SlidingWindowRateLimiter`, so those do need dividing by `desired_count`: two
-tasks each admit the configured RPM. Unlike spend, a sliding window is not a
-running total — sharing it means a read on every request rather than a counter
-folded into a write the request was already making, so it is left per-process
-for now.
+**Rate limits are fleet-wide when persistence is enabled.** Both the gateway
+limiter and policy RPM limiter consume atomic DynamoDB fixed-window counters,
+qualified by tenant and project (and user where applicable). An unavailable or
+malformed shared result fails closed. With persistence disabled, the original
+per-process sliding-window behavior remains for local and single-user use.
 
 Anything marked per-process above is worth knowing before debugging a "flapping"
 admin response. A value that alternates between two answers on identical
@@ -1704,7 +1782,7 @@ persistence is on, so it survives one.
 
 ```bash
 curl -X POST http://localhost:8000/admin/policies \
-  -H 'X-Api-Key: <an admin:* key>' \
+  -H "X-Api-Key: ${AXON_ADMIN_API_KEY}" \
   -H 'Content-Type: application/json' \
   -d '{
         "name": "seniors-write",
@@ -1812,6 +1890,11 @@ Two more caveats worth knowing before you rely on this layer:
 | `ANTHROPIC_API_KEY` | — | Anthropic API key |
 | `OPENAI_API_KEY` | — | OpenAI API key |
 | `AWS_DEFAULT_REGION` | `us-east-1` | AWS region for Bedrock |
+| `AXON_AWS_ACCOUNT_ID` | `AWS_ACCOUNT_ID`, when set | Exact 12-digit AWS account used to validate SNS and CloudWatch destination ARNs; both CDK stacks inject it |
+| `AXON_ENABLED_PROVIDERS` | — (all available providers) | Optional comma-separated runtime provider allowlist. Empty or unknown values fail startup; providers outside the list are neither advertised nor invoked |
+| `AXON_EVENT_OUTBOX_QUEUE_URL` | — | FIFO SQS queue used for durable security-event delivery. When set, readiness checks queue access and dispatch fails visibly if a matching event cannot be enqueued |
+| `AXON_SECURITY_EVENT_SNS_TOPIC_ARN` | — | Exact SNS topic ARN allowed for managed security-event destinations; both CDK stacks set it to `SecurityEventTopicArn` |
+| `AXON_SECURITY_EVENT_LOG_GROUP_ARN` | — | Exact CloudWatch Logs group ARN allowed for managed security-event destinations; both CDK stacks set it to `SecurityEventLogGroupArn` |
 | `AXON_LOAD_DEMO_DATA` | `false` | Load demo projects/users on startup; also enables reading provider keys from `.env` |
 | `AXON_DEV_ENV_FILE` | `.env` | Path to the demo env file (only read when `AXON_LOAD_DEMO_DATA=true`) |
 | `AXON_NO_BROWSER` | `false` | Stop `serve_dashboard.py` opening the pricing-coverage page when models are unpriced (already skipped when stdout is not a tty) |
@@ -1819,13 +1902,15 @@ Two more caveats worth knowing before you rely on this layer:
 | `AXON_DYNAMODB_TABLE` | `axonllm-state` | DynamoDB table name (must match the provisioned table) |
 | `AXON_SERVER_PORT` | `8000` | Server port |
 | `AXON_AUTH_MODE` | `ENFORCE` | Auth enforcement: `ENFORCE` (default, fail-closed) or `LOG_ONLY` (local dev) |
-| `AXON_REQUIRE_CANONICAL_IDENTITY` | `false` | Require every credential to resolve to an active server-held tenant principal. Production and AgentCore require `true`; startup also requires ENFORCE mode and DynamoDB |
+| `AXON_DEPLOYMENT_PROFILE` | `production`; the demo entrypoint selects `development` | Runtime security profile. `development` is the only profile that permits legacy identity; `production` fails startup without canonical identity, ENFORCE auth, and DynamoDB |
+| `AXON_REQUIRE_CANONICAL_IDENTITY` | `false` (configuration), `true` (container) | Require every credential to resolve to an active server-held tenant principal. Because ordinary startup defaults to the production profile, leaving this false prevents startup |
 | `AXON_OIDC_ISSUER` | — | Exact OIDC token issuer URL; required for direct OIDC and AgentCore |
 | `AXON_OIDC_AUDIENCE` | — | Expected OIDC audience; required for direct OIDC and AgentCore |
 | `AXON_ALB_SIGNER_ARN` | — | Exact ARN of the trusted ALB; required when accepting ALB OIDC headers |
 | `AXON_ALB_CLIENT_ID` | — | OIDC client id configured on the trusted ALB listener auth action |
 | `AXON_ALB_ISSUER` | — | Exact regional ALB key issuer, such as `https://public-keys.auth.elb.us-east-1.amazonaws.com` |
-| `AXON_SCIM_TOKEN` | — | Bearer secret the IdP uses for SCIM provisioning; SCIM is disabled until set |
+| `AXON_SCIM_TENANTS` | — | Canonical JSON map of tenant ids to unique `{issuer, token}` SCIM credentials |
+| `AXON_SCIM_TOKEN` | — | Legacy single-trust-domain SCIM bearer token; rejected in canonical mode |
 | `AXON_SAML_SP_ENTITY_ID` | — | SP entity id (SAML audience) |
 | `AXON_SAML_ACS_URL` | — | Assertion Consumer Service URL (this gateway's `/saml/acs`) |
 | `AXON_SAML_IDP_SSO_URL` | — | IdP SSO redirect endpoint |
@@ -1954,7 +2039,7 @@ traffic":
 | Tenant membership is authoritative | `AXON_REQUIRE_CANONICAL_IDENTITY=false` | Legacy token roles, scopes, tenant, and project claims can still supply authority |
 | Demo seed data is not loaded | `AXON_LOAD_DEMO_DATA` is unset or true | `serve_dashboard.py` — the container `CMD` — defaults it to `true` |
 | State survives a restart | DynamoDB is disabled or unreachable | Writes are swallowed by design, so billing data vanishes silently |
-| Issued API keys are scoped and expire | A key carries no expiry, or legacy scope posture needs review | **WARN, not FAIL.** In canonical mode the service principal's stored action scopes govern mapped data-plane routes; the checklist still reports the legacy scope warning and does not prove that key records and canonical principal rows agree |
+| Issued API keys are scoped and expire | A legacy key carries no expiry, or scope posture needs review | **WARN, not FAIL.** Canonical tenant keys default to 90 days and are capped at 365; the service principal's stored scopes govern mapped data-plane routes |
 
 The model-id check is the one that goes out to the network. It asks each
 configured provider what it currently serves and diffs that against
@@ -1981,12 +2066,12 @@ Three things worth knowing before you rely on it:
   a demo and teaches operators to ignore the page, so the page explains itself
   instead and makes no outbound calls.
 
-The HTTP `/health` route is liveness only. AgentCore's `health` action is also
-liveness only and deliberately returns `ready: false` with dependencies
-unchecked. AgentCore separately exposes `GET /ready`, which returns 200 only
-after explicit lifespan initialization and successful bounded OIDC/JWKS and
-DynamoDB checks. It complements rather than replaces this checklist plus an
-authenticated model-list and completion canary.
+The HTTP `/health` route is liveness only. Starlette `/ready` checks DynamoDB
+reachability when persistence is enabled, but does not prove OIDC, provider, or
+application readiness. AgentCore's `health` action is also liveness only and
+deliberately returns `ready: false`; its separate `GET /ready` adds bounded
+runtime, OIDC/JWKS, and canonical-store checks. Neither replaces this checklist
+plus authenticated model-list and completion canaries.
 
 Coverage spans three authentication styles, not just bearer tokens: API-key
 providers over HTTP, **Bedrock** through boto3, and **Bedrock Mantle** through a
@@ -2044,90 +2129,69 @@ uv sync --extra dev
 uv run pytest tests/ -x -q
 ```
 
-2,844 tests including unit, integration, end-to-end, and Hypothesis
-property-based tests.
+The suite includes unit, integration, end-to-end, release-security, synthesized
+infrastructure, and Hypothesis property-based tests.
+
+Do not generate release evidence unless required CI succeeds for the exact
+release commit.
 
 ## Deployment
 
 ### ECS Fargate (reference deployment)
 
-```bash
-export AXON_VIEWER_DOMAIN_NAME=axon.example.com
-export AXON_VIEWER_CERTIFICATE_ARN=arn:aws:acm:us-east-1:123456789012:certificate/...
-export AXON_ORIGIN_DOMAIN_NAME=origin.axon.internal
-export AXON_ORIGIN_CERTIFICATE_ARN=arn:aws:acm:us-east-1:123456789012:certificate/...
-export AXON_APPROVED_HTTPS_PREFIX_LIST_ID=pl-0123456789abcdef0
-./deploy-fargate.sh us-east-1
-```
+`infra/stack.py` deploys AxonLLM in `us-east-1` with:
 
-This deploys AxonLLM as a Fargate service (via CDK) with:
 - CloudFront VPC Origin to an internal TLS ALB
 - TLS 1.2+, WAF IP-reputation filtering, and per-IP rate limiting
 - Private retained ALB and CloudFront access logs with 365-day expiry
-- Private tasks with customer-approved HTTPS egress
+- Private tasks with customer-approved HTTPS egress and restrictive ingress
 - Sticky sessions and a 5-minute ALB idle timeout for SSE streaming
 - Auto-scaling (2-10 tasks) on CPU and request count
 - ECS deployment rollback with 100% minimum healthy capacity
-- An ALB `GET /ready` gate that fails when enabled DynamoDB is unavailable
-- DynamoDB tables for persistence (audit trail, API keys, policies)
-- Secrets Manager for provider API keys
-- IAM role with Bedrock invoke permissions
+- Production ALB OIDC on `/admin/*` and canonical identity settings
+- An ALB `/ready` gate for enabled DynamoDB and security-event outbox
+  reachability
+- KMS-encrypted DynamoDB with deletion protection, PITR, and daily AWS Backup
+- KMS-encrypted FIFO security-event outbox/DLQ, managed SNS/Logs sinks, and
+  private SQS/SNS/Logs endpoints
+- Secrets Manager, alarms, and an operations dashboard
+- A required private ECR image identified by `@sha256`
+- IAM role with Bedrock invoke permissions restricted to required concrete ARNs
 - CloudWatch Container Insights
 
-Prerequisites:
-- AWS CLI configured with appropriate permissions
-- Docker running
-- Node.js **20 or newer** (for the CDK CLI; 22 or 24 preferred). Node 18 still
-  deploys, but every `cdk` call prints a ten-line end-of-life banner that reads
-  like a failure and buries the real output — and the bundled AWS SDK warns it
-  will require Node 22 from January 2027
-- First-time: `cd infra && uv venv && uv pip install -r requirements.txt && npx cdk bootstrap`
-  (`uv venv` first — `uv pip install` refuses without one; `npx cdk` because the
-  CDK CLI is not installed globally)
-- A public viewer name and private origin name, each covered by the supplied
-  `us-east-1` ACM certificate
-- A governed customer-managed prefix list containing every approved HTTPS
-  destination needed by the tasks, with no catch-all CIDR
+`deploy-fargate.sh` requires `AXON_VERIFIED_IMAGE_URI` and
+`AXON_BEDROCK_INVOKE_RESOURCE_ARNS`, but does not select production mode or
+supply its OIDC identity parameters. Use the direct CDK template in the
+[Production Runbook](docs/PRODUCTION_RUNBOOK.md#fargate-deployment).
+Staging mode is for an isolated trust domain; production mode is subject to the
+release, identity-bootstrap, canary, and recovery gates in that runbook.
 
-The checked-in stack enables DynamoDB, `ENFORCE`, and clean startup, but it does
-not yet provision canonical principals or set
-`AXON_REQUIRE_CANONICAL_IDENTITY=true`. It also does not configure an ALB
-authenticate action or set `AXON_ALB_SIGNER_ARN`, `AXON_ALB_CLIENT_ID`, and
-`AXON_ALB_ISSUER`. Treat it as a reference stack, not a turnkey multi-tenant
-production deployment.
+### Amazon Bedrock AgentCore
 
-### Amazon Bedrock AgentCore (hardening preview)
+The checked-in AgentCore CDK stack provides a JWT authorizer, `Authorization`
+header forwarding, private VPC networking, DynamoDB and Bedrock endpoints,
+concrete Bedrock resource permissions, an immutable private ECR ARM64 image,
+canonical identity, backups, encrypted one-year logs, alarms, and a dashboard.
 
-`agentcore_agent.py` now has a fail-closed adapter for `chat`, `list_models`, and
-liveness. It accepts identity only from the SDK runtime context, re-verifies the
-JWT, resolves a canonical principal and the authoritative tenant/project row,
-applies RBAC, preserves all chat fields, and uses native async streaming.
-Configured response guardrails or output PII controls intentionally buffer the
-complete response before release. The SDK application initializes dependencies
-in its lifespan, exposes a bounded `GET /ready` check, and closes provider HTTP
-and OTLP resources on shutdown. Request admission has a startup deadline, but
-Python cannot forcibly cancel the synchronous bootstrap worker if it hangs; the
-deployment must enforce a process-level startup/termination deadline. It does
-**not** host the HTTP admin console.
+The runtime exposes only `chat`, `list_models`, `health`, and `GET /ready`; it
+does not host the admin console. The stack sets
+`AXON_ENABLED_PROVIDERS=bedrock`, so AgentCore advertises and invokes only
+standard Bedrock model mappings, not Bedrock Mantle or HTTP providers. AgentCore
+Memory is not wired, non-Bedrock provider secrets are not injected, and no
+principal-bootstrap command ships.
+The release workflow records Fargate and AgentCore as distinct targets in its
+schema-v2 manifest and attests both image digests. Deployment verification
+selects `fargate` or `agentcore`, binds the selected private ECR digest to its
+target-specific evidence and Sigstore bundle, verifies the remote image, and
+rescans it. The workflows do not publish or deploy either image, and a real
+tagged private-ECR/Sigstore execution remains externally unverified.
+See the [AgentCore Runbook](docs/AGENTCORE_RUNBOOK.md).
 
-Do not launch the current local AgentCore configuration as production. A release
-deployment still needs a checked-in IaC definition with a JWT authorizer,
-`Authorization` header forwarding (or a trusted signed facade using the custom
-identity-token header), private networking, scoped IAM, readiness-route wiring,
-and tenant-safe memory design. Non-project control state can still fail open
-during hydration, retained usage/audit history is scanned at startup, and rate
-limits, cache, and audit serialization are not distributed.
-AgentCore dependencies, including its OIDC HTTP client, are hash-pinned in
-`requirements.txt`. The exact header contract, environment, and preflight are in
-[ENTERPRISE_HARDENING.md](ENTERPRISE_HARDENING.md).
+### AWS App Runner
 
-### AWS App Runner (simpler, less control)
-
-```bash
-./deploy.sh us-east-1
-```
-
-Simpler setup but no ALB, no sticky sessions, limited scaling control.
+`deploy.sh` remains a legacy reference path. It does not provide the canonical
+identity, private networking, immutable release gate, backup, or readiness
+controls of the checked-in CDK stacks and is not a production-equivalent option.
 
 ### Docker (self-hosted)
 
@@ -2161,14 +2225,19 @@ state or rebuild the image after configuration changes.
 | OIDC | Set exact issuer and audience; verify key rotation and fail-closed outage behavior |
 | TLS | Terminate TLS at ALB/CloudFront, not at the gateway |
 | Budgets | Set org-level budget limits before granting project access |
+| Release image | Deploy only the private ECR `@sha256` URI that passed verification for the selected `fargate` or `agentcore` target |
+| Recovery | Verify PITR and a recent AWS Backup recovery point; complete and retain evidence from a real AWS restore exercise |
 
 Do not use a green liveness probe as the release gate. Run
 `/admin/production-checklist`, resolve every `FAIL`, investigate every
 `UNKNOWN`, and exercise authenticated positive and negative tenant canaries.
+Require green CI and schema-v2 target-aware release evidence for the exact
+deployed digest. The first real tagged private-ECR/Sigstore flow and a real AWS
+restore exercise remain externally unverified.
 
 ## Embedding in Ostiari (trace forwarding)
 
-When AxonLLM runs embedded inside [Ostiari](https://github.com/…), each completed
+When AxonLLM runs embedded inside Ostiari, each completed
 request is forwarded as a trace event into Ostiari's Live Traces view. Forwarding
 activates automatically when Ostiari is *detected* — no code change to standalone
 deployments (with neither of the following, it's a no-op).

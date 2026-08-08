@@ -1,4 +1,4 @@
-"""Fleet-wide convergence for projects and user configs.
+"""Fleet-wide convergence for request-governing configuration.
 
 ``self.projects`` and ``self._user_configs`` are hydrated once at startup and
 then only ever mutated by the task that served the write. Behind the shipped
@@ -23,6 +23,10 @@ Same mechanism as ``CedarPolicyService.refresh_if_stale`` and the same shape of
 fix: writes bump a shared version counter, and each instance re-reads the config
 scans only when that number moves. The cost in steady state is one small
 ``GetItem`` per instance per window, not two table scans per request.
+
+Region topology is already stored as one revisioned document, so it is polled
+directly on the same bounded interval. That keeps routing and data-residency
+rules converged without coupling a topology write to a second counter write.
 """
 
 from __future__ import annotations
@@ -31,7 +35,13 @@ import asyncio
 import logging
 import time
 
+from src.gateway.multi_region.region_config import apply_persisted_topology
+
 logger = logging.getLogger(__name__)
+
+
+class RegionTopologyUnavailable(RuntimeError):
+    """The authoritative topology could not be checked safely."""
 
 
 class ConfigSyncService:
@@ -57,18 +67,37 @@ class ConfigSyncService:
         cost_tracker,
         persistence=None,
         policy_resolver=None,
+        region_config=None,
+        health_monitor=None,
+        region_lock: asyncio.Lock | None = None,
     ) -> None:
         self._projects = projects
         self._user_configs = user_configs
         self._cost_tracker = cost_tracker
         self._persistence = persistence
         self._policy_resolver = policy_resolver
+        self._region_config = region_config
+        self._health_monitor = health_monitor
+        self._region_lock = region_lock or asyncio.Lock()
         # Negative infinity, not 0: time.monotonic() has an arbitrary origin and
         # can legitimately be near 0 early in the process, which with a 0 sentinel
         # would skip the first check.
         self._last_version_check = float("-inf")
         self._known_version: int | None = None
         self._refresh_task: asyncio.Task | None = None
+        self._local_generation = 0
+        self._last_region_check = float("-inf")
+        self._known_region_revision = (
+            getattr(region_config, "revision", 0)
+            if region_config is not None
+            else None
+        )
+        self._region_refresh_task: asyncio.Task | None = None
+
+    @property
+    def region_lock(self) -> asyncio.Lock:
+        """Lock shared with the local topology writer."""
+        return self._region_lock
 
     async def refresh_if_stale(self) -> bool:
         """Adopt fleet config if another instance changed it. Returns whether it did.
@@ -80,19 +109,111 @@ class ConfigSyncService:
         if self._persistence is None or not self._persistence.enabled:
             return False
 
+        region_refreshed = await self._refresh_region_if_stale()
         now = time.monotonic()
         if now - self._last_version_check < self.CONFIG_SYNC_TTL_SECONDS:
-            return False
+            return region_refreshed
 
         if self._refresh_task is None or self._refresh_task.done():
             self._refresh_task = asyncio.create_task(self._refresh(now))
         try:
-            return await asyncio.shield(self._refresh_task)
+            config_refreshed = await asyncio.shield(self._refresh_task)
+            return region_refreshed or config_refreshed
         except Exception:
             logger.warning("Config refresh failed", exc_info=True)
+            return region_refreshed
+
+    async def _refresh_region_if_stale(self) -> bool:
+        if self._region_config is None:
             return False
+        loader = getattr(
+            self._persistence,
+            "load_region_topology_snapshot",
+            None,
+        )
+        if loader is None:
+            raise RegionTopologyUnavailable(
+                "Region topology loading is not configured"
+            )
+        now = time.monotonic()
+        if (
+            now - self._last_region_check
+            < self.CONFIG_SYNC_TTL_SECONDS
+        ):
+            return False
+        if (
+            self._region_refresh_task is None
+            or self._region_refresh_task.done()
+        ):
+            self._region_refresh_task = asyncio.create_task(
+                self._refresh_region(now)
+            )
+        try:
+            return await asyncio.shield(self._region_refresh_task)
+        except RegionTopologyUnavailable:
+            raise
+        except Exception as exc:
+            logger.error("Region topology refresh failed", exc_info=True)
+            raise RegionTopologyUnavailable(
+                "Region topology is temporarily unavailable"
+            ) from exc
+
+    async def _refresh_region(self, now: float) -> bool:
+        async with self._region_lock:
+            snapshot = (
+                await self._persistence.load_region_topology_snapshot()
+            )
+            if snapshot is None:
+                self._known_region_revision = getattr(
+                    self._region_config,
+                    "revision",
+                    0,
+                )
+                await self._reconcile_health_monitor()
+                self._last_region_check = now
+                return False
+
+            revision = snapshot.get("revision")
+            if (
+                not isinstance(revision, int)
+                or isinstance(revision, bool)
+                or revision < 0
+            ):
+                raise RegionTopologyUnavailable(
+                    "Region topology revision is invalid"
+                )
+            live_revision = getattr(self._region_config, "revision", 0)
+            if revision <= live_revision:
+                # A delayed read must never roll back a local commit or a newer
+                # refresh. Track the live revision, not the stale poller's prior
+                # observation, so the next check starts from reality.
+                self._known_region_revision = live_revision
+                await self._reconcile_health_monitor()
+                self._last_region_check = now
+                return False
+
+            apply_persisted_topology(
+                self._region_config,
+                snapshot,
+                preserve_health=True,
+            )
+            logger.info(
+                "Adopting region topology revision %s -> %s",
+                live_revision,
+                revision,
+            )
+            self._known_region_revision = revision
+            await self._reconcile_health_monitor()
+            self._last_region_check = now
+            return True
+
+    async def _reconcile_health_monitor(self) -> None:
+        reconcile = getattr(self._health_monitor, "reconcile", None)
+        if callable(reconcile):
+            await reconcile()
 
     async def _refresh(self, now: float) -> bool:
+        generation = self._local_generation
         version = await self._persistence.get_config_version()
         if version is None:
             # Unreadable. Keep the config we have and retry on the next request
@@ -100,8 +221,8 @@ class ConfigSyncService:
             # window of divergence.
             return False
 
-        self._last_version_check = now
         if version == self._known_version:
+            self._last_version_check = now
             return False
 
         projects, configs = await asyncio.gather(
@@ -121,6 +242,17 @@ class ConfigSyncService:
                 "ok" if projects is not None else "failed",
                 "ok" if configs is not None else "failed",
             )
+            return False
+
+        confirmed_version = await self._persistence.get_config_version()
+        if confirmed_version is None or confirmed_version != version:
+            # A write landed while the two scans were in flight. Mixing rows
+            # from before and after that write would acknowledge a snapshot that
+            # never existed, so retry the whole read on the next request.
+            return False
+        if generation != self._local_generation:
+            # This process committed a local mutation while the scan was
+            # running. Publishing the older scan would roll that mutation back.
             return False
 
         # Stored entries win; entries this instance knows and the store does not
@@ -143,6 +275,7 @@ class ConfigSyncService:
             self._known_version, version, len(projects), len(configs),
         )
         self._known_version = version
+        self._last_version_check = now
         return True
 
     def _register_budgets(self, projects: dict, configs: dict[str, dict]) -> None:
@@ -160,6 +293,7 @@ class ConfigSyncService:
                 project.project_id,
                 budget_limit=project.budget_limit,
                 alert_threshold=project.alert_threshold,
+                tenant_id=project.tenant_id,
             )
             # Only where no node exists, matching _register_persisted_budgets: a
             # real org -> team -> project hierarchy carries a tighter parent cap
@@ -198,3 +332,21 @@ class ConfigSyncService:
         if version is not None:
             self._known_version = version
             self._last_version_check = time.monotonic()
+
+    def invalidate_local_config(self) -> None:
+        """Force a verified snapshot after this process commits a local write."""
+        self._local_generation += 1
+        self._last_version_check = float("-inf")
+
+    def note_local_region_revision(self, revision: int) -> None:
+        """Record a topology revision this instance already published."""
+        if (
+            not isinstance(revision, int)
+            or isinstance(revision, bool)
+            or revision < 0
+        ):
+            raise ValueError(
+                "topology revision must be a non-negative integer"
+            )
+        self._known_region_revision = revision
+        self._last_region_check = time.monotonic()

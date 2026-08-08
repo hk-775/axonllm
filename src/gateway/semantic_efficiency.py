@@ -283,8 +283,24 @@ class SemanticEfficiencyEngine:
     # User profile learning
     # ------------------------------------------------------------------
 
-    def build_user_profile(self, user_id: str) -> UserEfficiencyProfile:
-        records = [r for r in self._cost_tracker._records if r.user_id == user_id]
+    @staticmethod
+    def _profile_key(user_id: str, tenant_id: str | None) -> str:
+        if tenant_id is None:
+            return user_id
+        return f"tenant:{len(tenant_id)}:{tenant_id}:user:{len(user_id)}:{user_id}"
+
+    def build_user_profile(
+        self,
+        user_id: str,
+        tenant_id: str | None = None,
+    ) -> UserEfficiencyProfile:
+        records = [
+            r
+            for r in self._cost_tracker._records
+            if r.user_id == user_id
+            and (tenant_id is None or r.tenant_id == tenant_id)
+        ]
+        profile_key = self._profile_key(user_id, tenant_id)
         if not records:
             profile = UserEfficiencyProfile(
                 user_id=user_id,
@@ -296,7 +312,7 @@ class SemanticEfficiencyEngine:
                 patterns=[],
                 updated_at=datetime.now(timezone.utc),
             )
-            self._user_profiles[user_id] = profile
+            self._user_profiles[profile_key] = profile
             return profile
 
         # Find dominant model
@@ -337,11 +353,17 @@ class SemanticEfficiencyEngine:
             patterns=patterns,
             updated_at=datetime.now(timezone.utc),
         )
-        self._user_profiles[user_id] = profile
+        self._user_profiles[profile_key] = profile
         return profile
 
-    def get_user_profile(self, user_id: str) -> UserEfficiencyProfile | None:
-        return self._user_profiles.get(user_id)
+    def get_user_profile(
+        self,
+        user_id: str,
+        tenant_id: str | None = None,
+    ) -> UserEfficiencyProfile | None:
+        return self._user_profiles.get(
+            self._profile_key(user_id, tenant_id)
+        )
 
     # ------------------------------------------------------------------
     # Full semantic report
@@ -351,8 +373,11 @@ class SemanticEfficiencyEngine:
         self,
         user_id: str | None = None,
         project_id: str | None = None,
+        tenant_id: str | None = None,
     ) -> SemanticReport:
         records = self._cost_tracker._records
+        if tenant_id is not None:
+            records = [r for r in records if r.tenant_id == tenant_id]
         if user_id:
             records = [r for r in records if r.user_id == user_id]
         if project_id:
@@ -366,7 +391,10 @@ class SemanticEfficiencyEngine:
         # Build user profile if user_id specified
         profile = None
         if user_id:
-            profile = self.build_user_profile(user_id)
+            profile = self.build_user_profile(
+                user_id,
+                tenant_id=tenant_id,
+            )
 
         # Waste summary
         waste_summary = self._compute_waste_summary(records)

@@ -405,6 +405,22 @@ class TestSemanticCacheBasics:
         assert hit is not None
         assert hit.choices[0]["message"]["content"] == "tenant a's answer"
 
+    async def test_tenantless_lookup_cannot_retrieve_a_tenant_entry(self):
+        emb = FakeEmbedder()
+        cache = SemanticCache(emb)
+        req = _req("what is our refund policy for annual plans")
+        await cache.put(
+            req,
+            "shared-project",
+            _resp("tenant a's answer"),
+            300,
+            tenant_id="tenant-a",
+        )
+
+        assert await cache.get(req, "shared-project") is None
+        assert cache.entry_count("shared-project") == 0
+        assert cache.entry_count("shared-project", tenant_id="tenant-a") == 1
+
     async def test_a_dissimilar_prompt_misses(self):
         emb = FakeEmbedder(vectors={
             "what is our refund policy for annual plans": [1.0, 0.0],
@@ -691,6 +707,19 @@ class TestEmbeddingMemo:
             "second question about the refund policy",
         ]
 
+    async def test_the_memo_is_scoped_to_tenant_and_project(self):
+        emb = FakeEmbedder()
+        cache = SemanticCache(emb)
+        req = _req("what is our refund policy for annual plans")
+
+        await cache.put(req, "shared-project", _resp(), 300, tenant_id="tenant-a")
+        await cache.put(req, "shared-project", _resp(), 300, tenant_id="tenant-b")
+
+        assert emb.calls == [
+            "what is our refund policy for annual plans",
+            "what is our refund policy for annual plans",
+        ]
+
 
 @pytest.mark.asyncio
 class TestInvalidation:
@@ -724,21 +753,44 @@ class TestInvalidation:
         assert cache.entry_count("shared-project", tenant_id="tenant-a") == 0
         assert cache.entry_count("shared-project", tenant_id="tenant-b") == 1
 
-    async def test_legacy_project_invalidation_clears_all_tenant_namespaces(self):
+    async def test_legacy_project_invalidation_clears_only_legacy_namespace(self):
         cache = SemanticCache(FakeEmbedder())
         req = _req("a question long enough to cache")
+        await cache.put(req, "shared-project", _resp(), 300)
         await cache.put(req, "shared-project", _resp(), 300, tenant_id="tenant-a")
         await cache.put(req, "shared-project", _resp(), 300, tenant_id="tenant-b")
         await cache.put(req, "other-project", _resp(), 300, tenant_id="tenant-a")
 
-        assert cache.invalidate("shared-project") == 2
+        assert cache.invalidate("shared-project") == 1
         assert cache.entry_count("shared-project") == 0
-        assert cache.entry_count("other-project") == 1
+        assert cache.entry_count("shared-project", tenant_id="tenant-a") == 1
+        assert cache.entry_count("shared-project", tenant_id="tenant-b") == 1
+
+    async def test_platform_invalidation_requires_explicit_all_tenants_opt_in(self):
+        cache = SemanticCache(FakeEmbedder())
+        req = _req("a question long enough to cache")
+        await cache.put(req, "shared-project", _resp(), 300)
+        await cache.put(req, "shared-project", _resp(), 300, tenant_id="tenant-a")
+        await cache.put(req, "shared-project", _resp(), 300, tenant_id="tenant-b")
+        await cache.put(req, "other-project", _resp(), 300, tenant_id="tenant-a")
+
+        assert cache.invalidate("shared-project", all_tenants=True) == 3
+        assert cache.entry_count("shared-project", all_tenants=True) == 0
+        assert cache.entry_count("other-project", all_tenants=True) == 1
 
     async def test_tenant_only_invalidation_is_rejected(self):
         cache = SemanticCache(FakeEmbedder())
         with pytest.raises(ValueError, match="project_id"):
             cache.invalidate(tenant_id="tenant-a")
+
+    async def test_tenant_and_all_tenants_cannot_be_combined(self):
+        cache = SemanticCache(FakeEmbedder())
+        with pytest.raises(ValueError, match="cannot be combined"):
+            cache.invalidate(
+                "shared-project",
+                tenant_id="tenant-a",
+                all_tenants=True,
+            )
 
     async def test_invalidating_an_unknown_project_is_not_an_error(self):
         assert SemanticCache(FakeEmbedder()).invalidate("nope") == 0

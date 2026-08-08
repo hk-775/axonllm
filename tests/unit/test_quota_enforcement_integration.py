@@ -11,9 +11,12 @@ from src.gateway.cost_tracker import CostTracker
 from src.gateway.guardrail_engine import GuardrailEngine
 from src.gateway.models import (
     ChatCompletionResponse,
+    ModelConfig,
     PolicyNode,
     Project,
+    ProviderModelMapping,
     RateLimitConfig,
+    TokenPricing,
     TokenUsage,
 )
 from src.gateway.quota_enforcer import QuotaEnforcer
@@ -42,6 +45,17 @@ class FakePersistence:
 
 def _run(coro):
     return asyncio.run(coro)
+
+
+def _cost_tracker():
+    return CostTracker(pricing_config={
+        "bedrock": {
+            "claude-sonnet-x": TokenPricing(
+                prompt_token_cost=0.001,
+                completion_token_cost=0.002,
+            )
+        }
+    })
 
 
 class FakeProviderFactory:
@@ -74,7 +88,18 @@ def setup():
 
     from src.gateway.model_registry import ModelRegistry
     registry = ModelRegistry()
-    registry._models = {}
+    registry.models = {
+        "claude-sonnet": ModelConfig(
+            name="claude-sonnet",
+            description="test",
+            providers=[
+                ProviderModelMapping(
+                    provider="bedrock",
+                    model_id="claude-sonnet-x",
+                )
+            ],
+        )
+    }
 
     from src.gateway.health_tracker import ProviderHealthTracker
     health = ProviderHealthTracker()
@@ -82,7 +107,7 @@ def setup():
     from src.gateway.smart_routing import SmartRoutingStrategy
     router = Router(model_registry=registry, health_tracker=health)
 
-    cost_tracker = CostTracker(pricing_config={})
+    cost_tracker = _cost_tracker()
     rate_limiter = SlidingWindowRateLimiter(config=RateLimitConfig(user_rpm=9999, project_rpm=9999))
     guardrails = GuardrailEngine()
     cache = CacheManager()
@@ -125,20 +150,21 @@ class TestQuotaEnforcementInFlow:
 
     def test_allowed_request_passes_quota(self, setup):
         agent, _ = setup
-        # Should pass quota checks but fail downstream (model not in registry).
-        # The KeyError from model registry is a downstream failure, not a quota denial.
-        with pytest.raises(KeyError, match="claude-sonnet"):
-            _run(agent.handle_chat_completion(
-                {"model": "claude-sonnet", "messages": [{"role": "user", "content": "hi"}]},
-                {"project_id": "proj:ml", "user_id": "u1"},
-            ))
+        result = _run(agent.handle_chat_completion(
+            {"model": "claude-sonnet", "messages": [{"role": "user", "content": "hi"}]},
+            {"project_id": "proj:ml", "user_id": "u1"},
+        ))
+        assert result["id"] == "resp-1"
 
     def test_spend_recorded_after_success(self, setup):
         """If a response comes back, the enforcer's spend tracker is updated."""
         agent, enforcer = setup
-        # We can't easily get a full response without a real model registry,
-        # so we verify the wiring: spend starts at 0
-        assert enforcer.get_spend("proj:ml") == 0.0
+        result = _run(agent.handle_chat_completion(
+            {"model": "claude-sonnet", "messages": [{"role": "user", "content": "hi"}]},
+            {"project_id": "proj:ml", "user_id": "u1"},
+        ))
+        assert result["id"] == "resp-1"
+        assert enforcer.get_spend("proj:ml") > 0.0
 
 
 class CapturingProviderFactory:
@@ -166,8 +192,6 @@ def setup_with_token_limit():
     """Agent whose policy caps max_tokens_per_request, with a resolvable model."""
     from src.gateway.health_tracker import ProviderHealthTracker
     from src.gateway.model_registry import ModelRegistry
-    from src.gateway.models import ModelConfig, ProviderModelMapping
-
     persistence = FakePersistence()
     resolver = PolicyHierarchyResolver(persistence=persistence, cache_ttl_seconds=0)
     proj = PolicyNode("proj:ml", "project", None, "ML",
@@ -192,7 +216,7 @@ def setup_with_token_limit():
         rate_limiter=SlidingWindowRateLimiter(config=RateLimitConfig(user_rpm=9999, project_rpm=9999)),
         guardrail_engine=GuardrailEngine(),
         cache_manager=CacheManager(),
-        cost_tracker=CostTracker(pricing_config={}),
+        cost_tracker=_cost_tracker(),
         projects={"proj:ml": Project(project_id="proj:ml", name="ML")},
         provider_fn_factory=factory,
         quota_enforcer=QuotaEnforcer(),
@@ -205,10 +229,11 @@ class TestMaxTokensCapping:
     def test_omitted_max_tokens_is_capped_to_policy(self, setup_with_token_limit):
         """A request with no max_tokens must be bounded by the policy ceiling."""
         agent, factory = setup_with_token_limit
-        _run(agent.handle_chat_completion(
+        result = _run(agent.handle_chat_completion(
             {"model": "claude-sonnet", "messages": [{"role": "user", "content": "hi"}]},
             {"project_id": "proj:ml", "user_id": "u1"},
         ))
+        assert result["id"] == "resp-1"
         assert factory.seen_max_tokens == 1000
 
     def test_oversized_explicit_max_tokens_is_rejected(self, setup_with_token_limit):
@@ -225,9 +250,10 @@ class TestMaxTokensCapping:
 
     def test_within_limit_max_tokens_is_preserved(self, setup_with_token_limit):
         agent, factory = setup_with_token_limit
-        _run(agent.handle_chat_completion(
+        result = _run(agent.handle_chat_completion(
             {"model": "claude-sonnet", "messages": [{"role": "user", "content": "hi"}],
              "max_tokens": 200},
             {"project_id": "proj:ml", "user_id": "u1"},
         ))
+        assert result["id"] == "resp-1"
         assert factory.seen_max_tokens == 200

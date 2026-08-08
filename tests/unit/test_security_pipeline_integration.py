@@ -186,7 +186,13 @@ class TestPIIRedaction:
         assert "choices" in result
 
     def test_records_input_and_output_pii_audit(self):
-        agent, _, audit_trail, _ = _make_agent()
+        agent, _, audit_trail, event_dispatcher = _make_agent()
+        event_ids = []
+
+        async def capture(event):
+            event_ids.append(event.event_id)
+
+        event_dispatcher.dispatch = capture
         _run(agent.handle_chat_completion(
             {
                 "model": "test-model",
@@ -201,6 +207,11 @@ class TestPIIRedaction:
             "email" in record.data["redacted_types"]
             for record in pii_records
         )
+        assert len(event_ids) == 2
+        assert len(set(event_ids)) == 2
+        assert event_ids[0].endswith(":pii:input")
+        assert event_ids[1].endswith(":pii:output")
+        assert all(event_id.startswith("req_") for event_id in event_ids)
 
     def test_no_redaction_when_disabled(self):
         agent, router, _, _ = _make_agent(pii_enabled=False)

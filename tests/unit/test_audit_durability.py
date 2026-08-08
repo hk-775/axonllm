@@ -3,11 +3,16 @@ verify against the durable store detects tampering/removal, and export."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 import pytest
 
-from src.gateway.security.audit_trail import AuditEventType, AuditTrail
+from src.gateway.security.audit_trail import (
+    AuditEventType,
+    AuditStoreUnavailable,
+    AuditTrail,
+)
 
 
 class FakePersistence:
@@ -47,9 +52,9 @@ async def test_chain_head_reloads_across_restart():
     # Simulate a process restart: fresh AuditTrail on the same durable store.
     a2 = AuditTrail(persistence=p)
     await a2.initialize()
-    assert a2._last_hash == r2.record_hash          # head reloaded (the bug)
+    assert a2._last_hash == r2.record_hash  # head reloaded (the bug)
     r3 = await a2.record(AuditEventType.LLM_REQUEST, "u", "proj", "req3", {})
-    assert r3.prev_hash == r2.record_hash            # chain links across restart
+    assert r3.prev_hash == r2.record_hash  # chain links across restart
 
 
 async def test_verify_persisted_clean():
@@ -68,7 +73,7 @@ async def test_verify_persisted_detects_content_tampering():
     await a.initialize()
     await a.record(AuditEventType.LLM_REQUEST, "u", "proj", "r1", {"amount": 1})
     await a.record(AuditEventType.LLM_REQUEST, "u", "proj", "r2", {})
-    p.rows[0]["data"] = json.dumps({"amount": 999999})   # tamper a persisted row
+    p.rows[0]["data"] = json.dumps({"amount": 999999})  # tamper a persisted row
     result = await a.verify_persisted_chain()
     assert result["valid"] is False
     assert "altered" in result["reason"] or "mismatch" in result["reason"]
@@ -81,7 +86,7 @@ async def test_verify_persisted_detects_removal():
     await a.record(AuditEventType.LLM_REQUEST, "u", "proj", "r1", {})
     await a.record(AuditEventType.LLM_REQUEST, "u", "proj", "r2", {})
     await a.record(AuditEventType.LLM_REQUEST, "u", "proj", "r3", {})
-    del p.rows[1]                                         # remove the middle row
+    del p.rows[1]  # remove the middle row
     result = await a.verify_persisted_chain()
     assert result["valid"] is False
 
@@ -90,7 +95,11 @@ async def test_failed_append_does_not_advance_chain_or_buffer():
     p = FakePersistence()
     a = AuditTrail(persistence=p)
     committed = await a.record(
-        AuditEventType.LLM_REQUEST, "u", "proj", "r1", {},
+        AuditEventType.LLM_REQUEST,
+        "u",
+        "proj",
+        "r1",
+        {},
     )
     original_buffer = list(a._buffer)
 
@@ -103,7 +112,11 @@ async def test_failed_append_does_not_advance_chain_or_buffer():
     assert len(p.rows) == 1
 
     recovered = await a.record(
-        AuditEventType.LLM_REQUEST, "u", "proj", "r2", {},
+        AuditEventType.LLM_REQUEST,
+        "u",
+        "proj",
+        "r2",
+        {},
     )
     assert recovered.prev_hash == committed.record_hash
     assert a.verify_chain() is True
@@ -127,7 +140,11 @@ async def test_verify_persisted_detects_forged_first_row_predecessor():
     p = FakePersistence()
     a = AuditTrail(persistence=p)
     first = await a.record(
-        AuditEventType.LLM_REQUEST, "u", "proj", "r1", {"k": "v"},
+        AuditEventType.LLM_REQUEST,
+        "u",
+        "proj",
+        "r1",
+        {"k": "v"},
     )
     first.prev_hash = "forged-predecessor"
     first.record_hash = first.compute_hash()
@@ -188,9 +205,10 @@ async def test_initialize_sync_is_loop_safe_when_embedded():
     head = p.rows[-1]["record_hash"]
 
     a = AuditTrail(persistence=p)
-    a.initialize_sync()                 # called from within this running loop
+    a.initialize_sync()  # called from within this running loop
     import asyncio
-    await asyncio.sleep(0.05)           # let the deferred task run
+
+    await asyncio.sleep(0.05)  # let the deferred task run
     assert a._last_hash == head
 
 
@@ -199,16 +217,144 @@ def test_initialize_sync_standalone_no_loop():
     import asyncio
 
     p = FakePersistence()
-    asyncio.run(AuditTrail(persistence=p).record(
-        AuditEventType.LLM_REQUEST, "u", "proj", "r1", {}))
+    asyncio.run(AuditTrail(persistence=p).record(AuditEventType.LLM_REQUEST, "u", "proj", "r1", {}))
     head = p.rows[-1]["record_hash"]
 
     a = AuditTrail(persistence=p)
-    a.initialize_sync()                 # no running loop → runs now
+    a.initialize_sync()  # no running loop → runs now
     assert a._last_hash == head
 
 
 def test_initialize_sync_no_persistence():
     a = AuditTrail(persistence=None)
-    a.initialize_sync()                 # no crash, stays genesis
+    a.initialize_sync()  # no crash, stays genesis
     assert a._last_hash == "genesis"
+
+
+class AtomicTenantPersistence:
+    """Shared compare-and-swap audit store for multi-replica tests."""
+
+    enabled = True
+
+    def __init__(self) -> None:
+        self.heads: dict[str, str] = {}
+        self.rows: dict[str, list[dict]] = {}
+        self.lock = asyncio.Lock()
+        self.fail_append = False
+        self.fail_load = False
+
+    async def append_tenant_audit_record(
+        self,
+        tenant_id: str,
+        record: dict,
+        expected_prev_hash: str,
+    ) -> bool:
+        if self.fail_append:
+            raise RuntimeError("append unavailable")
+        await asyncio.sleep(0)
+        async with self.lock:
+            current = self.heads.get(tenant_id, "genesis")
+            if current != expected_prev_hash:
+                return False
+            self.rows.setdefault(tenant_id, []).append(dict(record))
+            self.heads[tenant_id] = record["record_hash"]
+            return True
+
+    async def get_latest_tenant_audit_hash(
+        self,
+        tenant_id: str,
+    ) -> str | None:
+        return self.heads.get(tenant_id)
+
+    async def load_tenant_audit_records(
+        self,
+        tenant_id: str,
+        project_id: str | None = None,
+    ) -> list[dict]:
+        if self.fail_load:
+            raise RuntimeError("load unavailable")
+        rows = list(self.rows.get(tenant_id, []))
+        if project_id is not None:
+            rows = [row for row in rows if row.get("project_id") == project_id]
+        return rows
+
+
+async def test_atomic_tenant_append_serializes_concurrent_replicas():
+    persistence = AtomicTenantPersistence()
+    replicas = [
+        AuditTrail(persistence=persistence),
+        AuditTrail(persistence=persistence),
+    ]
+
+    await asyncio.gather(
+        *[
+            replicas[index % 2].record(
+                AuditEventType.LLM_REQUEST,
+                "same-user",
+                "same-project",
+                f"request-{index}",
+                tenant_id="tenant-a",
+            )
+            for index in range(30)
+        ]
+    )
+
+    rows = persistence.rows["tenant-a"]
+    assert len(rows) == 30
+    previous = "genesis"
+    for row in rows:
+        assert row["prev_hash"] == previous
+        previous = row["record_hash"]
+    assert persistence.heads["tenant-a"] == previous
+
+    verifier = AuditTrail(persistence=persistence)
+    result = await verifier.verify_persisted_chain(tenant_id="tenant-a")
+    assert result["available"] is True
+    assert result["valid"] is True
+    assert result["checked"] == 30
+
+
+async def test_tenant_append_failure_does_not_advance_memory():
+    persistence = AtomicTenantPersistence()
+    persistence.fail_append = True
+    trail = AuditTrail(persistence=persistence)
+
+    with pytest.raises(AuditStoreUnavailable):
+        await trail.record(
+            AuditEventType.AUTH_FAILURE,
+            "same-user",
+            "same-project",
+            "request-failed",
+            tenant_id="tenant-a",
+        )
+
+    assert trail.buffered_records("tenant-a") == []
+    assert trail._last_hashes["tenant-a"] == "genesis"
+    assert persistence.rows == {}
+
+
+async def test_durable_load_outage_is_unavailable_not_empty_valid_chain():
+    persistence = AtomicTenantPersistence()
+    persistence.fail_load = True
+    trail = AuditTrail(persistence=persistence)
+
+    result = await trail.verify_persisted_chain(tenant_id="tenant-a")
+
+    assert result["available"] is False
+    assert result["valid"] is False
+    assert result["checked"] == 0
+    assert "unavailable" in result["reason"]
+
+
+async def test_tenant_export_rejects_cross_tenant_rows():
+    persistence = AtomicTenantPersistence()
+    persistence.rows["tenant-a"] = [
+        {
+            "tenant_id": "tenant-b",
+            "record_id": "aud_cross_tenant",
+        }
+    ]
+    trail = AuditTrail(persistence=persistence)
+
+    with pytest.raises(AuditStoreUnavailable):
+        await trail.export_records(tenant_id="tenant-a")

@@ -6,10 +6,17 @@ import hashlib
 import secrets
 import time
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
-from src.gateway.models import APIKey
+from src.gateway.auth.principal import API_KEY_ISSUER
+from src.gateway.models import (
+    APIKey,
+    AuthMethod,
+    MembershipStatus,
+    Principal,
+    TenantRole,
+)
 
 if TYPE_CHECKING:
     from src.gateway.persistence import DynamoPersistence
@@ -25,6 +32,8 @@ CACHE_TTL_SECONDS = 300
 # persistence, or the read failed). Five seconds of one small point read per
 # instance, against 300 seconds of a revoked credential still being accepted.
 REVOCATION_POLL_SECONDS = 5
+DEFAULT_TENANT_KEY_TTL = timedelta(days=90)
+MAX_TENANT_KEY_TTL = timedelta(days=365)
 
 
 class APIKeyService:
@@ -57,6 +66,11 @@ class APIKeyService:
         self._requires_epoch_baseline: set[str] = set()
 
     @property
+    def persistence(self) -> DynamoPersistence:
+        """The authoritative store shared with lifecycle audit recording."""
+        return self._persistence
+
+    @property
     def _in_memory(self) -> bool:
         return not self._persistence.enabled
 
@@ -68,6 +82,54 @@ class APIKeyService:
     def hash_key(raw_key: str) -> str:
         return hashlib.sha256(raw_key.encode()).hexdigest()
 
+    @staticmethod
+    def _resolve_expiry(
+        expires_at: datetime | None,
+        tenant_id: str | None,
+        now: datetime,
+    ) -> datetime | None:
+        if tenant_id is None:
+            return expires_at
+        resolved = expires_at or now + DEFAULT_TENANT_KEY_TTL
+        if resolved.tzinfo is None or resolved.utcoffset() is None:
+            raise ValueError("tenant API-key expiry must include a timezone")
+        resolved = resolved.astimezone(timezone.utc)
+        if resolved <= now:
+            raise ValueError("tenant API-key expiry must be in the future")
+        if resolved - now > MAX_TENANT_KEY_TTL:
+            raise ValueError("tenant API-key expiry cannot exceed 365 days")
+        return resolved
+
+    @staticmethod
+    def _principal_for_key(key: APIKey) -> Principal:
+        if key.tenant_id is None:
+            raise ValueError("canonical API-key principals require tenant_id")
+        return Principal(
+            principal_id=f"apikey:{key.key_id}",
+            tenant_id=key.tenant_id,
+            subject=key.key_id,
+            issuer=API_KEY_ISSUER,
+            roles=frozenset({TenantRole.SERVICE}),
+            auth_method=AuthMethod.API_KEY,
+            membership_status=MembershipStatus.ACTIVE,
+            project_ids=frozenset({key.project_id}),
+            scopes=frozenset(key.scopes),
+            authorization_version=1,
+            credential_id=key.key_id,
+        )
+
+    def _cache_issued_key(self, key: APIKey) -> None:
+        self._cache[key.key_hash] = (key, time.time())
+        if self._in_memory:
+            return
+        baseline = (
+            self._revocation_epoch
+            if key.tenant_id is None
+            else self._tenant_revocation_epochs.get(key.tenant_id)
+        )
+        if baseline is None:
+            self._requires_epoch_baseline.add(key.key_hash)
+
     async def issue_key(
         self,
         project_id: str,
@@ -78,6 +140,7 @@ class APIKeyService:
         tenant_id: str | None = None,
     ) -> tuple[APIKey, str]:
         """Issue a new API key. Returns (key_record, raw_key_one_time)."""
+        now = datetime.now(timezone.utc)
         raw_key = self.generate_raw_key()
         key_hash = self.hash_key(raw_key)
         key_id = f"axk_{secrets.token_hex(12)}"
@@ -90,24 +153,24 @@ class APIKeyService:
             scopes=scopes,
             created_by=created_by,
             tenant_id=tenant_id,
-            created_at=datetime.now(timezone.utc),
-            expires_at=expires_at,
+            created_at=now,
+            expires_at=self._resolve_expiry(expires_at, tenant_id, now),
         )
 
         # Real persistence treats this as one conditional transaction. Do not
         # expose or cache the plaintext credential until all durable rows exist.
-        await self._persistence.save_api_key(key)
+        save_with_principal = getattr(
+            self._persistence,
+            "save_api_key_with_principal",
+            None,
+        )
+        if tenant_id is not None and callable(save_with_principal):
+            await save_with_principal(key, self._principal_for_key(key))
+        else:
+            await self._persistence.save_api_key(key)
         if self._in_memory:
             self._memory_store[key_id] = key
-        self._cache[key_hash] = (key, time.time())
-        if not self._in_memory:
-            baseline = (
-                self._revocation_epoch
-                if tenant_id is None
-                else self._tenant_revocation_epochs.get(tenant_id)
-            )
-            if baseline is None:
-                self._requires_epoch_baseline.add(key_hash)
+        self._cache_issued_key(key)
         return key, raw_key
 
     async def _check_revocations(self, tenant_id: str | None) -> bool:
@@ -274,6 +337,8 @@ class APIKeyService:
         self,
         key_id: str,
         tenant_id: str | None = None,
+        *,
+        revoked_by: str | None = None,
     ) -> bool:
         """Revoke a key by ID. Returns True if found and revoked."""
         key = await self._get_key(key_id, tenant_id)
@@ -282,18 +347,34 @@ class APIKeyService:
         if key.revoked:
             self._evict_cached_key(key)
             return False
+        if key.tenant_id is not None and (
+            not isinstance(revoked_by, str) or not revoked_by.strip()
+        ):
+            raise ValueError(
+                "canonical API-key revocation requires actor attribution"
+            )
 
         revoked_key = replace(
             key,
             revoked=True,
             revoked_at=datetime.now(timezone.utc),
+            revoked_by=revoked_by or "system",
         )
 
         if self._in_memory:
             self._memory_store[key_id] = revoked_key
         else:
+            canonical_revoke = getattr(
+                self._persistence,
+                "revoke_api_key_with_principal",
+                None,
+            )
             atomic_revoke = getattr(self._persistence, "revoke_api_key", None)
-            if atomic_revoke is not None:
+            if key.tenant_id is not None and callable(canonical_revoke):
+                if not await canonical_revoke(revoked_key):
+                    self._evict_cached_key(key)
+                    return False
+            elif atomic_revoke is not None:
                 if not await atomic_revoke(revoked_key):
                     self._evict_cached_key(key)
                     return False
@@ -331,7 +412,55 @@ class APIKeyService:
         if old_key is None:
             return None
 
-        if not await self.revoke_key(key_id, old_key.tenant_id):
+        atomic_rotate = getattr(
+            self._persistence,
+            "rotate_api_key_with_principal",
+            None,
+        )
+        if (
+            old_key.tenant_id is not None
+            and not self._in_memory
+            and callable(atomic_rotate)
+        ):
+            now = datetime.now(timezone.utc)
+            raw_key = self.generate_raw_key()
+            replacement = APIKey(
+                key_id=f"axk_{secrets.token_hex(12)}",
+                key_hash=self.hash_key(raw_key),
+                project_id=old_key.project_id,
+                name=old_key.name,
+                scopes=list(old_key.scopes),
+                created_by=rotated_by,
+                tenant_id=old_key.tenant_id,
+                created_at=now,
+                expires_at=self._resolve_expiry(
+                    old_key.expires_at,
+                    old_key.tenant_id,
+                    now,
+                ),
+            )
+            revoked_key = replace(
+                old_key,
+                revoked=True,
+                revoked_at=now,
+                revoked_by=rotated_by,
+            )
+            if not await atomic_rotate(
+                revoked_key,
+                replacement,
+                self._principal_for_key(replacement),
+            ):
+                self._evict_cached_key(old_key)
+                return None
+            self._evict_cached_key(old_key)
+            self._cache_issued_key(replacement)
+            return replacement, raw_key
+
+        if not await self.revoke_key(
+            key_id,
+            old_key.tenant_id,
+            revoked_by=rotated_by,
+        ):
             return None
 
         return await self.issue_key(
@@ -376,3 +505,11 @@ class APIKeyService:
         if tenant_id is None:
             return await self._persistence.get_api_key(key_id)
         return await self._persistence.get_api_key(key_id, tenant_id)
+
+    async def get_key(
+        self,
+        key_id: str,
+        tenant_id: str | None = None,
+    ) -> APIKey | None:
+        """Return credential metadata from the authoritative tenant namespace."""
+        return await self._get_key(key_id, tenant_id)

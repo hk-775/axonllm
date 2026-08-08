@@ -33,13 +33,19 @@ from starlette.routing import Route
 from starlette.testclient import TestClient
 
 from src.gateway.middleware.admin_rbac import (
+    PLATFORM_RESOURCES,
     WRITE_EFFECT_PATHS,
     AdminRBACMiddleware,
     classify_access,
     parse_admin_scope,
     scope_implies,
 )
-from src.gateway.models import AuthMethod, RequestContext
+from src.gateway.models import (
+    AuthMethod,
+    Principal,
+    RequestContext,
+    TenantRole,
+)
 
 
 async def _ok(request: Request) -> JSONResponse:
@@ -164,6 +170,163 @@ class TestReadOnlyScopes:
     def test_read_does_not_reach_another_resource(self, client):
         assert _call(client, "GET", "/admin/projects",
                      scopes="admin:quotas:read").status_code == 403
+
+    @pytest.mark.parametrize("role", ["tenant_member", "tenant_auditor"])
+    def test_canonical_non_admin_roles_can_read_all_tenant_config(
+        self,
+        client,
+        role,
+    ):
+        for method, path in ROUTES:
+            resource = path.strip("/").split("/")[1]
+            if (
+                classify_access(method, path) == "read"
+                and resource not in PLATFORM_RESOURCES
+            ):
+                assert _call(
+                    client,
+                    method,
+                    path,
+                    roles=role,
+                ).status_code == 200
+
+    @pytest.mark.parametrize(
+        "role",
+        ["tenant_admin", "tenant_member", "tenant_auditor"],
+    )
+    def test_tenant_roles_cannot_read_platform_config(self, client, role):
+        assert _call(
+            client,
+            "GET",
+            "/admin/regions",
+            roles=role,
+        ).status_code == 403
+
+    @pytest.mark.parametrize("role", ["tenant_member", "tenant_auditor"])
+    def test_canonical_non_admin_roles_cannot_mutate(
+        self,
+        client,
+        role,
+    ):
+        for method, path in ROUTES:
+            if classify_access(method, path) == "write":
+                assert _call(
+                    client,
+                    method,
+                    path,
+                    roles=role,
+                ).status_code == 403
+
+    def test_tenant_admin_can_write_tenant_config(self, client):
+        assert _call(
+            client,
+            "POST",
+            "/admin/projects",
+            roles="tenant_admin",
+        ).status_code == 200
+
+    def test_tenant_admin_cannot_write_platform_config(self, client):
+        assert _call(
+            client,
+            "POST",
+            "/admin/regions/route",
+            roles="tenant_admin",
+        ).status_code == 403
+
+    def test_service_role_has_no_admin_access(self, client):
+        assert _call(
+            client,
+            "GET",
+            "/admin/projects",
+            roles="service",
+        ).status_code == 403
+
+    def test_canonical_service_cannot_elevate_with_legacy_admin_scope(self):
+        middleware = AdminRBACMiddleware(app=None, mode="ENFORCE")
+        context = RequestContext(
+            user_id="service-principal",
+            project_id="p1",
+            roles=["service"],
+            scopes=["admin:*"],
+            auth_method=AuthMethod.API_KEY,
+            tenant_id="tenant-a",
+            principal_id="principal:service",
+        )
+
+        assert not middleware._is_authorized(
+            context,
+            "/admin/projects",
+            "read",
+        )
+
+    def test_canonical_viewer_cannot_elevate_with_legacy_admin_scope(self):
+        middleware = AdminRBACMiddleware(app=None, mode="ENFORCE")
+        context = RequestContext(
+            user_id="viewer",
+            project_id="p1",
+            roles=["tenant_member"],
+            scopes=["admin:*"],
+            auth_method=AuthMethod.OIDC_JWT,
+            tenant_id="tenant-a",
+            principal_id="principal:viewer",
+        )
+
+        assert not middleware._is_authorized(
+            context,
+            "/admin/projects",
+            "write",
+        )
+
+    def test_legacy_service_keeps_admin_scope_compatibility(self):
+        middleware = AdminRBACMiddleware(app=None, mode="ENFORCE")
+        context = RequestContext(
+            user_id="legacy-service",
+            project_id="p1",
+            roles=["service"],
+            scopes=["admin:*"],
+            auth_method=AuthMethod.API_KEY,
+        )
+
+        assert middleware._is_authorized(
+            context,
+            "/admin/projects",
+            "write",
+        )
+
+    def test_platform_admin_needs_break_glass_for_tenant_config(self):
+        middleware = AdminRBACMiddleware(app=None, mode="ENFORCE")
+        principal = Principal(
+            principal_id="principal:platform-admin",
+            tenant_id="platform-home",
+            subject="platform-admin",
+            issuer="https://idp.example.test",
+            roles=frozenset({TenantRole.PLATFORM_ADMIN}),
+            auth_method=AuthMethod.OIDC_JWT,
+        )
+        context = RequestContext(
+            user_id=principal.principal_id,
+            project_id="",
+            roles=["platform_admin"],
+            scopes=[],
+            auth_method=AuthMethod.OIDC_JWT,
+            tenant_id=principal.tenant_id,
+            principal_id=principal.principal_id,
+            authorization_version=principal.authorization_version,
+        )
+
+        assert not middleware._is_authorized(
+            context,
+            "/admin/projects",
+            "read",
+        )
+        assert middleware._is_authorized(
+            context,
+            "/admin/projects",
+            "read",
+            break_glass_reason="support incident 123",
+            principal=principal,
+            target_tenant_id="tenant-a",
+        )
 
     def test_the_denial_names_the_scope_that_would_work(self, client):
         """A 403 should be actionable, not just a refusal."""

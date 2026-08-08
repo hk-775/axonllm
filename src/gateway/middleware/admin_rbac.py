@@ -1,8 +1,11 @@
 """Admin RBAC middleware — restricts /admin/* endpoints to authorized users.
 
-Checks that the authenticated context has either:
-- The 'admin' role, OR
-- A scope matching 'admin:*' or the specific admin action
+Canonical tenant roles are the primary policy:
+- ``tenant_admin`` may read and write tenant configuration.
+- ``tenant_member`` and ``tenant_auditor`` may read it, but never mutate it.
+- ``service`` has no control-plane access.
+
+Legacy ``admin`` roles and ``admin:*`` scopes remain supported during migration.
 
 Scopes name a resource and, optionally, an access level:
 
@@ -36,12 +39,51 @@ In ENFORCE mode, returns 403.
 from __future__ import annotations
 
 import logging
+import re
+import uuid
+from dataclasses import replace
+from typing import TYPE_CHECKING
 
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
+from src.gateway.auth.authorization import Action, ResourceRef, authorize
+from src.gateway.models import Principal, TenantRole
+
+if TYPE_CHECKING:
+    from src.gateway.security.audit_trail import AuditTrail
+
 logger = logging.getLogger(__name__)
+
+TENANT_ADMIN_ROLE = "tenant_admin"
+TENANT_READ_ROLES = frozenset({"tenant_member", "tenant_auditor"})
+PLATFORM_ADMIN_ROLE = "platform_admin"
+BREAK_GLASS_TARGET_HEADER = "x-axon-target-tenant"
+_TENANT_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
+CANONICAL_CONTROL_PLANE_ROLES = frozenset({
+    TENANT_ADMIN_ROLE,
+    *TENANT_READ_ROLES,
+    PLATFORM_ADMIN_ROLE,
+})
+PLATFORM_RESOURCES = frozenset({
+    "architecture",
+    "catalog",
+    "catalog-drift",
+    "health",
+    "models",
+    "pricing-drift",
+    "production-checklist",
+    "regions",
+})
+TENANT_RESOURCE_ACTIONS = {
+    "audit": (Action.AUDIT_READ, Action.AUDIT_EXPORT),
+    "keys": (Action.API_KEY_READ, Action.API_KEY_MANAGE),
+    "policies": (Action.POLICY_READ, Action.POLICY_WRITE),
+    "quotas": (Action.QUOTA_READ, Action.QUOTA_WRITE),
+    "usage": (Action.USAGE_READ, Action.USAGE_EXPORT),
+    "webhooks": (Action.WEBHOOK_READ, Action.WEBHOOK_WRITE),
+}
 
 READ_ONLY_WRITE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 """Methods that are reads by default, before the by-effect overrides below."""
@@ -119,9 +161,15 @@ def scope_implies(held: str, requested: str) -> bool:
 class AdminRBACMiddleware(BaseHTTPMiddleware):
     """Enforces role/scope requirements on admin endpoints."""
 
-    def __init__(self, app, mode: str = "ENFORCE"):
+    def __init__(
+        self,
+        app,
+        mode: str = "ENFORCE",
+        audit_trail: AuditTrail | None = None,
+    ):
         super().__init__(app)
         self.mode = mode
+        self._audit_trail = audit_trail
 
     async def dispatch(self, request: Request, call_next) -> Response:
         path = request.url.path
@@ -140,8 +188,75 @@ class AdminRBACMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         access = classify_access(request.method, path)
+        principal = getattr(request.state, "principal", None)
 
-        if self._is_authorized(ctx, path, access):
+        if self._is_break_glass_attempt(ctx, path, principal):
+            try:
+                target_tenant_id = self._target_tenant_id(request)
+                reason = self._break_glass_reason(request)
+            except ValueError as exc:
+                return self._invalid_break_glass_request(str(exc))
+
+            if not self._is_canonical_platform_context(ctx, principal):
+                return self._deny(
+                    "Break-glass access requires a server-resolved "
+                    "platform administrator."
+                )
+
+            action = self._tenant_action(path, access)
+            decision = authorize(
+                principal,
+                action,
+                ResourceRef(
+                    resource_type=self._extract_resource(path) or "admin",
+                    resource_id=path,
+                    tenant_id=target_tenant_id,
+                ),
+                break_glass_reason=reason,
+            )
+            try:
+                await self._record_break_glass(
+                    ctx=ctx,
+                    target_tenant_id=target_tenant_id,
+                    path=path,
+                    method=request.method,
+                    access=access,
+                    reason=reason,
+                    allowed=decision.allowed,
+                )
+            except Exception:
+                logger.error(
+                    "Break-glass audit append failed user=%s tenant=%s path=%s",
+                    ctx.user_id,
+                    target_tenant_id,
+                    path,
+                    exc_info=True,
+                )
+                return self._unavailable()
+
+            if not decision.allowed:
+                return self._deny(
+                    "Platform tenant access requires a distinct target tenant "
+                    "and a non-empty break-glass reason."
+                )
+
+            # The canonical principal remains attached with its home tenant.
+            # Only the handler context is rebound, after authorization and
+            # durable audit agree on the exact target.
+            request.state.context = replace(
+                ctx,
+                tenant_id=target_tenant_id,
+                project_id="",
+            )
+            request.state.break_glass_target_tenant_id = target_tenant_id
+            return await call_next(request)
+
+        if self._is_authorized(
+            ctx,
+            path,
+            access,
+            principal=principal,
+        ):
             return await call_next(request)
 
         if self.mode == "ENFORCE":
@@ -158,15 +273,193 @@ class AdminRBACMiddleware(BaseHTTPMiddleware):
         )
         return await call_next(request)
 
-    def _is_authorized(self, ctx, path: str = "", access: str = "write") -> bool:
+    def _is_break_glass_attempt(
+        self,
+        ctx,
+        path: str,
+        principal: Principal | None = None,
+    ) -> bool:
+        roles = set(getattr(ctx, "roles", ()))
+        principal_is_platform = (
+            isinstance(principal, Principal)
+            and TenantRole.PLATFORM_ADMIN in principal.roles
+        )
+        return (
+            (PLATFORM_ADMIN_ROLE in roles or principal_is_platform)
+            and self._extract_resource(path) not in PLATFORM_RESOURCES
+        )
+
+    @staticmethod
+    def _is_canonical_platform_context(ctx, principal: object) -> bool:
+        if not isinstance(principal, Principal):
+            return False
+        expected_roles = {role.value for role in principal.roles}
+        return (
+            TenantRole.PLATFORM_ADMIN in principal.roles
+            and getattr(ctx, "principal_id", None) == principal.principal_id
+            and getattr(ctx, "user_id", None) == principal.principal_id
+            and getattr(ctx, "tenant_id", None) == principal.tenant_id
+            and set(getattr(ctx, "roles", ())) == expected_roles
+            and getattr(ctx, "auth_method", None) is principal.auth_method
+            and getattr(ctx, "authorization_version", None)
+            == principal.authorization_version
+        )
+
+    @staticmethod
+    def _break_glass_reason(request: Request) -> str:
+        values = request.headers.getlist("x-axon-break-glass-reason")
+        if len(values) > 1:
+            raise ValueError(
+                "X-Axon-Break-Glass-Reason must be supplied at most once"
+            )
+        return values[0] if values else ""
+
+    @staticmethod
+    def _target_tenant_id(request: Request) -> str:
+        values = request.headers.getlist(BREAK_GLASS_TARGET_HEADER)
+        if len(values) != 1:
+            raise ValueError(
+                "Exactly one X-Axon-Target-Tenant header is required"
+            )
+        tenant_id = values[0]
+        if (
+            tenant_id != tenant_id.strip()
+            or _TENANT_ID_PATTERN.fullmatch(tenant_id) is None
+        ):
+            raise ValueError(
+                "X-Axon-Target-Tenant contains an invalid tenant identifier"
+            )
+
+        query_values = request.query_params.getlist("tenant_id")
+        if len(query_values) > 1 or any(
+            value != tenant_id for value in query_values
+        ):
+            raise ValueError(
+                "tenant_id query parameters must not conflict with "
+                "X-Axon-Target-Tenant"
+            )
+        return tenant_id
+
+    def _tenant_action(self, path: str, access: str) -> Action:
+        if "/members" in path:
+            return (
+                Action.MEMBERSHIP_READ
+                if access == "read"
+                else Action.MEMBERSHIP_WRITE
+            )
+        if "/keys" in path:
+            return (
+                Action.API_KEY_READ
+                if access == "read"
+                else Action.API_KEY_MANAGE
+            )
+        if path == "/admin/audit/export":
+            return Action.AUDIT_EXPORT
+        if path == "/admin/usage/export":
+            return Action.USAGE_EXPORT
+        resource = self._extract_resource(path)
+        read_action, write_action = TENANT_RESOURCE_ACTIONS.get(
+            resource,
+            (Action.TENANT_CONFIG_READ, Action.TENANT_CONFIG_WRITE),
+        )
+        return read_action if access == "read" else write_action
+
+    async def _record_break_glass(
+        self,
+        *,
+        ctx,
+        target_tenant_id: str,
+        path: str,
+        method: str,
+        access: str,
+        reason: str,
+        allowed: bool,
+    ) -> None:
+        if self._audit_trail is None:
+            raise RuntimeError("break-glass audit trail is not configured")
+        principal_id = getattr(ctx, "principal_id", None)
+        if not isinstance(principal_id, str) or not principal_id.strip():
+            raise RuntimeError("break-glass principal context is missing")
+        await self._audit_trail.record_break_glass_access(
+            user_id=ctx.user_id,
+            principal_id=principal_id,
+            tenant_id=target_tenant_id,
+            project_id="",
+            request_id=f"breakglass_{uuid.uuid4().hex}",
+            route=path,
+            method=method.upper(),
+            reason=reason,
+            result="allowed" if allowed else "denied",
+            access=access,
+        )
+
+    def _is_authorized(
+        self,
+        ctx,
+        path: str = "",
+        access: str = "write",
+        *,
+        break_glass_reason: str | None = None,
+        principal: Principal | None = None,
+        target_tenant_id: str | None = None,
+    ) -> bool:
         """Whether ``ctx`` may perform ``access`` on ``path``.
 
         ``access`` defaults to ``"write"`` so that a caller which forgets to pass
         it gets the stricter check rather than silently authorizing mutations.
         """
-        if "admin" in ctx.roles:
-            return True
+        roles = set(ctx.roles)
         resource = self._extract_resource(path)
+        canonical = (
+            getattr(ctx, "principal_id", None) is not None
+            or not roles.isdisjoint(CANONICAL_CONTROL_PLANE_ROLES)
+        )
+
+        if canonical:
+            if resource in PLATFORM_RESOURCES:
+                if not isinstance(principal, Principal):
+                    return False
+                platform_action = (
+                    Action.PLATFORM_READ
+                    if access == "read"
+                    else Action.PLATFORM_WRITE
+                )
+                return authorize(
+                    principal,
+                    platform_action,
+                    ResourceRef(
+                        resource_type=resource,
+                        resource_id=path,
+                        tenant_id=None,
+                    ),
+                ).allowed
+            if PLATFORM_ADMIN_ROLE in roles:
+                if (
+                    not self._is_canonical_platform_context(ctx, principal)
+                    or target_tenant_id is None
+                ):
+                    return False
+                return authorize(
+                    principal,
+                    self._tenant_action(path, access),
+                    ResourceRef(
+                        resource_type=resource or "admin",
+                        resource_id=path or "/admin",
+                        tenant_id=target_tenant_id,
+                    ),
+                    break_glass_reason=break_glass_reason,
+                ).allowed
+            if TENANT_ADMIN_ROLE in roles:
+                return True
+            if not roles.isdisjoint(TENANT_READ_ROLES):
+                return access == "read"
+            # Canonical authority comes only from server-held roles. Legacy
+            # admin scopes must not turn a service principal into a tenant
+            # administrator.
+            return False
+
+        if "admin" in roles:
+            return True
         for scope in ctx.scopes:
             if not scope.startswith("admin:"):
                 continue
@@ -192,6 +485,32 @@ class AdminRBACMiddleware(BaseHTTPMiddleware):
                     "type": "authorization_error",
                     "message": message,
                     "code": "admin_access_denied",
+                }
+            },
+        )
+
+    @staticmethod
+    def _unavailable() -> JSONResponse:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "error": {
+                    "type": "service_unavailable",
+                    "message": "Break-glass authorization is unavailable.",
+                    "code": "break_glass_audit_unavailable",
+                }
+            },
+        )
+
+    @staticmethod
+    def _invalid_break_glass_request(message: str) -> JSONResponse:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": {
+                    "type": "invalid_request",
+                    "message": message,
+                    "code": "invalid_break_glass_target",
                 }
             },
         )

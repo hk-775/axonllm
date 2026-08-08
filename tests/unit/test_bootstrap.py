@@ -99,7 +99,10 @@ class TestBuildStaletteApp:
         assert response.json() == {
             "status": "ready",
             "ready": True,
-            "dependencies": {"persistence": "disabled"},
+            "dependencies": {
+                "persistence": "disabled",
+                "security_event_outbox": "disabled",
+            },
         }
 
 
@@ -224,6 +227,9 @@ class TestPersistedPoliciesAreLoadedAtStartup:
                 super().__init__()
                 self._enabled = True
 
+            async def create_table_if_not_exists(self) -> None:
+                return None
+
             def _get_table(self):
                 class _Table:
                     def scan(self, **kwargs):
@@ -318,6 +324,9 @@ class TestSpendCountersAtStartup:
             def __init__(self) -> None:
                 super().__init__()
                 self._enabled = True
+
+            async def create_table_if_not_exists(self) -> None:
+                return None
 
             def _get_table(self):
                 class _Table:

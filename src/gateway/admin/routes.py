@@ -18,6 +18,8 @@ import io
 import logging
 import pathlib
 import uuid
+from copy import deepcopy
+from dataclasses import replace
 from datetime import datetime
 from typing import TYPE_CHECKING
 
@@ -117,6 +119,11 @@ from src.gateway.efficiency_analyzer import EfficiencyAnalyzer
 from src.gateway.health_tracker import ProviderHealthTracker
 from src.gateway.model_registry import ModelRegistry
 from src.gateway.models import GuardrailRule, Project, UsageFilters
+from src.gateway.persistence import (
+    CanonicalMembershipConflictError,
+    CanonicalMembershipNotFoundError,
+    PersistenceConflictError,
+)
 from src.gateway.provider_config import ProviderConfig
 from src.gateway.semantic_efficiency import SemanticEfficiencyEngine
 from .page_style import (
@@ -131,6 +138,100 @@ if TYPE_CHECKING:
     from src.gateway.persistence import DynamoPersistence
 
 logger = logging.getLogger(__name__)
+
+
+def _request_tenant_id(request: Request) -> str | None:
+    if request is None:
+        return None
+    state = getattr(request, "state", None)
+    context = getattr(state, "context", None)
+    tenant_id = getattr(context, "tenant_id", None)
+    return tenant_id if isinstance(tenant_id, str) and tenant_id else None
+
+
+def _user_config_key(
+    tenant_id: str | None,
+    user_id: str,
+) -> str:
+    if tenant_id is None:
+        return user_id
+    return (
+        f"tenant:{len(tenant_id)}:{tenant_id}:"
+        f"user:{len(user_id)}:{user_id}"
+    )
+
+
+def _revision_headers(revision: int) -> dict[str, str]:
+    return {"ETag": f'"{revision}"'}
+
+
+def _parse_if_match_revision(
+    request: Request,
+    current_revision: int,
+) -> tuple[int | None, JSONResponse | None]:
+    """Return the requested CAS revision, defaulting to the loaded revision."""
+    headers = getattr(request, "headers", {})
+    raw = headers.get("if-match") if headers is not None else None
+    if raw is None or raw.strip() == "*":
+        return current_revision, None
+
+    value = raw.strip()
+    if (
+        "," in value
+        or value.startswith("W/")
+        or (value.startswith('"') != value.endswith('"'))
+    ):
+        return None, JSONResponse(
+            {
+                "error": {
+                    "type": "invalid_request",
+                    "code": "invalid_revision",
+                    "message": "If-Match must contain one strong revision ETag",
+                }
+            },
+            status_code=400,
+        )
+    if value.startswith('"'):
+        value = value[1:-1]
+    try:
+        revision = int(value)
+    except (TypeError, ValueError):
+        revision = -1
+    if revision < 0:
+        return None, JSONResponse(
+            {
+                "error": {
+                    "type": "invalid_request",
+                    "code": "invalid_revision",
+                    "message": "If-Match revision must be a non-negative integer",
+                }
+            },
+            status_code=400,
+        )
+    return revision, None
+
+
+def _staged_project(project: Project, **changes) -> Project:
+    """Detach every mutable project field before applying a candidate change."""
+    detached = {
+        "allowed_models": deepcopy(project.allowed_models),
+        "guardrail_rules": deepcopy(project.guardrail_rules),
+        "members": deepcopy(project.members),
+    }
+    detached.update(changes)
+    return replace(project, **detached)
+
+
+def _next_revision(value: object, expected: int, resource: str) -> int:
+    if (
+        not isinstance(value, int)
+        or isinstance(value, bool)
+        or value != expected + 1
+    ):
+        raise RuntimeError(
+            f"{resource} persistence returned an invalid revision"
+        )
+    return value
 
 
 def _parse_semantic_threshold(raw) -> tuple[float | None, str | None]:
@@ -318,7 +419,26 @@ class AdminAPI:
         """
         return await self.cost_tracker.synced_records()
 
-    async def _fleet_spend(self, scope: str, ident: str, local: float) -> float:
+    async def _tenant_records(self, request: Request) -> list:
+        """Return the synced usage view constrained to the caller's tenant."""
+        tenant_id = _request_tenant_id(request)
+        records = await self._synced_records()
+        if tenant_id is None:
+            return records
+        return [
+            record
+            for record in records
+            if record.tenant_id == tenant_id
+        ]
+
+    async def _fleet_spend(
+        self,
+        scope: str,
+        ident: str,
+        local: float,
+        *,
+        tenant_id: str | None = None,
+    ) -> float:
         """Exact fleet-wide spend, falling back to the local figure.
 
         Kept separate from ``_synced_records`` because money has a cheaper and
@@ -326,27 +446,24 @@ class AdminAPI:
         is neither TTL-stale nor subject to record trimming. Where a page shows
         both, the cost is exact and the counts are up to one TTL behind.
         """
-        total = await self.cost_tracker.fleet_spend(scope, ident)
+        total = await self.cost_tracker.fleet_spend(
+            scope,
+            ident,
+            tenant_id=tenant_id,
+        )
         return local if total is None else total
 
     async def _note_config_write(self) -> None:
-        """Tell the sync which version this instance's own write produced.
-
-        Called after a project or user config write. Without it the writing
-        instance sees its own bump as a remote change on the next poll and
-        re-scans both tables to learn what it already knows — harmless but a
-        wasted pair of scans per write.
-        """
-        if self._config_sync is None or self._persistence is None:
+        """Invalidate any in-flight snapshot after a local config commit."""
+        if self._config_sync is None:
             return
-        if not self._persistence.enabled:
-            return
-        try:
-            version = await self._persistence.get_config_version()
-        except Exception:
-            logger.warning("Could not read back the config version", exc_info=True)
-            return
-        self._config_sync.note_local_version(version)
+        invalidate = getattr(
+            self._config_sync,
+            "invalidate_local_config",
+            None,
+        )
+        if callable(invalidate):
+            invalidate()
 
     async def _refresh_config(self) -> None:
         """Converge on the fleet's config before listing or reading it.
@@ -366,13 +483,173 @@ class AdminAPI:
                 exc_info=True,
             )
 
+    async def _get_user_config(
+        self,
+        user_id: str,
+        tenant_id: str | None,
+    ) -> dict:
+        """Read a user config without falling across tenant namespaces."""
+        key = _user_config_key(tenant_id, user_id)
+        if tenant_id is None:
+            return self._user_configs.get(key, {})
+        if self._persistence is None or not self._persistence.enabled:
+            return self._user_configs.get(key, {})
+        loader = getattr(
+            self._persistence,
+            "get_tenant_user_config",
+            None,
+        )
+        if not callable(loader):
+            raise RuntimeError("tenant user config loading is unavailable")
+        config = await loader(tenant_id, user_id)
+        if config is None:
+            self._user_configs.pop(key, None)
+            return {}
+        self._user_configs[key] = config
+        return config
+
+    async def _save_user_config(
+        self,
+        user_id: str,
+        tenant_id: str | None,
+        config: dict,
+        *,
+        expected_revision: int,
+    ) -> dict:
+        """Commit one detached config, then publish its new revision."""
+        key = _user_config_key(tenant_id, user_id)
+        staged = deepcopy(config)
+        if self._persistence is not None and self._persistence.enabled:
+            if tenant_id is None:
+                revision = await self._persistence.save_user_config(
+                    user_id,
+                    staged,
+                    expected_revision=expected_revision,
+                )
+            else:
+                saver = getattr(
+                    self._persistence,
+                    "save_tenant_user_config",
+                    None,
+                )
+                if not callable(saver):
+                    raise RuntimeError(
+                        "tenant user config persistence is unavailable"
+                    )
+                revision = await saver(
+                    tenant_id,
+                    user_id,
+                    staged,
+                    expected_revision=expected_revision,
+                )
+            revision = _next_revision(
+                revision,
+                expected_revision,
+                "user config",
+            )
+            await self._note_config_write()
+        else:
+            revision = expected_revision + 1
+        committed = {**staged, "revision": revision}
+        self._user_configs[key] = committed
+        return committed
+
+    async def _reload_user_config(
+        self,
+        user_id: str,
+        tenant_id: str | None,
+    ) -> dict | None:
+        """Adopt the authoritative config after rejecting a stale writer."""
+        if self._persistence is None or not self._persistence.enabled:
+            return None
+        key = _user_config_key(tenant_id, user_id)
+        try:
+            if tenant_id is not None:
+                loader = getattr(
+                    self._persistence,
+                    "get_tenant_user_config",
+                    None,
+                )
+                if not callable(loader):
+                    return None
+                config = await loader(tenant_id, user_id)
+            else:
+                loader = getattr(
+                    self._persistence,
+                    "load_user_configs_or_none",
+                    None,
+                )
+                if callable(loader):
+                    configs = await loader()
+                else:
+                    configs = await self._persistence.load_user_configs()
+                if configs is None:
+                    return None
+                config = configs.get(user_id)
+        except Exception:
+            logger.warning(
+                "Failed to reload user config for %s after a conflict",
+                user_id,
+                exc_info=True,
+            )
+            return None
+
+        if config is None:
+            self._user_configs.pop(key, None)
+            return None
+        committed = deepcopy(config)
+        self._user_configs[key] = committed
+        self.cost_tracker.register_user(
+            user_id,
+            budget_limit=committed.get("budget_limit"),
+            alert_threshold=committed.get("alert_threshold"),
+            tenant_id=tenant_id,
+        )
+        return committed
+
+    @staticmethod
+    def _user_config_write_conflict(
+        revision: int | None = None,
+    ) -> JSONResponse:
+        error: dict[str, object] = {
+            "type": "write_conflict",
+            "code": "user_config_write_conflict",
+            "message": "User configuration changed concurrently; reload and retry",
+        }
+        headers = None
+        if revision is not None:
+            error["revision"] = revision
+            headers = _revision_headers(revision)
+        return JSONResponse(
+            {"error": error},
+            status_code=409,
+            headers=headers,
+        )
+
+    @staticmethod
+    def _user_config_store_unavailable() -> JSONResponse:
+        return JSONResponse(
+            {
+                "error": {
+                    "type": "service_unavailable",
+                    "message": "User configuration persistence is unavailable",
+                }
+            },
+            status_code=503,
+        )
+
     # ------------------------------------------------------------------
     # GET /admin/overview
     # ------------------------------------------------------------------
 
     async def overview(self, request: Request) -> JSONResponse:
         """Total requests, cost, active projects, and active users."""
-        records = await self._synced_records()
+        tenant_id = _request_tenant_id(request)
+        records = [
+            record
+            for record in await self._synced_records()
+            if tenant_id is None or record.tenant_id == tenant_id
+        ]
         total_requests = len(records)
         total_cost = sum(r.cost for r in records)
         active_projects = len({r.project_id for r in records})
@@ -399,22 +676,36 @@ class AdminAPI:
 
     async def list_projects(self, request: Request) -> JSONResponse:
         """List all projects with spend, budget utilization, and request counts."""
+        tenant_id = _request_tenant_id(request)
         result = []
         # One refresh for the whole list, not one per project: the scan returns
         # every project's records at once, so filtering the synced list in the
         # loop costs nothing extra.
-        synced = await self._synced_records()
-        projects = list((await self._all_projects()).values())
+        synced = [
+            record
+            for record in await self._synced_records()
+            if tenant_id is None or record.tenant_id == tenant_id
+        ]
+        projects = list((await self._all_projects(tenant_id)).values())
 
         # Counter reads concurrently rather than one per iteration. Each is a
         # separate GetItem in a thread, so sequentially they add up: 300 projects
         # at ~8ms is nearly 3s of an operator staring at a spinner, for reads that
         # do not depend on each other.
         statuses = await asyncio.gather(*(
-            self.cost_tracker.check_budget(p.project_id) for p in projects
+            self.cost_tracker.check_budget(
+                p.project_id,
+                tenant_id=p.tenant_id,
+            )
+            for p in projects
         ))
         spends = await asyncio.gather(*(
-            self._fleet_spend("project", p.project_id, s.current_spend)
+            self._fleet_spend(
+                "project",
+                p.project_id,
+                s.current_spend,
+                tenant_id=p.tenant_id,
+            )
             for p, s in zip(projects, statuses)
         ))
 
@@ -431,6 +722,7 @@ class AdminAPI:
             result.append({
                 "project_id": project.project_id,
                 "name": project.name,
+                "revision": project.revision,
                 "current_spend": current_spend,
                 "budget_limit": project.budget_limit,
                 "budget_utilization_pct": utilization,
@@ -445,7 +737,8 @@ class AdminAPI:
     async def get_project(self, request: Request) -> JSONResponse:
         """Project detail with users, usage breakdown, and config."""
         project_id = request.path_params["id"]
-        project = await self._get_project(project_id)
+        tenant_id = _request_tenant_id(request)
+        project = await self._get_project(project_id, tenant_id)
         if project is None:
             return JSONResponse(
                 {"error": {"type": "not_found", "message": f"Project '{project_id}' not found"}},
@@ -455,6 +748,7 @@ class AdminAPI:
         records = [
             r for r in await self._synced_records()
             if r.project_id == project_id
+            and (tenant_id is None or r.tenant_id == tenant_id)
         ]
         users = list({r.user_id for r in records})
 
@@ -491,6 +785,7 @@ class AdminAPI:
         return JSONResponse({
             "project_id": project.project_id,
             "name": project.name,
+            "revision": project.revision,
             "budget_limit": project.budget_limit,
             "alert_threshold": project.alert_threshold,
             "allowed_models": project.allowed_models,
@@ -512,7 +807,7 @@ class AdminAPI:
             "total_cached_tokens": total_cached_tokens,
             "total_cache_creation_tokens": total_cache_creation_tokens,
             "cache_hit_rate": cache_hit_rate,
-        })
+        }, headers=_revision_headers(project.revision))
 
     # ------------------------------------------------------------------
     # POST /admin/projects
@@ -523,6 +818,24 @@ class AdminAPI:
         body = await request.json()
 
         project_id = body.get("project_id", str(uuid.uuid4()))
+        tenant_id = _request_tenant_id(request)
+        if (
+            tenant_id is not None
+            and self._app_config.canonical_identity_required
+            and body.get("members")
+        ):
+            return JSONResponse(
+                {
+                    "error": {
+                        "type": "invalid_request",
+                        "message": (
+                            "Canonical project members must be granted "
+                            "through the project member endpoint"
+                        ),
+                    }
+                },
+                status_code=400,
+            )
         name = body.get("name")
         if not name:
             return JSONResponse(
@@ -553,6 +866,7 @@ class AdminAPI:
         project = Project(
             project_id=project_id,
             name=name,
+            tenant_id=tenant_id,
             budget_limit=body.get("budget_limit"),
             alert_threshold=body.get("alert_threshold"),
             allowed_models=body.get("allowed_models"),
@@ -568,19 +882,43 @@ class AdminAPI:
             members=body.get("members", []),
         )
 
-        self.projects[project_id] = project
-
-        # Persist to DynamoDB if enabled
+        revision = 1
         if self._persistence is not None and self._persistence.enabled:
             try:
-                await self._persistence.save_project(project)
+                create = getattr(self._persistence, "create_project", None)
+                if callable(create):
+                    revision = await create(project)
+                else:
+                    revision = await self._persistence.save_project(
+                        project,
+                        expected_revision=0,
+                    )
+                revision = _next_revision(revision, 0, "project")
                 await self._note_config_write()
+            except (PersistenceConflictError, ValueError):
+                latest = await self._reload_project(project_id, tenant_id)
+                return self._project_write_conflict(
+                    latest.revision if latest is not None else None
+                )
             except Exception:
                 logger.warning(
                     "Failed to persist project %s to DynamoDB",
                     project_id,
                     exc_info=True,
                 )
+                return JSONResponse(
+                    {
+                        "error": {
+                            "type": "service_unavailable",
+                            "message": "Project persistence is unavailable",
+                        }
+                    },
+                    status_code=503,
+                )
+
+        project = replace(project, revision=revision)
+        if tenant_id is None:
+            self.projects[project_id] = project
 
         # Register budget with cost tracker if configured
         if project.budget_limit is not None or project.alert_threshold is not None:
@@ -588,11 +926,18 @@ class AdminAPI:
                 project_id,
                 budget_limit=project.budget_limit,
                 alert_threshold=project.alert_threshold,
+                tenant_id=tenant_id,
             )
 
         return JSONResponse(
-            {"project_id": project_id, "name": project.name, "status": "created"},
+            {
+                "project_id": project_id,
+                "name": project.name,
+                "revision": project.revision,
+                "status": "created",
+            },
             status_code=201,
+            headers=_revision_headers(project.revision),
         )
 
     # ------------------------------------------------------------------
@@ -602,7 +947,10 @@ class AdminAPI:
     async def update_project(self, request: Request) -> JSONResponse:
         """Update project config (hot-reload, no restart)."""
         project_id = request.path_params["id"]
-        project = await self._get_project(project_id)
+        project = await self._get_project(
+            project_id,
+            _request_tenant_id(request),
+        )
         if project is None:
             return JSONResponse(
                 {"error": {"type": "not_found", "message": f"Project '{project_id}' not found"}},
@@ -610,22 +958,57 @@ class AdminAPI:
             )
 
         body = await request.json()
+        if (
+            project.tenant_id is not None
+            and self._app_config.canonical_identity_required
+            and "members" in body
+        ):
+            return JSONResponse(
+                {
+                    "error": {
+                        "type": "invalid_request",
+                        "message": (
+                            "Canonical project members must be changed "
+                            "through the project member endpoint"
+                        ),
+                    }
+                },
+                status_code=400,
+            )
 
-        # Update mutable fields if present in the body
+        expected_revision, error = _parse_if_match_revision(
+            request,
+            project.revision,
+        )
+        if error is not None:
+            return error
+        assert expected_revision is not None
+        if expected_revision != project.revision:
+            latest = await self._reload_project(
+                project_id,
+                project.tenant_id,
+            )
+            return self._project_write_conflict(
+                latest.revision if latest is not None else None
+            )
+
+        updates: dict[str, object] = {}
         if "name" in body:
-            project.name = body["name"]
+            updates["name"] = body["name"]
         if "budget_limit" in body:
-            project.budget_limit = body["budget_limit"]
+            updates["budget_limit"] = body["budget_limit"]
         if "alert_threshold" in body:
-            project.alert_threshold = body["alert_threshold"]
+            updates["alert_threshold"] = body["alert_threshold"]
         if "allowed_models" in body:
-            project.allowed_models = body["allowed_models"]
+            updates["allowed_models"] = deepcopy(body["allowed_models"])
         if "cache_enabled" in body:
-            project.cache_enabled = body["cache_enabled"]
+            updates["cache_enabled"] = body["cache_enabled"]
         if "cache_ttl_seconds" in body:
-            project.cache_ttl_seconds = body["cache_ttl_seconds"]
+            updates["cache_ttl_seconds"] = body["cache_ttl_seconds"]
         if "semantic_cache_enabled" in body:
-            project.semantic_cache_enabled = body["semantic_cache_enabled"]
+            updates["semantic_cache_enabled"] = body[
+                "semantic_cache_enabled"
+            ]
         if "semantic_cache_threshold" in body:
             value, err = _parse_semantic_threshold(body["semantic_cache_threshold"])
             if err is not None:
@@ -633,19 +1016,21 @@ class AdminAPI:
                     {"error": {"type": "invalid_request", "message": err}},
                     status_code=400,
                 )
-            project.semantic_cache_threshold = value
+            updates["semantic_cache_threshold"] = value
         if "log_level" in body:
-            project.log_level = body["log_level"]
+            updates["log_level"] = body["log_level"]
         if "log_destination" in body:
-            project.log_destination = body["log_destination"]
+            updates["log_destination"] = body["log_destination"]
         if "rate_limit_rpm" in body:
-            project.rate_limit_rpm = body["rate_limit_rpm"]
+            updates["rate_limit_rpm"] = body["rate_limit_rpm"]
         if "members" in body:
-            project.members = body["members"]
+            updates["members"] = deepcopy(body["members"])
         if "prompt_caching_enabled" in body:
-            project.prompt_caching_enabled = body["prompt_caching_enabled"]
+            updates["prompt_caching_enabled"] = body[
+                "prompt_caching_enabled"
+            ]
         if "guardrail_rules" in body:
-            project.guardrail_rules = [
+            updates["guardrail_rules"] = [
                 GuardrailRule(
                     name=g["name"],
                     rule_type=g.get("rule_type", "keyword_block"),
@@ -655,34 +1040,32 @@ class AdminAPI:
                 )
                 for g in body["guardrail_rules"]
             ]
-
-        # Hot-reload budget in cost tracker
-        if project.budget_limit is not None or project.alert_threshold is not None:
-            self.cost_tracker.register_project(
-                project_id,
-                budget_limit=project.budget_limit,
-                alert_threshold=project.alert_threshold,
-            )
-
-        # Persist to DynamoDB if enabled
-        if self._persistence is not None and self._persistence.enabled:
-            try:
-                await self._persistence.save_project(project)
-                await self._note_config_write()
-            except Exception:
-                logger.warning(
-                    "Failed to persist project %s to DynamoDB",
-                    project_id,
-                    exc_info=True,
-                )
-
-        return JSONResponse({"project_id": project_id, "status": "updated"})
+        staged = _staged_project(project, **updates)
+        committed, error = await self._commit_project(
+            staged,
+            expected_revision=expected_revision,
+        )
+        if error is not None:
+            return error
+        assert committed is not None
+        return JSONResponse(
+            {
+                "project_id": project_id,
+                "revision": committed.revision,
+                "status": "updated",
+            },
+            headers=_revision_headers(committed.revision),
+        )
 
     # ------------------------------------------------------------------
     # POST /admin/projects/{id}/members
     # ------------------------------------------------------------------
 
-    async def _get_project(self, project_id: str):
+    async def _get_project(
+        self,
+        project_id: str,
+        tenant_id: str | None = None,
+    ):
         """Resolve a project by id, reading through to DynamoDB on a miss.
 
         ``self.projects`` is hydrated once at startup and is per-process, so with
@@ -698,24 +1081,30 @@ class AdminAPI:
         which is why authentication never exhibited this bug while project reads
         did.
 
-        The resolved project is inserted into ``self.projects`` rather than
-        returned detached, and that is load-bearing: ``update_project``,
-        ``add_member`` and the model handlers all mutate the returned object in
-        place and rely on the dict holding the same reference (see
-        ``_persist_project``). Returning a copy would make those writes apply to
-        an object nothing else can see, turning a visible bug into a silent one.
+        Legacy projects are cached in ``self.projects``. Writers stage detached
+        copies and replace that entry only after their conditional write commits.
         """
-        project = self.projects.get(project_id)
-        if project is not None:
-            return project
+        if tenant_id is None:
+            project = self.projects.get(project_id)
+            if project is not None:
+                return project
         if self._persistence is None or not self._persistence.enabled:
             return None
-        project = await self._persistence.get_project(project_id)
-        if project is not None:
+        if tenant_id is None:
+            project = await self._persistence.get_project(project_id)
+        else:
+            project = await self._persistence.get_project(
+                project_id,
+                tenant_id,
+            )
+        if project is not None and tenant_id is None:
             self.projects[project_id] = project
         return project
 
-    async def _all_projects(self) -> dict:
+    async def _all_projects(
+        self,
+        tenant_id: str | None = None,
+    ) -> dict:
         """Every project, including ones created or changed by another instance.
 
         The list endpoint cannot read through on a miss the way ``_get_project``
@@ -729,13 +1118,28 @@ class AdminAPI:
         callers that construct ``AdminAPI`` without a sync, where the old
         behaviour is better than none.
 
-        In the fallback, locally-known objects win over the scanned copy: a
-        request that is mid-mutation holds a reference to the dict's object, and
-        replacing it would show a pre-mutation copy. That also means a project
-        another instance *edited* keeps its stale local fields, which is the gap
-        the sync closes — see ``ConfigSyncService._refresh`` for why adopting the
-        stored copy is the right trade once versions make it bounded.
+        In the fallback, locally-known objects win over the scanned copy. The
+        fleet sync uses the shared version signal to adopt later revisions.
         """
+        if tenant_id is not None:
+            if self._persistence is None or not self._persistence.enabled:
+                return {
+                    project.project_id: project
+                    for project in self.projects.values()
+                    if project.tenant_id == tenant_id
+                }
+            list_tenant_projects = getattr(
+                self._persistence,
+                "list_tenant_projects",
+                None,
+            )
+            if not callable(list_tenant_projects):
+                return {}
+            projects = await list_tenant_projects(tenant_id)
+            return {
+                project.project_id: project
+                for project in projects
+            }
         if self._config_sync is not None:
             await self._refresh_config()
             return self.projects
@@ -750,36 +1154,215 @@ class AdminAPI:
             self.projects.setdefault(project_id, project)
         return self.projects
 
-    async def _persist_project(self, project) -> None:
-        """Write a mutated project back to DynamoDB, if persistence is on.
+    @staticmethod
+    def _project_store_unavailable() -> JSONResponse:
+        return JSONResponse(
+            {
+                "error": {
+                    "type": "service_unavailable",
+                    "message": "Project persistence is unavailable",
+                }
+            },
+            status_code=503,
+        )
 
-        Every route that changes a field of ``Project`` has to call this. The
-        object in ``self.projects`` is shared, so mutating it updates what ``GET``
-        returns whether or not the write happens — which is why forgetting the
-        call produces an endpoint that looks like it worked and loses the change
-        on the next restart. Extracted rather than repeated so the omission is
-        harder to make: ``add_member``/``remove_member`` were missing it while the
-        two model handlers below had it, on the same object.
+    @staticmethod
+    def _project_write_conflict(
+        revision: int | None = None,
+    ) -> JSONResponse:
+        error: dict[str, object] = {
+            "type": "write_conflict",
+            "code": "project_write_conflict",
+            "message": "Project changed concurrently; reload and retry",
+        }
+        headers = None
+        if revision is not None:
+            error["revision"] = revision
+            headers = _revision_headers(revision)
+        return JSONResponse(
+            {"error": error},
+            status_code=409,
+            headers=headers,
+        )
 
-        A failure is logged and swallowed, matching the rest of the admin API: the
-        in-memory change already succeeded, and ``last_write_error`` on the
-        persistence layer is what surfaces the drop to a health probe.
-        """
+    def _publish_project(self, project: Project) -> None:
+        """Replace shared legacy state only after a durable commit."""
+        if project.tenant_id is None:
+            self.projects[project.project_id] = project
+
+    def _register_project_budget(self, project: Project) -> None:
+        self.cost_tracker.register_project(
+            project.project_id,
+            budget_limit=project.budget_limit,
+            alert_threshold=project.alert_threshold,
+            tenant_id=project.tenant_id,
+        )
+
+    async def _reload_project(
+        self,
+        project_id: str,
+        tenant_id: str | None,
+    ) -> Project | None:
+        """Adopt the authoritative project after rejecting a stale writer."""
+        if self._persistence is None or not self._persistence.enabled:
+            return None
+        try:
+            if tenant_id is None:
+                project = await self._persistence.get_project(project_id)
+            else:
+                project = await self._persistence.get_project(
+                    project_id,
+                    tenant_id,
+                )
+        except Exception:
+            logger.warning(
+                "Failed to reload project %s after a conflict",
+                project_id,
+                exc_info=True,
+            )
+            return None
+        if project is not None:
+            self._publish_project(project)
+            self._register_project_budget(project)
+        return project
+
+    async def _commit_project(
+        self,
+        staged: Project,
+        *,
+        expected_revision: int,
+    ) -> tuple[Project | None, JSONResponse | None]:
+        """CAS a detached candidate, then publish and arm its budget."""
         if self._persistence is not None and self._persistence.enabled:
             try:
-                await self._persistence.save_project(project)
+                revision = await self._persistence.save_project(
+                    staged,
+                    expected_revision=expected_revision,
+                )
+                revision = _next_revision(
+                    revision,
+                    expected_revision,
+                    "project",
+                )
                 await self._note_config_write()
+            except PersistenceConflictError:
+                latest = await self._reload_project(
+                    staged.project_id,
+                    staged.tenant_id,
+                )
+                return None, self._project_write_conflict(
+                    latest.revision if latest is not None else None
+                )
             except Exception:
                 logger.warning(
                     "Failed to persist project %s to DynamoDB",
-                    project.project_id,
+                    staged.project_id,
                     exc_info=True,
                 )
+                return None, self._project_store_unavailable()
+        else:
+            revision = expected_revision + 1
+
+        committed = replace(staged, revision=revision)
+        self._publish_project(committed)
+        self._register_project_budget(committed)
+        return committed, None
+
+    async def _set_canonical_project_membership(
+        self,
+        project: Project,
+        user_id: object,
+        *,
+        granted: bool,
+    ) -> tuple[Project | None, bool, JSONResponse | None]:
+        """Apply one tenant grant through the authoritative transaction."""
+        if not isinstance(user_id, str) or not user_id.strip():
+            return None, False, JSONResponse(
+                {
+                    "error": {
+                        "type": "invalid_request",
+                        "message": "user_id must be a non-empty SCIM user id",
+                    }
+                },
+                status_code=400,
+            )
+        scim_user_id = user_id.removeprefix("scim:")
+        setter = getattr(
+            self._persistence,
+            "set_tenant_project_membership",
+            None,
+        )
+        if project.tenant_id is None or not callable(setter):
+            return None, False, JSONResponse(
+                {
+                    "error": {
+                        "type": "service_unavailable",
+                        "message": (
+                            "Canonical project membership is unavailable"
+                        ),
+                    }
+                },
+                status_code=503,
+            )
+        try:
+            updated, changed = await setter(
+                project.tenant_id,
+                project.project_id,
+                scim_user_id,
+                granted=granted,
+            )
+        except CanonicalMembershipNotFoundError as exc:
+            return None, False, JSONResponse(
+                {
+                    "error": {
+                        "type": "not_found",
+                        "message": str(exc),
+                    }
+                },
+                status_code=404,
+            )
+        except CanonicalMembershipConflictError:
+            latest = await self._reload_project(
+                project.project_id,
+                project.tenant_id,
+            )
+            return None, False, self._project_write_conflict(
+                latest.revision if latest is not None else None
+            )
+        except ValueError as exc:
+            return None, False, JSONResponse(
+                {
+                    "error": {
+                        "type": "invalid_request",
+                        "message": str(exc),
+                    }
+                },
+                status_code=400,
+            )
+        except RuntimeError:
+            logger.exception("Canonical project membership write failed")
+            return None, False, JSONResponse(
+                {
+                    "error": {
+                        "type": "service_unavailable",
+                        "message": (
+                            "Canonical project membership is unavailable"
+                        ),
+                    }
+                },
+                status_code=503,
+            )
+        self._publish_project(updated)
+        self._register_project_budget(updated)
+        return updated, changed, None
 
     async def add_member(self, request: Request) -> JSONResponse:
         """Add a user to a project."""
         project_id = request.path_params["id"]
-        project = await self._get_project(project_id)
+        project = await self._get_project(
+            project_id,
+            _request_tenant_id(request),
+        )
         if project is None:
             return JSONResponse(
                 {"error": {"type": "not_found", "message": f"Project '{project_id}' not found"}},
@@ -792,10 +1375,69 @@ class AdminAPI:
                 {"error": {"type": "invalid_request", "message": "Field 'user_id' is required"}},
                 status_code=400,
             )
+        if (
+            project.tenant_id is not None
+            and self._app_config.canonical_identity_required
+        ):
+            updated, _changed, error = (
+                await self._set_canonical_project_membership(
+                    project,
+                    user_id,
+                    granted=True,
+                )
+            )
+            if error is not None:
+                return error
+            assert updated is not None
+            normalized = f"scim:{user_id.removeprefix('scim:')}"
+            return JSONResponse(
+                {
+                    "project_id": project_id,
+                    "user_id": normalized,
+                    "revision": updated.revision,
+                    "status": "added",
+                },
+                headers=_revision_headers(updated.revision),
+            )
+
+        expected_revision, error = _parse_if_match_revision(
+            request,
+            project.revision,
+        )
+        if error is not None:
+            return error
+        assert expected_revision is not None
+        if expected_revision != project.revision:
+            latest = await self._reload_project(
+                project_id,
+                project.tenant_id,
+            )
+            return self._project_write_conflict(
+                latest.revision if latest is not None else None
+            )
+
+        committed = project
         if user_id not in project.members:
-            project.members.append(user_id)
-            await self._persist_project(project)
-        return JSONResponse({"project_id": project_id, "user_id": user_id, "status": "added"})
+            staged = _staged_project(
+                project,
+                members=[*project.members, user_id],
+            )
+            committed, error = await self._commit_project(
+                staged,
+                expected_revision=expected_revision,
+            )
+            if error is not None:
+                return error
+            assert committed is not None
+        return JSONResponse(
+            {
+                "project_id": project_id,
+                "user_id": user_id,
+                "revision": committed.revision,
+                "status": "added",
+            },
+            headers=_revision_headers(committed.revision),
+        )
 
     # ------------------------------------------------------------------
     # DELETE /admin/projects/{id}/members/{user_id}
@@ -805,19 +1447,94 @@ class AdminAPI:
         """Remove a user from a project."""
         project_id = request.path_params["id"]
         user_id = request.path_params["user_id"]
-        project = await self._get_project(project_id)
+        project = await self._get_project(
+            project_id,
+            _request_tenant_id(request),
+        )
         if project is None:
             return JSONResponse(
                 {"error": {"type": "not_found", "message": f"Project '{project_id}' not found"}},
                 status_code=404,
             )
+        if (
+            project.tenant_id is not None
+            and self._app_config.canonical_identity_required
+        ):
+            updated, changed, error = (
+                await self._set_canonical_project_membership(
+                    project,
+                    user_id,
+                    granted=False,
+                )
+            )
+            if error is not None:
+                return error
+            assert updated is not None
+            normalized = f"scim:{user_id.removeprefix('scim:')}"
+            if not changed:
+                return JSONResponse(
+                    {
+                        "error": {
+                            "type": "not_found",
+                            "message": (
+                                f"User '{normalized}' is not a member of "
+                                f"project '{project_id}'"
+                            ),
+                        }
+                    },
+                    status_code=404,
+                )
+            return JSONResponse(
+                {
+                    "project_id": project_id,
+                    "user_id": normalized,
+                    "revision": updated.revision,
+                    "status": "removed",
+                },
+                headers=_revision_headers(updated.revision),
+            )
+
+        expected_revision, error = _parse_if_match_revision(
+            request,
+            project.revision,
+        )
+        if error is not None:
+            return error
+        assert expected_revision is not None
+        if expected_revision != project.revision:
+            latest = await self._reload_project(
+                project_id,
+                project.tenant_id,
+            )
+            return self._project_write_conflict(
+                latest.revision if latest is not None else None
+            )
+
         if user_id in project.members:
-            project.members.remove(user_id)
-            # Revoking access is the direction that matters: without this the
-            # removal reverted on the next restart, silently restoring a member
-            # an operator had deliberately taken off the project.
-            await self._persist_project(project)
-            return JSONResponse({"project_id": project_id, "user_id": user_id, "status": "removed"})
+            staged = _staged_project(
+                project,
+                members=[
+                    member
+                    for member in project.members
+                    if member != user_id
+                ],
+            )
+            committed, error = await self._commit_project(
+                staged,
+                expected_revision=expected_revision,
+            )
+            if error is not None:
+                return error
+            assert committed is not None
+            return JSONResponse(
+                {
+                    "project_id": project_id,
+                    "user_id": user_id,
+                    "revision": committed.revision,
+                    "status": "removed",
+                },
+                headers=_revision_headers(committed.revision),
+            )
         return JSONResponse(
             {"error": {"type": "not_found", "message": f"User '{user_id}' is not a member of project '{project_id}'"}},
             status_code=404,
@@ -838,6 +1555,7 @@ class AdminAPI:
             model=params.get("model"),
             project_id=params.get("project_id"),
             user_id=params.get("user_id"),
+            tenant_id=_request_tenant_id(request),
         )
 
         # Before aggregating, not after: get_aggregated_usage and _apply_filters
@@ -894,6 +1612,7 @@ class AdminAPI:
             model=params.get("model"),
             project_id=params.get("project_id"),
             user_id=params.get("user_id"),
+            tenant_id=_request_tenant_id(request),
         )
         fmt = (params.get("format") or "csv").lower()
         level = (params.get("level") or "records").lower()
@@ -989,16 +1708,66 @@ class AdminAPI:
         operator checking their work saw it missing and reasonably concluded the
         write had failed.
         """
+        tenant_id = _request_tenant_id(request)
+        state = getattr(request, "state", None) if request is not None else None
+        context = getattr(state, "context", None)
         if self._policy_service is not None:
             refresh = getattr(self._policy_service, "refresh_if_stale", None)
             if refresh is not None:
                 try:
-                    await refresh()
+                    await refresh(
+                        context if tenant_id is not None else None,
+                    )
                 except Exception:
+                    if tenant_id is not None:
+                        logger.error(
+                            "Tenant policy listing refresh failed",
+                            exc_info=True,
+                        )
+                        return JSONResponse(
+                            {
+                                "error": {
+                                    "type": "service_unavailable",
+                                    "message": (
+                                        "Tenant policy listing is unavailable."
+                                    ),
+                                }
+                            },
+                            status_code=503,
+                        )
                     logger.warning(
                         "Policy refresh failed; listing this instance's set",
                         exc_info=True,
                     )
+            if tenant_id is not None:
+                scoped = getattr(
+                    self._policy_service,
+                    "policies_for_scope",
+                    None,
+                )
+                if not callable(scoped):
+                    return JSONResponse(
+                        {
+                            "error": {
+                                "type": "service_unavailable",
+                                "message": (
+                                    "Tenant policy listing is unavailable."
+                                ),
+                            }
+                        },
+                        status_code=503,
+                    )
+                return JSONResponse(scoped(tenant_id))
+        elif tenant_id is not None:
+            return JSONResponse(
+                {
+                    "error": {
+                        "type": "service_unavailable",
+                        "message": "Tenant policy listing is unavailable.",
+                    }
+                },
+                status_code=503,
+            )
         return JSONResponse(self.policies)
 
     # ------------------------------------------------------------------
@@ -1008,6 +1777,7 @@ class AdminAPI:
     async def create_policy(self, request: Request) -> JSONResponse:
         """Store a new Cedar policy, persist it, and apply it to live traffic."""
         body = await request.json()
+        tenant_id = _request_tenant_id(request)
 
         name = body.get("name")
         if not name:
@@ -1044,31 +1814,160 @@ class AdminAPI:
             "policy_text": policy_text,
             "mode": body.get("mode", "LOG_ONLY"),
         }
+        if tenant_id is not None:
+            policy["tenant_id"] = tenant_id
+
+        if tenant_id is not None:
+            if self._policy_service is None:
+                return JSONResponse(
+                    {
+                        "error": {
+                            "type": "service_unavailable",
+                            "message": "Tenant policy service is unavailable.",
+                        }
+                    },
+                    status_code=503,
+                )
+            state = getattr(request, "state", None)
+            context = getattr(state, "context", None)
+            try:
+                await self._policy_service.refresh_if_stale(context)
+            except Exception:
+                logger.error(
+                    "Tenant policy initialization failed",
+                    exc_info=True,
+                )
+                return JSONResponse(
+                    {
+                        "error": {
+                            "type": "service_unavailable",
+                            "message": "Tenant policy service is unavailable.",
+                        }
+                    },
+                    status_code=503,
+                )
+            current_policies = self._policy_service.policies_for_scope(
+                tenant_id
+            )
+        else:
+            current_policies = list(self.policies)
 
         # Update existing policy with the same name, or append
         status, code = "created", 201
-        for i, existing in enumerate(self.policies):
+        for i, existing in enumerate(current_policies):
             if existing["name"] == name:
-                self.policies[i] = policy
+                current_policies[i] = policy
                 status, code = "updated", 200
                 break
         else:
-            self.policies.append(policy)
+            current_policies.append(policy)
 
         version = None
         if self._persistence is not None:
-            await self._persistence.save_cedar_policy(policy)
-            # The write bumped the shared version; read it back so this instance
-            # does not see its own change as a remote one and re-scan to learn
-            # what it already knows.
-            version = await self._persistence.get_policy_version()
+            if tenant_id is None:
+                await self._persistence.save_cedar_policy(policy)
+                # The write bumped the shared version; read it back so this
+                # instance does not re-scan to learn what it already knows.
+                version = await self._persistence.get_policy_version()
+            else:
+                save = getattr(
+                    self._persistence,
+                    "save_tenant_cedar_policy",
+                    None,
+                )
+                if not callable(save):
+                    return JSONResponse(
+                        {
+                            "error": {
+                                "type": "service_unavailable",
+                                "message": (
+                                    "Tenant policy persistence is unavailable."
+                                ),
+                            }
+                        },
+                        status_code=503,
+                )
+                try:
+                    await save(tenant_id, policy)
+                except Exception:
+                    logger.error(
+                        "Failed to persist tenant Cedar policy %s/%s",
+                        tenant_id,
+                        name,
+                        exc_info=True,
+                    )
+                    return JSONResponse(
+                        {
+                            "error": {
+                                "type": "service_unavailable",
+                                "message": (
+                                    "Tenant policy persistence is unavailable."
+                                ),
+                            }
+                        },
+                        status_code=503,
+                    )
+        elif tenant_id is not None:
+            return JSONResponse(
+                {
+                    "error": {
+                        "type": "service_unavailable",
+                        "message": "Tenant policy persistence is unavailable.",
+                    }
+                },
+                status_code=503,
+            )
         # Statements are compiled once, so without this the policy sits in the
         # list without affecting a single request until the process restarts.
         if self._policy_service is not None:
-            self._policy_service.reload(self.policies)
-            note = getattr(self._policy_service, "note_local_version", None)
-            if note is not None:
-                note(version)
+            if tenant_id is None:
+                self.policies[:] = current_policies
+                self._policy_service.reload(
+                    current_policies,
+                    tenant_id=None,
+                )
+                note = getattr(
+                    self._policy_service,
+                    "note_local_version",
+                    None,
+                )
+                if note is not None:
+                    note(version, tenant_id=None)
+            else:
+                # A local pre-write snapshot may be missing a concurrent policy
+                # written by another task. Reload the authoritative tenant set
+                # after the transaction instead of associating that stale
+                # snapshot with the latest fleet version.
+                invalidate = getattr(
+                    self._policy_service,
+                    "invalidate_scope",
+                    None,
+                )
+                if callable(invalidate):
+                    invalidate(tenant_id)
+                try:
+                    await self._policy_service.refresh_if_stale(
+                        context,
+                        require_fresh=True,
+                    )
+                except Exception:
+                    logger.error(
+                        "Tenant policy persisted but authoritative refresh failed",
+                        exc_info=True,
+                    )
+                    return JSONResponse(
+                        {
+                            "error": {
+                                "type": "service_unavailable",
+                                "message": (
+                                    "Tenant policy service is unavailable."
+                                ),
+                            }
+                        },
+                        status_code=503,
+                    )
+        elif tenant_id is None:
+            self.policies[:] = current_policies
 
         return JSONResponse({"name": name, "status": status}, status_code=code)
 
@@ -1116,7 +2015,12 @@ class AdminAPI:
         # user config dict — so without this the limits shown were whichever ones
         # this task happened to be told about.
         await self._refresh_config()
-        records = await self._synced_records()
+        tenant_id = _request_tenant_id(request)
+        records = [
+            record
+            for record in await self._synced_records()
+            if tenant_id is None or record.tenant_id == tenant_id
+        ]
         user_data: dict[str, dict] = {}
         for r in records:
             entry = user_data.setdefault(r.user_id, {
@@ -1137,17 +2041,53 @@ class AdminAPI:
         # loop is the worst offender, since a busy deployment has far more users
         # than projects.
         users = list(user_data.values())
+        try:
+            configs = await asyncio.gather(*(
+                self._get_user_config(user["user_id"], tenant_id)
+                for user in users
+            ))
+        except Exception:
+            logger.error(
+                "Tenant user configuration listing failed",
+                exc_info=True,
+            )
+            return JSONResponse(
+                {
+                    "error": {
+                        "type": "service_unavailable",
+                        "message": "Tenant user configuration is unavailable",
+                    }
+                },
+                status_code=503,
+            )
+        for user, config in zip(users, configs):
+            self.cost_tracker.register_user(
+                user["user_id"],
+                budget_limit=config.get("budget_limit"),
+                alert_threshold=config.get("alert_threshold"),
+                tenant_id=tenant_id,
+            )
         spends = await asyncio.gather(*(
-            self._fleet_spend("user", u["user_id"], u["cost"]) for u in users
+            self._fleet_spend(
+                "user",
+                u["user_id"],
+                u["cost"],
+                tenant_id=tenant_id,
+            )
+            for u in users
         ))
 
         result = []
-        for u, current_spend in zip(users, spends):
-            budget = self.cost_tracker.get_user_budget(u["user_id"])
+        for u, config, current_spend in zip(users, configs, spends):
+            budget = self.cost_tracker.get_user_budget(
+                u["user_id"],
+                tenant_id=tenant_id,
+            )
             budget_limit = budget.get("budget_limit")
             utilization = (current_spend / budget_limit * 100) if budget_limit else None
             result.append({
                 "user_id": u["user_id"],
+                "revision": config.get("revision", 0),
                 "projects": sorted(u["projects"]),
                 "requests": u["requests"],
                 "total_tokens": u["total_tokens"],
@@ -1166,10 +2106,16 @@ class AdminAPI:
     async def get_user(self, request: Request) -> JSONResponse:
         """User detail with per-project and per-model breakdown, plus budget info."""
         user_id = request.path_params["id"]
+        tenant_id = _request_tenant_id(request)
         # Same reason as list_users: the budget and allowed-models this reports
         # are per-instance config unless the sync has run.
         await self._refresh_config()
-        records = [r for r in await self._synced_records() if r.user_id == user_id]
+        records = [
+            record
+            for record in await self._synced_records()
+            if record.user_id == user_id
+            and (tenant_id is None or record.tenant_id == tenant_id)
+        ]
         if not records:
             return JSONResponse(
                 {"error": {"type": "not_found", "message": f"User '{user_id}' not found"}},
@@ -1179,7 +2125,10 @@ class AdminAPI:
         total_requests = len(records)
         total_tokens = sum(r.total_tokens for r in records)
         total_cost = await self._fleet_spend(
-            "user", user_id, sum(r.cost for r in records)
+            "user",
+            user_id,
+            sum(r.cost for r in records),
+            tenant_id=tenant_id,
         )
         projects = sorted({r.project_id for r in records})
 
@@ -1204,25 +2153,52 @@ class AdminAPI:
             entry["tokens"] += r.total_tokens
             entry["cost"] += r.cost
 
-        budget = self.cost_tracker.get_user_budget(user_id)
+        try:
+            user_config = await self._get_user_config(
+                user_id,
+                tenant_id,
+            )
+        except Exception:
+            return JSONResponse(
+                {
+                    "error": {
+                        "type": "service_unavailable",
+                        "message": "Tenant user configuration is unavailable",
+                    }
+                },
+                status_code=503,
+            )
+        self.cost_tracker.register_user(
+            user_id,
+            budget_limit=user_config.get("budget_limit"),
+            alert_threshold=user_config.get("alert_threshold"),
+            tenant_id=tenant_id,
+        )
+        budget = self.cost_tracker.get_user_budget(
+            user_id,
+            tenant_id=tenant_id,
+        )
 
+        revision = user_config.get("revision", 0)
         return JSONResponse({
             "user_id": user_id,
+            "revision": revision,
             "projects": projects,
             "total_requests": total_requests,
             "total_tokens": total_tokens,
             "total_cost": total_cost,
             "budget_limit": budget.get("budget_limit"),
             "alert_threshold": budget.get("alert_threshold"),
-            "allowed_models": self._user_configs.get(user_id, {}).get("allowed_models"),
+            "allowed_models": user_config.get("allowed_models"),
             "usage_by_model": model_breakdown,
             "usage_by_provider": provider_breakdown,
             "usage_by_project": project_breakdown,
-        })
+        }, headers=_revision_headers(revision))
 
     async def set_user_budget(self, request: Request) -> JSONResponse:
         """Set or update budget for a user."""
         user_id = request.path_params["id"]
+        tenant_id = _request_tenant_id(request)
         try:
             body = await request.json()
         except Exception:
@@ -1230,49 +2206,71 @@ class AdminAPI:
 
         budget_limit = body.get("budget_limit")
         alert_threshold = body.get("alert_threshold")
+        try:
+            current = deepcopy(
+                await self._get_user_config(user_id, tenant_id)
+            )
+        except Exception:
+            return self._user_config_store_unavailable()
+
+        current_revision = current.get("revision", 0)
+        expected_revision, error = _parse_if_match_revision(
+            request,
+            current_revision,
+        )
+        if error is not None:
+            return error
+        assert expected_revision is not None
+        if expected_revision != current_revision:
+            latest = await self._reload_user_config(user_id, tenant_id)
+            return self._user_config_write_conflict(
+                latest.get("revision", 0)
+                if latest is not None
+                else None
+            )
+
+        staged = {
+            **current,
+            "budget_limit": budget_limit,
+            "alert_threshold": alert_threshold,
+        }
+
+        try:
+            committed = await self._save_user_config(
+                user_id,
+                tenant_id,
+                staged,
+                expected_revision=expected_revision,
+            )
+        except PersistenceConflictError:
+            latest = await self._reload_user_config(user_id, tenant_id)
+            return self._user_config_write_conflict(
+                latest.get("revision", 0)
+                if latest is not None
+                else None
+            )
+        except Exception:
+            logger.warning(
+                "Failed to persist user config for %s",
+                user_id,
+                exc_info=True,
+            )
+            return self._user_config_store_unavailable()
 
         self.cost_tracker.register_user(
             user_id=user_id,
             budget_limit=budget_limit,
             alert_threshold=alert_threshold,
+            tenant_id=tenant_id,
         )
-
-        # setdefault, not .get(user_id, {}): the latter hands back a throwaway dict
-        # on a miss, so the limits were written to DynamoDB and never recorded in
-        # self._user_configs. Because save_user_config is a whole-item put_item,
-        # the *next* write for this user then serialized a config with no budget in
-        # it and erased the limit from the table:
-        #
-        #   after the budget write, store:  {'budget_limit': 100.0, 'alert_threshold': 80.0}
-        #   after the budget write, local:  {}
-        #   after the models write, store:  {'allowed_models': ['claude-haiku']}
-        #
-        # Setting a budget and then an allowed-models list silently dropped the
-        # budget, and since restart rehydrates from this row, the limit was gone
-        # for good. Moved out of the persistence branch too — the local dict is
-        # what the request path reads, so it must be updated whether or not
-        # DynamoDB is on.
-        config = self._user_configs.setdefault(user_id, {})
-        config["budget_limit"] = budget_limit
-        config["alert_threshold"] = alert_threshold
-
-        if self._persistence is not None and self._persistence.enabled:
-            try:
-                await self._persistence.save_user_config(user_id, config)
-                await self._note_config_write()
-            except Exception:
-                logger.warning(
-                    "Failed to persist user config for %s to DynamoDB",
-                    user_id,
-                    exc_info=True,
-                )
 
         return JSONResponse({
             "user_id": user_id,
             "budget_limit": budget_limit,
             "alert_threshold": alert_threshold,
+            "revision": committed["revision"],
             "status": "updated",
-        })
+        }, headers=_revision_headers(committed["revision"]))
 
     # ------------------------------------------------------------------
     # PUT /admin/users/{id}/allowed-models
@@ -1281,28 +2279,69 @@ class AdminAPI:
     async def set_user_allowed_models(self, request: Request) -> JSONResponse:
         """Set or update allowed models for a user."""
         user_id = request.path_params["id"]
+        tenant_id = _request_tenant_id(request)
         body = await request.json()
         allowed_models = body.get("allowed_models")
-        self._user_configs.setdefault(user_id, {})["allowed_models"] = allowed_models
+        try:
+            current = deepcopy(
+                await self._get_user_config(user_id, tenant_id)
+            )
+        except Exception:
+            logger.warning(
+                "Failed to load user config for %s",
+                user_id,
+                exc_info=True,
+            )
+            return self._user_config_store_unavailable()
 
-        # Persist user config to DynamoDB if enabled
-        if self._persistence is not None and self._persistence.enabled:
-            try:
-                config = self._user_configs.get(user_id, {})
-                await self._persistence.save_user_config(user_id, config)
-                await self._note_config_write()
-            except Exception:
-                logger.warning(
-                    "Failed to persist user config for %s to DynamoDB",
-                    user_id,
-                    exc_info=True,
-                )
+        current_revision = current.get("revision", 0)
+        expected_revision, error = _parse_if_match_revision(
+            request,
+            current_revision,
+        )
+        if error is not None:
+            return error
+        assert expected_revision is not None
+        if expected_revision != current_revision:
+            latest = await self._reload_user_config(user_id, tenant_id)
+            return self._user_config_write_conflict(
+                latest.get("revision", 0)
+                if latest is not None
+                else None
+            )
+
+        staged = {
+            **current,
+            "allowed_models": deepcopy(allowed_models),
+        }
+        try:
+            committed = await self._save_user_config(
+                user_id,
+                tenant_id,
+                staged,
+                expected_revision=expected_revision,
+            )
+        except PersistenceConflictError:
+            latest = await self._reload_user_config(user_id, tenant_id)
+            return self._user_config_write_conflict(
+                latest.get("revision", 0)
+                if latest is not None
+                else None
+            )
+        except Exception:
+            logger.warning(
+                "Failed to persist user config for %s",
+                user_id,
+                exc_info=True,
+            )
+            return self._user_config_store_unavailable()
 
         return JSONResponse({
             "user_id": user_id,
             "allowed_models": allowed_models,
+            "revision": committed["revision"],
             "status": "updated",
-        })
+        }, headers=_revision_headers(committed["revision"]))
 
 
     # ------------------------------------------------------------------
@@ -1312,7 +2351,10 @@ class AdminAPI:
     async def list_project_models(self, request: Request) -> JSONResponse:
         """Return the allowed models for a project."""
         project_id = request.path_params["id"]
-        project = await self._get_project(project_id)
+        project = await self._get_project(
+            project_id,
+            _request_tenant_id(request),
+        )
         if project is None:
             return JSONResponse(
                 {"error": {"type": "not_found", "message": f"Project '{project_id}' not found"}},
@@ -1320,8 +2362,9 @@ class AdminAPI:
             )
         return JSONResponse({
             "project_id": project_id,
+            "revision": project.revision,
             "allowed_models": project.allowed_models if project.allowed_models is not None else [],
-        })
+        }, headers=_revision_headers(project.revision))
 
     # ------------------------------------------------------------------
     # POST /admin/projects/{id}/models
@@ -1330,7 +2373,10 @@ class AdminAPI:
     async def add_project_model(self, request: Request) -> JSONResponse:
         """Add a model to a project's allowed_models list."""
         project_id = request.path_params["id"]
-        project = await self._get_project(project_id)
+        project = await self._get_project(
+            project_id,
+            _request_tenant_id(request),
+        )
         if project is None:
             return JSONResponse(
                 {"error": {"type": "not_found", "message": f"Project '{project_id}' not found"}},
@@ -1345,20 +2391,45 @@ class AdminAPI:
                 status_code=400,
             )
 
-        if project.allowed_models is None:
-            project.allowed_models = []
+        expected_revision, error = _parse_if_match_revision(
+            request,
+            project.revision,
+        )
+        if error is not None:
+            return error
+        assert expected_revision is not None
+        if expected_revision != project.revision:
+            latest = await self._reload_project(
+                project_id,
+                project.tenant_id,
+            )
+            return self._project_write_conflict(
+                latest.revision if latest is not None else None
+            )
 
-        if model not in project.allowed_models:
-            project.allowed_models.append(model)
-
-        await self._persist_project(project)
+        committed = project
+        allowed_models = list(project.allowed_models or [])
+        if model not in allowed_models:
+            allowed_models.append(model)
+            staged = _staged_project(
+                project,
+                allowed_models=allowed_models,
+            )
+            committed, error = await self._commit_project(
+                staged,
+                expected_revision=expected_revision,
+            )
+            if error is not None:
+                return error
+            assert committed is not None
 
         return JSONResponse({
             "project_id": project_id,
             "model": model,
-            "allowed_models": project.allowed_models,
+            "revision": committed.revision,
+            "allowed_models": committed.allowed_models,
             "status": "added",
-        })
+        }, headers=_revision_headers(committed.revision))
 
     # ------------------------------------------------------------------
     # DELETE /admin/projects/{id}/models/{model_name}
@@ -1368,7 +2439,10 @@ class AdminAPI:
         """Remove a model from a project's allowed_models list."""
         project_id = request.path_params["id"]
         model_name = request.path_params["model_name"]
-        project = await self._get_project(project_id)
+        project = await self._get_project(
+            project_id,
+            _request_tenant_id(request),
+        )
         if project is None:
             return JSONResponse(
                 {"error": {"type": "not_found", "message": f"Project '{project_id}' not found"}},
@@ -1381,16 +2455,45 @@ class AdminAPI:
                 status_code=404,
             )
 
-        project.allowed_models.remove(model_name)
+        expected_revision, error = _parse_if_match_revision(
+            request,
+            project.revision,
+        )
+        if error is not None:
+            return error
+        assert expected_revision is not None
+        if expected_revision != project.revision:
+            latest = await self._reload_project(
+                project_id,
+                project.tenant_id,
+            )
+            return self._project_write_conflict(
+                latest.revision if latest is not None else None
+            )
 
-        await self._persist_project(project)
+        staged = _staged_project(
+            project,
+            allowed_models=[
+                model
+                for model in project.allowed_models
+                if model != model_name
+            ],
+        )
+        committed, error = await self._commit_project(
+            staged,
+            expected_revision=expected_revision,
+        )
+        if error is not None:
+            return error
+        assert committed is not None
 
         return JSONResponse({
             "project_id": project_id,
             "model": model_name,
-            "allowed_models": project.allowed_models,
+            "revision": committed.revision,
+            "allowed_models": committed.allowed_models,
             "status": "removed",
-        })
+        }, headers=_revision_headers(committed.revision))
 
     # ------------------------------------------------------------------
     # GET /admin/catalog
@@ -1409,7 +2512,7 @@ class AdminAPI:
         models = self.model_registry.list_models()
         # No shared counter is keyed by model, so per-model cost has only the
         # record list as a source — the refresh is the whole fix here.
-        records = await self._synced_records()
+        records = await self._tenant_records(request)
 
         result = []
         for m in models:
@@ -1621,7 +2724,7 @@ class AdminAPI:
 
     async def traces(self, request: Request) -> JSONResponse:
         """Return recent request traces for the live traces view."""
-        records = await self._synced_records()
+        records = await self._tenant_records(request)
         # Clamp rather than trust: an unparseable limit used to 500, and a negative
         # one silently returned an empty list.
         try:
@@ -1682,7 +2785,10 @@ class AdminAPI:
         # The analyzer reads the same record list this API does, so refreshing
         # here is enough — it needs no fleet awareness of its own.
         await self._synced_records()
-        all_metrics = self._efficiency_analyzer.get_all_user_metrics()
+        tenant_id = _request_tenant_id(request)
+        all_metrics = self._efficiency_analyzer.get_all_user_metrics(
+            tenant_id=tenant_id,
+        )
 
         grade_distribution: dict[str, int] = {}
         for m in all_metrics:
@@ -1736,7 +2842,11 @@ class AdminAPI:
             )
 
         await self._synced_records()
-        report = self._efficiency_analyzer.analyze_user(user_id)
+        tenant_id = _request_tenant_id(request)
+        report = self._efficiency_analyzer.analyze_user(
+            user_id,
+            tenant_id=tenant_id,
+        )
 
         result: dict = {
             "user_id": user_id,
@@ -1780,7 +2890,10 @@ class AdminAPI:
 
         # Add semantic analysis if available
         if self._semantic_engine is not None:
-            semantic = self._semantic_engine.generate_report(user_id=user_id)
+            semantic = self._semantic_engine.generate_report(
+                user_id=user_id,
+                tenant_id=tenant_id,
+            )
             result["semantic"] = {
                 "output_analysis": {
                     "avg_completion_tokens": semantic.output_analysis.avg_completion_tokens,
@@ -1827,7 +2940,10 @@ class AdminAPI:
                 status_code=501,
             )
 
-        project = await self._get_project(project_id)
+        project = await self._get_project(
+            project_id,
+            _request_tenant_id(request),
+        )
         if project is None:
             return JSONResponse(
                 {"error": {"type": "not_found", "message": f"Project '{project_id}' not found"}},
@@ -1835,7 +2951,11 @@ class AdminAPI:
             )
 
         await self._synced_records()
-        report = self._efficiency_analyzer.analyze_project(project_id)
+        tenant_id = _request_tenant_id(request)
+        report = self._efficiency_analyzer.analyze_project(
+            project_id,
+            tenant_id=tenant_id,
+        )
 
         result: dict = {
             "project_id": project_id,
@@ -1880,7 +3000,10 @@ class AdminAPI:
 
         # Add semantic waste analysis if available
         if self._semantic_engine is not None:
-            semantic = self._semantic_engine.generate_report(project_id=project_id)
+            semantic = self._semantic_engine.generate_report(
+                project_id=project_id,
+                tenant_id=tenant_id,
+            )
             result["semantic"] = {
                 "output_analysis": {
                     "avg_completion_tokens": semantic.output_analysis.avg_completion_tokens,
@@ -2118,11 +3241,13 @@ class AdminAPI:
         than surveyed. Rendered fresh per request from the live registry, so
         editing either file and reloading shows the new coverage.
         """
-        # Fleet-wide, because the shadow-AI finding depends on it: a model only
-        # another task has served looks undeclared-and-idle from here, which is
-        # exactly the traffic this page exists to surface.
+        # Fleet-wide within the caller's tenant. A model served by another task
+        # must remain visible, but one tenant's shadow traffic is not another
+        # tenant's operational data.
         report = audit_catalog(
-            self.model_registry, self._catalog, await self._synced_records()
+            self.model_registry,
+            self._catalog,
+            await self._tenant_records(request),
         )
         return HTMLResponse(
             render_catalog_drift_page(
@@ -2180,18 +3305,24 @@ class AdminAPI:
                 "reason": "no semantic cache wired into this gateway",
             })
 
+        tenant_id = _request_tenant_id(request)
         opted_in = sorted(
             p.project_id
-            for p in (await self._all_projects()).values()
+            for p in (await self._all_projects(tenant_id)).values()
             if p.semantic_cache_enabled
         )
+        entries = sum(
+            cache.entry_count(project_id, tenant_id=tenant_id)
+            for project_id in opted_in
+        )
+        stats = cache.stats_for_scope(tenant_id=tenant_id)
         return JSONResponse({
             "available": cache.enabled,
             "reason": None if cache.enabled else "no embedder (check AXON_SEMANTIC_CACHE and AWS credentials)",
             "default_threshold": cache.threshold,
-            "entries": cache.entry_count(),
+            "entries": entries,
             "projects_enabled": opted_in,
-            "stats": cache.stats.as_dict(),
+            "stats": stats.as_dict(),
         })
 
     async def invalidate_semantic_cache(self, request: Request) -> JSONResponse:
@@ -2210,7 +3341,21 @@ class AdminAPI:
                 status_code=404,
             )
         project_id = request.query_params.get("project_id")
-        removed = cache.invalidate(project_id)
+        tenant_id = _request_tenant_id(request)
+        if project_id is not None:
+            removed = cache.invalidate(
+                project_id,
+                tenant_id=tenant_id,
+            )
+        else:
+            projects = await self._all_projects(tenant_id)
+            removed = sum(
+                cache.invalidate(
+                    current_project_id,
+                    tenant_id=tenant_id,
+                )
+                for current_project_id in projects
+            )
         logger.info(
             "semantic cache invalidated: scope=%s removed=%d",
             project_id or "all", removed,

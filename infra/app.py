@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""CDK app entry point for AxonLLM Fargate deployment.
+"""CDK app entry point for AxonLLM Fargate and AgentCore deployments.
 
 ``cdk.json`` invokes this as ``.venv/bin/python3 app.py`` rather than ``python3
 app.py``, and the explicit interpreter is the point. ``aws-cdk-lib`` is installed
@@ -20,17 +20,35 @@ resolves against ``infra/`` no matter where the caller was.
 
 import aws_cdk as cdk
 
-from stack import AxonLLMStack
-
 app = cdk.App()
 
-AxonLLMStack(
-    app,
-    "AxonLLMStack",
-    env=cdk.Environment(
-        account=app.node.try_get_context("account") or None,
-        region=app.node.try_get_context("region") or "us-east-1",
-    ),
+environment = cdk.Environment(
+    account=app.node.try_get_context("account") or None,
+    region=app.node.try_get_context("region") or "us-east-1",
 )
+deployment_target = (
+    app.node.try_get_context("deployment_target") or "fargate"
+).lower()
+
+if deployment_target == "fargate":
+    from stack import AxonLLMStack
+
+    AxonLLMStack(
+        app,
+        "AxonLLMStack",
+        env=environment,
+    )
+elif deployment_target == "agentcore":
+    from agentcore_stack import AxonLLMAgentCoreStack
+
+    AxonLLMAgentCoreStack(
+        app,
+        "AxonLLMAgentCoreStack",
+        env=environment,
+    )
+else:
+    raise ValueError(
+        "deployment_target must be either 'fargate' or 'agentcore'"
+    )
 
 app.synth()

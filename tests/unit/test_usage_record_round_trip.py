@@ -45,6 +45,7 @@ def _make_record(**overrides) -> UsageRecord:
         request_id="req-1",
         project_id="proj-1",
         user_id="alice",
+        tenant_id="tenant-a",
         provider="bedrock",
         model="claude-sonnet",
         prompt_tokens=100,

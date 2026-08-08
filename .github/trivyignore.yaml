@@ -9,3 +9,8 @@ misconfigurations:
       - AxonLLMStack.template.json
     statement: ALB and CloudFront access-log delivery require SSE-S3; the bucket cannot use a customer-managed KMS key.
     expired_at: "2027-08-07T00:00:00Z"
+  - id: AWS-0035
+    paths:
+      - AxonLLMStack.template.json
+    statement: The task volume is ephemeral Fargate scratch storage mounted at /tmp; no EFSVolumeConfiguration exists, so EFS transit encryption does not apply.
+    expired_at: "2027-08-07T00:00:00Z"
