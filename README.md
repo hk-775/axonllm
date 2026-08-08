@@ -2183,8 +2183,10 @@ The release workflow records Fargate and AgentCore as distinct targets in its
 schema-v2 manifest and attests both image digests. Deployment verification
 selects `fargate` or `agentcore`, binds the selected private ECR digest to its
 target-specific evidence and Sigstore bundle, verifies the remote image, and
-rescans it. The workflows do not publish or deploy either image, and a real
-tagged private-ECR/Sigstore execution remains externally unverified.
+rescans it. A separate protected workflow copies the signed OCI archives into
+retained KMS-encrypted immutable ECR repositories without rebuilding and
+verifies both remote attestations. The workflows do not deploy either runtime,
+and a real tagged private-ECR/Sigstore execution remains externally unverified.
 See the [AgentCore Runbook](docs/AGENTCORE_RUNBOOK.md).
 
 ### AWS App Runner

@@ -11,6 +11,8 @@ ROOT_DOCKERFILE = REPO_ROOT / "Dockerfile"
 AGENTCORE_DOCKERFILE = REPO_ROOT / "infra" / "agentcore-image" / "Dockerfile"
 RELEASE_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release-security.yml"
 DEPLOY_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "deploy-verification.yml"
+PUBLISH_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "publish-release.yml"
+REGISTRY_INSTALLER = REPO_ROOT / "scripts" / "ci" / "install_registry_tools.sh"
 
 
 def test_fargate_deploy_requires_and_passes_verified_image() -> None:
@@ -34,6 +36,10 @@ def test_synthesis_requires_zero_cdk_docker_assets() -> None:
         'verify_target "agentcore" "AxonLLMAgentCoreStack"'
         in script
     )
+    assert (
+        'verify_target "release-foundation" '
+        '"AxonLLMReleaseFoundationStack"'
+    ) in script
     assert '"${venv_dir}/bin/cfn-lint" -i W3005' in script
 
 
@@ -136,3 +142,41 @@ def test_deployment_gate_selects_only_signed_target_identity() -> None:
     assert '--source-ref "${RELEASE_REF}"' in workflow
     assert "--verify-remote" in workflow
     assert "VERIFIED_TARGET: ${{ steps.evidence.outputs.target }}" in workflow
+
+
+def test_publication_preserves_signed_digests_in_private_ecr() -> None:
+    workflow = PUBLISH_WORKFLOW.read_text(encoding="utf-8")
+
+    assert "environment: release" in workflow
+    assert "id-token: write" in workflow
+    assert "AXON_RELEASE_PUBLISH_ROLE_ARN" in workflow
+    assert "allowed-account-ids: ${{ vars.AXON_AWS_ACCOUNT_ID }}" in workflow
+    assert "--require-release-tag" in workflow
+    assert workflow.count("--run-id \"${EVIDENCE_RUN_ID}\"") == 2
+    assert '[[ "${release_ref}" == "refs/tags/${EXPECTED_TAG}" ]]' in workflow
+    assert '.path == ".github/workflows/release-security.yml"' in workflow
+    assert '.conclusion == "success"' in workflow
+    assert "(.run_attempt | tostring) == $run_attempt" in workflow
+    assert '[[ "${tag_sha}" == "${EXPECTED_COMMIT}" ]]' in workflow
+    assert "actions/workflows/ci.yml/runs" in workflow
+    assert "--from-oci-layout" in workflow
+    assert '"${archive}@${digest}"' in workflow
+    assert '"${repository}:${RELEASE_TAG}"' in workflow
+    assert "--verify-remote" in workflow
+    assert workflow.count("gh attestation verify") == 2
+    assert "ecr:BatchDeleteImage" not in workflow
+    assert "ImageNotFoundException" in workflow
+    assert "2>/dev/null || true" not in workflow
+    assert "latest" not in workflow
+    assert "packages: write" not in workflow
+
+
+def test_registry_client_is_version_and_checksum_pinned() -> None:
+    installer = REGISTRY_INSTALLER.read_text(encoding="utf-8")
+
+    assert REGISTRY_INSTALLER.stat().st_mode & 0o111
+    assert 'ORAS_VERSION="1.3.3"' in installer
+    assert installer.count('sha256="') == 4
+    assert "sha256sum --check" in installer
+    assert "shasum -a 256 --check" in installer
+    assert "curl --fail --silent --show-error --location" in installer
