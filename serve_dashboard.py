@@ -39,6 +39,12 @@ def build_app() -> tuple:
     if "AXON_LOAD_DEMO_DATA" not in os.environ:
         os.environ["AXON_LOAD_DEMO_DATA"] = "true"
 
+    # This is the local-development entrypoint. Container and AWS deployments
+    # inject their profile explicitly, so only an unconfigured direct run gets
+    # the development contract.
+    if "AXON_DEPLOYMENT_PROFILE" not in os.environ:
+        os.environ["AXON_DEPLOYMENT_PROFILE"] = "development"
+
     # The local dev server is meant to be run without credentials so the admin
     # dashboard (which sends no auth header yet — see task #10) works out of the
     # box. Production defaults to ENFORCE; only this dev entrypoint opts out, and

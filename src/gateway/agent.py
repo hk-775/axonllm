@@ -7,6 +7,7 @@ import dataclasses
 import json
 import logging
 import time
+import uuid
 import warnings
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, AsyncIterator
@@ -29,6 +30,7 @@ from src.gateway.models import (
     UsageRecord,
 )
 from src.gateway.rate_limiter import SlidingWindowRateLimiter
+from src.gateway.quota_enforcer import BudgetReservation, QuotaDecision
 from src.gateway.request_validator import RequestValidator
 from src.gateway.router import (
     AllProvidersExhaustedError,
@@ -49,6 +51,7 @@ if TYPE_CHECKING:
     from src.gateway.provider_fn_factory import ProviderFnFactory
     from src.gateway.quota_enforcer import QuotaEnforcer
     from src.gateway.observability.trace_forwarder import TraceForwarder
+    from src.gateway.persistence import DynamoPersistence
     from src.gateway.security.audit_trail import AuditTrail
     from src.gateway.security.event_dispatcher import EventDispatcher
     from src.gateway.security.injection_detector import PromptInjectionDetector
@@ -186,6 +189,7 @@ class GatewayAgent:
         trace_forwarder: TraceForwarder | None = None,
         otlp_exporter: Any = None,
         semantic_cache: SemanticCache | None = None,
+        persistence: DynamoPersistence | None = None,
     ) -> None:
         self.router = router
         self.rate_limiter = rate_limiter
@@ -213,6 +217,7 @@ class GatewayAgent:
         self._trace_forwarder = trace_forwarder
         self._otlp_exporter = otlp_exporter
         self._semantic_cache = semantic_cache
+        self._persistence = persistence
 
     # ------------------------------------------------------------------
     # Public API
@@ -244,6 +249,16 @@ class GatewayAgent:
                 "not_found",
                 "The requested resource was not found.",
                 code="resource_not_found",
+            )
+        if project is not None and (
+            project.budget_limit is not None
+            or project.alert_threshold is not None
+        ):
+            self.cost_tracker.register_project(
+                project.project_id,
+                budget_limit=project.budget_limit,
+                alert_threshold=project.alert_threshold,
+                tenant_id=req_ctx.tenant_id,
             )
 
         # 2.5. Request validation (before rate limiting)
@@ -282,7 +297,11 @@ class GatewayAgent:
         # 2.7. Policy-hierarchy quota enforcement
         resolved_policy = None
         if self._quota_enforcer is not None and self._policy_resolver is not None:
-            resolved_policy = await self._policy_resolver.resolve(req_ctx.project_id)
+            resolved_policy = await self._policy_resolver.resolve(
+                req_ctx.project_id,
+                tenant_id=req_ctx.tenant_id,
+                project=project,
+            )
             estimated_cost = self._estimate_request_cost(request)
             quota_decision = await self._quota_enforcer.enforce_all(
                 project_id=req_ctx.project_id,
@@ -291,14 +310,11 @@ class GatewayAgent:
                 max_tokens=request.max_tokens,
                 estimated_cost=estimated_cost,
                 policy=resolved_policy,
+                tenant_id=req_ctx.tenant_id,
+                project=project,
             )
             if not quota_decision.allowed:
-                return _error_response(
-                    429,
-                    "quota_exceeded",
-                    quota_decision.reason,
-                    code=f"quota_{quota_decision.limit_type}",
-                )
+                return self._quota_error(quota_decision)
 
             # Apply the policy's max_tokens ceiling. This also bounds requests
             # that omit max_tokens entirely — otherwise an unbounded (streaming)
@@ -309,7 +325,7 @@ class GatewayAgent:
             )
 
         # 2.8. Prompt injection detection
-        request_id = f"req_{__import__('uuid').uuid4().hex[:12]}"
+        request_id = f"req_{uuid.uuid4().hex}"
         pii_mapping = None
 
         if self._injection_detector is not None:
@@ -323,15 +339,17 @@ class GatewayAgent:
                         threat_level=injection_result.threat_level.value,
                         patterns=injection_result.detected_patterns,
                         blocked=injection_result.should_block,
+                        tenant_id=req_ctx.tenant_id or "__legacy__",
                     )
                 if self._event_dispatcher is not None:
                     await self._event_dispatcher.dispatch_injection_event(
-                        event_id=request_id,
+                        event_id=f"{request_id}:injection",
                         user_id=req_ctx.user_id,
                         project_id=req_ctx.project_id,
                         threat_level=injection_result.threat_level.value,
                         patterns=injection_result.detected_patterns,
                         blocked=injection_result.should_block,
+                        tenant_id=req_ctx.tenant_id or "__legacy__",
                     )
                 if injection_result.should_block:
                     return _error_response(
@@ -369,19 +387,24 @@ class GatewayAgent:
                         request_id=request_id,
                         redacted_types=redacted_types,
                         count=pii_mapping.redacted_count,
+                        tenant_id=req_ctx.tenant_id or "__legacy__",
                     )
                 if self._event_dispatcher is not None:
                     await self._event_dispatcher.dispatch_pii_event(
-                        event_id=request_id,
+                        event_id=f"{request_id}:pii:input",
                         user_id=req_ctx.user_id,
                         project_id=req_ctx.project_id,
                         redacted_types=list(pii_mapping._counters.keys()),
                         count=pii_mapping.redacted_count,
+                        tenant_id=req_ctx.tenant_id or "__legacy__",
                     )
 
         # 3. Rate limit check
         rate_result = await self.rate_limiter.check_rate_limit(
-            req_ctx.user_id, req_ctx.project_id
+            req_ctx.user_id,
+            req_ctx.project_id,
+            tenant_id=req_ctx.tenant_id,
+            project=project,
         )
 
         # Build rate limit headers from the result
@@ -415,7 +438,21 @@ class GatewayAgent:
             return resp
 
         # 5. User model access check (skip for smart routing)
-        user_config = self._user_configs.get(req_ctx.user_id, {})
+        try:
+            user_config = await self._user_config_for_context(req_ctx)
+        except RuntimeError:
+            return _error_response(
+                503,
+                "service_unavailable",
+                "Tenant user configuration is temporarily unavailable.",
+                code="user_config_unavailable",
+            )
+        self.cost_tracker.register_user(
+            req_ctx.user_id,
+            budget_limit=user_config.get("budget_limit"),
+            alert_threshold=user_config.get("alert_threshold"),
+            tenant_id=req_ctx.tenant_id,
+        )
         user_allowed = user_config.get("allowed_models")
         if not skip_model_checks and user_allowed and request.model not in user_allowed:
             resp = _error_response(
@@ -428,9 +465,13 @@ class GatewayAgent:
             return resp
 
         # 6. Project budget check
+        project_budget: BudgetStatus | None = None
         if project:
-            budget_status = await self.cost_tracker.check_budget(req_ctx.project_id)
-            if budget_status.is_over_budget:
+            project_budget = await self.cost_tracker.check_budget(
+                req_ctx.project_id,
+                tenant_id=req_ctx.tenant_id,
+            )
+            if project_budget.is_over_budget:
                 resp = _error_response(
                     429,
                     "budget_exceeded",
@@ -441,7 +482,10 @@ class GatewayAgent:
                 return resp
 
         # 7. User budget check
-        user_budget = await self.cost_tracker.check_user_budget(req_ctx.user_id)
+        user_budget = await self.cost_tracker.check_user_budget(
+            req_ctx.user_id,
+            tenant_id=req_ctx.tenant_id,
+        )
         if user_budget.is_over_budget:
             resp = _error_response(
                 429,
@@ -451,6 +495,11 @@ class GatewayAgent:
             )
             resp["_rate_limit_headers"] = _rate_limit_headers
             return resp
+        has_request_budget = self._request_has_budget(
+            project_budget,
+            user_budget,
+            resolved_policy,
+        )
 
         # 8. Request guardrails
         if project and project.guardrail_rules:
@@ -500,7 +549,10 @@ class GatewayAgent:
                 req_ctx.project_id,
                 req_ctx.tenant_id,
             )
-            cached = await self.cache_manager.get(cache_key)
+            cached = await self.cache_manager.get(
+                cache_key,
+                tenant_id=req_ctx.tenant_id,
+            )
             if cached is not None:
                 cached = await self._apply_cached_output_policy(
                     cached,
@@ -569,6 +621,7 @@ class GatewayAgent:
         # Multi-region: the selected spoke overrides the provider endpoint/region
         # for the actual call (not just response metadata). None → default region.
         target_spoke = region_decision.target_spoke if region_decision is not None else None
+        budget_reservation: BudgetReservation | None = None
         try:
             prompt_caching_enabled = project.prompt_caching_enabled if project else False
 
@@ -581,7 +634,10 @@ class GatewayAgent:
                 provider_fn = self._make_provider_fn()
 
             # Compute effective allowed models from project + user access lists
-            effective_allowed = self._compute_effective_allowed_models(project, req_ctx.user_id)
+            effective_allowed = self._compute_effective_allowed_models(
+                project,
+                user_config,
+            )
 
             # Extract prompt from last user message (shared by smart + ensemble).
             prompt = extract_last_user_prompt(request.messages)
@@ -631,38 +687,46 @@ class GatewayAgent:
                         resp["_rate_limit_headers"] = _rate_limit_headers
                         return resp
 
-                # Budget pre-check on the estimated (N+1) * per_call cost
-                # before any dispatch.
+                # Validate all panel access and the preset ceiling before
+                # reserving budget. The router repeats these checks as a
+                # defense-in-depth boundary.
                 per_call = self._estimate_per_call_cost(request, preset)
-                estimated = (len(preset.panel) + 1) * per_call
-                if estimated > 0:
-                    if project:
-                        proj_budget = await self.cost_tracker.check_budget(req_ctx.project_id)
-                        if (
-                            proj_budget.budget_limit is not None
-                            and proj_budget.current_spend + estimated > proj_budget.budget_limit
-                        ):
-                            resp = _error_response(
-                                429, "budget_exceeded",
-                                f"Estimated ensemble cost {estimated:.4f} would exceed "
-                                f"project '{req_ctx.project_id}' budget.",
-                                code="budget_exceeded",
-                            )
-                            resp["_rate_limit_headers"] = _rate_limit_headers
-                            return resp
-                    usr_budget = await self.cost_tracker.check_user_budget(req_ctx.user_id)
-                    if (
-                        usr_budget.budget_limit is not None
-                        and usr_budget.current_spend + estimated > usr_budget.budget_limit
-                    ):
-                        resp = _error_response(
-                            429, "budget_exceeded",
-                            f"Estimated ensemble cost {estimated:.4f} would exceed "
-                            f"user '{req_ctx.user_id}' budget.",
-                            code="budget_exceeded",
-                        )
-                        resp["_rate_limit_headers"] = _rate_limit_headers
-                        return resp
+                ceiling_estimate = (len(preset.panel) + 1) * per_call
+                if (
+                    preset.cost_ceiling is not None
+                    and ceiling_estimate > preset.cost_ceiling
+                ):
+                    resp = _error_response(
+                        400,
+                        "invalid_request",
+                        (
+                            f"Estimated ensemble cost {ceiling_estimate} "
+                            f"exceeds ceiling {preset.cost_ceiling}"
+                        ),
+                        code="ensemble_cost_ceiling",
+                    )
+                    resp["_rate_limit_headers"] = _rate_limit_headers
+                    return resp
+
+                estimated = (
+                    self._estimate_ensemble_cost(request, preset)
+                    if has_request_budget
+                    else 0.0
+                )
+                reserve_decision = await self._reserve_request_budget(
+                    request_id=request_id,
+                    req_ctx=req_ctx,
+                    estimated_cost=estimated,
+                    project_budget=project_budget,
+                    user_budget=user_budget,
+                    resolved_policy=resolved_policy,
+                )
+                if not reserve_decision.allowed:
+                    return self._quota_error(
+                        reserve_decision,
+                        _rate_limit_headers,
+                    )
+                budget_reservation = reserve_decision.reservation
 
                 # Streaming ensemble request: defer to the streaming
                 # generator instead of running the non-streaming path. The
@@ -670,20 +734,25 @@ class GatewayAgent:
                 # (output is withheld until the judge / best-single result is
                 # ready), so nothing is streamed during panel dispatch.
                 if request.stream:
-                    return self._stream_ensemble_response(
-                        request,
-                        prompt,
-                        preset,
-                        effective_allowed,
-                        req_ctx.project_id,
-                        req_ctx.user_id,
-                        per_call,
-                        _rate_limit_headers,
-                        resolved_policy,
-                        pii_mapping,
-                        request_id,
-                        authorized_project=project,
-                        tenant_id=req_ctx.tenant_id,
+                    return self._guard_budgeted_stream(
+                        self._stream_ensemble_response(
+                            request,
+                            prompt,
+                            preset,
+                            effective_allowed,
+                            req_ctx.project_id,
+                            req_ctx.user_id,
+                            per_call,
+                            _rate_limit_headers,
+                            resolved_policy,
+                            pii_mapping,
+                            request_id,
+                            authorized_project=project,
+                            tenant_id=req_ctx.tenant_id,
+                            budget_reservation=budget_reservation,
+                        ),
+                        budget_reservation,
+                        req_ctx=req_ctx,
                     )
 
                 response, ensemble_decision = await self.router.ensemble_route(
@@ -694,7 +763,13 @@ class GatewayAgent:
                     allowed_models=effective_allowed,
                     project_id=req_ctx.project_id,
                     user_id=req_ctx.user_id,
+                    tenant_id=req_ctx.tenant_id,
                     per_call_cost_estimate=per_call,
+                    skip_shared_scopes=(
+                        self._reserved_cost_tracker_scopes(
+                            budget_reservation
+                        )
+                    ),
                 )
             elif self._is_smart_routing_request(request, context):
                 # TRUE STREAMING (#18): for a streaming smart request, resolve the
@@ -704,15 +779,81 @@ class GatewayAgent:
                 if request.stream and self._can_stream_true():
                     smart_decision = await self.router._smart_strategy.select_model(
                         prompt, effective_allowed, req_ctx.project_id, req_ctx.user_id,
+                        tenant_id=req_ctx.tenant_id,
                     )
                     request.model = smart_decision.selected_model
-                    return self._stream_true(
-                        request, context, req_ctx, prompt_caching_enabled,
-                        _rate_limit_headers, resolved_policy, pii_mapping,
-                        request_id, _request_start,
-                        preferred_provider=None, effective_allowed=effective_allowed,
-                        smart_routing_decision=smart_decision, spoke=target_spoke,
+                    candidate_models = {smart_decision.selected_model}
+                    default_model = getattr(
+                        self.router._smart_strategy,
+                        "default_model",
+                        None,
                     )
+                    if default_model:
+                        candidate_models.add(default_model)
+                    reserve_decision = await self._reserve_request_budget(
+                        request_id=request_id,
+                        req_ctx=req_ctx,
+                        estimated_cost=(
+                            self._estimate_request_cost(
+                                request,
+                                candidate_models,
+                            )
+                            if has_request_budget
+                            else 0.0
+                        ),
+                        project_budget=project_budget,
+                        user_budget=user_budget,
+                        resolved_policy=resolved_policy,
+                    )
+                    if not reserve_decision.allowed:
+                        return self._quota_error(
+                            reserve_decision,
+                            _rate_limit_headers,
+                        )
+                    budget_reservation = reserve_decision.reservation
+                    return self._guard_budgeted_stream(
+                        self._stream_true(
+                            request, context, req_ctx,
+                            prompt_caching_enabled,
+                            _rate_limit_headers, resolved_policy, pii_mapping,
+                            request_id, _request_start,
+                            preferred_provider=None,
+                            effective_allowed=effective_allowed,
+                            smart_routing_decision=smart_decision,
+                            spoke=target_spoke,
+                            budget_reservation=budget_reservation,
+                        ),
+                        budget_reservation,
+                        req_ctx=req_ctx,
+                    )
+                registry = getattr(self.router, "model_registry", None)
+                configured_models = getattr(registry, "models", {})
+                candidate_models = (
+                    set(effective_allowed)
+                    if effective_allowed is not None
+                    else set(configured_models)
+                )
+                reserve_decision = await self._reserve_request_budget(
+                    request_id=request_id,
+                    req_ctx=req_ctx,
+                    estimated_cost=(
+                        self._estimate_request_cost(
+                            request,
+                            candidate_models,
+                        )
+                        if has_request_budget
+                        else 0.0
+                    ),
+                    project_budget=project_budget,
+                    user_budget=user_budget,
+                    resolved_policy=resolved_policy,
+                )
+                if not reserve_decision.allowed:
+                    return self._quota_error(
+                        reserve_decision,
+                        _rate_limit_headers,
+                    )
+                budget_reservation = reserve_decision.reservation
                 response, smart_routing_decision = await self.router.smart_route(
                     request,
                     self.provider_fn_factory,
@@ -720,19 +861,45 @@ class GatewayAgent:
                     allowed_models=effective_allowed,
                     project_id=req_ctx.project_id,
                     user_id=req_ctx.user_id,
+                    tenant_id=req_ctx.tenant_id,
                     spoke=target_spoke,
                 )
             else:
+                reserve_decision = await self._reserve_request_budget(
+                    request_id=request_id,
+                    req_ctx=req_ctx,
+                    estimated_cost=(
+                        self._estimate_request_cost(request)
+                        if has_request_budget
+                        else 0.0
+                    ),
+                    project_budget=project_budget,
+                    user_budget=user_budget,
+                    resolved_policy=resolved_policy,
+                )
+                if not reserve_decision.allowed:
+                    return self._quota_error(
+                        reserve_decision,
+                        _rate_limit_headers,
+                    )
+                budget_reservation = reserve_decision.reservation
                 # TRUE STREAMING (#18): direct single-model streaming opens the
                 # provider stream directly — no blocking call, no double billing.
                 if request.stream and self._can_stream_true():
-                    return self._stream_true(
-                        request, context, req_ctx, prompt_caching_enabled,
-                        _rate_limit_headers, resolved_policy, pii_mapping,
-                        request_id, _request_start,
-                        preferred_provider=context.get("provider"),
-                        effective_allowed=effective_allowed,
-                        smart_routing_decision=None, spoke=target_spoke,
+                    return self._guard_budgeted_stream(
+                        self._stream_true(
+                            request, context, req_ctx,
+                            prompt_caching_enabled,
+                            _rate_limit_headers, resolved_policy, pii_mapping,
+                            request_id, _request_start,
+                            preferred_provider=context.get("provider"),
+                            effective_allowed=effective_allowed,
+                            smart_routing_decision=None,
+                            spoke=target_spoke,
+                            budget_reservation=budget_reservation,
+                        ),
+                        budget_reservation,
+                        req_ctx=req_ctx,
                     )
                 response = await self.router.execute_with_fallback(
                     request, provider_fn,
@@ -740,6 +907,10 @@ class GatewayAgent:
                     allowed_models=effective_allowed,
                 )
         except EnsembleAccessError as exc:
+            await self._release_request_budget(
+                budget_reservation,
+                req_ctx=req_ctx,
+            )
             resp = _error_response(
                 403, "forbidden",
                 f"Model '{exc.model}' is not allowed",
@@ -748,6 +919,10 @@ class GatewayAgent:
             resp["_rate_limit_headers"] = _rate_limit_headers
             return resp
         except EnsembleCostCeilingError as exc:
+            await self._release_request_budget(
+                budget_reservation,
+                req_ctx=req_ctx,
+            )
             resp = _error_response(
                 400, "invalid_request", str(exc),
                 code="ensemble_cost_ceiling",
@@ -755,6 +930,17 @@ class GatewayAgent:
             resp["_rate_limit_headers"] = _rate_limit_headers
             return resp
         except EnsembleNoSurvivorsError as exc:
+            totals = await self._finalize_request_budget(
+                budget_reservation,
+                actual_cost=exc.decision.total_cost,
+                req_ctx=req_ctx,
+            )
+            if totals and "user" in totals:
+                self.cost_tracker.adopt_user_spend(
+                    req_ctx.user_id,
+                    totals["user"],
+                    tenant_id=req_ctx.tenant_id,
+                )
             resp = _error_response(
                 502, "provider_error",
                 str(exc),
@@ -764,6 +950,17 @@ class GatewayAgent:
             resp["_rate_limit_headers"] = _rate_limit_headers
             return resp
         except EnsembleQuorumError as exc:
+            totals = await self._finalize_request_budget(
+                budget_reservation,
+                actual_cost=exc.decision.total_cost,
+                req_ctx=req_ctx,
+            )
+            if totals and "user" in totals:
+                self.cost_tracker.adopt_user_spend(
+                    req_ctx.user_id,
+                    totals["user"],
+                    tenant_id=req_ctx.tenant_id,
+                )
             resp = _error_response(
                 502, "provider_error",
                 str(exc),
@@ -773,6 +970,17 @@ class GatewayAgent:
             resp["_rate_limit_headers"] = _rate_limit_headers
             return resp
         except EnsembleSynthesisError as exc:
+            totals = await self._finalize_request_budget(
+                budget_reservation,
+                actual_cost=exc.decision.total_cost,
+                req_ctx=req_ctx,
+            )
+            if totals and "user" in totals:
+                self.cost_tracker.adopt_user_spend(
+                    req_ctx.user_id,
+                    totals["user"],
+                    tenant_id=req_ctx.tenant_id,
+                )
             resp = _error_response(
                 502, "provider_error",
                 str(exc),
@@ -782,6 +990,10 @@ class GatewayAgent:
             resp["_rate_limit_headers"] = _rate_limit_headers
             return resp
         except AllProvidersExhaustedError as exc:
+            await self._release_request_budget(
+                budget_reservation,
+                req_ctx=req_ctx,
+            )
             resp = _error_response(
                 502,
                 "provider_error",
@@ -791,6 +1003,10 @@ class GatewayAgent:
             resp["_rate_limit_headers"] = _rate_limit_headers
             return resp
         except NoCandidateModelsError as exc:
+            await self._release_request_budget(
+                budget_reservation,
+                req_ctx=req_ctx,
+            )
             resp = _error_response(
                 502,
                 "provider_error",
@@ -799,49 +1015,20 @@ class GatewayAgent:
             )
             resp["_rate_limit_headers"] = _rate_limit_headers
             return resp
-
-        # 11. Response guardrails.
-        # 11.5. Output PII policy. This same helper is used by true and buffered
-        # streaming paths so no provider output can take an early return around
-        # post-response policy.
-        (
-            response,
-            response_blocked,
-            output_pii_count,
-            output_pii_types,
-        ) = await self._apply_output_policy(
-            response,
-            project=project,
-            resolved_policy=resolved_policy,
-            pii_mapping=pii_mapping,
-        )
-        await self._record_output_pii_redaction(
-            req_ctx=req_ctx,
-            request_id=request_id,
-            count=output_pii_count,
-            redacted_types=output_pii_types,
-        )
-
-        # 11.6. Audit trail — record LLM request
-        if self._audit_trail is not None:
-            await self._audit_trail.record_llm_request(
-                user_id=req_ctx.user_id,
-                project_id=req_ctx.project_id,
-                request_id=request_id,
-                model=response.model,
-                provider=response.provider,
-                message_count=len(request.messages or []),
-                pii_redacted_count=(
-                    (pii_mapping.redacted_count if pii_mapping else 0)
-                    + output_pii_count
-                ),
-                injection_score=0.0,
-            )
+        except Exception:
+            if budget_reservation is not None:
+                await self._finalize_request_budget(
+                    budget_reservation,
+                    actual_cost=budget_reservation.amount,
+                    req_ctx=req_ctx,
+                )
+            raise
 
         # 12. Cost tracking
         # Ensemble routing records per-call usage internally via the router's
         # cost tracker; skip the normal post-response recording to avoid
         # double-counting.
+        budget_finalization_failed = False
         if ensemble_decision is None:
             cost = self.cost_tracker.calculate_cost(
                 response.provider,
@@ -863,6 +1050,7 @@ class GatewayAgent:
                 request_id=request_id,
                 project_id=req_ctx.project_id,
                 user_id=req_ctx.user_id,
+                tenant_id=req_ctx.tenant_id,
                 provider=response.provider,
                 model=request.model,
                 prompt_tokens=response.usage.prompt_tokens,
@@ -877,7 +1065,25 @@ class GatewayAgent:
                 task_type=self._classify_for_usage(prompt, smart_routing_decision),
                 provider_request_id=response.id or "",
             )
-            await self.cost_tracker.record_usage(usage_record)
+            reservation_totals = await self._finalize_request_budget(
+                budget_reservation,
+                actual_cost=cost,
+                req_ctx=req_ctx,
+            )
+            budget_finalization_failed = reservation_totals is None
+            await self.cost_tracker.record_usage(
+                usage_record,
+                skip_shared_scopes=(
+                    self._reserved_cost_tracker_scopes(
+                        budget_reservation
+                    )
+                ),
+            )
+            if reservation_totals:
+                self.cost_tracker.adopt_reserved_spend(
+                    usage_record,
+                    reservation_totals,
+                )
 
             # Forward the trace to an embedding Ostiari (best-effort; never blocks
             # or fails the request). forward() swallows and logs its own errors,
@@ -894,10 +1100,88 @@ class GatewayAgent:
             ):
                 self._otlp_exporter.export_usage(usage_record)
 
-            # Record spend in quota enforcer for hierarchy budget tracking
-            if self._quota_enforcer is not None:
+            # A project reservation already reconciled this counter. Requests
+            # with no project cap retain the existing shared spend history so a
+            # budget added later starts from actual prior usage.
+            if (
+                self._quota_enforcer is not None
+                and not self._reservation_has_scope(
+                    budget_reservation,
+                    "quota",
+                )
+            ):
                 budget_limit = resolved_policy.budget_limit if resolved_policy else None
-                await self._quota_enforcer.record_spend(req_ctx.project_id, cost, budget_limit=budget_limit)
+                await self._quota_enforcer.record_spend(
+                    req_ctx.project_id,
+                    cost,
+                    budget_limit=budget_limit,
+                    tenant_id=req_ctx.tenant_id,
+                )
+        else:
+            reservation_totals = await self._finalize_request_budget(
+                budget_reservation,
+                actual_cost=ensemble_decision.total_cost,
+                req_ctx=req_ctx,
+            )
+            budget_finalization_failed = reservation_totals is None
+            if reservation_totals and "user" in reservation_totals:
+                self.cost_tracker.adopt_user_spend(
+                    req_ctx.user_id,
+                    reservation_totals["user"],
+                    tenant_id=req_ctx.tenant_id,
+                )
+
+        if budget_finalization_failed:
+            response_error = _error_response(
+                503,
+                "service_unavailable",
+                "The provider call completed, but budget accounting could not "
+                "be finalized.",
+                code="budget_finalization_failed",
+            )
+            response_error["_rate_limit_headers"] = _rate_limit_headers
+            return response_error
+
+        # 11. Response guardrails run after accounting.
+        # 11.5. Output PII policy re-injects only caller-supplied values and
+        # redacts newly generated PII. A policy or audit outage may withhold the
+        # response, but cannot erase a provider charge that has already occurred.
+        (
+            response,
+            response_blocked,
+            output_pii_count,
+            output_pii_types,
+        ) = await self._apply_output_policy(
+            response,
+            project=project,
+            resolved_policy=resolved_policy,
+            pii_mapping=pii_mapping,
+        )
+
+        await self._record_output_pii_redaction(
+            req_ctx=req_ctx,
+            request_id=request_id,
+            count=output_pii_count,
+            redacted_types=output_pii_types,
+        )
+
+        # 11.6. Audit after accounting. A durable audit outage may still fail the
+        # request closed, but it must never erase a provider charge.
+        if self._audit_trail is not None:
+            await self._audit_trail.record_llm_request(
+                user_id=req_ctx.user_id,
+                project_id=req_ctx.project_id,
+                request_id=request_id,
+                model=response.model,
+                provider=response.provider,
+                message_count=len(request.messages or []),
+                pii_redacted_count=(
+                    (pii_mapping.redacted_count if pii_mapping else 0)
+                    + output_pii_count
+                ),
+                injection_score=0.0,
+                tenant_id=req_ctx.tenant_id or "__legacy__",
+            )
 
         # 13. Budget status for streaming (already enforced pre-request)
         budget_status: BudgetStatus | None = None
@@ -934,7 +1218,12 @@ class GatewayAgent:
         # nothing ever wrote to, so it could only ever miss.
         if cache_key is not None and not response_blocked:
             ttl = project.cache_ttl_seconds if project else 300
-            await self.cache_manager.put(cache_key, response, ttl)
+            await self.cache_manager.put(
+                cache_key,
+                response,
+                ttl,
+                tenant_id=req_ctx.tenant_id,
+            )
             if semantic_eligible:
                 # put() swallows its own failures; an embedding outage must not
                 # turn a completed request into an error.
@@ -1207,14 +1496,16 @@ class GatewayAgent:
                 request_id=request_id,
                 redacted_types=redacted_types,
                 count=count,
+                tenant_id=req_ctx.tenant_id or "__legacy__",
             )
         if self._event_dispatcher is not None:
             await self._event_dispatcher.dispatch_pii_event(
-                event_id=request_id,
+                event_id=f"{request_id}:pii:output",
                 user_id=req_ctx.user_id,
                 project_id=req_ctx.project_id,
                 redacted_types=redacted_types,
                 count=count,
+                tenant_id=req_ctx.tenant_id or "__legacy__",
             )
 
     async def _apply_cached_output_policy(
@@ -1256,6 +1547,7 @@ class GatewayAgent:
                     + output_pii_count
                 ),
                 injection_score=0.0,
+                tenant_id=req_ctx.tenant_id or "__legacy__",
             )
         return response
 
@@ -1409,6 +1701,7 @@ class GatewayAgent:
         effective_allowed: list[str] | None,
         smart_routing_decision: Any = None,
         spoke: Any = None,
+        budget_reservation: BudgetReservation | None = None,
     ) -> AsyncIterator[dict]:
         """Real end-to-end streaming with policy-aware release.
 
@@ -1429,6 +1722,10 @@ class GatewayAgent:
             and effective_allowed is not None
             and request.model not in effective_allowed
         ):
+            await self._release_request_budget(
+                budget_reservation,
+                req_ctx=req_ctx,
+            )
             yield {"data": {"error": {"type": "forbidden",
                     "message": f"Model '{request.model}' is not allowed",
                     "code": "model_not_allowed"}}}
@@ -1504,6 +1801,10 @@ class GatewayAgent:
                     request.model,
                     exc_info=True,
                 )
+                await self._release_request_budget(
+                    budget_reservation,
+                    req_ctx=req_ctx,
+                )
                 yield {"data": {"error": {"type": "provider_error",
                         "message": "The provider request failed.",
                         "code": "all_providers_exhausted"}}}
@@ -1548,6 +1849,7 @@ class GatewayAgent:
                     status="error",
                     task_type=task_type,
                     provider_request_id=response.id or "",
+                    budget_reservation=budget_reservation,
                 )
                 yield {"data": {"error": {
                     "type": "output_policy_error",
@@ -1601,6 +1903,7 @@ class GatewayAgent:
                     task_type=task_type,
                     provider_request_id=response.id or "",
                     output_pii_count=output_pii_count,
+                    budget_reservation=budget_reservation,
                 )
             if not finalization_ok and not client_error_emitted:
                 yield {"data": {"error": {
@@ -1747,6 +2050,7 @@ class GatewayAgent:
                 text="".join(accumulated), usage=final_usage, status=stream_status,
                 task_type=task_type,
                 output_pii_count=output_pii_count,
+                budget_reservation=budget_reservation,
             )
         if not finalization_ok and not client_error_emitted:
             yield {"data": {"error": {
@@ -1783,6 +2087,7 @@ class GatewayAgent:
         pii_mapping, provider, model, response_model, text, usage, status,
         task_type: str = "", provider_request_id: str = "",
         output_pii_count: int = 0,
+        budget_reservation: BudgetReservation | None = None,
     ) -> None:
         """End-of-stream accounting: usage, cost, audit, trace, OTLP, quota.
 
@@ -1797,8 +2102,14 @@ class GatewayAgent:
                 if isinstance(m, dict) and isinstance(m.get("content"), str)
             )
             try:
-                prompt_tokens = await self.cost_tracker.estimate_tokens(prompt_text, model)
-                completion_tokens = await self.cost_tracker.estimate_tokens(text, model)
+                prompt_tokens = await self.cost_tracker.estimate_tokens(
+                    prompt_text,
+                    response_model,
+                )
+                completion_tokens = await self.cost_tracker.estimate_tokens(
+                    text,
+                    response_model,
+                )
             except Exception:  # noqa: BLE001 — estimation must never fail the stream
                 prompt_tokens = completion_tokens = 0
             usage = TokenUsage(
@@ -1807,29 +2118,20 @@ class GatewayAgent:
                 total_tokens=prompt_tokens + completion_tokens,
             )
 
-        # Audit trail (step 11.6 parity)
-        if self._audit_trail is not None:
-            await self._audit_trail.record_llm_request(
-                user_id=req_ctx.user_id, project_id=req_ctx.project_id,
-                request_id=request_id, model=response_model, provider=provider,
-                message_count=len(request.messages or []),
-                pii_redacted_count=(
-                    (pii_mapping.redacted_count if pii_mapping else 0)
-                    + output_pii_count
-                ),
-                injection_score=0.0,
-            )
-
         # Cost tracking (step 12 parity)
         cost = self.cost_tracker.calculate_cost(
-            provider, model, usage.prompt_tokens, usage.completion_tokens,
+            provider,
+            response_model,
+            usage.prompt_tokens,
+            usage.completion_tokens,
             cached_tokens=usage.cached_tokens,
             cache_creation_tokens=usage.cache_creation_tokens,
         )
         latency_ms = (time.perf_counter() - request_start) * 1000
         usage_record = UsageRecord(
             request_id=request_id, project_id=req_ctx.project_id, user_id=req_ctx.user_id,
-            provider=provider, model=model,
+            tenant_id=req_ctx.tenant_id,
+            provider=provider, model=response_model,
             prompt_tokens=usage.prompt_tokens, completion_tokens=usage.completion_tokens,
             total_tokens=usage.total_tokens, cost=cost,
             timestamp=datetime.now(timezone.utc),
@@ -1841,7 +2143,26 @@ class GatewayAgent:
             task_type=task_type,
             provider_request_id=provider_request_id,
         )
-        await self.cost_tracker.record_usage(usage_record)
+        reservation_totals = await self._finalize_request_budget(
+            budget_reservation,
+            actual_cost=cost,
+            req_ctx=req_ctx,
+        )
+        await self.cost_tracker.record_usage(
+            usage_record,
+            skip_shared_scopes=(
+                self._reserved_cost_tracker_scopes(
+                    budget_reservation
+                )
+            ),
+        )
+        if reservation_totals is None:
+            raise RuntimeError("budget reservation finalization failed")
+        if reservation_totals:
+            self.cost_tracker.adopt_reserved_spend(
+                usage_record,
+                reservation_totals,
+            )
 
         if self._trace_forwarder is not None:
             await self._trace_forwarder.forward(usage_record)
@@ -1849,10 +2170,37 @@ class GatewayAgent:
             self._trace_forwarder is not None and self._trace_forwarder.enabled
         ):
             self._otlp_exporter.export_usage(usage_record)
-        if self._quota_enforcer is not None:
+        if (
+            self._quota_enforcer is not None
+            and not self._reservation_has_scope(
+                budget_reservation,
+                "quota",
+            )
+        ):
             budget_limit = resolved_policy.budget_limit if resolved_policy else None
             await self._quota_enforcer.record_spend(
-                req_ctx.project_id, cost, budget_limit=budget_limit)
+                req_ctx.project_id,
+                cost,
+                budget_limit=budget_limit,
+                tenant_id=req_ctx.tenant_id,
+            )
+
+        # Audit after spend and usage are durable enough to retry independently.
+        if self._audit_trail is not None:
+            await self._audit_trail.record_llm_request(
+                user_id=req_ctx.user_id,
+                project_id=req_ctx.project_id,
+                request_id=request_id,
+                model=response_model,
+                provider=provider,
+                message_count=len(request.messages or []),
+                pii_redacted_count=(
+                    (pii_mapping.redacted_count if pii_mapping else 0)
+                    + output_pii_count
+                ),
+                injection_score=0.0,
+                tenant_id=req_ctx.tenant_id or "__legacy__",
+            )
         if approximate:
             logger.debug("stream usage estimated (provider reported none) req=%s", request_id)
 
@@ -1923,6 +2271,7 @@ class GatewayAgent:
         request_id: str = "",
         authorized_project: Project | None = None,
         tenant_id: str | None = None,
+        budget_reservation: BudgetReservation | None = None,
     ) -> AsyncIterator[dict]:
         """Async generator for streaming ensemble requests.
 
@@ -1935,10 +2284,6 @@ class GatewayAgent:
         error policy (or there are zero survivors), the stream terminates with
         an error chunk and no synthesized content (Req 10.4).
         """
-        # Yield rate limit headers as first metadata chunk if present.
-        if rate_limit_headers:
-            yield {"_rate_limit_headers": rate_limit_headers}
-
         try:
             response, _decision = await self.router.ensemble_route(
                 request,
@@ -1948,7 +2293,13 @@ class GatewayAgent:
                 allowed_models=effective_allowed,
                 project_id=project_id,
                 user_id=user_id,
+                tenant_id=tenant_id,
                 per_call_cost_estimate=per_call,
+                skip_shared_scopes=(
+                    self._reserved_cost_tracker_scopes(
+                        budget_reservation
+                    )
+                ),
             )
         except (
             EnsembleAccessError,
@@ -1956,7 +2307,7 @@ class GatewayAgent:
             EnsembleNoSurvivorsError,
             EnsembleQuorumError,
             EnsembleSynthesisError,
-        ):
+        ) as exc:
             # Pre-dispatch rejection (access / cost ceiling), below quorum
             # under error policy, 0 survivors, or judge failure: terminate the
             # stream with an error chunk and no synthesized content (Req 10.4).
@@ -1966,6 +2317,41 @@ class GatewayAgent:
                 project_id,
                 exc_info=True,
             )
+            decision = getattr(exc, "decision", None)
+            if decision is None:
+                await self._release_request_budget(
+                    budget_reservation,
+                    req_ctx=RequestContext(
+                        user_id=user_id,
+                        project_id=project_id,
+                        roles=[],
+                        scopes=[],
+                        tenant_id=tenant_id,
+                        authorized_project=authorized_project,
+                    ),
+                )
+            else:
+                failed_ctx = RequestContext(
+                    user_id=user_id,
+                    project_id=project_id,
+                    roles=[],
+                    scopes=[],
+                    tenant_id=tenant_id,
+                    authorized_project=authorized_project,
+                )
+                totals = await self._finalize_request_budget(
+                    budget_reservation,
+                    actual_cost=decision.total_cost,
+                    req_ctx=failed_ctx,
+                )
+                if totals and "user" in totals:
+                    self.cost_tracker.adopt_user_spend(
+                        user_id,
+                        totals["user"],
+                        tenant_id=tenant_id,
+                    )
+            if rate_limit_headers:
+                yield {"_rate_limit_headers": rate_limit_headers}
             yield {"data": {"error": {
                 "type": "ensemble_error",
                 "message": "The ensemble request failed.",
@@ -1982,6 +2368,27 @@ class GatewayAgent:
             tenant_id=tenant_id,
             authorized_project=authorized_project,
         )
+        reservation_totals = await self._finalize_request_budget(
+            budget_reservation,
+            actual_cost=_decision.total_cost,
+            req_ctx=req_ctx,
+        )
+        if reservation_totals is None:
+            yield {"data": {"error": {
+                "type": "service_unavailable",
+                "message": "Budget accounting could not be finalized.",
+                "code": "budget_finalization_failed",
+            }}}
+            yield {"data": "[DONE]"}
+            return
+        if "user" in reservation_totals:
+            self.cost_tracker.adopt_user_spend(
+                user_id,
+                reservation_totals["user"],
+                tenant_id=tenant_id,
+            )
+        if rate_limit_headers:
+            yield {"_rate_limit_headers": rate_limit_headers}
         try:
             (
                 response,
@@ -2013,6 +2420,7 @@ class GatewayAgent:
                         + output_pii_count
                     ),
                     injection_score=0.0,
+                    tenant_id=tenant_id or "__legacy__",
                 )
         except Exception:  # noqa: BLE001 — no unapproved content has been sent
             logger.exception(
@@ -2179,20 +2587,44 @@ class GatewayAgent:
         # Nominal completion budget for the estimate.
         estimated_completion_tokens = request.max_tokens or 256
 
-        # Price using the judge model's resolved provider, if available.
-        chain = self.router.get_fallback_chain(preset.judge)
-        if not chain:
-            return 0.0
-        mapping = chain[0]
-        try:
-            return self.cost_tracker.calculate_cost(
-                mapping.provider,
-                mapping.model_id,
-                estimated_prompt_tokens,
-                estimated_completion_tokens,
+        return self._estimate_models_cost(
+            {preset.judge},
+            prompt_tokens=estimated_prompt_tokens,
+            completion_tokens=estimated_completion_tokens,
+        )
+
+    def _estimate_ensemble_cost(
+        self,
+        request: ChatCompletionRequest,
+        preset: EnsemblePreset,
+    ) -> float:
+        """Bound panel calls plus the larger synthesis prompt conservatively."""
+        prompt_chars = sum(
+            len(content)
+            for message in (request.messages or [])
+            if isinstance(message, dict)
+            and isinstance((content := message.get("content", "")), str)
+        )
+        prompt_tokens = max(1, prompt_chars // 4)
+        completion_tokens = request.max_tokens or 256
+        panel_total = sum(
+            self._estimate_models_cost(
+                {model},
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
             )
-        except Exception:
-            return 0.0
+            for model in preset.panel
+        )
+        # The judge sees the original prompt plus every successful panel output.
+        judge_prompt_tokens = (
+            prompt_tokens + len(preset.panel) * completion_tokens
+        )
+        judge_cost = self._estimate_models_cost(
+            {preset.judge},
+            prompt_tokens=judge_prompt_tokens,
+            completion_tokens=completion_tokens,
+        )
+        return panel_total + judge_cost
 
     @staticmethod
     def _ensemble_metadata(decision) -> dict:
@@ -2215,7 +2647,262 @@ class GatewayAgent:
     # Helpers
     # ------------------------------------------------------------------
 
-    def _estimate_request_cost(self, request: ChatCompletionRequest) -> float:
+    async def _reserve_request_budget(
+        self,
+        *,
+        request_id: str,
+        req_ctx: RequestContext,
+        estimated_cost: float,
+        project_budget: BudgetStatus | None,
+        user_budget: BudgetStatus,
+        resolved_policy: ResolvedPolicy | None,
+    ) -> QuotaDecision:
+        """Reserve estimated cost against the strictest project and user caps."""
+        project_limits = [
+            limit
+            for limit in (
+                project_budget.budget_limit if project_budget else None,
+                resolved_policy.budget_limit if resolved_policy else None,
+            )
+            if limit is not None
+        ]
+        project_limit = min(project_limits) if project_limits else None
+        user_limit = user_budget.budget_limit
+        if project_limit is None and user_limit is None:
+            return QuotaDecision(allowed=True)
+        if estimated_cost <= 0:
+            return QuotaDecision(
+                allowed=False,
+                reason=(
+                    "Budgeted requests require a positive, priced cost "
+                    "estimate."
+                ),
+                limit_type="budget_estimate_unavailable",
+                status_code=503,
+            )
+        if self._quota_enforcer is None:
+            if (
+                project_limit is not None
+                and (project_budget.current_spend if project_budget else 0.0)
+                + estimated_cost
+                > project_limit
+            ):
+                return QuotaDecision(
+                    allowed=False,
+                    reason="Project budget limit would be exceeded.",
+                    limit_type="budget_limit",
+                    limit_value=project_limit,
+                    current_value=(
+                        project_budget.current_spend
+                        if project_budget
+                        else 0.0
+                    ),
+                    error_code="budget_exceeded",
+                )
+            if (
+                user_limit is not None
+                and user_budget.current_spend + estimated_cost > user_limit
+            ):
+                return QuotaDecision(
+                    allowed=False,
+                    reason="User budget limit would be exceeded.",
+                    limit_type="user_budget_limit",
+                    limit_value=user_limit,
+                    current_value=user_budget.current_spend,
+                    error_code="budget_exceeded",
+                )
+            return QuotaDecision(allowed=True)
+        return await self._quota_enforcer.reserve_budget(
+            request_id=request_id,
+            project_id=req_ctx.project_id,
+            user_id=req_ctx.user_id,
+            estimated_cost=estimated_cost,
+            project_budget_limit=project_limit,
+            user_budget_limit=user_limit,
+            tenant_id=req_ctx.tenant_id,
+            project_current_spend=(
+                project_budget.current_spend if project_budget else 0.0
+            ),
+            user_current_spend=user_budget.current_spend,
+        )
+
+    @staticmethod
+    def _request_has_budget(
+        project_budget: BudgetStatus | None,
+        user_budget: BudgetStatus,
+        resolved_policy: ResolvedPolicy | None,
+    ) -> bool:
+        return any(
+            limit is not None
+            for limit in (
+                project_budget.budget_limit if project_budget else None,
+                user_budget.budget_limit,
+                resolved_policy.budget_limit if resolved_policy else None,
+            )
+        )
+
+    @staticmethod
+    def _reservation_has_scope(
+        reservation: BudgetReservation | None,
+        scope: str,
+    ) -> bool:
+        return bool(
+            reservation
+            and any(
+                counter_scope == scope
+                for counter_scope, _ident, _limit in reservation.counters
+            )
+        )
+
+    @staticmethod
+    def _reserved_cost_tracker_scopes(
+        reservation: BudgetReservation | None,
+    ) -> frozenset[str]:
+        if reservation is None:
+            return frozenset()
+        return frozenset(
+            scope
+            for scope, _ident, _limit in reservation.counters
+            if scope in {"project", "user"}
+        )
+
+    async def _finalize_request_budget(
+        self,
+        reservation: BudgetReservation | None,
+        *,
+        actual_cost: float,
+        req_ctx: RequestContext,
+    ) -> dict[str, float] | None:
+        if reservation is None or self._quota_enforcer is None:
+            return {}
+        return await self._quota_enforcer.finalize_budget(
+            reservation,
+            actual_cost,
+            tenant_id=req_ctx.tenant_id,
+            project_id=req_ctx.project_id,
+        )
+
+    async def _guard_budgeted_stream(
+        self,
+        stream: AsyncIterator[dict],
+        reservation: BudgetReservation | None,
+        *,
+        req_ctx: RequestContext,
+    ) -> AsyncIterator[dict]:
+        """Reconcile a reservation when a caller abandons a stream."""
+        completed = False
+        try:
+            async for event in stream:
+                yield event
+            completed = True
+        finally:
+            if not completed:
+                close = getattr(stream, "aclose", None)
+                if close is not None:
+                    try:
+                        await close()
+                    except Exception:  # noqa: BLE001
+                        logger.debug(
+                            "budgeted stream close failed req=%s",
+                            reservation.request_id if reservation else "",
+                            exc_info=True,
+                        )
+                if reservation is not None:
+                    try:
+                        totals = await self._finalize_request_budget(
+                            reservation,
+                            actual_cost=reservation.amount,
+                            req_ctx=req_ctx,
+                        )
+                        if totals and "user" in totals:
+                            self.cost_tracker.adopt_user_spend(
+                                req_ctx.user_id,
+                                totals["user"],
+                                tenant_id=req_ctx.tenant_id,
+                            )
+                        if totals is None:
+                            logger.error(
+                                "Failed to reconcile interrupted stream "
+                                "reservation req=%s",
+                                reservation.request_id,
+                            )
+                    except Exception:  # noqa: BLE001
+                        logger.exception(
+                            "Interrupted stream reservation reconciliation "
+                            "raised req=%s",
+                            reservation.request_id,
+                        )
+
+    async def _release_request_budget(
+        self,
+        reservation: BudgetReservation | None,
+        *,
+        req_ctx: RequestContext,
+    ) -> None:
+        if reservation is None or self._quota_enforcer is None:
+            return
+        released = await self._quota_enforcer.release_budget(
+            reservation,
+            tenant_id=req_ctx.tenant_id,
+            project_id=req_ctx.project_id,
+        )
+        if not released:
+            logger.error(
+                "Failed to release budget reservation req=%s",
+                reservation.request_id,
+            )
+
+    @staticmethod
+    def _quota_error(
+        decision: QuotaDecision,
+        rate_limit_headers: dict[str, str] | None = None,
+    ) -> dict:
+        response = _error_response(
+            decision.status_code,
+            (
+                "service_unavailable"
+                if decision.status_code == 503
+                else "quota_exceeded"
+            ),
+            decision.reason,
+            code=decision.error_code or f"quota_{decision.limit_type}",
+        )
+        if rate_limit_headers:
+            response["_rate_limit_headers"] = rate_limit_headers
+        return response
+
+    def _estimate_models_cost(
+        self,
+        models: set[str],
+        *,
+        prompt_tokens: int,
+        completion_tokens: int,
+    ) -> float:
+        estimates: list[float] = []
+        for model in models:
+            try:
+                chain = self.router.get_fallback_chain(model)
+            except Exception:
+                continue
+            for mapping in chain:
+                try:
+                    estimates.append(
+                        self.cost_tracker.calculate_cost(
+                            mapping.provider,
+                            mapping.model_id,
+                            prompt_tokens,
+                            completion_tokens,
+                        )
+                    )
+                except Exception:
+                    continue
+        return max(estimates, default=0.0)
+
+    def _estimate_request_cost(
+        self,
+        request: ChatCompletionRequest,
+        candidate_models: set[str] | None = None,
+    ) -> float:
         """Estimate the cost of a request before execution for quota pre-check.
 
         Uses a rough token estimate from message content and the model's pricing.
@@ -2230,36 +2917,32 @@ class GatewayAgent:
         estimated_prompt_tokens = max(1, prompt_chars // 4)
         estimated_completion_tokens = request.max_tokens or 256
 
-        try:
-            chain = self.router.get_fallback_chain(request.model or "")
-        except (KeyError, Exception):
-            return 0.0
-        if not chain:
-            return 0.0
-        mapping = chain[0]
-        try:
-            return self.cost_tracker.calculate_cost(
-                mapping.provider,
-                mapping.model_id,
-                estimated_prompt_tokens,
-                estimated_completion_tokens,
-            )
-        except Exception:
-            return 0.0
+        models = candidate_models or {request.model or ""}
+        return self._estimate_models_cost(
+            models,
+            prompt_tokens=estimated_prompt_tokens,
+            completion_tokens=estimated_completion_tokens,
+        )
 
     def _compute_effective_allowed_models(
-        self, project: Project | None, user_id: str
+        self,
+        project: Project | None,
+        user_config: dict | str,
     ) -> set[str] | None:
         """Compute the effective allowed-models set from project and user access lists.
 
         Returns the intersection when both are set, the single list when only one
         is set, or ``None`` when neither is set (meaning all models are permitted).
+
+        ``str`` retains the legacy internal call contract. Canonical request
+        paths resolve a tenant-qualified config first and always pass the dict.
         """
+        if isinstance(user_config, str):
+            user_config = self._user_configs.get(user_config, {})
         project_allowed: set[str] | None = None
         if project and project.allowed_models:
             project_allowed = set(project.allowed_models)
 
-        user_config = self._user_configs.get(user_id, {})
         user_allowed_list = user_config.get("allowed_models")
         user_allowed: set[str] | None = None
         if user_allowed_list:
@@ -2272,6 +2955,34 @@ class GatewayAgent:
         if user_allowed is not None:
             return user_allowed
         return None
+
+    async def _user_config_for_context(
+        self,
+        req_ctx: RequestContext,
+    ) -> dict:
+        """Resolve user restrictions only inside the authenticated tenant."""
+        if req_ctx.tenant_id is None:
+            return self._user_configs.get(req_ctx.user_id, {})
+
+        cache_key = (
+            f"tenant:{len(req_ctx.tenant_id)}:{req_ctx.tenant_id}:"
+            f"user:{len(req_ctx.user_id)}:{req_ctx.user_id}"
+        )
+        if self._persistence is None or not self._persistence.enabled:
+            return self._user_configs.get(cache_key, {})
+        loader = getattr(
+            self._persistence,
+            "get_tenant_user_config",
+            None,
+        )
+        if not callable(loader):
+            raise RuntimeError("tenant user config loading is unavailable")
+        config = await loader(req_ctx.tenant_id, req_ctx.user_id)
+        if config is None:
+            self._user_configs.pop(cache_key, None)
+            return {}
+        self._user_configs[cache_key] = config
+        return config
 
     # ------------------------------------------------------------------
     # Helpers
@@ -2443,7 +3154,24 @@ class GatewayAgent:
         only those models are returned. If user_id is provided and the
         user has allowed_models, further filter to the intersection.
         """
-        models = self.router.model_registry.list_models()
+        runtime_providers = getattr(self.router, "available_providers", None)
+        if not isinstance(runtime_providers, (set, frozenset)):
+            runtime_providers = None
+
+        def available_mappings(model):
+            if runtime_providers is None:
+                return list(model.providers)
+            return [
+                mapping
+                for mapping in model.providers
+                if mapping.provider in runtime_providers
+            ]
+
+        models = [
+            model
+            for model in self.router.model_registry.list_models()
+            if available_mappings(model)
+        ]
         if project_id:
             project = self._project_for_context(
                 RequestContext(
@@ -2478,7 +3206,10 @@ class GatewayAgent:
                 {
                     "name": m.name,
                     "description": m.description,
-                    "providers": [p.provider for p in m.providers],
+                    "providers": [
+                        mapping.provider
+                        for mapping in available_mappings(m)
+                    ],
                     "capabilities": m.capabilities or [],
                     "routing_strategy": m.routing_strategy.value,
                 }
@@ -2488,11 +3219,18 @@ class GatewayAgent:
 
     async def handle_health_check(self) -> dict:
         """Return service status and per-provider health."""
+        runtime_providers = getattr(self.router, "available_providers", None)
+        if not isinstance(runtime_providers, (set, frozenset)):
+            runtime_providers = None
         models = self.router.model_registry.list_models()
         providers: set[str] = set()
         for m in models:
-            for p in m.providers:
-                providers.add(p.provider)
+            for mapping in m.providers:
+                if (
+                    runtime_providers is None
+                    or mapping.provider in runtime_providers
+                ):
+                    providers.add(mapping.provider)
 
         provider_health: dict[str, str] = {}
         for provider in sorted(providers):
@@ -2567,6 +3305,7 @@ def create_gateway_agent(
     trace_forwarder: TraceForwarder | None = None,
     otlp_exporter: Any = None,
     semantic_cache: SemanticCache | None = None,
+    persistence: DynamoPersistence | None = None,
 ) -> GatewayAgent:
     """Create and wire a GatewayAgent, also setting the module-level singleton."""
     global _agent
@@ -2591,6 +3330,7 @@ def create_gateway_agent(
         trace_forwarder=trace_forwarder,
         otlp_exporter=otlp_exporter,
         semantic_cache=semantic_cache,
+        persistence=persistence,
     )
     _agent = agent
     return agent

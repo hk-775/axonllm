@@ -49,6 +49,9 @@ class _AllowRateLimiter:
         self,
         user_id: str,
         project_id: str,
+        *,
+        tenant_id: str | None = None,
+        project: Project | None = None,
     ) -> RateLimitResult:
         return RateLimitResult(
             allowed=True,
@@ -63,7 +66,13 @@ class _PolicyResolver:
     def __init__(self, policy: ResolvedPolicy) -> None:
         self.policy = policy
 
-    async def resolve(self, project_id: str) -> ResolvedPolicy:
+    async def resolve(
+        self,
+        project_id: str,
+        *,
+        tenant_id: str | None = None,
+        project: Project | None = None,
+    ) -> ResolvedPolicy:
         return self.policy
 
 

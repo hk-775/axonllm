@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import datetime
+import logging
 import random
 import time
 from typing import TYPE_CHECKING, Awaitable, Callable
@@ -37,6 +38,8 @@ if TYPE_CHECKING:
     from src.gateway.cost_tracker import CostTracker
     from src.gateway.ensemble_config import EnsembleConfig
     from src.gateway.smart_routing import SmartRoutingStrategy
+
+logger = logging.getLogger(__name__)
 
 
 class ProviderError(Exception):
@@ -138,9 +141,11 @@ class Router:
         smart_strategy: SmartRoutingStrategy | None = None,
         ensemble_config: "EnsembleConfig | None" = None,
         cost_tracker: "CostTracker | None" = None,
+        available_providers: frozenset[str] | None = None,
     ) -> None:
         self.model_registry = model_registry
         self.health_tracker = health_tracker
+        self.available_providers = available_providers
 
         # Strategy map: instantiated once, reused across requests
         self._strategies: dict[RoutingStrategy, RoutingStrategyBase] = {
@@ -195,8 +200,22 @@ class Router:
 
     def get_fallback_chain(self, model: str) -> list[ProviderModelMapping]:
         """Return ordered fallback chain for a model."""
-        mappings = self.model_registry.resolve(model)
+        mappings = self.available_mappings(model)
         return sorted(mappings, key=lambda m: m.fallback_order)
+
+    def available_mappings(self, model: str) -> list[ProviderModelMapping]:
+        """Return mappings this deployment is configured to invoke."""
+        mappings = self.model_registry.resolve(model)
+        if self.available_providers is None:
+            return list(mappings)
+        return [
+            mapping
+            for mapping in mappings
+            if mapping.provider in self.available_providers
+        ]
+
+    def is_model_available(self, model: str) -> bool:
+        return bool(self.available_mappings(model))
 
     async def smart_route(
         self,
@@ -206,6 +225,7 @@ class Router:
         allowed_models: set[str] | None = None,
         project_id: str | None = None,
         user_id: str | None = None,
+        tenant_id: str | None = None,
         spoke=None,
     ) -> tuple[ChatCompletionResponse, SmartRoutingDecision]:
         """Smart routing: select model, then execute with fallback.
@@ -220,14 +240,29 @@ class Router:
         if self._smart_strategy is None:
             raise RuntimeError("Smart routing strategy not configured")
 
-        decision = await self._smart_strategy.select_model(
-            prompt, allowed_models, project_id, user_id,
+        runtime_models = {
+            model.name
+            for model in self.model_registry.list_models()
+            if self.is_model_available(model.name)
+        }
+        effective_allowed = (
+            runtime_models
+            if allowed_models is None
+            else runtime_models.intersection(allowed_models)
         )
+        select_args = (prompt, effective_allowed, project_id, user_id)
+        if tenant_id is None:
+            decision = await self._smart_strategy.select_model(*select_args)
+        else:
+            decision = await self._smart_strategy.select_model(
+                *select_args,
+                tenant_id=tenant_id,
+            )
         request.model = decision.selected_model
         provider_fn = provider_fn_factory.create(request, spoke=spoke)
         try:
             response = await self.execute_with_fallback(
-                request, provider_fn, allowed_models=allowed_models,
+                request, provider_fn, allowed_models=effective_allowed,
             )
             return response, decision
         except AllProvidersExhaustedError:
@@ -246,7 +281,7 @@ class Router:
                 cost_quality_tradeoff=decision.cost_quality_tradeoff,
             )
             response = await self.execute_with_fallback(
-                request, provider_fn, allowed_models=allowed_models,
+                request, provider_fn, allowed_models=effective_allowed,
             )
             return response, decision
 
@@ -280,6 +315,8 @@ class Router:
         model: str,
         project_id: str | None,
         user_id: str | None,
+        tenant_id: str | None,
+        skip_shared_scopes: frozenset[str] = frozenset(),
     ) -> float:
         """Calculate and record usage for one successful underlying call.
 
@@ -303,8 +340,9 @@ class Router:
             request_id=response.id,
             project_id=project_id,
             user_id=user_id,
+            tenant_id=tenant_id,
             provider=response.provider,
-            model=model,  # model name, not provider's versioned name
+            model=response.model,
             prompt_tokens=response.usage.prompt_tokens,
             completion_tokens=response.usage.completion_tokens,
             total_tokens=response.usage.total_tokens,
@@ -313,7 +351,10 @@ class Router:
             cached_tokens=response.usage.cached_tokens,
             cache_creation_tokens=response.usage.cache_creation_tokens,
         )
-        await self._cost_tracker.record_usage(usage_record)
+        await self._cost_tracker.record_usage(
+            usage_record,
+            skip_shared_scopes=skip_shared_scopes,
+        )
         return cost
 
     def _build_decision(
@@ -356,7 +397,9 @@ class Router:
         allowed_models: set[str] | None = None,
         project_id: str | None = None,
         user_id: str | None = None,
+        tenant_id: str | None = None,
         per_call_cost_estimate: float = 0.0,
+        skip_shared_scopes: frozenset[str] = frozenset(),
     ) -> tuple[ChatCompletionResponse, EnsembleDecision]:
         """Scatter-gather-synthesize across the preset's panel and judge.
 
@@ -403,8 +446,23 @@ class Router:
                 )
             except AllProvidersExhaustedError as exc:
                 return PanelMemberResult(model, "failed", failure_reason=str(exc))
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "Unexpected ensemble panel failure model=%s",
+                    model,
+                )
+                return PanelMemberResult(
+                    model,
+                    "failed",
+                    failure_reason="provider execution failed",
+                )
             cost = await self._record_member_cost(
-                resp, request.model, project_id, user_id
+                resp,
+                request.model,
+                project_id,
+                user_id,
+                tenant_id,
+                skip_shared_scopes,
             )
             return PanelMemberResult(
                 model,
@@ -450,9 +508,21 @@ class Router:
         except AllProvidersExhaustedError as exc:
             decision.error = f"judge synthesis failed: {exc}"
             raise EnsembleSynthesisError(decision)
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "Unexpected ensemble judge failure model=%s",
+                preset.judge,
+            )
+            decision.error = "judge synthesis failed"
+            raise EnsembleSynthesisError(decision)
 
         judge_cost = await self._record_member_cost(
-            final, preset.judge, project_id, user_id
+            final,
+            preset.judge,
+            project_id,
+            user_id,
+            tenant_id,
+            skip_shared_scopes,
         )
         decision.judge_invoked = True
         decision.total_cost = panel_cost + judge_cost
@@ -470,7 +540,7 @@ class Router:
         If preferred_provider is set, skip strategy and use that provider directly.
         If allowed_models is set, filter out providers for models not in the set.
         """
-        mappings = self.model_registry.resolve(request.model)
+        mappings = self.available_mappings(request.model)
 
         # Filter by allowed models when the access list is provided
         if allowed_models is not None and request.model not in allowed_models:
@@ -481,6 +551,19 @@ class Router:
             }])
 
         attempts: list[dict] = []
+        if not mappings:
+            raise AllProvidersExhaustedError(
+                [
+                    {
+                        "provider": "none",
+                        "status_code": 503,
+                        "message": (
+                            f"Model '{request.model}' has no provider enabled "
+                            "in this deployment"
+                        ),
+                    }
+                ]
+            )
 
         if preferred_provider:
             # Find the mapping for the preferred provider

@@ -41,6 +41,10 @@ from src.gateway.health_tracker import ProviderHealthTracker
 from src.gateway.model_registry import ModelRegistry
 from src.gateway.models import PolicyNode, Project
 from src.gateway.persistence import DynamoPersistence
+from tests.unit.test_persistence_cas_foundations import (
+    _CasDynamoClient,
+    _CasTable,
+)
 
 
 class _FakeTable:
@@ -49,7 +53,14 @@ class _FakeTable:
     def __init__(self, rows: dict) -> None:
         self._rows = rows
 
-    def put_item(self, Item):  # noqa: N803 — boto3's parameter name
+    def put_item(  # noqa: N803 — boto3's parameter names
+        self,
+        Item,
+        ConditionExpression=None,
+        ExpressionAttributeValues=None,
+    ):
+        if ConditionExpression and (Item["PK"], Item["SK"]) in self._rows:
+            raise RuntimeError("conditional write rejected")
         self._rows[(Item["PK"], Item["SK"])] = dict(Item)
 
     def get_item(self, Key):  # noqa: N803
@@ -80,10 +91,16 @@ class _TablePersistence(DynamoPersistence):
     def __init__(self, rows: dict | None = None) -> None:
         super().__init__()
         self._enabled = True
-        self.rows = rows if rows is not None else {}
+        self._client = _CasDynamoClient()
+        self._client.rows = rows if rows is not None else {}
+        self._table = _CasTable(self._client)
+
+    @property
+    def rows(self) -> dict:
+        return self._client.rows
 
     def _get_table(self):
-        return _FakeTable(self.rows)
+        return self._table
 
 
 def _admin_client(persistence, projects=None, user_configs=None):

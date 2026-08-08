@@ -49,6 +49,7 @@ class MultiProviderFactory:
         self,
         provider_configs: dict[str, ProviderConfig] | None = None,
         bedrock_region: str = "us-east-1",
+        enabled_providers: frozenset[str] | None = None,
     ) -> None:
         # HTTP-based providers
         self._adapter_registry = AdapterRegistry()
@@ -67,6 +68,14 @@ class MultiProviderFactory:
         self._adapter_registry.register("ai21", AI21Adapter())
 
         self._provider_configs = provider_configs or {}
+        available = {
+            "bedrock",
+            "bedrock-mantle",
+            *self._provider_configs,
+        }
+        if enabled_providers is not None:
+            available.intersection_update(enabled_providers)
+        self._available_providers = frozenset(available)
         self._http_client = HttpClient()
         self._bedrock_region = bedrock_region
 
@@ -80,6 +89,11 @@ class MultiProviderFactory:
         # a region other than the default (boto3 clients bake in their region).
         self._bedrock_by_region: dict[str, Callable] = {bedrock_region: self._bedrock_create}
         self._mantle_by_region: dict[str, Callable] = {bedrock_region: self._mantle_create}
+
+    @property
+    def available_providers(self) -> frozenset[str]:
+        """Providers that this process has credentials and permission to invoke."""
+        return self._available_providers
 
     def config_for(
         self, provider: str, spoke: SpokeConfig | None = None,
@@ -138,6 +152,15 @@ class MultiProviderFactory:
             request, prompt_caching_enabled=prompt_caching_enabled)
 
         async def _provider_fn(mapping: ProviderModelMapping) -> ChatCompletionResponse:
+            if mapping.provider not in self._available_providers:
+                raise ProviderError(
+                    status_code=503,
+                    provider=mapping.provider,
+                    message=(
+                        f"Provider '{mapping.provider}' is disabled or "
+                        "not configured in this deployment"
+                    ),
+                )
             # Bedrock Mantle — OpenAI-compatible via SigV4
             if mapping.provider == "bedrock-mantle":
                 return await mantle_fn(mapping)

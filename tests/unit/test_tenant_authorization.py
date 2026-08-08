@@ -160,10 +160,20 @@ def test_member_requires_an_explicit_project_grant() -> None:
     assert decision.status_code == 404
 
 
-def test_tenant_admin_requires_explicit_project_grant_until_ownership_exists() -> None:
+def test_tenant_admin_config_access_covers_every_project_in_its_tenant() -> None:
     decision = authorize(
         _principal(TenantRole.TENANT_ADMIN, projects=frozenset()),
         Action.TENANT_CONFIG_WRITE,
+        _tenant_resource(project_id="unlisted-project"),
+    )
+
+    assert decision.allowed
+
+
+def test_tenant_admin_data_plane_access_still_requires_project_grant() -> None:
+    decision = authorize(
+        _principal(TenantRole.TENANT_ADMIN, projects=frozenset()),
+        Action.INFERENCE_INVOKE,
         _tenant_resource(project_id="unlisted-project"),
     )
 

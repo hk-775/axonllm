@@ -478,6 +478,43 @@ async def test_handle_list_models_empty_registry(mock_rate_limiter, cache_manage
 
 
 @pytest.mark.asyncio
+async def test_handle_list_models_hides_unavailable_provider_only_models(
+    mock_rate_limiter,
+    cache_manager,
+    cost_tracker,
+):
+    registry = _build_registry_with_models()
+    router = Router(
+        registry,
+        ProviderHealthTracker(),
+        available_providers=frozenset({"openai"}),
+    )
+    agent = GatewayAgent(
+        router=router,
+        rate_limiter=mock_rate_limiter,
+        guardrail_engine=GuardrailEngine(),
+        cache_manager=cache_manager,
+        cost_tracker=cost_tracker,
+    )
+
+    result = await agent.handle_list_models()
+
+    assert result["models"] == [
+        {
+            "name": "gpt-4",
+            "description": "GPT-4 class model",
+            "providers": ["openai"],
+            "capabilities": [
+                "chat",
+                "streaming",
+                "function_calling",
+            ],
+            "routing_strategy": "weighted",
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_handle_health_check_all_healthy(mock_rate_limiter, cache_manager, cost_tracker):
     """health_check returns 'healthy' for all providers when none are in cooldown."""
     registry = _build_registry_with_models()

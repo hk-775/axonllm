@@ -186,7 +186,7 @@ class TestListProjectModels:
 class TestDynamoPersistenceFailure:
     """DynamoDB persistence failure handling — Requirement 4"""
 
-    def test_add_model_dynamo_failure_logs_warning_returns_success(
+    def test_add_model_dynamo_failure_leaves_live_state_unchanged(
         self, cost_tracker, health_tracker, model_registry, caplog
     ):
         mock_persistence = MagicMock()
@@ -207,6 +207,11 @@ class TestDynamoPersistenceFailure:
         with caplog.at_level(logging.WARNING, logger="src.gateway.admin.routes"):
             resp = client.post("/admin/projects/proj-1/models", json={"model": "new-model"})
 
-        assert resp.status_code == 200
-        assert "new-model" in resp.json()["allowed_models"]
+        assert resp.status_code == 503
+        assert project.allowed_models == ["gpt-4"]
+        assert api.projects["proj-1"] is project
+        mock_persistence.save_project.assert_awaited_once()
+        assert mock_persistence.save_project.await_args.kwargs == {
+            "expected_revision": 0,
+        }
         assert any("Failed to persist" in msg for msg in caplog.messages)

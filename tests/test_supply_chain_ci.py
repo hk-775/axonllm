@@ -53,6 +53,15 @@ def test_workflow_enforces_each_release_gate() -> None:
     missing = [command for command in required_commands if command not in workflow]
     assert missing == []
     assert "--extra agentcore" in workflow
+    assert (
+        '"${CDK_CI_OUTDIR}/fargate/AxonLLMStack.template.json"'
+        in workflow
+    )
+    assert (
+        '"${CDK_CI_OUTDIR}/agentcore/'
+        'AxonLLMAgentCoreStack.template.json"'
+        in workflow
+    )
 
 
 def test_secret_baseline_contains_only_verified_fingerprints() -> None:
@@ -88,6 +97,16 @@ def test_trivy_exception_is_narrow_and_expires() -> None:
                 "statement": (
                     "ALB and CloudFront access-log delivery require SSE-S3; "
                     "the bucket cannot use a customer-managed KMS key."
+                ),
+                "expired_at": "2027-08-07T00:00:00Z",
+            },
+            {
+                "id": "AWS-0035",
+                "paths": ["AxonLLMStack.template.json"],
+                "statement": (
+                    "The task volume is ephemeral Fargate scratch storage "
+                    "mounted at /tmp; no EFSVolumeConfiguration exists, so "
+                    "EFS transit encryption does not apply."
                 ),
                 "expired_at": "2027-08-07T00:00:00Z",
             },

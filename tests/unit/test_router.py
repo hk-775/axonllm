@@ -99,6 +99,22 @@ class TestGetFallbackChain:
         with pytest.raises(KeyError):
             router.get_fallback_chain("nonexistent")
 
+    def test_runtime_provider_allowlist_filters_the_chain(
+        self,
+        registry,
+        health_tracker,
+    ):
+        router = Router(
+            registry,
+            health_tracker,
+            available_providers=frozenset({"bedrock"}),
+        )
+
+        assert [
+            mapping.provider
+            for mapping in router.get_fallback_chain("gpt-4")
+        ] == ["bedrock"]
+
 
 # ---------------------------------------------------------------------------
 # execute_with_fallback — success cases
@@ -145,6 +161,31 @@ class TestExecuteSuccess:
         resp = await router.execute_with_fallback(_make_request(), provider_fn)
         assert resp.provider == "openai"
         assert attempts == 2
+
+    @pytest.mark.asyncio
+    async def test_disabled_providers_are_never_invoked(
+        self,
+        registry,
+        health_tracker,
+    ):
+        router = Router(
+            registry,
+            health_tracker,
+            available_providers=frozenset({"bedrock"}),
+        )
+        invoked: list[str] = []
+
+        async def provider_fn(mapping):
+            invoked.append(mapping.provider)
+            return _make_response(mapping.provider)
+
+        response = await router.execute_with_fallback(
+            _make_request(),
+            provider_fn,
+        )
+
+        assert response.provider == "bedrock"
+        assert invoked == ["bedrock"]
 
 
 # ---------------------------------------------------------------------------

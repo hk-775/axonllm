@@ -1,429 +1,254 @@
-# AxonLLM Enterprise Hardening Runbook
+# AxonLLM Enterprise Hardening Status
 
-This runbook describes `hardening/enterprise-tenant-sweep-2` as of
-2026-08-07. It separates controls present in the code from work still required
-before a shared, multi-tenant production release.
+This document describes `hardening/enterprise-production-sweep-3` as of
+2026-08-07. It separates controls implemented in the repository from deployment
+and operational evidence that must still be produced in the target AWS account.
+
+Use these documents for detailed procedures:
+
+- [Production runbook](docs/PRODUCTION_RUNBOOK.md)
+- [AgentCore runbook](docs/AGENTCORE_RUNBOOK.md)
+- [Feature catalog](README.md#features)
+- [Architecture and request flow](README.md#architecture)
+- [Product requirements](docs/PRD.md)
 
 ## Release Status
 
-Implemented:
+The repository now contains the code-level controls required for a shared
+multi-tenant deployment:
 
-- Canonical principals backed by strongly consistent DynamoDB reads.
-- Strongly consistent, tenant-qualified project ownership lookup before RBAC,
-  default-deny tenant role/action policy, project grants, cross-tenant 404
-  concealment, and data-plane enforcement for model listing and inference.
-- Tenant-qualified exact and semantic response caches, including isolation for
-  identical project ids in different tenants.
-- Tenant-qualified API-key rows and project indexes, atomic three-row issuance,
-  and atomic revocation plus per-tenant cache-invalidation epoch updates.
-- Hardened direct and ALB OIDC verification and a fail-closed AgentCore adapter.
-- Explicit AgentCore lifespan initialization, bounded OIDC/DynamoDB readiness,
-  a distinct `/ready` route, and bounded provider HTTP/OTLP shutdown.
-- Bounded chat ingress, PII-sensitive cache bypass, current-policy checks on
-  cache hits, append-only audit-chain containment, secret-aware Docker context,
-  and a non-root immutable image.
-- A Fargate reference stack with an internal TLS ALB behind CloudFront VPC
-  Origin, WAF, private tasks, explicitly approved HTTPS egress, retained
-  ALB/CloudFront access logs, and deployment rollback.
-- Hash-locked application/AgentCore dependencies and CI gates for lint, tests,
-  secret/dependency/IaC scanning, CDK synthesis, and container build/scan.
+- canonical, server-held tenant identity backed by strongly consistent DynamoDB
+  reads;
+- tenant-qualified control-plane and data-plane persistence;
+- role and action enforcement for tenant administrators, members, auditors,
+  services, and platform administrators;
+- project ownership checks before project grants are evaluated;
+- canonical API-key and SCIM lifecycle integration;
+- tenant-qualified quotas, policies, usage, audit, webhooks, and caches;
+- durable, conditional multi-instance state updates and refresh;
+- tenant-bound security-event delivery through a KMS/TLS FIFO SQS outbox,
+  bounded retries, native DLQ redrive, and managed SNS/Logs allowlists;
+- Fargate and AgentCore CDK stacks with private networking, encryption,
+  retained backups, alarms, immutable image parameters, and production runtime
+  profiles; and
+- locked CI, release-evidence, deployment-verification, recovery, and security
+  workflows for both deployment targets.
 
-Not complete:
+This is not production certification. Promotion still requires green protected
+CI for the exact release commit, target-account configuration, verified release
+evidence for the deployed image digest, authenticated canaries, and retained
+recovery evidence.
 
-- Tenant-scoped persistence and authorization for all remaining customer data
-  and `/admin/*` routes.
-- An automated principal migration/provisioning path, transactional SCIM
-  lifecycle integration, and atomic API-key rotation tied to canonical
-  principal authorization versions.
-- Production AgentCore IaC, JWT authorizer/header forwarding, private
-  networking, distributed controls, and memory isolation.
-- The remaining release blockers listed at the end of this document.
+## Production Contract
 
-The current branch is a tenant authorization foundation. It is not a claim that
-the admin control plane is safe for multiple untrusted tenants.
-
-## Canonical Identity
-
-Set all of the following for production:
+Every production runtime must start with:
 
 ```bash
+AXON_DEPLOYMENT_PROFILE=production
 AXON_AUTH_MODE=ENFORCE
 AXON_REQUIRE_CANONICAL_IDENTITY=true
 AXON_LOAD_DEMO_DATA=false
-
 LLM_ROUTER_DYNAMODB_ENABLED=true
-AXON_DYNAMODB_TABLE=axonllm-state
-AWS_DEFAULT_REGION=us-east-1
-
-AXON_OIDC_ISSUER=https://idp.example.com/oauth2/default
-AXON_OIDC_AUDIENCE=api://axonllm
 ```
 
-For HTTP traffic authenticated by an ALB, also set:
+`AppConfig` rejects a production profile that does not enforce authentication,
+canonical identity, and DynamoDB persistence. The Fargate production mode and
+AgentCore stack set this contract explicitly. Docker Compose selects the
+development profile and is not a production deployment path.
 
-```bash
-AXON_ALB_SIGNER_ARN=arn:aws:elasticloadbalancing:us-east-1:123456789012:loadbalancer/app/axon-prod/...
-AXON_ALB_CLIENT_ID=<listener-auth-action-client-id>
-AXON_ALB_ISSUER=https://public-keys.auth.elb.us-east-1.amazonaws.com
-```
+Direct OIDC also requires an exact HTTPS issuer and audience. Fargate production
+mode requires the ALB OIDC endpoints, client identity, client secret, issuer,
+audience, signer, and listener integration configured by the stack. AgentCore
+requires its JWT authorizer inputs and independently verifies the forwarded
+token before resolving canonical authority.
 
-`AWS_DEFAULT_REGION` must match the ALB signer region. These values are not
-needed by the direct OIDC or AgentCore paths.
+`AXON_ENABLED_PROVIDERS` is an optional comma-separated runtime provider
+allowlist. Providers outside it are neither advertised nor invoked, and empty or
+unknown values fail startup. The AgentCore stack sets it to `bedrock`, limiting
+that target to standard Bedrock mappings even if other provider metadata or
+credentials are present.
 
-Provider credentials and `AXON_BEDROCK_REGION` are deployment-specific.
-`AXON_CHECK_MODEL_AVAILABILITY=true` enables the readiness checklist's live
-provider catalogue check.
+Both AWS stacks also inject the deployment account, FIFO outbox queue URL, and
+exact managed SNS and CloudWatch destination ARNs. Queue access participates in
+readiness. Those ARN values are allowlists, not tenant destination
+configuration; administrators still create the desired destinations through
+the tenant control plane.
 
-Canonical identity defaults to `false` only to permit migration. The production
-checklist reports that state as `FAIL`. When the flag is true, startup refuses:
+## Canonical Identity
 
-- any `AXON_AUTH_MODE` other than `ENFORCE`; or
-- disabled DynamoDB persistence.
+Authentication verifies the credential first and extracts only identity hints.
+Canonical resolution then replaces credential-provided tenant, principal, role,
+scope, membership, project grants, and authorization version with the
+authoritative DynamoDB principal.
 
-Authentication first verifies a credential and extracts identity hints. The
-canonical resolver then looks up server-held authority and replaces all
-credential-provided roles, scopes, principal id, and authorization version.
-Token roles and scopes are never authoritative in canonical mode.
-
-Each principal record must contain:
+A canonical principal contains:
 
 | Field | Requirement |
 |---|---|
 | `issuer`, `subject` | Exact verified credential identity |
 | `tenant_id`, `principal_id` | Non-empty server-owned identifiers |
-| `roles` | One or more canonical `TenantRole` values |
-| `auth_method` | `oidc_jwt`, `api_key`, or the supported source method |
+| `roles` | Canonical `TenantRole` values |
 | `membership_status` | `active` to authorize |
-| `project_ids` | Explicit grants required by the current policy for every tenant role, including tenant admins |
-| `scopes` | Server-held action scopes, primarily for `service` principals |
-| `authorization_version` | Positive integer; increment by one on each update |
+| `project_ids` | Explicit grants for project-scoped data-plane actions |
+| `scopes` | Server-held action scopes for service principals |
+| `authorization_version` | Positive version used by conditional updates |
 
-OIDC records use the IdP issuer and `sub`. API-key records use issuer
-`urn:axonllm:api-key`, subject equal to the key id, role `service`, and an
-explicit project grant and action scopes. Existing API-key and SCIM records do
-not create canonical principal rows automatically.
+Missing, inactive, malformed, ambiguous, or mismatched canonical records deny
+access. An unavailable authority store returns `503`; it does not fall back to
+token claims or legacy in-memory authority.
 
-DynamoDB reads are strongly consistent. Missing, malformed, inactive, ambiguous,
-or identity-mismatched rows deny access. Writes support optimistic
-`authorization_version` conditions, but no public administration route currently
-manages these rows. Populate them through a controlled migration tool or trusted
-one-off process, and retain a reviewed manifest and rollback snapshot.
+## RBAC Model
 
-## Tenant RBAC
-
-Every decision requires an active membership. Unknown actions default deny.
-
-| Role | Tenant actions |
+| Role | Effective access |
 |---|---|
-| `tenant_member` | `model.list`, `inference.invoke`, `query.select`, `tenant.config.read`, `policy.read`, `quota.read` |
-| `tenant_auditor` | All member actions plus membership, API-key, webhook, usage, and audit reads; usage and audit exports |
-| `tenant_admin` | All auditor actions plus tenant config, membership, API-key, policy, quota, and webhook writes |
-| `service` | Only explicitly stored action scopes, and only for granted projects |
-| `platform_admin` | Platform actions only; tenant access requires break glass |
+| `tenant_member` | Tenant configuration reads plus granted-project model listing, inference, and reserved `query.select` |
+| `tenant_auditor` | Member access plus tenant membership, key, webhook, usage, audit, policy, and quota reads and exports |
+| `tenant_admin` | Auditor access plus tenant-owned membership, API-key, policy, quota, webhook, project, and configuration writes |
+| `service` | Granted-project data-plane actions explicitly present in server-held scopes; no control-plane access |
+| `platform_admin` | Platform resources; tenant access only through validated and audited break glass |
 
-The kernel requires every tenant role to hold an explicit grant when the
-resource carries a project id, including `tenant_admin`. Before that grant is
-evaluated, canonical ingress resolves the exact project under the principal's
-tenant with a strongly consistent point read. Ownership and permission are
-therefore independent checks. A service scope may be an exact action, a
-namespace wildcard such as `inference.*`, or `*`; these are server-held scopes,
-not trusted token claims.
+Canonical project access has two independent gates:
 
-`query.select` expresses read-only query intent. `query.mutate` is denied for
-every role, including platform administrators and services. No SQL/query HTTP
-surface is currently wired to these actions, so this is a policy contract, not
-yet an end-user query feature.
+1. A strongly consistent lookup must prove the project belongs to the selected
+   tenant.
+2. The principal must have the project grant and action required by policy.
 
-Cross-tenant resources and ungranted projects return 404 to conceal existence.
-Ordinary same-tenant role denials return 403.
+Cross-tenant and ungranted project resources return `404` to conceal existence.
+Ordinary same-tenant denials return `403`. Canonical mode default-denies unmapped
+`/api/*` and `/v1/*` routes.
 
-### Current Enforcement Boundary
+Legacy `admin` and `admin:*` authority exists only for noncanonical migration
+contexts. It cannot elevate a canonical viewer or service identity.
 
-Tenant RBAC is enforced on:
+`query.select` is reserved authorization vocabulary. AxonLLM does not currently
+ship a SQL parser, datasource adapter, or query endpoint. `query.mutate` always
+denies.
 
-- `GET /api/models`
-- `GET /v1/models`
-- `POST /api/chat`
-- `POST /api/chat/stream`
-- `POST /v1/chat/completions`
-- AgentCore `list_models` and `chat`
+## Request Flow
 
-Other routes remain under their existing authorizers. In particular,
-`/admin/*` still uses legacy `admin` roles and `admin:*` scopes and operates over
-data that is not comprehensively tenant-qualified. A canonical `tenant_admin`
-does not unlock those routes. Do not grant legacy global admin scopes to tenant
-principals in a shared deployment.
+For Starlette and AgentCore data-plane requests:
 
-Canonical mode also default-denies any unmapped `/api/*` or `/v1/*` endpoint.
-That intentionally makes `GET /api/users` unavailable: its current result is a
-fleet-wide user aggregate with no tenant-qualified ownership filter.
+1. Verify the credential and reject duplicate or ambiguous credential sources.
+2. Resolve canonical identity from DynamoDB.
+3. Require explicit tenant and project context.
+4. Resolve authoritative project ownership.
+5. Evaluate role, project grant, and service scope.
+6. Apply distributed rate and budget reservations.
+7. Run request validation, policy, PII, guardrail, cache, routing, and provider
+   stages.
+8. Persist tenant-qualified usage and audit records.
 
-The standalone OIDC validator requires `iss`, `aud`, `exp`, and `sub`, but does
-not require the custom tenant or project claims. A unique tenant membership can
-resolve without a tenant hint. In canonical mode, mapped HTTP data-plane routes
-reject a missing project before dispatch with `400 project_context_required`;
-there is no default-project fallback on that path. AgentCore requires both
-tenant and project claims. Legacy migration mode does not provide this canonical
-RBAC floor and must not be used for shared tenancy.
+AgentCore rejects payload-supplied identity and reads identity only from trusted
+runtime headers. Its `health` action is liveness only. Use `/ready`,
+authenticated `list_models`, and a low-cost authenticated completion as release
+canaries.
 
-Canonical data-plane projects now carry a tenant owner and use
-`PK=TENANT#{tenant_id}`, `SK=PROJECT#{project_id}`. HTTP and AgentCore resolve
-that exact row before RBAC, return a concealed 404 when it is absent, and return
-503 when ownership cannot be established safely. The resolved object is carried
-through model listing, chat, routing, and response policy rather than looked up
-again in the global startup map. Exact and semantic cache namespaces also
-include both tenant and project, with tests for colliding project ids.
+## Control Plane And Break Glass
 
-Users, usage/accounting, quotas, hierarchy and Cedar policies, webhooks, SCIM
-objects, and audit data are still not comprehensively tenant-qualified. API-key
-storage is tenant-qualified, but its current routes remain behind legacy admin
-RBAC and key creation does not create a canonical service principal. Do not
-expose the current admin API to multiple untrusted tenants; use an isolated
-operator control plane or one deployment per tenant until those boundaries are
-closed.
+Tenant control-plane routes use the canonical tenant selected by middleware.
+Tenant members and auditors can read but cannot mutate. Tenant administrators
+can mutate tenant-owned configuration. Region topology and other platform
+resources require `platform_admin`.
 
-## Break Glass
+Platform access to tenant resources additionally requires:
 
-The authorization kernel permits a `platform_admin` to enter a different tenant
-only when the caller supplies a non-blank reason. The decision is marked
-`break_glass`; it still cannot grant `query.mutate`.
+- a canonical platform principal;
+- a non-empty break-glass reason;
+- a validated `X-Axon-Target-Tenant` header; and
+- a successful append-only audit record before tenant dispatch.
 
-No HTTP or AgentCore ingress currently accepts a break-glass reason, and no
-complete approval, expiry, alerting, or audit workflow is wired. Break glass is
-therefore a kernel primitive, not an operational feature. Keep platform
-administrators out of tenant paths until an authenticated, time-bounded,
-ticket-linked, append-only audited workflow exists.
+The target tenant is syntax-checked and checked for consistency at middleware.
+Handlers then perform resource-specific, tenant-qualified authoritative lookups.
 
-## Direct OIDC
+## Durable Multi-Instance State
 
-Direct Bearer-token validation is fail closed:
+DynamoDB is authoritative in production. Conditional writes and revisioned
+compare-and-swap updates protect topology, webhooks, policies, quotas, budgets,
+rate windows, API keys, SCIM state, principals, audit chains, and configuration
+epochs from lost updates.
 
-- Both issuer and audience must be configured.
-- Only `RS256` and `ES256` are accepted.
-- `iss`, `aud`, `exp`, and non-empty string `sub` are required.
-- `kid` must match exactly one JWK.
-- JWK key type and optional `alg`, `use`, and `key_ops` must permit verification.
-- Audience strings and arrays are supported by the JWT verifier.
-- Mapped string claims are type checked; roles must be a string or string list,
-  and OAuth `scope` must be a string.
-- JWKS cache lifetime is bounded to one hour. Once stale, cached keys are
-  discarded; discovery or JWKS refresh failure denies the token.
-- Issuer and JWKS URLs must use HTTPS, discovery must return the exact configured
-  issuer, and the JWKS URI must remain on the same origin. Redirects, proxy
-  environment variables, compressed/oversized responses, and malformed or
-  duplicate JSON are rejected.
-- An unknown signing `kid` causes one single-flight JWKS refresh for normal key
-  rotation. Unknown-key refreshes are limited to one per 30 seconds per process
-  so attacker-controlled key ids cannot create unbounded issuer traffic.
-- Missing `python-jose[cryptography]` denies every JWT rather than decoding it
-  without signature verification.
+Fleet refresh rejects stale revisions. Topology parsing completes before the
+live object is mutated, and a shared mutation/refresh lock prevents hybrid
+snapshots. Health status remains live state and is preserved across durable
+topology publication.
 
-ALB OIDC uses a separate ES256 regional-key path. It requires
-`AXON_ALB_SIGNER_ARN`, `AXON_ALB_CLIENT_ID`, and `AXON_ALB_ISSUER`, validates
-protected signer/client/issuer/expiry metadata before key retrieval, verifies
-the signature, and requires signed `sub` to equal `X-Amzn-Oidc-Identity`. Key
-retrieval and caching are bounded. Duplicate, incomplete, malformed, or invalid
-ALB headers fail closed without trying another credential.
+Store failures on security-relevant writes fail closed with sanitized `503`
+responses. They do not report success for an in-memory-only mutation.
 
-The checked-in Fargate stack does not create the ALB authentication action or
-set these trust values. Deployment wiring, task ingress restricted to the ALB,
-and an authenticated canary remain release prerequisites.
+Security events are durably enqueued once per matching tenant destination.
+Strict envelopes bind event and destination to one tenant, deterministic
+delivery identities support idempotent receivers, and repeated failures redrive
+to a retained DLQ after five receives. See the production runbook before
+redriving because each message retains its enqueue-time destination snapshot.
 
-## Fargate Reference Stack
+## Deployment Controls
 
-The stack is deliberately restricted to `us-east-1` because its CloudFront WAF
-has global scope. Deployment requires five values with no source or template
-defaults:
+Both checked-in AWS stacks require immutable private-ECR image URIs ending in a
+digest. CI synthesizes and lints both stacks under Node 22, rejects local CDK
+Docker assets, scans both templates, and validates all workflow action pins.
 
-| Parameter | Requirement |
-|---|---|
-| `ViewerDomainName` | Public CloudFront alternate name |
-| `ViewerCertificateArn` | `us-east-1` ACM certificate covering the viewer name |
-| `OriginDomainName` | Private name presented to the internal ALB |
-| `OriginCertificateArn` | `us-east-1` ACM certificate covering the origin name |
-| `ApprovedHttpsPrefixListId` | Customer-managed allowlist for every task HTTPS destination |
+The Fargate stack also requires `BedrockInvokeResourceArns`; deployment through
+`deploy-fargate.sh` supplies it from
+`AXON_BEDROCK_INVOKE_RESOURCE_ARNS`. Values must be concrete model or
+inference-profile ARNs without wildcards. Its retained provider secret has a
+CloudFormation-generated physical name, so operator tooling must use the
+`ProviderSecretArn` stack output for updates, rotation, and monitoring.
 
-`deploy-fargate.sh` reads the corresponding `AXON_*` environment variables,
-passes them as CloudFormation parameters, and refuses another region. The
-prefix list must cover image/runtime AWS dependencies, OIDC endpoints, and every
-configured LLM provider without a `0.0.0.0/0` entry. The stack outputs
-`CloudFrontDistributionDomain` and `InternalALBDomain` for DNS wiring.
+Both stacks provision retained KMS-encrypted FIFO event queues, a managed FIFO
+SNS event topic, a retained encrypted CloudWatch event group, private
+SQS/SNS/Logs endpoints, scoped runtime IAM, and DLQ alarms. Operators must use
+the event resource outputs, add and confirm topic subscribers, and rehearse the
+controlled DLQ recovery procedure.
 
-This improves transport and network defaults but does not make the deployment
-multi-tenant ready. ALB and CloudFront access logs are written to a private,
-TLS-only, SSE-S3 bucket retained independently of the stack and expired after
-365 days. ECS uses a rollback circuit breaker with 100% minimum and 200% maximum
-healthy deployment percentages. Its target group probes public `GET /ready`,
-which returns 503 when the enabled DynamoDB store is unreachable or times out;
-`GET /health` remains liveness. The stack still lacks the ALB authentication
-action, canonical principal provisioning, WAF tuning, multi-AZ NAT, and broader
-identity/provider readiness checks. After CloudFront creates its VPC-origin
-service security group, restrict ALB ingress to that group instead of the
-VPC-wide bootstrap rule.
+The release workflow builds separate Fargate AMD64 and AgentCore ARM64 images,
+scans them, creates SBOMs and target-qualified evidence, and emits keyless
+attestations. Deployment verification binds a selected private-ECR digest to the
+exact commit, release tag, workflow run, target, and Sigstore bundle before a
+fresh image scan.
 
-## AgentCore Runtime
+Neither workflow publishes or deploys an image automatically. Use controlled
+private-ECR publication and deploy only the digest returned by deployment
+verification.
 
-The AgentCore adapter supports three actions:
+## Known Design Residuals
 
-| Action | Authentication | Behavior |
-|---|---|---|
-| `chat` | Required | Strict chat validation, canonical RBAC, native async streaming |
-| `list_models` | Required | Models for the signed and granted project |
-| `health` | Not required | Liveness only: `ready: false`, dependencies unchecked |
+These limitations are explicit and must not be represented as completed:
 
-The SDK application also exposes `GET /ready`. It is separate from the
-AgentCore action payload and returns 200 only when the explicitly initialized
-runtime, OIDC/JWKS dependency, and DynamoDB principal/project store are ready;
-otherwise it returns 503 with sanitized dependency states.
+- API-key state mutation and hash-chain audit append are separate DynamoDB
+  transactions. Failed issue or rotation audit triggers credential containment.
+  Revocation can succeed while its audit append returns `503`; operators must
+  reconcile that result from the durable key state.
+- There is no standalone authoritative tenant registry. Break-glass target
+  syntax and request consistency are validated before dispatch, then each
+  handler proves tenant ownership through its authoritative resource lookup.
+- AgentCore conversation memory is not enabled. Any future memory namespace
+  must include canonical tenant, principal, project, and an opaque
+  server-controlled session identifier.
+- `GET /api/users` remains unavailable in canonical mode because the legacy
+  aggregate has no safe tenant selector or canonical action mapping.
 
-Identity is accepted only from `context.request_headers`, using exactly one of:
+## Promotion Evidence Still Required
 
-```text
-Authorization: Bearer <OIDC JWT>
-X-Amzn-Bedrock-AgentCore-Runtime-Custom-Identity-Token: Bearer <OIDC JWT>
-```
+Before production traffic:
 
-Supplying both, duplicate case variants, a malformed Bearer value, or no trusted
-runtime header fails with 401. Payload fields such as `user_id`, `project_id`,
-`tenant_id`, `roles`, and `scopes` are rejected. The adapter independently
-re-verifies the JWT and requires signed tenant and project claims, then resolves
-canonical authority; token roles and scopes are discarded.
+1. Configure the protected GitHub production environment, including
+   `AXON_OPERATIONS_AUDIT_ROLE_ARN`,
+   `AXON_OPERATIONS_RECOVERY_ROLE_ARN`, `AXON_AWS_ACCOUNT_ID`, and
+   both target data-key variables: `AXON_DATA_KMS_KEY_ARN` and
+   `AXON_AGENTCORE_DATA_KMS_KEY_ARN`.
+2. Produce green required CI for the exact release commit.
+3. Execute the real tagged private-ECR and Sigstore flow for the selected
+   Fargate or AgentCore image digest.
+4. Run authenticated positive and negative tenant canaries, including wrong
+   tenant, wrong project, inactive membership, viewer write denial, service
+   scope denial, and break-glass attribution.
+5. Execute a real AWS restore exercise and an application cutover and rollback
+   rehearsal. Retain the recovery evidence.
+6. Exercise each security-event destination, its receiver, DLQ alarm, and
+   controlled redrive procedure.
+7. Validate load, throttling, quotas, audit continuity, revocation propagation,
+   and topology refresh with the intended replica count.
 
-Before deployment:
-
-1. Provision an AgentCore JWT authorizer for the exact issuer/audience and
-   allowlist forwarding of `Authorization`; or place a trusted signed facade in
-   front and use only the custom identity-token header.
-2. Set canonical identity, DynamoDB, OIDC, clean-start, region, and provider
-   configuration. Provision every principal before enabling traffic.
-3. Install the checked-in hash-pinned `requirements.txt`, generated from
-   `uv.lock`; it includes `bedrock-agentcore`, `python-jose`, and cryptography.
-   It also includes `httpx`, which direct OIDC discovery requires. Keep the CI
-   lock-consistency check green and do not resolve dependencies dynamically
-   during deployment.
-4. Give the execution role least-privilege access to the state table, required
-   Bedrock models, runtime secrets, logs/traces, and only the AWS services in use.
-5. Replace local generated AgentCore configuration with reviewed IaC. Do not
-   commit `.bedrock_agentcore*`, staged archives, account ids, role ARNs, or
-   deployment buckets.
-6. Wire `/ready` into the deployment readiness gate, then test token expiry,
-   wrong issuer/audience, wrong tenant/project, deprovisioned membership, JWKS
-   outage, DynamoDB outage, startup timeout, graceful shutdown, and streaming.
-
-AgentCore does not expose the Starlette admin console or
-`/admin/production-checklist`. Run control-plane readiness separately and use
-`/ready`, authenticated `list_models`, and a low-cost completion as the
-AgentCore canary. The `health` action must never be used as a readiness signal.
-
-Runtime initialization now runs once in the AgentCore lifespan before traffic
-is accepted, and request admission has an initialization deadline. It fails
-startup when OIDC/JWKS, DynamoDB, canonical principal resolution, or
-authoritative project resolution is unavailable. The synchronous factory runs
-in a Python worker thread, which cannot be forcibly cancelled; a permanently
-hung factory can outlive the admission deadline and must be contained by the
-runtime's process-level startup/termination policy. Readiness probes are bounded
-and cached briefly; shutdown closes provider HTTP sessions and flushes OTLP
-resources within a deadline. Bootstrap still scans retained projects, users,
-usage, feedback,
-policies, destinations, topology, and audit state, and several non-project
-control domains retain fail-open hydration or process-local semantics.
-Rate-limit windows, response caches, and audit-chain serialization remain
-process-local. Those are release blockers, not tuning items.
-
-### Private Networking
-
-No production AgentCore network topology is supplied by this branch. A release
-deployment must define private subnets, security groups, DNS, and egress
-explicitly. Prefer VPC endpoints for DynamoDB, Bedrock Runtime, Secrets Manager,
-CloudWatch, and other used AWS services. Direct OIDC discovery/JWKS and non-AWS
-providers require controlled HTTPS egress through an inspected NAT/proxy path.
-Restrict inbound invocation with the runtime authorizer and IAM resource policy;
-network placement does not replace authentication.
-
-### Memory Isolation
-
-The AgentCore entrypoint does not currently wire `SessionManager`, does not use
-`context.session_id`, and does not read or write AgentCore Memory. A configured
-memory resource therefore does not mean conversation memory is active.
-
-Before enabling memory, derive every namespace from canonical tenant, principal,
-and project ids plus an opaque server-controlled session id. Never use a
-payload-supplied tenant or a globally reusable session id. Define per-tenant
-retention/deletion, encryption, access policies, export controls, and adversarial
-cross-tenant tests. Separate memory resources per tenant where the isolation
-requirement warrants it.
-
-## Container Constraints
-
-The Docker image:
-
-- resolves dependencies from `uv.lock` with `--frozen`;
-- installs the OIDC, SAML, and OTEL extras;
-- runs as UID/GID `10001` with no login shell or writable home;
-- makes `/app` root-owned and non-writable; and
-- excludes env files, provider config, private keys, AWS/AgentCore state, CDK
-  output, caches, tests, and local build artifacts from the build context.
-
-Run it with a read-only root filesystem, a bounded `noexec,nosuid` tmpfs for
-`/tmp`, dropped Linux capabilities, `no-new-privileges`, runtime secret mounts,
-and platform-managed liveness/readiness probes. File-backed configuration writes
-will fail in the immutable image; use tenant-safe durable state or build a new
-image. CI builds, inspects, and scans the image and synthesizes/scans CDK assets.
-A release still needs a successful CI run for the exact commit, an
-SBOM/signature or equivalent provenance, and a deployment smoke test.
-
-## Rollout And Readiness
-
-1. Inventory issuers, subjects, tenants, projects, roles, service keys, and
-   expected action scopes. Resolve duplicate subjects and ambiguous memberships.
-2. Back up the state table and write canonical principal rows with
-   `authorization_version=1`. Reconcile every existing API key to a `service`
-   principal.
-3. Deploy an isolated staging environment with `ENFORCE`, DynamoDB, canonical
-   identity, and demo data off. There is no shadow/dual-resolution mode.
-4. Test each role positively and negatively, including cross-tenant 404,
-   ungranted project 404, inactive membership 403, service scope denial, and
-   universal query-mutation denial. Verify missing-project canonical HTTP
-   requests return `400 project_context_required`.
-5. Run `/admin/production-checklist`. Resolve every `FAIL`; investigate every
-   `UNKNOWN`; explicitly accept or remediate each `WARN`.
-6. Exercise direct OIDC and AgentCore canaries, provider fallback, streaming,
-   audit verification, budget limits, revocation, and restart recovery.
-7. Roll out by tenant or a small traffic percentage while monitoring 401, 403,
-   404, 429, 503, JWKS refresh, DynamoDB errors, dropped writes, and audit-chain
-   health.
-
-Disabling canonical identity is a security downgrade, not a routine rollback:
-legacy credential claims become authority again. Prefer rolling back application
-code while retaining canonical records and `ENFORCE`. Never recover production
-access by switching to `LOG_ONLY`.
-
-The production checklist currently covers eight areas: auth enforcement,
-canonical identity, demo data, provider credentials, pricing, model ids,
-persistence, and API-key posture. It reports rather than enforces, is hidden in
-demo mode, and its API-key scope warning still describes legacy behavior without
-proving that canonical service-principal scopes match key metadata.
-
-## Remaining Release Blockers
-
-- Tenant-qualified persistence and filtered admin reads/writes for users,
-  usage/accounting, quotas, policies, webhooks, SCIM, and audit, plus
-  tenant-aware project administration rather than a global startup map.
-- Redacted member views and tenant-admin configuration routes.
-- Atomic API-key rotation and SCIM deprovisioning tied to canonical principal
-  authorization versions; migration for legacy unqualified keys.
-- Fargate ALB authentication-action/trust-value wiring, post-create restriction
-  to the CloudFront VPC-origin service security group, DNS, alarms, and broader
-  identity/provider readiness checks beyond the DynamoDB gate.
-- Distributed rate-limit and budget semantics plus cross-replica cache and
-  revocation behavior verified under load.
-- Durable audit/accounting reservation semantics for failures after the first
-  streamed byte; terminal errors are sanitized and emitted before `[DONE]`, but
-  already delivered provider content cannot be recalled.
-- AgentCore IaC, JWT authorizer/header forwarding, private networking,
-  fail-closed non-project control-state hydration, bounded startup reads,
-  process-level containment of a stuck synchronous bootstrap, distributed
-  controls, and memory isolation.
-- Secret rotation and audit of any previously staged CDK/AgentCore build assets.
-- Release SBOM/signing/provenance and successful CI evidence for the exact
-  artifact; backup/restore drills, load tests, and multi-replica failure tests.
+Never recover production access by switching to `LOG_ONLY` or disabling
+canonical identity. Roll back application code while retaining `ENFORCE`,
+canonical records, and durable state.

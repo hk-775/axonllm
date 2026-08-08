@@ -32,6 +32,24 @@ logger = logging.getLogger(__name__)
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
 
+def _tenant_scoped_id(
+    tenant_id: str | None,
+    resource_type: str,
+    resource_id: str,
+) -> str:
+    """Return a collision-safe key while retaining legacy raw identifiers."""
+    if not isinstance(resource_id, str) or not resource_id.strip():
+        raise ValueError(f"{resource_type}_id must be a non-empty string")
+    if tenant_id is None:
+        return resource_id
+    if not isinstance(tenant_id, str) or not tenant_id.strip():
+        raise ValueError("tenant_id must be None or a non-empty string")
+    return (
+        f"tenant:{len(tenant_id)}:{tenant_id}:"
+        f"{resource_type}:{len(resource_id)}:{resource_id}"
+    )
+
+
 class CostTracker:
     """Records usage, calculates costs, checks budgets, and aggregates usage data.
 
@@ -73,6 +91,8 @@ class CostTracker:
         # to drop the oldest 50k records and silently under-count budgets).
         self._project_spend: defaultdict[str, float] = defaultdict(float)
         self._user_spend: defaultdict[str, float] = defaultdict(float)
+        self._project_spend_epochs: dict[str, int] = {}
+        self._user_spend_epochs: dict[str, int] = {}
         self._budgets: dict[str, dict] = budgets or {}
         self._user_budgets: dict[str, dict] = {}
         self._persistence = persistence
@@ -82,6 +102,56 @@ class CostTracker:
         # legitimately be near 0 early in the process.
         self._last_usage_sync = float("-inf")
         self._usage_sync_task: asyncio.Task | None = None
+
+    async def _refresh_spend_state(
+        self,
+        scope: str,
+        scope_id: str,
+    ) -> None:
+        if self._persistence is None or not self._persistence.enabled:
+            return
+        getter = getattr(self._persistence, "get_spend_state", None)
+        if not callable(getter):
+            return
+        state = await getter(scope, scope_id)
+        if state is None:
+            return
+        totals = (
+            self._project_spend
+            if scope == "project"
+            else self._user_spend
+        )
+        epochs = (
+            self._project_spend_epochs
+            if scope == "project"
+            else self._user_spend_epochs
+        )
+        current_epoch = epochs.get(scope_id, 0)
+        if state.epoch < current_epoch:
+            return
+        if state.epoch > current_epoch:
+            epochs[scope_id] = int(state.epoch)
+            totals[scope_id] = float(state.total)
+            return
+        totals[scope_id] = max(
+            float(state.total),
+            totals.get(scope_id, 0.0),
+        )
+
+    def clear_project_spend(
+        self,
+        project_id: str,
+        *,
+        tenant_id: str | None = None,
+    ) -> None:
+        """Clear one process's project total after a shared cycle reset."""
+        scope_id = _tenant_scoped_id(
+            tenant_id,
+            "project",
+            project_id,
+        )
+        self._project_spend.pop(scope_id, None)
+        self._project_spend_epochs.pop(scope_id, None)
 
     async def synced_records(self) -> list[UsageRecord]:
         """The record list, refreshed fleet-wide at most once per TTL.
@@ -128,9 +198,12 @@ class CostTracker:
         project_id: str,
         budget_limit: float | None = None,
         alert_threshold: float | None = None,
+        *,
+        tenant_id: str | None = None,
     ) -> None:
         """Register a project with optional budget limit and alert threshold."""
-        self._budgets[project_id] = {
+        scope_id = _tenant_scoped_id(tenant_id, "project", project_id)
+        self._budgets[scope_id] = {
             "budget_limit": budget_limit,
             "alert_threshold": alert_threshold,
         }
@@ -140,24 +213,44 @@ class CostTracker:
         user_id: str,
         budget_limit: float | None = None,
         alert_threshold: float | None = None,
+        *,
+        tenant_id: str | None = None,
     ) -> None:
         """Register a user with optional budget limit and alert threshold."""
-        self._user_budgets[user_id] = {
+        scope_id = _tenant_scoped_id(tenant_id, "user", user_id)
+        self._user_budgets[scope_id] = {
             "budget_limit": budget_limit,
             "alert_threshold": alert_threshold,
         }
 
-    def get_user_budget(self, user_id: str) -> dict:
+    def get_user_budget(
+        self,
+        user_id: str,
+        *,
+        tenant_id: str | None = None,
+    ) -> dict:
         """Return budget info for a user, or empty defaults."""
-        return self._user_budgets.get(user_id, {"budget_limit": None, "alert_threshold": None})
+        scope_id = _tenant_scoped_id(tenant_id, "user", user_id)
+        return self._user_budgets.get(
+            scope_id,
+            {"budget_limit": None, "alert_threshold": None},
+        )
 
-    async def check_user_budget(self, user_id: str) -> BudgetStatus:
+    async def check_user_budget(
+        self,
+        user_id: str,
+        *,
+        tenant_id: str | None = None,
+    ) -> BudgetStatus:
         """Check whether a user is within their budget limits."""
-        budget_info = self._user_budgets.get(user_id, {})
+        scope_id = _tenant_scoped_id(tenant_id, "user", user_id)
+        budget_info = self._user_budgets.get(scope_id, {})
         budget_limit: float | None = budget_info.get("budget_limit")
         alert_threshold: float | None = budget_info.get("alert_threshold")
 
-        current_spend = self._user_spend.get(user_id, 0.0)
+        if budget_limit is not None or alert_threshold is not None:
+            await self._refresh_spend_state("user", scope_id)
+        current_spend = self._user_spend.get(scope_id, 0.0)
 
         is_over_budget = (
             budget_limit is not None and current_spend >= budget_limit
@@ -243,11 +336,26 @@ class CostTracker:
     def _bump_spend(self, usage: UsageRecord) -> None:
         """Add one record's cost to the running spend counters."""
         if usage.project_id:
-            self._project_spend[usage.project_id] += usage.cost
+            project_scope = _tenant_scoped_id(
+                usage.tenant_id,
+                "project",
+                usage.project_id,
+            )
+            self._project_spend[project_scope] += usage.cost
         if usage.user_id:
-            self._user_spend[usage.user_id] += usage.cost
+            user_scope = _tenant_scoped_id(
+                usage.tenant_id,
+                "user",
+                usage.user_id,
+            )
+            self._user_spend[user_scope] += usage.cost
 
-    async def _bump_spend_fleet_wide(self, usage: UsageRecord) -> None:
+    async def _bump_spend_fleet_wide(
+        self,
+        usage: UsageRecord,
+        *,
+        skip_scopes: frozenset[str] = frozenset(),
+    ) -> None:
         """Add this record's cost to the shared counters and adopt the totals.
 
         The local counters are per-process, so on their own they make a budget
@@ -269,14 +377,95 @@ class CostTracker:
         """
         if self._persistence is None or not self._persistence.enabled:
             return
-        if usage.project_id:
-            total = await self._persistence.add_spend("project", usage.project_id, usage.cost)
-            if total is not None:
-                self._project_spend[usage.project_id] = total
-        if usage.user_id:
-            total = await self._persistence.add_spend("user", usage.user_id, usage.cost)
-            if total is not None:
-                self._user_spend[usage.user_id] = total
+        if usage.project_id and "project" not in skip_scopes:
+            project_scope = _tenant_scoped_id(
+                usage.tenant_id,
+                "project",
+                usage.project_id,
+            )
+            add_state = getattr(
+                self._persistence,
+                "add_spend_state",
+                None,
+            )
+            if callable(add_state):
+                state = await add_state(
+                    "project",
+                    project_scope,
+                    usage.cost,
+                )
+                if state is not None:
+                    current_epoch = self._project_spend_epochs.get(
+                        project_scope,
+                        0,
+                    )
+                    if state.epoch >= current_epoch:
+                        if state.epoch > current_epoch:
+                            self._project_spend_epochs[project_scope] = (
+                                int(state.epoch)
+                            )
+                            self._project_spend[project_scope] = float(
+                                state.total
+                            )
+                        else:
+                            self._project_spend[project_scope] = max(
+                                float(state.total),
+                                self._project_spend.get(
+                                    project_scope,
+                                    0.0,
+                                ),
+                            )
+            else:
+                total = await self._persistence.add_spend(
+                    "project",
+                    project_scope,
+                    usage.cost,
+                )
+                if total is not None:
+                    self._project_spend[project_scope] = total
+        if usage.user_id and "user" not in skip_scopes:
+            user_scope = _tenant_scoped_id(
+                usage.tenant_id,
+                "user",
+                usage.user_id,
+            )
+            add_state = getattr(
+                self._persistence,
+                "add_spend_state",
+                None,
+            )
+            if callable(add_state):
+                state = await add_state(
+                    "user",
+                    user_scope,
+                    usage.cost,
+                )
+                if state is not None:
+                    current_epoch = self._user_spend_epochs.get(
+                        user_scope,
+                        0,
+                    )
+                    if state.epoch >= current_epoch:
+                        if state.epoch > current_epoch:
+                            self._user_spend_epochs[user_scope] = int(
+                                state.epoch
+                            )
+                            self._user_spend[user_scope] = float(
+                                state.total
+                            )
+                        else:
+                            self._user_spend[user_scope] = max(
+                                float(state.total),
+                                self._user_spend.get(user_scope, 0.0),
+                            )
+            else:
+                total = await self._persistence.add_spend(
+                    "user",
+                    user_scope,
+                    usage.cost,
+                )
+                if total is not None:
+                    self._user_spend[user_scope] = total
 
     def load_records(self, records: list[UsageRecord]) -> None:
         """Rehydrate the in-memory store from persisted usage records.
@@ -286,15 +475,22 @@ class CostTracker:
         appending to ``_records`` directly — a raw append would leave the
         counters (which back budget checks) stale.
         """
-        existing = {r.request_id for r in self._records}
+        existing = {(r.tenant_id, r.request_id) for r in self._records}
         for rec in records:
-            if rec.request_id in existing:
+            record_key = (rec.tenant_id, rec.request_id)
+            if record_key in existing:
                 continue
             self._records.append(rec)
-            existing.add(rec.request_id)
+            existing.add(record_key)
             self._bump_spend(rec)
 
-    async def fleet_spend(self, scope: str, ident: str) -> float | None:
+    async def fleet_spend(
+        self,
+        scope: str,
+        ident: str,
+        *,
+        tenant_id: str | None = None,
+    ) -> float | None:
         """Fleet-wide spend for one project/user, read from the shared counter.
 
         The exact figure, with no dependence on the record list: the counter is a
@@ -324,8 +520,11 @@ class CostTracker:
         """
         if self._persistence is None or not self._persistence.enabled:
             return None
+        if scope not in {"project", "user"}:
+            raise ValueError("scope must be 'project' or 'user'")
+        scope_id = _tenant_scoped_id(tenant_id, scope, ident)
         try:
-            return await self._persistence.get_spend(scope, ident)
+            return await self._persistence.get_spend(scope, scope_id)
         except Exception:
             logger.warning(
                 "Failed to read shared %s spend for %s; falling back to local",
@@ -398,14 +597,21 @@ class CostTracker:
         # records this instance served since the last refresh are not in the store
         # yet if their write failed, and dropping them would make a refresh lose
         # data that the un-refreshed path would have shown.
-        existing = {r.request_id for r in self._records}
+        existing = {(r.tenant_id, r.request_id) for r in self._records}
         for rec in records:
-            if rec.request_id not in existing:
+            record_key = (rec.tenant_id, rec.request_id)
+            if record_key not in existing:
                 self._records.append(rec)
-                existing.add(rec.request_id)
+                existing.add(record_key)
         return True
 
-    async def adopt_fleet_spend(self, project_ids, user_ids=()) -> None:
+    async def adopt_fleet_spend(
+        self,
+        project_ids,
+        user_ids=(),
+        *,
+        tenant_id: str | None = None,
+    ) -> None:
         """Replace local spend counters with the shared fleet-wide totals.
 
         Called once at startup, after ``load_records``. Both steps are needed and
@@ -426,15 +632,55 @@ class CostTracker:
         if self._persistence is None or not self._persistence.enabled:
             return
         for project_id in project_ids:
-            total = await self._persistence.get_spend("project", project_id)
-            if total is not None:
-                self._project_spend[project_id] = total
+            scope_id = _tenant_scoped_id(
+                tenant_id,
+                "project",
+                project_id,
+            )
+            getter = getattr(
+                self._persistence,
+                "get_spend_state",
+                None,
+            )
+            if callable(getter):
+                state = await getter("project", scope_id)
+                if state is not None:
+                    self._project_spend[scope_id] = float(state.total)
+                    self._project_spend_epochs[scope_id] = int(state.epoch)
+            else:
+                total = await self._persistence.get_spend(
+                    "project",
+                    scope_id,
+                )
+                if total is not None:
+                    self._project_spend[scope_id] = total
         for user_id in user_ids:
-            total = await self._persistence.get_spend("user", user_id)
-            if total is not None:
-                self._user_spend[user_id] = total
+            scope_id = _tenant_scoped_id(tenant_id, "user", user_id)
+            getter = getattr(
+                self._persistence,
+                "get_spend_state",
+                None,
+            )
+            if callable(getter):
+                state = await getter("user", scope_id)
+                if state is not None:
+                    self._user_spend[scope_id] = float(state.total)
+                    self._user_spend_epochs[scope_id] = int(state.epoch)
+            else:
+                total = await self._persistence.get_spend(
+                    "user",
+                    scope_id,
+                )
+                if total is not None:
+                    self._user_spend[scope_id] = total
 
-    async def record_usage(self, usage: UsageRecord, *, share: bool = True) -> None:
+    async def record_usage(
+        self,
+        usage: UsageRecord,
+        *,
+        share: bool = True,
+        skip_shared_scopes: frozenset[str] = frozenset(),
+    ) -> None:
         """Persist a usage record to the in-memory store.
 
         ``share=False`` records the cost locally without adding it to the shared
@@ -467,7 +713,51 @@ class CostTracker:
         # because the two fail independently: a dropped record costs a row of
         # history, a dropped counter update costs budget accuracy.
         if share:
-            await self._bump_spend_fleet_wide(usage)
+            await self._bump_spend_fleet_wide(
+                usage,
+                skip_scopes=skip_shared_scopes,
+            )
+
+    def adopt_reserved_spend(
+        self,
+        usage: UsageRecord,
+        totals: dict[str, float],
+    ) -> None:
+        """Adopt shared totals returned by atomic budget finalization."""
+        if usage.project_id and "project" in totals:
+            project_scope = _tenant_scoped_id(
+                usage.tenant_id,
+                "project",
+                usage.project_id,
+            )
+            self._project_spend[project_scope] = max(
+                totals["project"],
+                self._project_spend.get(project_scope, 0.0),
+            )
+        if usage.user_id and "user" in totals:
+            self.adopt_user_spend(
+                usage.user_id,
+                totals["user"],
+                tenant_id=usage.tenant_id,
+            )
+
+    def adopt_user_spend(
+        self,
+        user_id: str,
+        total: float,
+        *,
+        tenant_id: str | None = None,
+    ) -> None:
+        """Move the local user counter forward to a durable fleet total."""
+        user_scope = _tenant_scoped_id(
+            tenant_id,
+            "user",
+            user_id,
+        )
+        self._user_spend[user_scope] = max(
+            total,
+            self._user_spend.get(user_scope, 0.0),
+        )
 
     # ------------------------------------------------------------------
     # Token estimation
@@ -488,17 +778,25 @@ class CostTracker:
     # Budget checking
     # ------------------------------------------------------------------
 
-    async def check_budget(self, project_id: str) -> BudgetStatus:
+    async def check_budget(
+        self,
+        project_id: str,
+        *,
+        tenant_id: str | None = None,
+    ) -> BudgetStatus:
         """Check whether a project is within its budget limits.
 
         Returns a BudgetStatus with alert/exceeded flags set appropriately.
         If the project has no registered budget, limits are None and flags are False.
         """
-        budget_info = self._budgets.get(project_id, {})
+        scope_id = _tenant_scoped_id(tenant_id, "project", project_id)
+        budget_info = self._budgets.get(scope_id, {})
         budget_limit: float | None = budget_info.get("budget_limit")
         alert_threshold: float | None = budget_info.get("alert_threshold")
 
-        current_spend = self._project_spend.get(project_id, 0.0)
+        if budget_limit is not None or alert_threshold is not None:
+            await self._refresh_spend_state("project", scope_id)
+        current_spend = self._project_spend.get(scope_id, 0.0)
 
         is_over_budget = (
             budget_limit is not None and current_spend >= budget_limit
@@ -572,6 +870,8 @@ class CostTracker:
             result = [r for r in result if r.project_id == filters.project_id]
         if filters.user_id is not None:
             result = [r for r in result if r.user_id == filters.user_id]
+        if filters.tenant_id is not None:
+            result = [r for r in result if r.tenant_id == filters.tenant_id]
         return result
 
     def _build_breakdown(self, records: list[UsageRecord]) -> list[UsageBreakdown]:

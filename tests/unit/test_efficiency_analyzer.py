@@ -28,6 +28,7 @@ def _make_record(
     cost: float = 0.01,
     cached_tokens: int = 0,
     timestamp: datetime | None = None,
+    tenant_id: str | None = None,
 ) -> UsageRecord:
     return UsageRecord(
         request_id=f"req-{id(object())}",
@@ -41,6 +42,7 @@ def _make_record(
         cost=cost,
         timestamp=timestamp or datetime.utcnow(),
         cached_tokens=cached_tokens,
+        tenant_id=tenant_id,
     )
 
 
@@ -344,6 +346,46 @@ class TestProjectAnalysis:
         assert len(all_metrics) == 2
         user_ids = {m.entity_id for m in all_metrics}
         assert user_ids == {"alice", "bob"}
+
+    def test_colliding_user_and_project_ids_are_tenant_isolated(self):
+        records = [
+            _make_record(
+                tenant_id="tenant-a",
+                user_id="shared-user",
+                project_id="shared-project",
+                cost=0.10,
+            ),
+            _make_record(
+                tenant_id="tenant-b",
+                user_id="shared-user",
+                project_id="shared-project",
+                cost=9.00,
+            ),
+            _make_record(
+                tenant_id="tenant-b",
+                user_id="other-user",
+                project_id="shared-project",
+                cost=8.00,
+            ),
+        ]
+        analyzer = EfficiencyAnalyzer(_build_tracker(records))
+
+        user = analyzer.analyze_user(
+            "shared-user",
+            tenant_id="tenant-a",
+        )
+        project = analyzer.analyze_project(
+            "shared-project",
+            tenant_id="tenant-a",
+        )
+        users = analyzer.get_all_user_metrics(tenant_id="tenant-a")
+
+        assert user.metrics.total_requests == 1
+        assert user.metrics.total_cost == pytest.approx(0.10)
+        assert user.peer_comparison["peers_found"] == 0
+        assert project.metrics.total_requests == 1
+        assert project.metrics.total_cost == pytest.approx(0.10)
+        assert [metric.entity_id for metric in users] == ["shared-user"]
 
 
 # ---------------------------------------------------------------------------

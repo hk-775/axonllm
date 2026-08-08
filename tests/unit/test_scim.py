@@ -58,8 +58,7 @@ class TestScimStore:
     async def test_roles_from_groups(self):
         store = ScimStore()
         g = await store.create_group(ScimGroup(id="", display_name="eng", roles=["developer"]))
-        u = await store.create_user(ScimUser(id="", user_name="a@x.com",
-                                             roles=["viewer"], groups=[g.id]))
+        u = await store.create_user(ScimUser(id="", user_name="a@x.com", roles=["viewer"], groups=[g.id]))
         assert store.roles_for_user(u) == ["developer", "viewer"]
 
     async def test_delete_missing_raises(self):
@@ -76,6 +75,8 @@ class FakePersistence:
 
     def __init__(self):
         self.users, self.groups = {}, {}
+        self.user_loads = 0
+        self.group_loads = 0
 
     async def save_scim_user(self, u):
         self.users[u.id] = u
@@ -90,9 +91,11 @@ class FakePersistence:
         self.groups.pop(gid, None)
 
     async def load_scim_users(self):
+        self.user_loads += 1
         return list(self.users.values())
 
     async def load_scim_groups(self):
+        self.group_loads += 1
         return list(self.groups.values())
 
 
@@ -104,8 +107,13 @@ class TestScimPersistence:
         # Fresh store on the same durable backend rehydrates.
         s2 = ScimStore(persistence=p)
         await s2.initialize()
+        assert p.user_loads == 1
+        assert p.group_loads == 1
+        await s2.ensure_tenant_current("")
         assert s2.get_user(u.id) is not None
         assert s2.get_user_by_username("a@x.com").id == u.id
+        assert p.user_loads == 2
+        assert p.group_loads == 2
 
 
 # --- REST endpoints ---
@@ -114,7 +122,7 @@ class TestScimPersistence:
 class TestScimEndpoints:
     def test_requires_token(self, client):
         c, _ = client
-        r = c.get("/scim/v2/Users")           # no auth header
+        r = c.get("/scim/v2/Users")  # no auth header
         assert r.status_code == 401
 
     def test_disabled_without_env_token(self, client, monkeypatch):
@@ -125,9 +133,15 @@ class TestScimEndpoints:
 
     def test_create_get_list_user(self, client):
         c, _ = client
-        r = c.post("/scim/v2/Users", headers=_auth(), json={
-            "userName": "alice@x.com", "displayName": "Alice",
-            "emails": [{"value": "alice@x.com", "primary": True}]})
+        r = c.post(
+            "/scim/v2/Users",
+            headers=_auth(),
+            json={
+                "userName": "alice@x.com",
+                "displayName": "Alice",
+                "emails": [{"value": "alice@x.com", "primary": True}],
+            },
+        )
         assert r.status_code == 201
         uid = r.json()["id"]
 
@@ -152,13 +166,49 @@ class TestScimEndpoints:
         assert r.status_code == 409
         assert r.json()["scimType"] == "uniqueness"
 
+    @pytest.mark.parametrize("active", ["false", 0, 1, None, [], {}])
+    def test_create_rejects_non_boolean_active(self, client, active):
+        c, store = client
+
+        response = c.post(
+            "/scim/v2/Users",
+            headers=_auth(),
+            json={"userName": "a@x.com", "active": active},
+        )
+
+        assert response.status_code == 400
+        assert response.json()["scimType"] == "invalidValue"
+        assert store.get_user_by_username("a@x.com") is None
+
+    def test_replace_rejects_non_boolean_active_without_changing_user(self, client):
+        c, store = client
+        uid = c.post(
+            "/scim/v2/Users",
+            headers=_auth(),
+            json={"userName": "a@x.com"},
+        ).json()["id"]
+
+        response = c.put(
+            f"/scim/v2/Users/{uid}",
+            headers=_auth(),
+            json={"userName": "a@x.com", "active": "false"},
+        )
+
+        assert response.status_code == 400
+        assert response.json()["scimType"] == "invalidValue"
+        assert store.get_user(uid).active is True
+
     def test_patch_deprovision(self, client):
         c, store = client
-        uid = c.post("/scim/v2/Users", headers=_auth(),
-                     json={"userName": "a@x.com"}).json()["id"]
-        r = c.patch(f"/scim/v2/Users/{uid}", headers=_auth(), json={
-            "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
-            "Operations": [{"op": "replace", "path": "active", "value": False}]})
+        uid = c.post("/scim/v2/Users", headers=_auth(), json={"userName": "a@x.com"}).json()["id"]
+        r = c.patch(
+            f"/scim/v2/Users/{uid}",
+            headers=_auth(),
+            json={
+                "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+                "Operations": [{"op": "replace", "path": "active", "value": False}],
+            },
+        )
         assert r.status_code == 200
         assert r.json()["active"] is False
         assert store.get_user(uid).active is False
@@ -166,28 +216,59 @@ class TestScimEndpoints:
     def test_patch_deprovision_value_object_form(self, client):
         # Okta sends {"op":"replace","value":{"active":false}} (no path).
         c, store = client
-        uid = c.post("/scim/v2/Users", headers=_auth(),
-                     json={"userName": "a@x.com"}).json()["id"]
-        r = c.patch(f"/scim/v2/Users/{uid}", headers=_auth(), json={
-            "Operations": [{"op": "replace", "value": {"active": False}}]})
+        uid = c.post("/scim/v2/Users", headers=_auth(), json={"userName": "a@x.com"}).json()["id"]
+        r = c.patch(
+            f"/scim/v2/Users/{uid}",
+            headers=_auth(),
+            json={"Operations": [{"op": "replace", "value": {"active": False}}]},
+        )
         assert r.status_code == 200 and store.get_user(uid).active is False
+
+    @pytest.mark.parametrize(
+        "operation",
+        [
+            {"op": "replace", "path": "active", "value": "false"},
+            {"op": "replace", "value": {"active": "false"}},
+        ],
+    )
+    def test_patch_rejects_non_boolean_active_without_changing_user(
+        self,
+        client,
+        operation,
+    ):
+        c, store = client
+        uid = c.post(
+            "/scim/v2/Users",
+            headers=_auth(),
+            json={"userName": "a@x.com"},
+        ).json()["id"]
+
+        response = c.patch(
+            f"/scim/v2/Users/{uid}",
+            headers=_auth(),
+            json={"Operations": [operation]},
+        )
+
+        assert response.status_code == 400
+        assert response.json()["scimType"] == "invalidValue"
+        assert store.get_user(uid).active is True
 
     def test_delete_user(self, client):
         c, store = client
-        uid = c.post("/scim/v2/Users", headers=_auth(),
-                     json={"userName": "a@x.com"}).json()["id"]
+        uid = c.post("/scim/v2/Users", headers=_auth(), json={"userName": "a@x.com"}).json()["id"]
         assert c.delete(f"/scim/v2/Users/{uid}", headers=_auth()).status_code == 204
         assert store.get_user(uid) is None
 
     def test_group_crud_and_roles(self, client):
         c, _ = client
-        gid = c.post("/scim/v2/Groups", headers=_auth(), json={
-            "displayName": "engineers", "roles": [{"value": "developer"}]}).json()["id"]
+        gid = c.post(
+            "/scim/v2/Groups", headers=_auth(), json={"displayName": "engineers", "roles": [{"value": "developer"}]}
+        ).json()["id"]
         # user in the group inherits the role in its SCIM representation
-        uid = c.post("/scim/v2/Users", headers=_auth(), json={
-            "userName": "a@x.com", "groups": [{"value": gid}]}).json()["id"]
-        roles = [r["value"] for r in c.get(
-            f"/scim/v2/Users/{uid}", headers=_auth()).json()["roles"]]
+        uid = c.post(
+            "/scim/v2/Users", headers=_auth(), json={"userName": "a@x.com", "groups": [{"value": gid}]}
+        ).json()["id"]
+        roles = [r["value"] for r in c.get(f"/scim/v2/Users/{uid}", headers=_auth()).json()["roles"]]
         assert "developer" in roles
 
     def test_get_missing_user_404(self, client):

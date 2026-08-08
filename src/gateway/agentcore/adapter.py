@@ -13,6 +13,7 @@ from src.gateway.auth.authorization import (
     require_authorized,
 )
 from src.gateway.auth.project_repository import ProjectStoreUnavailable
+from src.gateway.config_sync import RegionTopologyUnavailable
 from src.gateway.models import Project
 
 from .errors import AgentCoreAdapterError
@@ -101,6 +102,20 @@ class AgentCoreAdapter:
             runtime.token_verifier,
             runtime.principal_resolver,
         )
+        if runtime.config_sync is not None:
+            try:
+                await runtime.config_sync.refresh_if_stale()
+            except RegionTopologyUnavailable as exc:
+                raise AgentCoreAdapterError(
+                    503,
+                    "region_topology_unavailable",
+                    "Region routing configuration is temporarily unavailable.",
+                ) from exc
+            except Exception:
+                logger.warning(
+                    "AgentCore config refresh failed; using loaded config",
+                    exc_info=True,
+                )
         try:
             project = await runtime.project_resolver.resolve(
                 identity.tenant_id,

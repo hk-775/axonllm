@@ -29,6 +29,7 @@ def _make_record(
     cached_tokens: int = 0,
     timestamp: datetime | None = None,
     task_type: str = "",
+    tenant_id: str | None = None,
 ) -> UsageRecord:
     # task_type defaults to "" — the same value a record written before the field
     # existed deserializes to — so every pre-existing test here exercises the
@@ -46,6 +47,7 @@ def _make_record(
         timestamp=timestamp or datetime.utcnow(),
         cached_tokens=cached_tokens,
         task_type=task_type,
+        tenant_id=tenant_id,
     )
 
 
@@ -402,6 +404,42 @@ class TestFullReport:
 
         assert report.user_profile is not None
         assert report.waste_summary["total_cost"] == 0.0
+
+    def test_report_and_profile_are_tenant_isolated(self):
+        records = [
+            _make_record(
+                tenant_id="tenant-a",
+                user_id="shared",
+                project_id="shared-project",
+                model="claude-sonnet",
+                cost=0.10,
+            ),
+            _make_record(
+                tenant_id="tenant-b",
+                user_id="shared",
+                project_id="shared-project",
+                model="claude-opus",
+                cost=9.00,
+            ),
+        ]
+        engine = _build_engine(records)
+
+        report = engine.generate_report(
+            user_id="shared",
+            tenant_id="tenant-a",
+        )
+
+        assert report.waste_summary["total_cost"] == pytest.approx(0.10)
+        assert report.user_profile is not None
+        assert report.user_profile.typical_model == "claude-sonnet"
+        assert engine.get_user_profile(
+            "shared",
+            tenant_id="tenant-a",
+        ) is report.user_profile
+        assert engine.get_user_profile(
+            "shared",
+            tenant_id="tenant-b",
+        ) is None
 
 
 # ---------------------------------------------------------------------------

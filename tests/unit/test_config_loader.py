@@ -201,6 +201,7 @@ class TestLoadAppConfig:
             if key.startswith("AXON_"):
                 monkeypatch.delenv(key, raising=False)
         monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
+        monkeypatch.setenv("AXON_DEPLOYMENT_PROFILE", "development")
 
         config = load_app_config()
         assert config.aws_region == "us-east-1"
@@ -208,6 +209,7 @@ class TestLoadAppConfig:
         assert config.server_host == "0.0.0.0"
         assert config.server_port == 8000
         assert config.models_config_path == "config/models.yaml"
+        assert config.enabled_providers is None
         assert config.load_demo_data is False
         assert config.alb_signer_arn == ""
         assert config.alb_client_id == ""
@@ -224,6 +226,10 @@ class TestLoadAppConfig:
         monkeypatch.setenv("AXON_ALB_SIGNER_ARN", signer_arn)
         monkeypatch.setenv("AXON_ALB_CLIENT_ID", "client-123")
         monkeypatch.setenv(
+            "AXON_ENABLED_PROVIDERS",
+            "bedrock, openai",
+        )
+        monkeypatch.setenv(
             "AXON_ALB_ISSUER",
             "https://public-keys.auth.elb.eu-west-1.amazonaws.com",
         )
@@ -234,10 +240,26 @@ class TestLoadAppConfig:
         assert config.load_demo_data is True
         assert config.alb_signer_arn == signer_arn
         assert config.alb_client_id == "client-123"
+        assert config.enabled_providers == frozenset({"bedrock", "openai"})
         assert (
             config.alb_issuer
             == "https://public-keys.auth.elb.eu-west-1.amazonaws.com"
         )
+
+    @pytest.mark.parametrize(
+        "value",
+        ["", "unknown", "bedrock,unknown"],
+    )
+    def test_invalid_enabled_provider_allowlist_fails_closed(
+        self,
+        monkeypatch,
+        value,
+    ):
+        monkeypatch.setenv("AXON_DEPLOYMENT_PROFILE", "development")
+        monkeypatch.setenv("AXON_ENABLED_PROVIDERS", value)
+
+        with pytest.raises(ValueError, match="PROVIDERS|providers"):
+            load_app_config()
 
 
 class TestSemanticCacheConfig:
@@ -253,6 +275,7 @@ class TestSemanticCacheConfig:
         for key in list(os.environ):
             if key.startswith("AXON_"):
                 monkeypatch.delenv(key, raising=False)
+        monkeypatch.setenv("AXON_DEPLOYMENT_PROFILE", "development")
 
     def test_the_cache_is_off_unless_asked_for(self, monkeypatch):
         self._clean(monkeypatch)

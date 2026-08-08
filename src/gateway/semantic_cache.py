@@ -519,6 +519,9 @@ class SemanticCache:
         self._entries: dict[
             _BucketKey, OrderedDict[_EntryKey, SemanticCacheEntry]
         ] = {}
+        self._stats_by_bucket: dict[_BucketKey, SemanticCacheStats] = {}
+        # Aggregate compatibility for existing observability callers. Tenant
+        # admin routes use ``stats_for_scope`` instead.
         self.stats = SemanticCacheStats()
         # One-slot memo of the most recent (prompt, embedding). A miss is
         # normally followed by a put of the same prompt, and embedding it twice
@@ -528,7 +531,7 @@ class SemanticCache:
         # concurrent requests can evict each other but can never pair a prompt
         # with another prompt's vector. The failure mode is a wasted re-embed,
         # not a wrong comparison.
-        self._last_embedding: tuple[str, list[float]] | None = None
+        self._last_embedding: tuple[_BucketKey, str, list[float]] | None = None
 
     @property
     def enabled(self) -> bool:
@@ -569,33 +572,33 @@ class SemanticCache:
         failure. The caller then proceeds to the provider, which is correct for
         all of them.
         """
+        bucket_key = (tenant_id, project_id)
         if not self.enabled:
             return None
 
         ok, reason = is_cacheable(request)
         if not ok or conversation_depth(request) > 1:
-            self.stats.skipped += 1
+            self._increment_stat(bucket_key, "skipped")
             return None
 
-        bucket_key = (tenant_id, project_id)
         bucket = self._entries.get(bucket_key)
         if not bucket:
             # No entries yet: a miss, but do not spend an embedding call to
             # discover that. Counted as a miss rather than a skip because the
             # request was eligible — the cache was simply cold.
-            self.stats.lookups += 1
-            self.stats.misses += 1
+            self._increment_stat(bucket_key, "lookups")
+            self._increment_stat(bucket_key, "misses")
             return None
 
         prompt = last_user_text(request)
         if prompt is None:  # pragma: no cover — is_cacheable already rejected it
-            self.stats.skipped += 1
+            self._increment_stat(bucket_key, "skipped")
             return None
 
-        self.stats.lookups += 1
-        embedding = await self._embed(prompt)
+        self._increment_stat(bucket_key, "lookups")
+        embedding = await self._embed(prompt, bucket_key)
         if embedding is None:
-            self.stats.misses += 1
+            self._increment_stat(bucket_key, "misses")
             return None
 
         self._purge_expired(project_id, tenant_id)
@@ -606,14 +609,15 @@ class SemanticCache:
             embedding,
             request.model,
             self._threshold if threshold is None else threshold,
+            bucket_key,
         )
         if match is None:
-            self.stats.misses += 1
+            self._increment_stat(bucket_key, "misses")
             return None
 
         key, entry, score = match
         bucket.move_to_end(key)
-        self.stats.hits += 1
+        self._increment_stat(bucket_key, "hits")
         logger.info(
             "semantic cache hit: tenant=%s project=%s similarity=%.4f "
             "cached_prompt=%r",
@@ -648,11 +652,12 @@ class SemanticCache:
         if prompt is None:  # pragma: no cover — is_cacheable already rejected it
             return
 
-        embedding = await self._embed(prompt)
+        bucket_key = (tenant_id, project_id)
+        embedding = await self._embed(prompt, bucket_key)
         if embedding is None:
             return
 
-        bucket = self._entries.setdefault((tenant_id, project_id), OrderedDict())
+        bucket = self._entries.setdefault(bucket_key, OrderedDict())
         # Keyed on (model, prompt), not prompt alone: the same question asked of
         # two models is two answers, and a prompt-only key would make the second
         # overwrite the first — so a project routing between models would keep
@@ -669,38 +674,36 @@ class SemanticCache:
         bucket.move_to_end(key)
         while len(bucket) > self._max_entries:
             bucket.popitem(last=False)
-            self.stats.evictions += 1
+            self._increment_stat(bucket_key, "evictions")
 
     def invalidate(
         self,
         project_id: str | None = None,
         tenant_id: str | None = None,
+        *,
+        all_tenants: bool = False,
     ) -> int:
-        """Drop entries for one tenant/project scope, one project, or all.
+        """Drop entries in one explicit scope.
 
         Exists because a semantic cache has no natural way to know its answers
         went stale — the underlying documents or prompts change with nothing
         observable in the request. An operator needs a way to clear it that
         does not involve a restart.
 
-        A project-only call preserves the legacy admin behavior by clearing
-        every tenant namespace with that project ID. Canonical tenant-aware
-        invalidation must provide both identifiers.
+        Omitting ``tenant_id`` addresses only the legacy tenantless namespace;
+        it is never a wildcard. Platform maintenance may opt into a cross-tenant
+        operation with ``all_tenants=True``.
         """
+        if all_tenants and tenant_id is not None:
+            raise ValueError("tenant_id and all_tenants cannot be combined")
         if tenant_id is not None and project_id is None:
             raise ValueError("project_id is required when tenant_id is provided")
-        if project_id is None:
-            removed = sum(len(b) for b in self._entries.values())
-            self._entries.clear()
-            return removed
-        if tenant_id is not None:
-            bucket = self._entries.pop((tenant_id, project_id), None)
-            return len(bucket) if bucket else 0
 
-        matching = [
-            key for key in self._entries
-            if key[1] == project_id
-        ]
+        matching = self._matching_bucket_keys(
+            project_id,
+            tenant_id,
+            all_tenants=all_tenants,
+        )
         removed = sum(len(self._entries[key]) for key in matching)
         for key in matching:
             del self._entries[key]
@@ -710,18 +713,55 @@ class SemanticCache:
         self,
         project_id: str | None = None,
         tenant_id: str | None = None,
+        *,
+        all_tenants: bool = False,
     ) -> int:
+        """Count entries in one tenant scope, or all scopes when requested."""
+        if all_tenants and tenant_id is not None:
+            raise ValueError("tenant_id and all_tenants cannot be combined")
         if tenant_id is not None and project_id is None:
             raise ValueError("project_id is required when tenant_id is provided")
-        if project_id is None:
-            return sum(len(b) for b in self._entries.values())
-        if tenant_id is not None:
-            return len(self._entries.get((tenant_id, project_id), ()))
         return sum(
-            len(bucket)
-            for key, bucket in self._entries.items()
-            if key[1] == project_id
+            len(self._entries[key])
+            for key in self._matching_bucket_keys(
+                project_id,
+                tenant_id,
+                all_tenants=all_tenants,
+            )
         )
+
+    def stats_for_scope(
+        self,
+        *,
+        tenant_id: str | None,
+        project_id: str | None = None,
+        all_tenants: bool = False,
+    ) -> SemanticCacheStats:
+        """Return counters visible inside exactly one authorization scope."""
+        if all_tenants and tenant_id is not None:
+            raise ValueError("tenant_id and all_tenants cannot be combined")
+        aggregate = SemanticCacheStats()
+        for bucket_key, stats in self._stats_by_bucket.items():
+            if not all_tenants and bucket_key[0] != tenant_id:
+                continue
+            if project_id is not None and bucket_key[1] != project_id:
+                continue
+            for field_name in (
+                "lookups",
+                "hits",
+                "misses",
+                "skipped",
+                "rejected_by_literals",
+                "embed_failures",
+                "evictions",
+            ):
+                setattr(
+                    aggregate,
+                    field_name,
+                    getattr(aggregate, field_name)
+                    + getattr(stats, field_name),
+                )
+        return aggregate
 
     # ------------------------------------------------------------------
     # Internals
@@ -734,6 +774,7 @@ class SemanticCache:
         embedding: list[float],
         model: str | None,
         threshold: float,
+        bucket_key: _BucketKey,
     ) -> tuple[str, SemanticCacheEntry, float] | None:
         """Highest-scoring entry that clears the threshold and the guards.
 
@@ -761,7 +802,10 @@ class SemanticCache:
             # differs, and no threshold short of 1.0 separates them.
             conflict = literals.conflict_with(entry.literals)
             if conflict is not None:
-                self.stats.rejected_by_literals += 1
+                self._increment_stat(
+                    bucket_key,
+                    "rejected_by_literals",
+                )
                 logger.debug(
                     "semantic cache rejected on %s: %.4f %r vs %r",
                     conflict, score, prompt[:60], entry.prompt[:60],
@@ -785,7 +829,24 @@ class SemanticCache:
         for key in [k for k, e in bucket.items() if now >= e.expires_at]:
             del bucket[key]
 
-    async def _embed(self, text: str) -> list[float] | None:
+    def _matching_bucket_keys(
+        self,
+        project_id: str | None,
+        tenant_id: str | None,
+        *,
+        all_tenants: bool,
+    ) -> list[_BucketKey]:
+        return [
+            key
+            for key in self._entries
+            if (all_tenants or key[0] == tenant_id) and (project_id is None or key[1] == project_id)
+        ]
+
+    async def _embed(
+        self,
+        text: str,
+        bucket_key: _BucketKey,
+    ) -> list[float] | None:
         """Embed, or None on any failure.
 
         Swallowing is deliberate: an embedding outage must degrade the cache to
@@ -793,16 +854,33 @@ class SemanticCache:
         visible on the admin surface rather than only in logs.
         """
         memo = self._last_embedding
-        if memo is not None and memo[0] == text:
-            return memo[1]
+        if memo is not None and memo[0] == bucket_key and memo[1] == text:
+            return memo[2]
         try:
             vector = await self._embedder.embed(text)
         except Exception:
-            self.stats.embed_failures += 1
+            self._increment_stat(bucket_key, "embed_failures")
             logger.warning("semantic cache: embedding failed", exc_info=True)
             return None
         if not vector:
-            self.stats.embed_failures += 1
+            self._increment_stat(bucket_key, "embed_failures")
             return None
-        self._last_embedding = (text, vector)
+        self._last_embedding = (bucket_key, text, vector)
         return vector
+
+    def _increment_stat(
+        self,
+        bucket_key: _BucketKey,
+        field_name: str,
+    ) -> None:
+        """Increment both compatibility aggregate and tenant-local counters."""
+        scoped = self._stats_by_bucket.setdefault(
+            bucket_key,
+            SemanticCacheStats(),
+        )
+        setattr(scoped, field_name, getattr(scoped, field_name) + 1)
+        setattr(
+            self.stats,
+            field_name,
+            getattr(self.stats, field_name) + 1,
+        )

@@ -76,6 +76,12 @@ class PolicyService(Protocol):
     ) -> str: ...
 
 
+class ConfigSync(Protocol):
+    """Request-path fleet convergence used by both runtime front doors."""
+
+    async def refresh_if_stale(self) -> bool: ...
+
+
 @dataclass(frozen=True)
 class RuntimeDependency:
     """One bounded dependency check required for runtime readiness."""
@@ -119,6 +125,7 @@ class RuntimeServices:
     principal_resolver: PrincipalResolver
     project_resolver: ProjectResolver
     policy_service: PolicyService | None = None
+    config_sync: ConfigSync | None = None
     readiness_checks: tuple[RuntimeDependency, ...] = field(default_factory=tuple)
     close_hooks: tuple[RuntimeCloseHook, ...] = field(default_factory=tuple)
 
@@ -257,8 +264,10 @@ def _validate_duration(value: float, name: str, *, allow_zero: bool = False) -> 
 
 def build_runtime_services() -> RuntimeServices:
     """Build production services and their AgentCore lifecycle contracts."""
+    from src.gateway.admin.webhook_routes import WebhookAPI
     from src.gateway.auth.cedar_policy import CedarPolicyService
     from src.gateway.bootstrap import build_gateway_components
+    from src.gateway.config_sync import ConfigSyncService
 
     components = build_gateway_components()
     if components.oidc_service is None:
@@ -267,6 +276,22 @@ def build_runtime_services() -> RuntimeServices:
         raise RuntimeError("canonical principal resolution is not configured")
     if components.project_resolver is None:
         raise RuntimeError("tenant project resolution is not configured")
+    config_sync = ConfigSyncService(
+        projects=components.projects,
+        user_configs=components.user_configs,
+        cost_tracker=components.cost_tracker,
+        persistence=components.persistence,
+        policy_resolver=components.policy_resolver,
+        region_config=components.region_router.config,
+        health_monitor=components.health_monitor,
+    )
+    # AgentCore has no Starlette admin-route construction step. Constructing the
+    # manager here installs the dispatcher's tenant destination refresh hook so
+    # canonical security events still converge across runtime replicas.
+    WebhookAPI(
+        dispatcher=components.event_dispatcher,
+        persistence=components.persistence,
+    )
 
     async def _identity_provider_ready() -> bool:
         verifier = components.oidc_service
@@ -296,6 +321,15 @@ def build_runtime_services() -> RuntimeServices:
         status = await components.persistence.health_status()
         return status.get("enabled") is True and status.get("reachable") is True
 
+    async def _event_outbox_startup_ready() -> bool:
+        return await components.event_dispatcher.check_readiness()
+
+    async def _event_outbox_ready() -> bool:
+        dispatcher = components.event_dispatcher
+        if dispatcher.outbox_enabled and not dispatcher.worker_running:
+            await dispatcher.start()
+        return await dispatcher.check_readiness()
+
     async def _close_provider_http() -> None:
         client = getattr(components.multi_factory, "_http_client", None)
         close = getattr(client, "close", None)
@@ -317,6 +351,7 @@ def build_runtime_services() -> RuntimeServices:
             components.policies,
             persistence=components.persistence,
         ),
+        config_sync=config_sync,
         readiness_checks=(
             RuntimeDependency(
                 "identity_provider",
@@ -328,9 +363,22 @@ def build_runtime_services() -> RuntimeServices:
                 _principal_store_ready,
                 _principal_store_ready,
             ),
+            RuntimeDependency(
+                "security_event_outbox",
+                _event_outbox_ready,
+                _event_outbox_startup_ready,
+            ),
         ),
         close_hooks=(
+            RuntimeCloseHook(
+                "spoke_health_monitor",
+                components.health_monitor.stop,
+            ),
             RuntimeCloseHook("provider_http", _close_provider_http),
+            RuntimeCloseHook(
+                "security_event_outbox",
+                components.event_dispatcher.stop,
+            ),
             RuntimeCloseHook("otlp", _shutdown_otlp),
         ),
     )

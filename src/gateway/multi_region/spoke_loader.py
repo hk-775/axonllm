@@ -38,6 +38,7 @@ from src.gateway.multi_region.region_config import (
     SpokeRole,
     SpokeStatus,
     default_single_region,
+    parse_topology_integer,
 )
 
 logger = logging.getLogger(__name__)
@@ -47,7 +48,7 @@ def _spoke_from(data: dict) -> SpokeConfig:
     return SpokeConfig(
         region=data["region"],
         role=SpokeRole(data.get("role", "primary")),
-        weight=int(data.get("weight", 100)),
+        weight=parse_topology_integer("weight", data.get("weight", 100)),
         status=SpokeStatus(data.get("status", "healthy")),
         endpoint=data.get("endpoint", ""),
         providers=list(data.get("providers", []) or []),
@@ -84,7 +85,10 @@ def load_hub_config(
         return HubConfig(
             hub_region=raw.get("hub_region", default_region),
             spokes=spokes,
-            health_check_interval_seconds=int(raw.get("health_check_interval_seconds", 30)),
+            health_check_interval_seconds=parse_topology_integer(
+                "health_check_interval_seconds",
+                raw.get("health_check_interval_seconds", 30),
+            ),
             failover_threshold_consecutive=int(raw.get("failover_threshold_consecutive", 3)),
             failover_cooldown_seconds=int(raw.get("failover_cooldown_seconds", 60)),
             data_residency_strict=bool(raw.get("data_residency_strict", False)),

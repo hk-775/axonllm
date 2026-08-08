@@ -35,19 +35,40 @@ class FakePersistence:
             return self._keys.get(key_id)
         return None
 
-    async def get_api_key(self, key_id: str) -> APIKey | None:
-        return self._keys.get(key_id)
+    async def get_api_key(
+        self,
+        key_id: str,
+        tenant_id: str | None = None,
+    ) -> APIKey | None:
+        key = self._keys.get(key_id)
+        if key is None or key.tenant_id != tenant_id:
+            return None
+        return key
 
-    async def list_api_keys_for_project(self, project_id: str) -> list[APIKey]:
-        return [k for k in self._keys.values() if k.project_id == project_id]
+    async def list_api_keys_for_project(
+        self,
+        project_id: str,
+        tenant_id: str | None = None,
+    ) -> list[APIKey]:
+        return [
+            key
+            for key in self._keys.values()
+            if key.project_id == project_id and key.tenant_id == tenant_id
+        ]
 
     async def update_api_key(self, key: APIKey) -> None:
         self._keys[key.key_id] = key
 
-    async def bump_revocation_epoch(self) -> None:
+    async def bump_revocation_epoch(
+        self,
+        tenant_id: str | None = None,
+    ) -> None:
         self.epoch += 1
 
-    async def get_revocation_epoch(self) -> int | None:
+    async def get_revocation_epoch(
+        self,
+        tenant_id: str | None = None,
+    ) -> int | None:
         return self.epoch
 
 
@@ -113,6 +134,58 @@ class TestIssueKey:
         assert persistence._keys[key.key_id].revoked is True
         assert persistence.epoch == 1
 
+    def test_tenant_key_defaults_to_ninety_day_expiry(self, service):
+        before = datetime.now(timezone.utc)
+        key, _ = asyncio.run(
+            service.issue_key(
+                "proj-1",
+                "K",
+                ["chat:invoke"],
+                "admin",
+                tenant_id="tenant-a",
+            )
+        )
+        after = datetime.now(timezone.utc)
+
+        assert key.expires_at is not None
+        assert before + timedelta(days=90) <= key.expires_at
+        assert key.expires_at <= after + timedelta(days=90)
+
+    @pytest.mark.parametrize(
+        ("expires_at", "message"),
+        [
+            (
+                datetime.now() + timedelta(days=1),
+                "must include a timezone",
+            ),
+            (
+                datetime.now(timezone.utc) - timedelta(seconds=1),
+                "must be in the future",
+            ),
+            (
+                datetime.now(timezone.utc) + timedelta(days=366),
+                "cannot exceed 365 days",
+            ),
+        ],
+    )
+    def test_tenant_key_expiry_is_bounded(
+        self,
+        service,
+        expires_at,
+        message,
+    ):
+        with pytest.raises(ValueError, match=message):
+            asyncio.run(
+                service.issue_key(
+                    "proj-1",
+                    "K",
+                    ["chat:invoke"],
+                    "admin",
+                    expires_at=expires_at,
+                    tenant_id="tenant-a",
+                )
+            )
+
 
 class TestValidateKey:
     def test_valid_key_returns_record(self, service):
@@ -160,12 +233,34 @@ class TestRevokeKey:
         key, _ = asyncio.run(
             service.issue_key("proj-1", "K", ["chat:invoke"], "admin")
         )
-        success = asyncio.run(service.revoke_key(key.key_id))
+        success = asyncio.run(
+            service.revoke_key(key.key_id, revoked_by="principal-a")
+        )
         assert success is True
+        assert service._persistence._keys[key.key_id].revoked_by == "principal-a"
 
     def test_revoke_nonexistent_returns_false(self, service):
         success = asyncio.run(service.revoke_key("nonexistent"))
         assert success is False
+
+    def test_tenant_revoke_requires_actor_attribution(self, service):
+        key, _ = asyncio.run(
+            service.issue_key(
+                "proj-1",
+                "K",
+                ["chat:invoke"],
+                "principal-a",
+                tenant_id="tenant-a",
+            )
+        )
+
+        with pytest.raises(
+            ValueError,
+            match="requires actor attribution",
+        ):
+            asyncio.run(service.revoke_key(key.key_id, "tenant-a"))
+
+        assert service._persistence._keys[key.key_id].revoked is False
 
     def test_failed_atomic_revoke_does_not_mutate_cache_or_fake_store(self):
         persistence = FakePersistence()

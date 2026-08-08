@@ -53,19 +53,18 @@ TENANT_MEMBER_ACTIONS = frozenset({
     Action.INFERENCE_INVOKE,
     Action.QUERY_SELECT,
     Action.TENANT_CONFIG_READ,
-    Action.POLICY_READ,
-    Action.QUOTA_READ,
-})
-
-TENANT_AUDITOR_ACTIONS = TENANT_MEMBER_ACTIONS | frozenset({
     Action.MEMBERSHIP_READ,
     Action.API_KEY_READ,
+    Action.POLICY_READ,
+    Action.QUOTA_READ,
     Action.WEBHOOK_READ,
     Action.USAGE_READ,
     Action.USAGE_EXPORT,
     Action.AUDIT_READ,
     Action.AUDIT_EXPORT,
 })
+
+TENANT_AUDITOR_ACTIONS = TENANT_MEMBER_ACTIONS
 
 TENANT_ADMIN_ACTIONS = TENANT_AUDITOR_ACTIONS | frozenset({
     Action.TENANT_CONFIG_WRITE,
@@ -76,7 +75,17 @@ TENANT_ADMIN_ACTIONS = TENANT_AUDITOR_ACTIONS | frozenset({
     Action.WEBHOOK_WRITE,
 })
 
-SERVICE_ACTIONS = TENANT_MEMBER_ACTIONS
+TENANT_WIDE_ADMIN_ACTIONS = TENANT_ADMIN_ACTIONS.difference({
+    Action.MODEL_LIST,
+    Action.INFERENCE_INVOKE,
+    Action.QUERY_SELECT,
+})
+
+SERVICE_ACTIONS = frozenset({
+    Action.MODEL_LIST,
+    Action.INFERENCE_INVOKE,
+    Action.QUERY_SELECT,
+})
 
 ROLE_ACTIONS: dict[TenantRole, frozenset[Action]] = {
     TenantRole.PLATFORM_ADMIN: PLATFORM_ACTIONS,
@@ -224,11 +233,11 @@ def authorize(
     if (
         resource.project_id is not None
         and resource.project_id not in principal.project_ids
+        and not (
+            TenantRole.TENANT_ADMIN in principal.roles
+            and normalized in TENANT_WIDE_ADMIN_ACTIONS
+        )
     ):
-        # Projects are not tenant-qualified in the legacy persistence model.
-        # Until ownership is loaded from a tenant-qualified repository, every
-        # ordinary tenant access, including tenant_admin, needs an explicit
-        # server-held grant. Break-glass cross-tenant access returned above.
         return AuthorizationDecision(
             False,
             normalized.value,

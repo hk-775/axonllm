@@ -1,0 +1,301 @@
+name: Verify release before deployment
+
+on:
+  workflow_call:
+    inputs:
+      evidence_run_id:
+        description: Workflow run containing the private release evidence
+        required: true
+        type: string
+      commit_sha:
+        description: Full release commit SHA
+        required: true
+        type: string
+      image_reference:
+        description: Immutable private ECR URI for the selected target
+        required: true
+        type: string
+      target:
+        description: Deployment target whose signed image must be verified
+        required: false
+        default: fargate
+        type: string
+      aws_region:
+        description: AWS region containing the private ECR image
+        required: false
+        default: us-east-1
+        type: string
+    secrets:
+      AWS_ROLE_ARN:
+        description: Read-only ECR verification role assumed through GitHub OIDC
+        required: true
+    outputs:
+      verified_image:
+        description: Immutable image reference that passed the release gate
+        value: ${{ jobs.verify.outputs.verified_image }}
+      verified_target:
+        description: Deployment target associated with the verified image
+        value: ${{ jobs.verify.outputs.verified_target }}
+  workflow_dispatch:
+    inputs:
+      evidence_run_id:
+        description: Workflow run containing the private release evidence
+        required: true
+        type: string
+      commit_sha:
+        description: Full release commit SHA
+        required: true
+        type: string
+      image_reference:
+        description: Immutable private ECR URI for the selected target
+        required: true
+        type: string
+      target:
+        description: Deployment target whose signed image must be verified
+        required: false
+        default: fargate
+        type: choice
+        options:
+          - fargate
+          - agentcore
+      aws_region:
+        description: AWS region containing the private ECR image
+        required: false
+        default: us-east-1
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-verification-${{ inputs.commit_sha }}-${{ inputs.target }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Verify immutable deployment image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: production
+    permissions:
+      actions: read
+      attestations: read
+      contents: read
+      id-token: write
+    outputs:
+      verified_image: ${{ steps.result.outputs.image }}
+      verified_target: ${{ steps.result.outputs.target }}
+
+    steps:
+      - name: Check out verification policy
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+
+      - name: Parse immutable ECR identity
+        id: image
+        env:
+          AWS_REGION: ${{ inputs.aws_region }}
+          IMAGE_REFERENCE: ${{ inputs.image_reference }}
+        run: >-
+          python scripts/release/verify_ecr_image.py
+          "${IMAGE_REFERENCE}"
+          --region "${AWS_REGION}"
+          --github-output "${GITHUB_OUTPUT}"
+
+      - name: Download private release evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: axonllm-release-evidence-${{ inputs.commit_sha }}
+          path: ${{ runner.temp }}/release-evidence
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.evidence_run_id }}
+
+      - name: Verify signed evidence contents
+        id: evidence
+        env:
+          DEPLOY_TARGET: ${{ inputs.target }}
+          EVIDENCE_DIR: ${{ runner.temp }}/release-evidence
+          EVIDENCE_RUN_ID: ${{ inputs.evidence_run_id }}
+          EXPECTED_COMMIT: ${{ inputs.commit_sha }}
+          EXPECTED_DIGEST: ${{ steps.image.outputs.digest }}
+          EXPECTED_REPOSITORY: ${{ github.repository }}
+        run: |
+          python scripts/release/release_evidence.py verify \
+            --directory "${EVIDENCE_DIR}" \
+            --repository "${EXPECTED_REPOSITORY}" \
+            --commit "${EXPECTED_COMMIT}" \
+            --image-digest "${EXPECTED_DIGEST}" \
+            --require-release-tag \
+            --target "${DEPLOY_TARGET}" \
+            --run-id "${EVIDENCE_RUN_ID}" \
+            --github-output "${GITHUB_OUTPUT}"
+
+      - name: Verify keyless manifest attestation
+        env:
+          EVIDENCE_DIR: ${{ runner.temp }}/release-evidence
+          EXPECTED_COMMIT: ${{ inputs.commit_sha }}
+          EXPECTED_REPOSITORY: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_REF: ${{ steps.evidence.outputs.release_ref }}
+        run: >-
+          gh attestation verify
+          "${EVIDENCE_DIR}/release-manifest.json"
+          --bundle "${EVIDENCE_DIR}/manifest-provenance.sigstore.jsonl"
+          --repo "${EXPECTED_REPOSITORY}"
+          --signer-workflow "${EXPECTED_REPOSITORY}/.github/workflows/release-security.yml"
+          --signer-digest "${EXPECTED_COMMIT}"
+          --source-digest "${EXPECTED_COMMIT}"
+          --source-ref "${RELEASE_REF}"
+          --deny-self-hosted-runners
+
+      - name: Require successful release run, matching tag, and CI
+        env:
+          EVIDENCE_RUN_ID: ${{ inputs.evidence_run_id }}
+          EXPECTED_COMMIT: ${{ inputs.commit_sha }}
+          EXPECTED_REPOSITORY: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_EVENT: ${{ steps.evidence.outputs.event_name }}
+          RELEASE_REF: ${{ steps.evidence.outputs.release_ref }}
+          RELEASE_RUN_ATTEMPT: ${{ steps.evidence.outputs.run_attempt }}
+        run: |
+          release_run=$(gh api \
+            "repos/${EXPECTED_REPOSITORY}/actions/runs/${EVIDENCE_RUN_ID}")
+          jq -e \
+            --arg attempt "${RELEASE_RUN_ATTEMPT}" \
+            --arg commit "${EXPECTED_COMMIT}" \
+            --arg event "${RELEASE_EVENT}" \
+            --arg run_id "${EVIDENCE_RUN_ID}" \
+            '(.id | tostring) == $run_id
+              and (.run_attempt | tostring) == $attempt
+              and .head_sha == $commit
+              and .event == $event
+              and .status == "completed"
+              and .conclusion == "success"
+              and .path == ".github/workflows/release-security.yml"' \
+            <<<"${release_run}"
+          [[ "${RELEASE_REF}" == refs/tags/v* ]]
+          release_tag="${RELEASE_REF#refs/tags/}"
+          tag_object=$(gh api \
+            "repos/${EXPECTED_REPOSITORY}/git/ref/tags/${release_tag}")
+          tag_type=$(jq -er '.object.type' <<<"${tag_object}")
+          tag_sha=$(jq -er '.object.sha' <<<"${tag_object}")
+          for _ in {1..5}; do
+            [[ "${tag_type}" == "tag" ]] || break
+            tag_object=$(gh api \
+              "repos/${EXPECTED_REPOSITORY}/git/tags/${tag_sha}")
+            tag_type=$(jq -er '.object.type' <<<"${tag_object}")
+            tag_sha=$(jq -er '.object.sha' <<<"${tag_object}")
+          done
+          [[ "${tag_type}" == "commit" ]]
+          [[ "${tag_sha}" == "${EXPECTED_COMMIT}" ]]
+          response="${RUNNER_TEMP}/ci-runs.json"
+          gh api \
+            --method GET \
+            "repos/${EXPECTED_REPOSITORY}/actions/workflows/ci.yml/runs" \
+            -f "head_sha=${EXPECTED_COMMIT}" \
+            -f status=completed \
+            -f per_page=100 \
+            >"${response}"
+          jq -e --arg commit "${EXPECTED_COMMIT}" \
+            '[.workflow_runs[] | select(
+              .head_sha == $commit and .conclusion == "success"
+            )] | length > 0' \
+            "${response}"
+
+      - name: Configure read-only AWS credentials
+        uses: aws-actions/configure-aws-credentials@00943011d9042930efac3dcd3a170e4273319bc8 # v5.1.0
+        with:
+          aws-region: ${{ inputs.aws_region }}
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          role-session-name: AxonLLMReleaseVerification
+          allowed-account-ids: ${{ steps.image.outputs.account_id }}
+          mask-aws-account-id: true
+          inline-session-policy: >-
+            {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": "ecr:GetAuthorizationToken",
+                  "Resource": "*"
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "ecr:BatchCheckLayerAvailability",
+                    "ecr:BatchGetImage",
+                    "ecr:GetDownloadUrlForLayer"
+                  ],
+                  "Resource": "arn:aws:ecr:${{ inputs.aws_region }}:${{ steps.image.outputs.account_id }}:repository/${{ steps.image.outputs.repository }}"
+                }
+              ]
+            }
+
+      - name: Authenticate to private ECR
+        env:
+          AWS_REGION: ${{ inputs.aws_region }}
+          REGISTRY: ${{ steps.image.outputs.registry }}
+        run: |
+          set -o pipefail
+          aws ecr get-login-password --region "${AWS_REGION}" |
+            docker login --username AWS --password-stdin "${REGISTRY}"
+
+      - name: Verify remote manifest and keyless image attestation
+        env:
+          EXPECTED_COMMIT: ${{ inputs.commit_sha }}
+          EXPECTED_DIGEST: ${{ steps.evidence.outputs.digest }}
+          EXPECTED_REPOSITORY: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+          IMAGE_BUNDLE: ${{ runner.temp }}/release-evidence/${{ steps.evidence.outputs.bundle }}
+          IMAGE_REFERENCE: ${{ inputs.image_reference }}
+          RELEASE_REF: ${{ steps.evidence.outputs.release_ref }}
+        run: |
+          test -f "${IMAGE_BUNDLE}"
+          test ! -L "${IMAGE_BUNDLE}"
+          python scripts/release/verify_ecr_image.py \
+            "${IMAGE_REFERENCE}" \
+            --region "${{ inputs.aws_region }}" \
+            --expected-digest "${EXPECTED_DIGEST}" \
+            --verify-remote
+          gh attestation verify \
+            "oci://${IMAGE_REFERENCE}" \
+            --bundle "${IMAGE_BUNDLE}" \
+            --repo "${EXPECTED_REPOSITORY}" \
+            --signer-workflow "${EXPECTED_REPOSITORY}/.github/workflows/release-security.yml" \
+            --signer-digest "${EXPECTED_COMMIT}" \
+            --source-digest "${EXPECTED_COMMIT}" \
+            --source-ref "${RELEASE_REF}" \
+            --deny-self-hosted-runners
+
+      - name: Install checksum-verified scanner
+        run: |
+          scripts/ci/install_security_tools.sh "${RUNNER_TEMP}/bin"
+          printf '%s\n' "${RUNNER_TEMP}/bin" >>"${GITHUB_PATH}"
+
+      - name: Re-scan exact deployment image
+        env:
+          IMAGE_REFERENCE: ${{ inputs.image_reference }}
+        run: >-
+          trivy image
+          --disable-telemetry
+          --scanners vuln,secret
+          --ignore-unfixed
+          --severity HIGH,CRITICAL
+          --exit-code 1
+          "${IMAGE_REFERENCE}"
+
+      - name: Emit verified immutable image
+        id: result
+        env:
+          IMAGE_REFERENCE: ${{ inputs.image_reference }}
+          VERIFIED_TARGET: ${{ steps.evidence.outputs.target }}
+        run: |
+          printf 'image=%s\n' "${IMAGE_REFERENCE}" >>"${GITHUB_OUTPUT}"
+          printf 'target=%s\n' "${VERIFIED_TARGET}" >>"${GITHUB_OUTPUT}"

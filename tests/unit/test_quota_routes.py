@@ -5,17 +5,24 @@ import dataclasses
 
 import pytest
 from starlette.applications import Starlette
+from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.testclient import TestClient
 
 from src.gateway.admin.quota_routes import QuotaAPI, create_quota_routes
 from src.gateway.auth.policy_hierarchy import PolicyHierarchyResolver
-from src.gateway.models import PolicyNode, ResolvedPolicy
+from src.gateway.models import (
+    PolicyNode,
+    Project,
+    RequestContext,
+    ResolvedPolicy,
+)
 from src.gateway.quota_enforcer import QuotaEnforcer
 
 
 class FakePersistence:
     def __init__(self):
         self._nodes = {}
+        self._tenant_nodes = {}
         self._enabled = True
 
     @property
@@ -30,6 +37,13 @@ class FakePersistence:
 
     async def load_all_policy_nodes(self):
         return list(self._nodes.values())
+
+    async def save_tenant_policy_node(self, tenant_id, node):
+        self._tenant_nodes.setdefault(tenant_id, {})[node.node_id] = node
+        return True
+
+    async def load_tenant_policy_nodes(self, tenant_id):
+        return list(self._tenant_nodes.get(tenant_id, {}).values())
 
 
 def _run(coro):
@@ -250,3 +264,271 @@ class TestSimulateRequest:
         policy = resp.json()["resolved_policy"]
         assert policy["rate_limit_rpm"] == 200
         assert policy["budget_limit"] == 5000.0
+
+
+class TestTenantQualifiedQuotaRoutes:
+    @staticmethod
+    def _setup_tenants():
+        persistence = FakePersistence()
+        resolver = PolicyHierarchyResolver(
+            persistence=persistence,
+            cache_ttl_seconds=0,
+        )
+        enforcer = QuotaEnforcer()
+        _run(persistence.save_tenant_policy_node(
+            "tenant-a",
+            PolicyNode(
+                "same-project",
+                "project",
+                None,
+                "Tenant A",
+                limits={
+                    "budget_limit": 100.0,
+                    "allowed_models": ["model-a"],
+                },
+            ),
+        ))
+        _run(persistence.save_tenant_policy_node(
+            "tenant-b",
+            PolicyNode(
+                "same-project",
+                "project",
+                None,
+                "Tenant B",
+                limits={
+                    "budget_limit": 200.0,
+                    "allowed_models": ["model-b"],
+                },
+            ),
+        ))
+        _run(enforcer.record_spend(
+            "same-project",
+            25.0,
+            tenant_id="tenant-a",
+        ))
+        _run(enforcer.record_spend(
+            "same-project",
+            75.0,
+            tenant_id="tenant-b",
+        ))
+        app = Starlette(routes=create_quota_routes(QuotaAPI(
+            quota_enforcer=enforcer,
+            policy_resolver=resolver,
+        )))
+        return TestClient(app), enforcer
+
+    def test_same_project_id_reads_policy_and_spend_for_requested_tenant(self):
+        client, _ = self._setup_tenants()
+
+        tenant_a = client.get(
+            "/admin/quotas/same-project?tenant_id=tenant-a"
+        ).json()
+        tenant_b = client.get(
+            "/admin/quotas/same-project?tenant_id=tenant-b"
+        ).json()
+
+        assert tenant_a["tenant_id"] == "tenant-a"
+        assert tenant_a["policy_limits"]["budget_limit"] == 100.0
+        assert tenant_a["usage"]["current_spend"] == 25.0
+        assert tenant_b["tenant_id"] == "tenant-b"
+        assert tenant_b["policy_limits"]["budget_limit"] == 200.0
+        assert tenant_b["usage"]["current_spend"] == 75.0
+
+    def test_simulation_uses_body_tenant_scope(self):
+        client, _ = self._setup_tenants()
+
+        tenant_a = client.post("/admin/quotas/simulate", json={
+            "tenant_id": "tenant-a",
+            "project_id": "same-project",
+            "model": "model-a",
+        }).json()
+        tenant_b = client.post("/admin/quotas/simulate", json={
+            "tenant_id": "tenant-b",
+            "project_id": "same-project",
+            "model": "model-a",
+        }).json()
+
+        assert tenant_a["allowed"] is True
+        assert tenant_b["allowed"] is False
+        assert tenant_b["limit_type"] == "allowed_models"
+
+    def test_reset_does_not_clear_same_project_id_in_other_tenant(self):
+        client, enforcer = self._setup_tenants()
+
+        response = client.post(
+            "/admin/quotas/same-project/reset?tenant_id=tenant-a"
+        )
+
+        assert response.status_code == 200
+        assert enforcer.get_spend(
+            "same-project",
+            tenant_id="tenant-a",
+        ) == 0.0
+        assert enforcer.get_spend(
+            "same-project",
+            tenant_id="tenant-b",
+        ) == 75.0
+
+    def test_blank_tenant_does_not_fall_back_to_legacy(self):
+        client, _ = self._setup_tenants()
+
+        response = client.get("/admin/quotas/same-project?tenant_id=")
+
+        assert response.status_code == 400
+
+    def test_tenant_policy_store_outage_returns_503(self):
+        class UnavailablePersistence(FakePersistence):
+            async def load_tenant_policy_nodes(self, tenant_id):
+                return None
+
+        resolver = PolicyHierarchyResolver(UnavailablePersistence())
+        client = TestClient(Starlette(routes=create_quota_routes(QuotaAPI(
+            quota_enforcer=QuotaEnforcer(),
+            policy_resolver=resolver,
+        ))))
+
+        response = client.get(
+            "/admin/quotas/same-project?tenant_id=tenant-a"
+        )
+
+        assert response.status_code == 503
+        assert response.json()["error"]["type"] == "policy_store_unavailable"
+
+    def test_authenticated_tenant_rejects_body_override(self):
+        persistence = FakePersistence()
+        resolver = PolicyHierarchyResolver(persistence)
+        app = Starlette(routes=create_quota_routes(QuotaAPI(
+            quota_enforcer=QuotaEnforcer(),
+            policy_resolver=resolver,
+        )))
+
+        async def add_context(request, call_next):
+            request.state.context = RequestContext(
+                user_id="admin",
+                project_id="same-project",
+                roles=["admin"],
+                scopes=["admin:*"],
+                tenant_id="tenant-a",
+            )
+            return await call_next(request)
+
+        app.add_middleware(BaseHTTPMiddleware, dispatch=add_context)
+        client = TestClient(app)
+        response = client.post("/admin/quotas/simulate", json={
+            "tenant_id": "tenant-b",
+            "project_id": "same-project",
+            "model": "model",
+        })
+
+        assert response.status_code == 403
+
+    def test_authenticated_tenant_rejects_query_override(self):
+        persistence = FakePersistence()
+        resolver = PolicyHierarchyResolver(persistence)
+        app = Starlette(routes=create_quota_routes(QuotaAPI(
+            quota_enforcer=QuotaEnforcer(),
+            policy_resolver=resolver,
+        )))
+
+        async def add_context(request, call_next):
+            request.state.context = RequestContext(
+                user_id="admin",
+                project_id="same-project",
+                roles=["tenant_admin"],
+                scopes=[],
+                tenant_id="tenant-a",
+            )
+            return await call_next(request)
+
+        app.add_middleware(BaseHTTPMiddleware, dispatch=add_context)
+        response = TestClient(app).get(
+            "/admin/quotas/same-project?tenant_id=tenant-b"
+        )
+
+        assert response.status_code == 403
+
+    def test_canonical_role_without_tenant_fails_closed(self):
+        app = Starlette(routes=create_quota_routes(QuotaAPI(
+            quota_enforcer=QuotaEnforcer(),
+            policy_resolver=PolicyHierarchyResolver(FakePersistence()),
+        )))
+
+        async def add_context(request, call_next):
+            request.state.context = RequestContext(
+                user_id="admin",
+                project_id="same-project",
+                roles=["tenant_admin"],
+                scopes=[],
+            )
+            return await call_next(request)
+
+        app.add_middleware(BaseHTTPMiddleware, dispatch=add_context)
+        response = TestClient(app).get(
+            "/admin/quotas/same-project?tenant_id=tenant-a"
+        )
+
+        assert response.status_code == 400
+        assert response.json()["error"]["type"] == "invalid_tenant_scope"
+
+    def test_direct_stub_without_state_keeps_legacy_scope(self):
+        persistence = FakePersistence()
+        resolver = PolicyHierarchyResolver(persistence)
+        _run(persistence.save_policy_node(PolicyNode(
+            "same-project",
+            "project",
+            None,
+            "Legacy",
+            limits={"budget_limit": 10.0},
+        )))
+
+        class RequestStub:
+            path_params = {"project_id": "same-project"}
+            query_params = {}
+
+        response = _run(QuotaAPI(
+            quota_enforcer=QuotaEnforcer(),
+            policy_resolver=resolver,
+        ).get_project_quota(RequestStub()))
+
+        assert response.status_code == 200
+        assert b'"tenant_id":null' in response.body
+
+    def test_authorized_project_supplies_canonical_rpm(self):
+        persistence = FakePersistence()
+        resolver = PolicyHierarchyResolver(persistence)
+        project = Project(
+            project_id="same-project",
+            name="Project",
+            tenant_id="tenant-a",
+            rate_limit_rpm=1,
+        )
+        app = Starlette(routes=create_quota_routes(QuotaAPI(
+            quota_enforcer=QuotaEnforcer(),
+            policy_resolver=resolver,
+        )))
+
+        async def add_context(request, call_next):
+            request.state.context = RequestContext(
+                user_id="admin",
+                project_id="same-project",
+                roles=["admin"],
+                scopes=["admin:*"],
+                tenant_id="tenant-a",
+                authorized_project=project,
+            )
+            return await call_next(request)
+
+        app.add_middleware(BaseHTTPMiddleware, dispatch=add_context)
+        client = TestClient(app)
+        body = {
+            "project_id": "same-project",
+            "model": "model",
+        }
+
+        assert client.post(
+            "/admin/quotas/simulate",
+            json=body,
+        ).json()["allowed"] is True
+        second = client.post("/admin/quotas/simulate", json=body).json()
+        assert second["allowed"] is False
+        assert second["limit_value"] == 1

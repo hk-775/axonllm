@@ -120,14 +120,12 @@ def _keyword_literals(name: str) -> list[str]:
 
 
 class TestTheResourcesTheDocsAddressByName:
-    """Physical names for the resources the README tells you to type.
+    """Physical names for resources the README still tells operators to type.
 
-    Every post-deploy instruction addresses these by name — `--cluster axonllm`,
-    `--service axonllm`, `--task-definition axonllm`. CDK does not assign a
-    physical name unless asked, so all three were previously synthesized as
-    something like `AxonLLMStack-ClusterEB0386A7-rSJKGJp9AqGt`, and every
-    documented command failed against a real deployment: the cluster came back
-    `MISSING` and `describe-task-definition` raised `ClientException`.
+    Cluster, service, and task-definition instructions use literal names. The
+    retained provider secret deliberately does not: operators resolve its
+    generated name through the ``ProviderSecretArn`` stack output so a retained
+    secret cannot block replacement-stack creation.
 
     Asserted here rather than left to review because the failure is invisible from
     both sides — the stack deploys perfectly, the docs read perfectly, and they
@@ -150,13 +148,12 @@ class TestTheResourcesTheDocsAddressByName:
             f"an unset {keyword} makes CDK generate a name that command cannot resolve"
         )
 
-    def test_the_secret_keeps_the_name_the_docs_use(self):
-        """`axonllm/api-keys` appears in the docs verbatim.
-
-        Already explicit; asserted so it stays that way, for the same reason as
-        the three above.
-        """
-        assert _keyword_literals("secret_name") == ["axonllm/api-keys"]
+    def test_the_retained_secret_uses_a_generated_name(self):
+        """A fixed retained name would make a replacement stack undeployable."""
+        assert _keyword_literals("secret_name") == []
+        source = _STACK.read_text(encoding="utf-8")
+        assert '"ProviderSecretArn"' in source
+        assert "value=api_keys_secret.secret_arn" in source
 
     def test_the_table_name_defaults_to_the_documented_one_but_is_overridable(self):
         """`axonllm-state` stays the default, and `-c table_name=` can replace it.

@@ -161,11 +161,13 @@ class TestTheEntrypointDefaultsDemoDataOn:
     def test_an_explicit_false_is_not_overridden(self, monkeypatch):
         """The clean-install path (README path 1 and 3) depends on this."""
         monkeypatch.setenv("AXON_LOAD_DEMO_DATA", "false")
+        monkeypatch.delenv("AXON_DEPLOYMENT_PROFILE", raising=False)
 
         import serve_dashboard
 
         _, app_config = serve_dashboard.build_app()
         assert os.environ["AXON_LOAD_DEMO_DATA"] == "false"
+        assert app_config.deployment_profile == "development"
         assert app_config.load_demo_data is False
 
     def test_the_env_file_is_gated_on_the_operator_not_the_default(self, tmp_path, monkeypatch):

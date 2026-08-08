@@ -85,6 +85,8 @@ class SmartRoutingStrategy(RoutingStrategyBase):
         allowed_models: set[str] | None = None,
         project_id: str | None = None,
         user_id: str | None = None,
+        *,
+        tenant_id: str | None = None,
     ) -> SmartRoutingDecision:
         """Full smart routing: classify prompt, score models, select best.
 
@@ -184,14 +186,20 @@ class SmartRoutingStrategy(RoutingStrategyBase):
 
             # Step 7: Filter by budget
             if project_id is not None:
-                budget_status = await self.cost_tracker.check_budget(project_id)
+                budget_status = await self.cost_tracker.check_budget(
+                    project_id,
+                    tenant_id=tenant_id,
+                )
                 if budget_status.is_over_budget:
                     entry["filtered_reason"] = "over_budget"
                     candidates_considered.append(entry)
                     continue
 
             if user_id is not None:
-                user_budget = await self.cost_tracker.check_user_budget(user_id)
+                user_budget = await self.cost_tracker.check_user_budget(
+                    user_id,
+                    tenant_id=tenant_id,
+                )
                 if user_budget.is_over_budget:
                     entry["filtered_reason"] = "over_budget"
                     candidates_considered.append(entry)

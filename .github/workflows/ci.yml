@@ -92,10 +92,21 @@ jobs:
       - name: Install locked audit dependencies
         run: uv sync --frozen --extra security
 
+      - name: Validate workflow and operational tooling
+        run: |
+          python scripts/ci/validate_workflows.py
+          python -m unittest discover -s tests/release_security -p 'test_*.py' -v
+          while IFS= read -r -d '' script; do
+            bash -n "${script}"
+          done < <(find scripts -type f -name '*.sh' -print0)
+
       - name: Install checksum-verified scanners
         run: |
           scripts/ci/install_security_tools.sh "${RUNNER_TEMP}/bin"
           printf '%s\n' "${RUNNER_TEMP}/bin" >>"${GITHUB_PATH}"
+
+      - name: Validate GitHub Actions syntax
+        run: actionlint
 
       - name: Scan Git history for secrets
         run: >-
@@ -124,7 +135,7 @@ jobs:
           JSII_RUNTIME_PACKAGE_CACHE_ROOT: ${{ runner.temp }}/jsii-cache
         run: scripts/ci/synthesize_and_verify_cdk.sh "${CDK_CI_OUTDIR}"
 
-      - name: Scan synthesized CloudFormation
+      - name: Scan synthesized Fargate CloudFormation
         env:
           CDK_CI_OUTDIR: ${{ runner.temp }}/cdk.out
         run: >-
@@ -134,7 +145,19 @@ jobs:
           --ignorefile .github/trivyignore.yaml
           --severity HIGH,CRITICAL
           --exit-code 1
-          "${CDK_CI_OUTDIR}/AxonLLMStack.template.json"
+          "${CDK_CI_OUTDIR}/fargate/AxonLLMStack.template.json"
+
+      - name: Scan synthesized AgentCore CloudFormation
+        env:
+          CDK_CI_OUTDIR: ${{ runner.temp }}/cdk.out
+        run: >-
+          trivy config
+          --disable-telemetry
+          --skip-check-update
+          --ignorefile .github/trivyignore.yaml
+          --severity HIGH,CRITICAL
+          --exit-code 1
+          "${CDK_CI_OUTDIR}/agentcore/AxonLLMAgentCoreStack.template.json"
 
   container:
     name: Container build and scan

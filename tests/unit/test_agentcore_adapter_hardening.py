@@ -18,6 +18,7 @@ from src.gateway.agentcore.runtime import (
     RuntimeServices,
 )
 from src.gateway.auth.project_repository import ProjectStoreUnavailable
+from src.gateway.config_sync import RegionTopologyUnavailable
 from src.gateway.models import (
     AuthMethod,
     MembershipStatus,
@@ -121,6 +122,18 @@ class _PolicyService:
         return self.decision
 
 
+class _ConfigSync:
+    def __init__(self, error: Exception | None = None) -> None:
+        self.error = error
+        self.calls = 0
+
+    async def refresh_if_stale(self) -> bool:
+        self.calls += 1
+        if self.error is not None:
+            raise self.error
+        return True
+
+
 class _Gateway:
     def __init__(self, chat_result: Any | None = None) -> None:
         self.chat_result = chat_result or {"id": "completion-1"}
@@ -214,6 +227,7 @@ def _runtime(
     gateway: _Gateway | None = None,
     project_resolver: _ProjectResolver | None = None,
     policy_service: _PolicyService | None = None,
+    config_sync: _ConfigSync | None = None,
 ) -> tuple[RuntimeServices, _Gateway, _Verifier, _Resolver]:
     resolved_gateway = gateway or _Gateway()
     verifier = _Verifier(verified_context or _verified_context())
@@ -225,6 +239,7 @@ def _runtime(
         principal_resolver=resolver,
         project_resolver=projects,
         policy_service=policy_service,
+        config_sync=config_sync,
     )
     return services, resolved_gateway, verifier, resolver
 
@@ -350,6 +365,48 @@ async def test_project_store_outage_fails_closed() -> None:
 
     assert raised.value.status_code == 503
     assert raised.value.code == "project_resolver_unavailable"
+    assert gateway.chat_calls == []
+
+
+@pytest.mark.asyncio
+async def test_agentcore_refreshes_fleet_config_before_dispatch() -> None:
+    config_sync = _ConfigSync()
+    services, gateway, _, _ = _runtime(config_sync=config_sync)
+    adapter = AgentCoreAdapter(_StaticProvider(services))
+
+    result = await adapter.invoke(_chat_payload(), _sdk_context())
+
+    assert result == {"id": "completion-1"}
+    assert config_sync.calls == 1
+    assert len(gateway.chat_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_agentcore_config_refresh_failure_uses_loaded_config() -> None:
+    config_sync = _ConfigSync(RuntimeError("config refresh unavailable"))
+    services, gateway, _, _ = _runtime(config_sync=config_sync)
+    adapter = AgentCoreAdapter(_StaticProvider(services))
+
+    result = await adapter.invoke(_chat_payload(), _sdk_context())
+
+    assert result == {"id": "completion-1"}
+    assert config_sync.calls == 1
+    assert len(gateway.chat_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_agentcore_topology_refresh_failure_fails_closed() -> None:
+    config_sync = _ConfigSync(
+        RegionTopologyUnavailable("topology read unavailable")
+    )
+    services, gateway, _, _ = _runtime(config_sync=config_sync)
+    adapter = AgentCoreAdapter(_StaticProvider(services))
+
+    with pytest.raises(AgentCoreAdapterError) as raised:
+        await adapter.invoke(_chat_payload(), _sdk_context())
+
+    assert raised.value.status_code == 503
+    assert raised.value.code == "region_topology_unavailable"
     assert gateway.chat_calls == []
 
 

@@ -1,6 +1,8 @@
 """Unit tests for CacheManager."""
 
 import asyncio
+import copy
+import pickle
 from datetime import datetime, timedelta
 from unittest.mock import patch
 
@@ -88,7 +90,7 @@ async def test_expired_entry_is_cleaned_up():
         await cm.get("key-exp")
 
     # Entry should have been removed from internal cache
-    assert "key-exp" not in cm._cache
+    assert (None, "key-exp") not in cm._cache
 
 
 @pytest.mark.asyncio
@@ -126,6 +128,83 @@ async def test_same_project_in_different_tenants_produces_different_cache_keys()
     key1 = cm.compute_cache_key(req, "shared-project", "tenant-a")
     key2 = cm.compute_cache_key(req, "shared-project", "tenant-b")
     assert key1 != key2
+
+
+@pytest.mark.asyncio
+async def test_raw_key_retrieval_requires_matching_tenant_scope():
+    cm = CacheManager()
+    response = _make_response("tenant a")
+    await cm.put("shared-key", response, 300, tenant_id="tenant-a")
+
+    assert await cm.get("shared-key") is None
+    assert await cm.get("shared-key", tenant_id="tenant-b") is None
+    assert await cm.get("shared-key", tenant_id="tenant-a") is response
+
+
+@pytest.mark.asyncio
+async def test_computed_key_carries_scope_for_existing_gateway_call_shape():
+    cm = CacheManager()
+    request = _make_request()
+    response = _make_response("tenant a")
+    key = cm.compute_cache_key(request, "shared-project", "tenant-a")
+
+    await cm.put(key, response, 300)
+
+    assert await cm.get(key) is response
+    assert await cm.get(key, tenant_id="tenant-b") is None
+    assert await cm.get(str(key)) is None
+    assert await cm.get(str(key), tenant_id="tenant-a") is response
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "round_trip",
+    [
+        copy.copy,
+        copy.deepcopy,
+        lambda value: pickle.loads(pickle.dumps(value)),
+    ],
+)
+async def test_computed_key_keeps_scope_through_object_round_trip(round_trip):
+    cm = CacheManager()
+    request = _make_request()
+    response = _make_response("tenant a")
+    key = cm.compute_cache_key(request, "shared-project", "tenant-a")
+    round_tripped_key = round_trip(key)
+
+    await cm.put(round_tripped_key, response, 300)
+
+    assert await cm.get(round_tripped_key) is response
+    assert await cm.get(round_tripped_key, tenant_id="tenant-b") is None
+
+
+@pytest.mark.asyncio
+async def test_digest_collision_cannot_overwrite_another_tenant():
+    cm = CacheManager()
+    request = _make_request()
+    tenant_a_response = _make_response("tenant a")
+    tenant_b_response = _make_response("tenant b")
+
+    with patch("src.gateway.cache_manager.hashlib.sha256") as sha256:
+        sha256.return_value.hexdigest.return_value = "forced-collision"
+        tenant_a_key = cm.compute_cache_key(
+            request,
+            "shared-project",
+            "tenant-a",
+        )
+        tenant_b_key = cm.compute_cache_key(
+            request,
+            "shared-project",
+            "tenant-b",
+        )
+
+    assert tenant_a_key == tenant_b_key
+    await cm.put(tenant_a_key, tenant_a_response, 300)
+    await cm.put(tenant_b_key, tenant_b_response, 300)
+
+    assert await cm.get(tenant_a_key) is tenant_a_response
+    assert await cm.get(tenant_b_key) is tenant_b_response
+    assert len(cm._cache) == 2
 
 
 @pytest.mark.asyncio

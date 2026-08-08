@@ -452,6 +452,34 @@ class TestEnsembleJudgeFailure:
         assert decision.error is not None
         assert "synthesis failed" in decision.error
 
+    @pytest.mark.asyncio
+    async def test_unexpected_judge_error_is_a_synthesis_failure(self):
+        preset = _make_preset(quorum=2)
+        responses = {
+            "nova-lite": _make_response("nova-lite", "a"),
+            "mistral": _make_response("mistral", "b"),
+            "deepseek": _make_response("deepseek", "c"),
+        }
+
+        async def execute(request, *_args, **_kwargs):
+            if request.model == "claude-sonnet":
+                raise RuntimeError("adapter bug")
+            return responses[request.model]
+
+        router = _make_router(cost_tracker=_make_cost_tracker())
+        router.execute_with_fallback = AsyncMock(side_effect=execute)
+
+        with pytest.raises(EnsembleSynthesisError) as exc_info:
+            await router.ensemble_route(
+                _make_request(),
+                _make_factory(),
+                prompt="hi",
+                preset=preset,
+            )
+
+        assert exc_info.value.decision.succeeded_count == 3
+        assert exc_info.value.decision.total_cost == 0.0
+
 
 # ---------------------------------------------------------------------------
 # Partial panel failure tolerated
@@ -500,6 +528,37 @@ class TestEnsemblePartialFailureTolerated:
         assert "survivor one" in judge_text
         assert "survivor two" in judge_text
         assert "mistral" not in judge_text
+
+    @pytest.mark.asyncio
+    async def test_unexpected_panel_error_is_contained_as_a_failed_member(self):
+        preset = _make_preset(quorum=2)
+        responses = {
+            "nova-lite": _make_response("nova-lite", "one"),
+            "deepseek": _make_response("deepseek", "two"),
+            "claude-sonnet": _make_response("claude-sonnet", "final"),
+        }
+
+        async def execute(request, *_args, **_kwargs):
+            if request.model == "mistral":
+                raise RuntimeError("adapter bug")
+            return responses[request.model]
+
+        router = _make_router(cost_tracker=_make_cost_tracker())
+        router.execute_with_fallback = AsyncMock(side_effect=execute)
+
+        response, decision = await router.ensemble_route(
+            _make_request(),
+            _make_factory(),
+            prompt="hi",
+            preset=preset,
+        )
+
+        assert response.model == "claude-sonnet"
+        assert decision.succeeded == ["nova-lite", "deepseek"]
+        assert decision.failed == [{
+            "model": "mistral",
+            "reason": "provider execution failed",
+        }]
 
 
 # ---------------------------------------------------------------------------

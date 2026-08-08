@@ -161,6 +161,34 @@ class TestSpokeLoader:
         p.write_text("spokes:\n  - {this is: [broken")   # invalid YAML
         assert load_hub_config(str(p)).is_single_region
 
+    @pytest.mark.parametrize(
+        "invalid_config",
+        [
+            (
+                "health_check_interval_seconds: 0\n"
+                "spokes:\n"
+                "  - region: us-east-1\n"
+            ),
+            (
+                "spokes:\n"
+                "  - region: us-east-1\n"
+                "    weight: -0.5\n"
+            ),
+        ],
+    )
+    def test_invalid_routing_inputs_fall_back(
+        self,
+        tmp_path,
+        invalid_config,
+    ):
+        p = tmp_path / "spokes.yaml"
+        p.write_text(invalid_config)
+
+        hub = load_hub_config(str(p), default_region="us-west-2")
+
+        assert hub.is_single_region
+        assert hub.spokes[0].region == "us-west-2"
+
 
 # --- health monitor lifecycle (started only when multi-region) ---
 

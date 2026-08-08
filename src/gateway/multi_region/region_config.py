@@ -10,6 +10,40 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 
+def parse_topology_integer(name: str, value: object) -> int:
+    """Normalize integer input without silently truncating fractional values."""
+    if isinstance(value, bool):
+        raise ValueError(f"{name} must be an integer")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError as exc:
+            raise ValueError(f"{name} must be an integer") from exc
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    raise ValueError(f"{name} must be an integer")
+
+
+def _require_non_negative_integer(name: str, value: object) -> None:
+    if (
+        not isinstance(value, int)
+        or isinstance(value, bool)
+        or value < 0
+    ):
+        raise ValueError(f"{name} must be a non-negative integer")
+
+
+def _require_positive_integer(name: str, value: object) -> None:
+    if (
+        not isinstance(value, int)
+        or isinstance(value, bool)
+        or value <= 0
+    ):
+        raise ValueError(f"{name} must be a positive integer")
+
+
 class SpokeRole(Enum):
     PRIMARY = "primary"
     FAILOVER = "failover"
@@ -39,6 +73,18 @@ class SpokeConfig:
     max_latency_ms: int = 5000
     failover_priority: int = 0
 
+    def __setattr__(self, name: str, value: object) -> None:
+        if name == "weight":
+            _require_non_negative_integer(name, value)
+        super().__setattr__(name, value)
+
+    def __post_init__(self) -> None:
+        self.validate()
+
+    def validate(self) -> None:
+        """Validate routing fields after external deserialization."""
+        _require_non_negative_integer("weight", self.weight)
+
 
 @dataclass
 class HubConfig:
@@ -50,6 +96,24 @@ class HubConfig:
     failover_threshold_consecutive: int = 3
     failover_cooldown_seconds: int = 60
     data_residency_strict: bool = False
+    revision: int = 0
+
+    def __setattr__(self, name: str, value: object) -> None:
+        if name == "health_check_interval_seconds":
+            _require_positive_integer(name, value)
+        super().__setattr__(name, value)
+
+    def __post_init__(self) -> None:
+        self.validate()
+
+    def validate(self) -> None:
+        """Validate health scheduling and all routable spoke inputs."""
+        _require_positive_integer(
+            "health_check_interval_seconds",
+            self.health_check_interval_seconds,
+        )
+        for spoke in self.spokes:
+            spoke.validate()
 
     @property
     def active_spokes(self) -> list[SpokeConfig]:
@@ -73,6 +137,92 @@ class HubConfig:
             and s.status == SpokeStatus.HEALTHY
         ]
         return sorted(candidates, key=lambda s: s.failover_priority)
+
+
+def apply_persisted_topology(
+    hub_config: HubConfig,
+    loaded: dict,
+    *,
+    preserve_health: bool = False,
+) -> None:
+    """Replace a live config with one authoritative persisted snapshot.
+
+    Parse the complete snapshot before touching the shared object. A malformed
+    spoke must not leave hub settings from the new document paired with spokes
+    from the old one.
+    """
+    previous_status = (
+        {spoke.region: spoke.status for spoke in hub_config.spokes}
+        if preserve_health
+        else {}
+    )
+    revision = loaded.get("revision", 0)
+    if (
+        not isinstance(revision, int)
+        or isinstance(revision, bool)
+        or revision < 0
+    ):
+        raise ValueError("topology revision must be a non-negative integer")
+
+    spokes: list[SpokeConfig] = []
+    for stored in loaded.get("spokes", []):
+        try:
+            role = SpokeRole(stored.get("role", "active"))
+        except ValueError as exc:
+            raise ValueError(
+                f"persisted spoke {stored.get('region')!r} has an unknown role"
+            ) from exc
+        region = stored["region"]
+        spokes.append(
+            SpokeConfig(
+                region=region,
+                role=role,
+                weight=stored.get("weight", 50),
+                status=previous_status.get(region, SpokeStatus.HEALTHY),
+                endpoint=stored.get("endpoint", ""),
+                providers=stored.get("providers", []),
+                models=stored.get("models", []),
+                data_residency_zones=stored.get(
+                    "data_residency_zones",
+                    [],
+                ),
+                health_check_url=stored.get("health_check_url", ""),
+                max_latency_ms=stored.get("max_latency_ms", 5000),
+                failover_priority=stored.get("failover_priority", 0),
+            )
+        )
+
+    candidate = HubConfig(
+        hub_region=loaded["hub_region"] or hub_config.hub_region,
+        spokes=spokes,
+        health_check_interval_seconds=loaded[
+            "health_check_interval_seconds"
+        ],
+        failover_threshold_consecutive=loaded[
+            "failover_threshold_consecutive"
+        ],
+        failover_cooldown_seconds=loaded[
+            "failover_cooldown_seconds"
+        ],
+        data_residency_strict=loaded["data_residency_strict"],
+        revision=revision,
+    )
+
+    # No operation below this point can fail: publish the fully parsed candidate
+    # synchronously so event-loop readers cannot observe a hybrid topology.
+    hub_config.hub_region = candidate.hub_region
+    hub_config.spokes[:] = candidate.spokes
+    hub_config.health_check_interval_seconds = (
+        candidate.health_check_interval_seconds
+    )
+    hub_config.failover_threshold_consecutive = (
+        candidate.failover_threshold_consecutive
+    )
+    hub_config.failover_cooldown_seconds = (
+        candidate.failover_cooldown_seconds
+    )
+    hub_config.data_residency_strict = candidate.data_residency_strict
+    hub_config.revision = candidate.revision
 
 
 def default_single_region(region: str = "us-east-1") -> HubConfig:
