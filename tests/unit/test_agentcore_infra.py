@@ -563,6 +563,10 @@ def test_state_and_backups_are_encrypted_retained_and_recoverable(
         "AWS::Backup::BackupVault",
     )
     assert vault["DeletionPolicy"] == "Retain"
+    assert vault["Properties"]["LockConfiguration"] == {
+        "MaxRetentionDays": 365,
+        "MinRetentionDays": 30,
+    }
     vault_name = vault["Properties"]["BackupVaultName"]
     assert vault_name["Fn::Join"][1][0] == "axon-agent"
     assert {"Ref": "AWS::StackId"} in _values_for_key(
@@ -664,6 +668,9 @@ def test_security_event_outbox_is_fifo_encrypted_and_redriven(
     assert outputs["SecurityEventLogGroupArn"]["Value"]["Fn::GetAtt"][
         0
     ].startswith("SecurityEventLogGroup")
+    assert outputs["DataKeyArn"]["Value"]["Fn::GetAtt"][0].startswith(
+        "DataKey"
+    )
 
 
 def test_encrypted_logs_and_alarm_delivery_have_service_permissions(

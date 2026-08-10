@@ -1,6 +1,6 @@
 # PRFAQ: AxonLLM Production and AgentCore
 
-> Working-backwards draft reconciled with the repository on 2026-08-07. This
+> Working-backwards draft reconciled with the repository on 2026-08-10. This
 > document describes implemented behavior; it is not a production certification.
 
 ## Press Release
@@ -96,29 +96,44 @@ executed by the caller, not AxonLLM.
 
 **Q: What must exist before canonical mode is enabled?**
 
-A: The tenant-owned project, canonical principal, active membership, tenant
-role, project grants, and any service scopes must already exist in DynamoDB.
-OIDC tokens must provide signed issuer/subject identity and the required tenant
-and project hints.
+A: OIDC tokens must provide signed issuer/subject identity and the required
+tenant and project hints. Bootstrap the initial authority against the same
+DynamoDB table the runtime uses:
 
-The repository has no supported tenant/principal bootstrap command.
-After a canonical SCIM user and principal exist,
+```bash
+LLM_ROUTER_DYNAMODB_ENABLED=true AXON_DYNAMODB_TABLE=axonllm-state \
+AWS_DEFAULT_REGION=us-east-1 \
+uv run axon bootstrap-tenant \
+  --tenant tenant-a --project project-a \
+  --issuer https://idp.example.com/oauth2/default \
+  --subject 00u-admin-subject --user-name admin@example.com
+```
+
+The restartable command conditionally creates or verifies the tenant project and
+SCIM-backed administrator, grants membership through the canonical transaction,
+and strongly verifies active `tenant_admin` authority and the project grant.
+Conflicting issuer/subject ownership fails closed. Canonical service keys use
+`axon issue-key --tenant tenant-a --project project-a`; their default scopes are
+`model.list`, `inference.invoke`, and `query.select`, and `admin:` scopes are
+rejected.
+
+After bootstrap,
 `POST /admin/projects/{id}/members` takes the SCIM resource id in `user_id`.
 POST/DELETE member operations atomically update `Project.members`,
 `ScimUser.project_ids`, authoritative `Principal.project_ids`, their
 authorization versions with compare-and-swap conditions, and tenant
 `SCIM#VERSION`. Stored and returned members use `scim:<id>`. Canonical project
 creation rejects non-empty bulk members, and project PUT rejects any `members`
-field. Initial tenant/admin bootstrap remains an external deployment
-responsibility.
+field.
 
 Canonical SCIM uses tenant-bound credentials in `AXON_SCIM_TENANTS` and
 stores users, groups, username uniqueness edges, and the version under
 `PK=TENANT#{tenant_id}` with `SCIM#USER#{id}`, `SCIM#GROUP#{id}`,
 `SCIM#USERNAME#{hash}`, and `SCIM#VERSION` sort keys. Mutations are
 transactional; version and tenant-snapshot reads are strongly consistent. The
-Fargate stack does not inject those SCIM credentials, so secret delivery and
-initial bootstrap are deployment responsibilities.
+Fargate stack can inject the complete map from Secrets Manager when
+`AXON_SCIM_TENANTS_SECRET_ARN` is supplied. Initial bootstrap remains an
+explicit operator action rather than an unauthenticated runtime path.
 
 **Q: Are limits and tenant state shared across replicas?**
 
@@ -156,8 +171,11 @@ A:
 | App Runner `deploy.sh` | Legacy reference path; lacks the canonical, private-network, digest-gate, backup, and readiness controls of the CDK stacks |
 | Docker / local | Development, testing, or a separately hardened self-hosted deployment |
 
-`deploy-fargate.sh` does not supply the immutable image and production identity
-parameters and is not the production deployment command.
+`deploy-fargate.sh` requires the immutable image and exact Bedrock ARNs. It
+defaults to staging, but supplies the complete production identity parameter set
+when `AXON_DEPLOYMENT_MODE=production` and all required `AXON_OIDC_*` values are
+present. It also supports the optional SCIM secret, hosted-zone records, and
+guarded Fargate recovery-table selection.
 
 **Q: What networking and image controls do the CDK stacks enforce?**
 
@@ -200,15 +218,25 @@ both and rehearse the DLQ procedure in the production runbook.
 
 A: Both CDK stacks enable DynamoDB PITR, deletion protection, KMS encryption,
 and daily AWS Backup with cold transition after 30 days and deletion after 365
-days. Vault Lock is not configured by CDK.
+days. Both backup vaults use governance-mode Vault Lock with a 30-day minimum
+and 365-day maximum retention.
 
 `scripts/operations/validate_state_recovery.py` verifies table/PITR/vault
-posture and can create a temporary PITR restore. It does not cut the application
-over to that table. The operations workflow uses a Fargate/AgentCore matrix to
-audit both targets daily and run both temporary-table restore exercises monthly
-with a separate recovery role. An ad hoc AgentCore invocation passes
-`--stack-name AxonLLMAgentCoreStack`. A real AWS execution and application
-cutover rehearsal remain externally unverified.
+posture and can create a protected temporary PITR restore. The operations
+workflow uses a Fargate/AgentCore matrix to audit both targets daily and run
+both temporary-table restore exercises monthly with a separate recovery role;
+it can retain only the Fargate result for controlled cutover and preserves
+90-day evidence artifacts.
+
+Fargate has a guarded restored-table parameter plus
+`scripts/operations/fargate_recovery.py` for quiesce, start, status, resume, and
+cleanup phases. Its explicit cutover mode keeps CloudFormation's desired task
+count at zero until the operator starts validated canaries.
+`run_production_validation.py` executes fail-closed RBAC canaries and bodyless
+read load without writing credentials to its report. The AgentCore workflow
+validates restore only: there is no supported AgentCore application cutover. A
+real AWS execution and Fargate cutover/rollback rehearsal remain externally
+unverified.
 
 **Q: What is the incident and rotation procedure?**
 
@@ -240,8 +268,10 @@ A:
 - no admin console or Starlette route surface;
 - no SQL/query action;
 - no wired `SessionManager` or AgentCore Memory;
-- no tenant/principal bootstrap command;
+- no bootstrap action on the AgentCore invocation surface; the repository CLI
+  can provision its DynamoDB table out of band;
 - no non-Bedrock provider-secret injection in the CDK stack;
+- no supported restored-table application cutover;
 - no automatic SNS alarm or security-event topic subscription;
 - a synchronous bootstrap worker cannot be forcibly canceled by Python;
 - no image publication or deployment step in the evidence and verification
@@ -270,7 +300,9 @@ A: Green CI for the exact commit, a `v*` release ref, source/image scans, SBOMs,
 immutable image digests, verified keyless attestations, private ECR publication,
 a fresh remote scan, deployment approval, readiness, authorization canaries,
 alarm delivery, and recovery evidence. The release workflow creates evidence
-but publishes and deploys neither image. The first real tagged
+but does not publish or deploy. The separate protected publication workflow
+copies the verified OCI archives to immutable private ECR without rebuilding;
+no workflow deploys a runtime. The first real tagged
 private-ECR/Sigstore flow and real AWS restore exercise remain externally
 unverified.
 

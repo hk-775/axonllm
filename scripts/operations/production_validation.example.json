@@ -1,0 +1,68 @@
+{
+  "schemaVersion": 1,
+  "target": "fargate",
+  "timeoutSeconds": 10,
+  "canaries": [
+    {
+      "name": "member-read",
+      "category": "authenticated_read_allowed",
+      "method": "GET",
+      "path": "/v1/models",
+      "credentialEnv": "AXON_CANARY_MEMBER_TOKEN",
+      "credentialType": "bearer",
+      "expectedStatuses": [
+        200
+      ]
+    },
+    {
+      "name": "viewer-mutation-denied",
+      "category": "viewer_mutation_denied",
+      "method": "POST",
+      "path": "/admin/projects",
+      "credentialEnv": "AXON_CANARY_VIEWER_SESSION_COOKIE",
+      "credentialType": "alb-session-cookie",
+      "expectedStatuses": [
+        403
+      ],
+      "jsonBody": {}
+    },
+    {
+      "name": "cross-tenant-denied",
+      "category": "cross_tenant_denied",
+      "method": "GET",
+      "path": "/v1/models",
+      "credentialEnv": "AXON_CANARY_CROSS_TENANT_TOKEN",
+      "credentialType": "bearer",
+      "expectedStatuses": [
+        403
+      ]
+    },
+    {
+      "name": "ungranted-project-denied",
+      "category": "ungranted_project_denied",
+      "method": "GET",
+      "path": "/v1/models",
+      "credentialEnv": "AXON_CANARY_UNGRANTED_PROJECT_TOKEN",
+      "credentialType": "bearer",
+      "expectedStatuses": [
+        403
+      ]
+    }
+  ],
+  "load": {
+    "request": {
+      "method": "GET",
+      "path": "/v1/models",
+      "credentialEnv": "AXON_CANARY_MEMBER_TOKEN",
+      "credentialType": "bearer",
+      "expectedStatuses": [
+        200
+      ]
+    },
+    "requestCount": 200,
+    "concurrency": 20,
+    "minimumEndpoints": 1,
+    "maxErrorRate": 0.01,
+    "maxP95LatencyMs": 750
+  }
+}

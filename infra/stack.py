@@ -1,9 +1,13 @@
 """AxonLLM Fargate stack — CloudFront + ALB + ECS Fargate + DynamoDB + Secrets."""
 
+import re
+
 from aws_cdk import (
     CfnCondition,
     CfnOutput,
     CfnParameter,
+    CfnResource,
+    CustomResource,
     CfnRule,
     CfnRuleAssertion,
     Duration,
@@ -26,6 +30,7 @@ from aws_cdk import (
     aws_events as events,
     aws_iam as iam,
     aws_kms as kms,
+    aws_lambda as lambda_,
     aws_logs as logs,
     aws_route53 as route53,
     aws_s3 as s3,
@@ -35,6 +40,85 @@ from aws_cdk import (
     aws_wafv2 as wafv2,
 )
 from constructs import Construct
+
+
+_RECOVERY_CUTOVER_GUARD = """\
+import boto3
+
+
+ecs = boto3.client("ecs")
+autoscaling = boto3.client("application-autoscaling")
+
+
+def handler(event, _context):
+    physical_id = "AxonLLMRecoveryCutoverGuard"
+    if event["RequestType"] == "Delete":
+        return {"PhysicalResourceId": physical_id}
+
+    properties = event["ResourceProperties"]
+    previous = event.get("OldResourceProperties", {})
+    cutover_mode = properties.get("CutoverMode") == "true"
+    previous_cutover_mode = previous.get("CutoverMode") == "true"
+    target_changed = (
+        event["RequestType"] == "Update"
+        and properties.get("TargetTable", "")
+        != previous.get("TargetTable", "")
+    )
+    rollback_from_cutover = target_changed and previous_cutover_mode
+    if target_changed and not (cutover_mode or rollback_from_cutover):
+        raise RuntimeError(
+            "recovery table changes require RecoveryCutoverMode=true"
+        )
+    if cutover_mode or rollback_from_cutover:
+        resource_id = (
+            f"service/{properties['ClusterName']}/"
+            f"{properties['ServiceName']}"
+        )
+        targets = autoscaling.describe_scalable_targets(
+            ServiceNamespace="ecs",
+            ResourceIds=[resource_id],
+            ScalableDimension="ecs:service:DesiredCount",
+        ).get("ScalableTargets", [])
+        if len(targets) != 1:
+            raise RuntimeError(
+                "recovery cutover requires exactly one ECS scalable target"
+            )
+        target = targets[0]
+        suspended = target.get("SuspendedState", {})
+        suspension_keys = (
+            "DynamicScalingInSuspended",
+            "DynamicScalingOutSuspended",
+            "ScheduledScalingSuspended",
+        )
+        if target.get("MinCapacity") != 0 or not all(
+            suspended.get(key) is True for key in suspension_keys
+        ):
+            raise RuntimeError(
+                "recovery cutover requires autoscaling suspended with "
+                "minimum capacity zero"
+            )
+
+        response = ecs.describe_services(
+            cluster=properties["ClusterName"],
+            services=[properties["ServiceName"]],
+        )
+        if response.get("failures") or len(response.get("services", [])) != 1:
+            raise RuntimeError(
+                "recovery cutover could not resolve the ECS service"
+            )
+        service = response["services"][0]
+        counts = {
+            name: service.get(name)
+            for name in ("desiredCount", "pendingCount", "runningCount")
+        }
+        if any(value != 0 for value in counts.values()):
+            raise RuntimeError(
+                "recovery cutover requires a fully quiesced ECS service: "
+                f"{counts}"
+            )
+
+    return {"PhysicalResourceId": physical_id}
+"""
 
 
 class AxonLLMStack(Stack):
@@ -311,6 +395,83 @@ class AxonLLMStack(Stack):
                 "verification gate"
             ),
         )
+        scim_tenants_secret_arn = self.node.try_get_context("scim_tenants_secret_arn")
+        if scim_tenants_secret_arn is not None and (
+            not isinstance(scim_tenants_secret_arn, str)
+            or re.fullmatch(
+                r"arn:aws:secretsmanager:us-east-1:[0-9]{12}:"
+                r"secret:[A-Za-z0-9/_+=.@-]+",
+                scim_tenants_secret_arn,
+            )
+            is None
+        ):
+            raise ValueError(
+                "scim_tenants_secret_arn must be a complete Secrets Manager "
+                "ARN in us-east-1"
+            )
+        primary_state_table_name = (
+            self.node.try_get_context("table_name") or "axonllm-state"
+        )
+        restore_table_marker = "-restore-validation-"
+        restore_table_suffix_limit = (
+            255
+            - len(primary_state_table_name)
+            - len(restore_table_marker)
+        )
+        if restore_table_suffix_limit < 21:
+            raise ValueError(
+                "Fargate state table name must be at most 214 characters "
+                "to preserve the PITR validation suffix"
+            )
+        restored_state_table_pattern = (
+            rf"^$|^{re.escape(primary_state_table_name)}"
+            rf"{restore_table_marker}[A-Za-z0-9_.-]"
+            rf"{{1,{restore_table_suffix_limit}}}$"
+        )
+        runtime_state_table_name = CfnParameter(
+            self,
+            "RuntimeStateTableName",
+            type="String",
+            default="",
+            allowed_pattern=restored_state_table_pattern,
+            constraint_description=(
+                "must be blank or a PITR validation table derived from the "
+                f"{primary_state_table_name} primary table"
+            ),
+            description=(
+                "Optional restored state table used for a controlled recovery "
+                "cutover; blank selects the stack-managed primary table"
+            ),
+        )
+        recovery_cutover_mode = CfnParameter(
+            self,
+            "RecoveryCutoverMode",
+            type="String",
+            default="false",
+            allowed_values=["false", "true"],
+            description=(
+                "Pins ECS desired count to zero while a quiesced recovery "
+                "table switch is deployed; return to false after validation"
+            ),
+        )
+        use_recovered_state = CfnCondition(
+            self,
+            "UseRecoveredState",
+            expression=Fn.condition_not(
+                Fn.condition_equals(
+                    runtime_state_table_name.value_as_string,
+                    "",
+                )
+            ),
+        )
+        recovery_cutover_active = CfnCondition(
+            self,
+            "RecoveryCutoverActive",
+            expression=Fn.condition_equals(
+                recovery_cutover_mode.value_as_string,
+                "true",
+            ),
+        )
         image_account_id = Fn.select(
             0,
             Fn.split(".", verified_image_uri.value_as_string),
@@ -555,7 +716,7 @@ class AxonLLMStack(Stack):
         state_table = dynamodb.Table(
             self,
             "StateTable",
-            table_name=self.node.try_get_context("table_name") or "axonllm-state",
+            table_name=primary_state_table_name,
             partition_key=dynamodb.Attribute(name="PK", type=dynamodb.AttributeType.STRING),
             sort_key=dynamodb.Attribute(name="SK", type=dynamodb.AttributeType.STRING),
             billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
@@ -567,6 +728,13 @@ class AxonLLMStack(Stack):
                 point_in_time_recovery_enabled=True
             ),
             time_to_live_attribute="expires_at",
+        )
+        selected_state_table_name = Token.as_string(
+            Fn.condition_if(
+                use_recovered_state.logical_id,
+                runtime_state_table_name.value_as_string,
+                state_table.table_name,
+            )
         )
 
         event_dead_letter_queue = sqs.Queue(
@@ -722,6 +890,10 @@ class AxonLLMStack(Stack):
                 ],
             ),
             encryption_key=backup_key,
+            lock_configuration=backup.LockConfiguration(
+                min_retention=Duration.days(30),
+                max_retention=Duration.days(365),
+            ),
             removal_policy=RemovalPolicy.RETAIN,
         )
         backup_plan = backup.BackupPlan(
@@ -751,6 +923,24 @@ class AxonLLMStack(Stack):
             resources=[backup.BackupResource.from_dynamo_db_table(state_table)],
             allow_restores=True,
         )
+        recovered_backup_selection = backup_plan.add_selection(
+            "RecoveredStateTableSelection",
+            resources=[
+                backup.BackupResource.from_arn(
+                    self.format_arn(
+                        service="dynamodb",
+                        resource="table",
+                        resource_name=(
+                            runtime_state_table_name.value_as_string
+                        ),
+                    )
+                )
+            ],
+            allow_restores=True,
+        )
+        for child in recovered_backup_selection.node.find_all():
+            if isinstance(child, CfnResource):
+                child.cfn_options.condition = use_recovered_state
 
         # --- ECS Cluster ---
         # cluster_name is explicit because every post-deploy instruction in the
@@ -778,6 +968,27 @@ class AxonLLMStack(Stack):
             origin_certificate_arn.value_as_string,
         )
 
+        container_secrets = {
+            "ANTHROPIC_API_KEY": ecs.Secret.from_secrets_manager(
+                api_keys_secret, "ANTHROPIC_API_KEY"
+            ),
+            "OPENAI_API_KEY": ecs.Secret.from_secrets_manager(
+                api_keys_secret, "OPENAI_API_KEY"
+            ),
+        }
+        scim_tenants_secret = None
+        if scim_tenants_secret_arn is not None:
+            scim_tenants_secret = (
+                secretsmanager.Secret.from_secret_complete_arn(
+                    self,
+                    "ScimTenantsSecret",
+                    scim_tenants_secret_arn,
+                )
+            )
+            container_secrets["AXON_SCIM_TENANTS"] = (
+                ecs.Secret.from_secrets_manager(scim_tenants_secret)
+            )
+
         # --- Fargate service with ALB ---
         fargate_service = ecs_patterns.ApplicationLoadBalancedFargateService(
             self,
@@ -803,19 +1014,12 @@ class AxonLLMStack(Stack):
                     stream_prefix="axonllm",
                     log_retention=logs.RetentionDays.ONE_MONTH,
                 ),
-                secrets={
-                    "ANTHROPIC_API_KEY": ecs.Secret.from_secrets_manager(
-                        api_keys_secret, "ANTHROPIC_API_KEY"
-                    ),
-                    "OPENAI_API_KEY": ecs.Secret.from_secrets_manager(
-                        api_keys_secret, "OPENAI_API_KEY"
-                    ),
-                },
+                secrets=container_secrets,
                 environment={
                     "AWS_DEFAULT_REGION": self.region,
                     "AXON_AWS_ACCOUNT_ID": self.account,
                     "LLM_ROUTER_DYNAMODB_ENABLED": "true",
-                    "AXON_DYNAMODB_TABLE": state_table.table_name,
+                    "AXON_DYNAMODB_TABLE": selected_state_table_name,
                     "AXON_EVENT_OUTBOX_QUEUE_URL": (
                         event_outbox_queue.queue_url
                     ),
@@ -903,6 +1107,86 @@ class AxonLLMStack(Stack):
             ssl_policy=elbv2.SslPolicy.RECOMMENDED_TLS,
             health_check_grace_period=Duration.seconds(60),
         )
+        cutover_guard_handler_logs = logs.LogGroup(
+            self,
+            "RecoveryCutoverGuardHandlerLogs",
+            encryption_key=data_key,
+            retention=logs.RetentionDays.ONE_YEAR,
+            removal_policy=RemovalPolicy.RETAIN,
+        )
+        cutover_guard_handler = lambda_.Function(
+            self,
+            "RecoveryCutoverGuardHandler",
+            description=(
+                "Blocks DynamoDB state cutover until AxonLLM is quiesced"
+            ),
+            runtime=lambda_.Runtime.PYTHON_3_12,
+            handler="index.handler",
+            code=lambda_.Code.from_inline(_RECOVERY_CUTOVER_GUARD),
+            timeout=Duration.seconds(30),
+            log_group=cutover_guard_handler_logs,
+        )
+        cutover_guard_handler.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["ecs:DescribeServices"],
+                resources=[
+                    self.format_arn(
+                        service="ecs",
+                        resource="service",
+                        resource_name="axonllm/axonllm",
+                    )
+                ],
+            )
+        )
+        cutover_guard_handler.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "application-autoscaling:DescribeScalableTargets"
+                ],
+                resources=["*"],
+            )
+        )
+        cutover_guard_provider_logs = logs.LogGroup(
+            self,
+            "RecoveryCutoverGuardProviderLogs",
+            encryption_key=data_key,
+            retention=logs.RetentionDays.ONE_YEAR,
+            removal_policy=RemovalPolicy.RETAIN,
+        )
+        cutover_guard_provider = cr.Provider(
+            self,
+            "RecoveryCutoverGuardProvider",
+            on_event_handler=cutover_guard_handler,
+            log_group=cutover_guard_provider_logs,
+        )
+        cutover_guard = CustomResource(
+            self,
+            "RecoveryCutoverGuard",
+            service_token=cutover_guard_provider.service_token,
+            properties={
+                "ClusterName": "axonllm",
+                "CutoverMode": recovery_cutover_mode.value_as_string,
+                "ServiceName": "axonllm",
+                "TargetTable": (
+                    runtime_state_table_name.value_as_string
+                ),
+            },
+        )
+        cfn_service = fargate_service.service.node.default_child
+        if not isinstance(cfn_service, ecs.CfnService):
+            raise TypeError("Fargate service did not create CfnService")
+        cfn_service.desired_count = Token.as_number(
+            Fn.condition_if(
+                recovery_cutover_active.logical_id,
+                0,
+                2,
+            )
+        )
+        cutover_guard_resource = cutover_guard.node.default_child
+        if cutover_guard_resource is None:
+            raise TypeError("recovery cutover guard has no CloudFormation child")
+        cfn_service.add_dependency(cutover_guard_resource)
+
         task_definition = fargate_service.task_definition
         task_definition.add_volume(name="tmp")
         container = task_definition.default_container
@@ -1058,6 +1342,45 @@ class AxonLLMStack(Stack):
 
         # DynamoDB — single state table (matches AXON_DYNAMODB_TABLE)
         state_table.grant_read_write_data(task_role)
+        recovered_state_policy = iam.Policy(
+            self,
+            "RecoveredStateAccessPolicy",
+            statements=[
+                iam.PolicyStatement(
+                    sid="UseSelectedRecoveryTable",
+                    actions=[
+                        "dynamodb:BatchGetItem",
+                        "dynamodb:BatchWriteItem",
+                        "dynamodb:ConditionCheckItem",
+                        "dynamodb:DeleteItem",
+                        "dynamodb:DescribeTable",
+                        "dynamodb:GetItem",
+                        "dynamodb:PutItem",
+                        "dynamodb:Query",
+                        "dynamodb:Scan",
+                        "dynamodb:UpdateItem",
+                    ],
+                    resources=[
+                        self.format_arn(
+                            service="dynamodb",
+                            resource="table",
+                            resource_name=(
+                                runtime_state_table_name.value_as_string
+                            ),
+                        )
+                    ],
+                )
+            ],
+        )
+        recovered_state_policy.attach_to_role(task_role)
+        recovered_state_policy_resource = (
+            recovered_state_policy.node.default_child
+        )
+        if not isinstance(recovered_state_policy_resource, iam.CfnPolicy):
+            raise TypeError("recovered-state policy did not create CfnPolicy")
+        recovered_state_policy_resource.cfn_options.condition = (
+            use_recovered_state
+        )
 
         # Durable security-event delivery and retry processing.
         event_outbox_queue.grant_send_messages(task_role)
@@ -1307,28 +1630,46 @@ class AxonLLMStack(Stack):
             )
         )
         state_operations = [
-            dynamodb.Operation.GET_ITEM,
-            dynamodb.Operation.QUERY,
-            dynamodb.Operation.SCAN,
-            dynamodb.Operation.PUT_ITEM,
-            dynamodb.Operation.UPDATE_ITEM,
-            dynamodb.Operation.DELETE_ITEM,
-            dynamodb.Operation.TRANSACT_GET_ITEMS,
-            dynamodb.Operation.TRANSACT_WRITE_ITEMS,
+            "GetItem",
+            "Query",
+            "Scan",
+            "PutItem",
+            "UpdateItem",
+            "DeleteItem",
+            "TransactGetItems",
+            "TransactWriteItems",
         ]
-        dynamodb_throttles = (
-            state_table.metric_throttled_requests_for_operations(
-                operations=state_operations,
-                period=Duration.minutes(5),
-                statistic="Sum",
-            )
+
+        def state_operation_metrics(
+            metric_name: str,
+        ) -> dict[str, cloudwatch.Metric]:
+            return {
+                operation.lower(): cloudwatch.Metric(
+                    namespace="AWS/DynamoDB",
+                    metric_name=metric_name,
+                    dimensions_map={
+                        "Operation": operation,
+                        "TableName": selected_state_table_name,
+                    },
+                    period=Duration.minutes(5),
+                    statistic="Sum",
+                )
+                for operation in state_operations
+            }
+
+        throttle_metrics = state_operation_metrics("ThrottledRequests")
+        dynamodb_throttles = cloudwatch.MathExpression(
+            expression=" + ".join(throttle_metrics),
+            using_metrics=throttle_metrics,
+            period=Duration.minutes(5),
+            label="Sum of throttled requests across all operations",
         )
-        dynamodb_system_errors = (
-            state_table.metric_system_errors_for_operations(
-                operations=state_operations,
-                period=Duration.minutes(5),
-                statistic="Sum",
-            )
+        system_error_metrics = state_operation_metrics("SystemErrors")
+        dynamodb_system_errors = cloudwatch.MathExpression(
+            expression=" + ".join(system_error_metrics),
+            using_metrics=system_error_metrics,
+            period=Duration.minutes(5),
+            label="Sum of errors across all operations",
         )
         cloudfront_5xx_rate = distribution.metric5xx_error_rate(
             period=Duration.minutes(5),
@@ -1523,8 +1864,46 @@ class AxonLLMStack(Stack):
         )
         CfnOutput(
             self,
+            "ClusterName",
+            value=cluster.cluster_name,
+        )
+        CfnOutput(
+            self,
+            "ServiceName",
+            value=fargate_service.service.service_name,
+        )
+        CfnOutput(
+            self,
+            "TargetGroupArn",
+            value=fargate_service.target_group.target_group_arn,
+        )
+        CfnOutput(
+            self,
             "StateBackupVaultArn",
             value=backup_vault.backup_vault_arn,
+        )
+        CfnOutput(
+            self,
+            "DataKeyArn",
+            value=data_key.key_arn,
+        )
+        CfnOutput(
+            self,
+            "StateTableName",
+            value=state_table.table_name,
+        )
+        CfnOutput(
+            self,
+            "SelectedRuntimeStateTableName",
+            value=selected_state_table_name,
+        )
+        recovery_cutover_mode_output = CfnOutput(
+            self,
+            "RecoveryCutoverModeOutput",
+            value=recovery_cutover_mode.value_as_string,
+        )
+        recovery_cutover_mode_output.override_logical_id(
+            "RecoveryCutoverMode"
         )
         CfnOutput(
             self,
@@ -1551,6 +1930,12 @@ class AxonLLMStack(Stack):
             "ProviderSecretArn",
             value=api_keys_secret.secret_arn,
         )
+        if scim_tenants_secret is not None:
+            CfnOutput(
+                self,
+                "ScimTenantsSecretArn",
+                value=scim_tenants_secret.secret_arn,
+            )
         CfnOutput(
             self,
             "CloudFrontOriginPrefixListId",

@@ -125,32 +125,40 @@ class TestTheCLIDefaultCannotAdminister:
 
 
 class TestTheDocumentedDefaultIsTheRealDefault:
-    def test_the_cli_still_defaults_to_chat(self):
+    def test_the_legacy_cli_still_defaults_to_chat(
+        self,
+        monkeypatch,
+        capsys,
+    ):
         """Pins the value the tests above and the README are written against.
 
-        Read out of `cli.py` rather than duplicated as a string, so widening the
-        CLI default to include an admin scope fails here — instead of quietly
-        making the README's "issue an admin key first" ordering unnecessary and
-        its allow/deny matrix wrong. Parsed as source because the parser is built
-        inside `main()`, and importing that to read one default would run the CLI.
+        Canonical ``--tenant`` issuance has a different default, so exercise the
+        actual legacy branch instead of reading a static argparse default.
         """
-        import ast
-        import pathlib
+        from types import SimpleNamespace
 
-        cli = pathlib.Path(__file__).resolve().parents[2] / "src" / "gateway" / "cli.py"
-        tree = ast.parse(cli.read_text(encoding="utf-8"))
+        from src.gateway import cli
 
-        defaults = [
-            keyword.value.value
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Call)
-            and any(
-                isinstance(arg, ast.Constant) and arg.value == "--scopes" for arg in node.args
+        captured: dict[str, object] = {}
+
+        async def issue_key(self, **kwargs):
+            captured.update(kwargs)
+            return object(), "axon_" + "a" * 64
+
+        monkeypatch.setattr(APIKeyService, "issue_key", issue_key)
+        monkeypatch.delenv("LLM_ROUTER_DYNAMODB_ENABLED", raising=False)
+
+        cli.cmd_issue_key(
+            SimpleNamespace(
+                project="proj:test",
+                tenant=None,
+                name="legacy-default",
+                scopes=None,
             )
-            for keyword in node.keywords
-            if keyword.arg == "default" and isinstance(keyword.value, ast.Constant)
-        ]
-        assert defaults == ["chat"], f"expected one --scopes default of 'chat', got {defaults}"
+        )
+
+        assert captured["scopes"] == CLI_DEFAULT_SCOPES
+        capsys.readouterr()
 
 
 class TestUnauthenticatedRequests:

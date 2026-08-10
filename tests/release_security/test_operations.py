@@ -39,6 +39,8 @@ class RestoreAws:
         self.restored_count = restored_count
         self.cleanup_error = cleanup_error
         self.deletion_protection = deletion_protection
+        self.pitr_enabled = False
+        self.ttl_enabled = False
 
     def json(self, service: str, operation: str, *arguments: str) -> dict[str, Any]:
         self.calls.append((service, operation, arguments))
@@ -67,8 +69,41 @@ class RestoreAws:
             if self.cleanup_error:
                 raise validate_state_recovery.AwsError("cleanup denied")
             return {}
+        if operation == "update-continuous-backups":
+            self.pitr_enabled = True
+            return {}
+        if operation == "describe-continuous-backups":
+            return {
+                "ContinuousBackupsDescription": {
+                    "PointInTimeRecoveryDescription": {
+                        "PointInTimeRecoveryStatus": (
+                            "ENABLED"
+                            if self.pitr_enabled
+                            else "DISABLED"
+                        )
+                    }
+                }
+            }
+        if operation == "describe-time-to-live":
+            return {
+                "TimeToLiveDescription": {
+                    "TimeToLiveStatus": (
+                        "ENABLED"
+                        if self.ttl_enabled
+                        else "DISABLED"
+                    ),
+                    "AttributeName": (
+                        "expires_at" if self.ttl_enabled else None
+                    ),
+                }
+            }
+        if operation == "update-time-to-live":
+            self.ttl_enabled = True
+            return {}
         if operation == "update-table":
-            self.deletion_protection = False
+            self.deletion_protection = (
+                "--deletion-protection-enabled" in arguments
+            )
             return {}
         raise AssertionError(f"unexpected AWS call: {service} {operation}")
 
@@ -382,6 +417,79 @@ class RecoveryValidationTests(unittest.TestCase):
                 now=NOW,
             )
 
+    def test_required_vault_lock_checks_governance_retention(self) -> None:
+        aws = self._aws()
+        vault = aws.responses[("backup", "describe-backup-vault")]
+        vault.update(
+            Locked=True,
+            MinRetentionDays=30,
+            MaxRetentionDays=365,
+        )
+
+        result = validate_state_recovery.validate_recovery(
+            aws,
+            stack_name="AxonLLMStack",
+            table_name=None,
+            max_backup_age_hours=30,
+            require_vault_lock=True,
+            exercise_restore=False,
+            keep_restored_table=False,
+            now=NOW,
+        )
+
+        self.assertEqual(result["backupVaultLockMode"], "GOVERNANCE")
+        self.assertEqual(result["backupVaultMinRetentionDays"], 30)
+        self.assertEqual(result["backupVaultMaxRetentionDays"], 365)
+
+    def test_required_vault_lock_rejects_wrong_retention(self) -> None:
+        aws = self._aws()
+        vault = aws.responses[("backup", "describe-backup-vault")]
+        vault.update(
+            Locked=True,
+            MinRetentionDays=7,
+            MaxRetentionDays=365,
+        )
+
+        with self.assertRaisesRegex(
+            validate_state_recovery.RecoveryValidationError,
+            "30-365",
+        ):
+            validate_state_recovery.validate_recovery(
+                aws,
+                stack_name="AxonLLMStack",
+                table_name=None,
+                max_backup_age_hours=30,
+                require_vault_lock=True,
+                exercise_restore=False,
+                keep_restored_table=False,
+                now=NOW,
+            )
+
+    def test_required_vault_lock_rejects_compliance_mode(self) -> None:
+        aws = self._aws()
+        vault = aws.responses[("backup", "describe-backup-vault")]
+        vault.update(
+            Locked=True,
+            MinRetentionDays=30,
+            MaxRetentionDays=365,
+            LockDate=NOW.isoformat(),
+        )
+
+        with self.assertRaisesRegex(
+            validate_state_recovery.RecoveryValidationError,
+            "governance mode",
+        ):
+            validate_state_recovery.validate_recovery(
+                aws,
+                stack_name="AxonLLMStack",
+                table_name=None,
+                max_backup_age_hours=30,
+                require_vault_lock=True,
+                exercise_restore=False,
+                keep_restored_table=False,
+                now=NOW,
+            )
+
     def test_restore_exercise_validates_and_cleans_up_temporary_table(self) -> None:
         aws = RestoreAws()
         result = validate_state_recovery._exercise_restore(
@@ -430,6 +538,35 @@ class RecoveryValidationTests(unittest.TestCase):
             [operation for _, operation, _ in aws.calls],
         )
 
+    def test_retained_restore_enables_production_data_protections(
+        self,
+    ) -> None:
+        aws = RestoreAws()
+        result = validate_state_recovery._exercise_restore(
+            aws,
+            {
+                "TableName": "axonllm-state",
+                "KeySchema": [
+                    {"AttributeName": "PK", "KeyType": "HASH"},
+                    {"AttributeName": "SK", "KeyType": "RANGE"},
+                ],
+            },
+            keep=True,
+            poll_interval=0,
+            timeout_seconds=10,
+            sleep=lambda _: None,
+        )
+
+        self.assertTrue(result["retained"])
+        self.assertEqual(result["pointInTimeRecovery"], "ENABLED")
+        self.assertEqual(result["timeToLive"], "ENABLED")
+        self.assertTrue(result["deletionProtection"])
+        operations = [operation for _, operation, _ in aws.calls]
+        self.assertIn("update-continuous-backups", operations)
+        self.assertIn("update-time-to-live", operations)
+        self.assertIn("update-table", operations)
+        self.assertNotIn("delete-table", operations)
+
     def test_restore_cleanup_failure_fails_closed(self) -> None:
         aws = RestoreAws(cleanup_error=True)
         with self.assertRaisesRegex(
@@ -450,6 +587,30 @@ class RecoveryValidationTests(unittest.TestCase):
                 timeout_seconds=10,
                 sleep=lambda _: None,
             )
+
+    def test_restore_rejects_source_name_that_cannot_preserve_scope(
+        self,
+    ) -> None:
+        aws = RestoreAws()
+        with self.assertRaisesRegex(
+            validate_state_recovery.RecoveryValidationError,
+            "too long",
+        ):
+            validate_state_recovery._exercise_restore(
+                aws,
+                {
+                    "TableName": "x" * 215,
+                    "KeySchema": [
+                        {"AttributeName": "PK", "KeyType": "HASH"},
+                        {"AttributeName": "SK", "KeyType": "RANGE"},
+                    ],
+                },
+                keep=False,
+                poll_interval=0,
+                timeout_seconds=10,
+                sleep=lambda _: None,
+            )
+        self.assertEqual(aws.calls, [])
 
     def test_restore_cleanup_disables_deletion_protection_before_delete(self) -> None:
         aws = RestoreAws(deletion_protection=True)

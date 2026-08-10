@@ -7,6 +7,8 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
+import types
 
 import pytest
 
@@ -69,6 +71,67 @@ def _values_for_key(value: object, wanted: str) -> list[object]:
             found.extend(_values_for_key(child, wanted))
         return found
     return []
+
+
+def _cutover_guard_handler(
+    monkeypatch,
+    *,
+    desired_count: int = 0,
+):
+    tree = ast.parse(_STACK.read_text(encoding="utf-8"))
+    source = next(
+        ast.literal_eval(node.value)
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name)
+            and target.id == "_RECOVERY_CUTOVER_GUARD"
+            for target in node.targets
+        )
+    )
+
+    class Scaling:
+        @staticmethod
+        def describe_scalable_targets(**kwargs):
+            return {
+                "ScalableTargets": [
+                    {
+                        "MinCapacity": 0,
+                        "SuspendedState": {
+                            "DynamicScalingInSuspended": True,
+                            "DynamicScalingOutSuspended": True,
+                            "ScheduledScalingSuspended": True,
+                        },
+                    }
+                ]
+            }
+
+    class Ecs:
+        @staticmethod
+        def describe_services(**kwargs):
+            return {
+                "failures": [],
+                "services": [
+                    {
+                        "desiredCount": desired_count,
+                        "pendingCount": 0,
+                        "runningCount": desired_count,
+                    }
+                ],
+            }
+
+    clients = {
+        "application-autoscaling": Scaling(),
+        "ecs": Ecs(),
+    }
+    monkeypatch.setitem(
+        sys.modules,
+        "boto3",
+        types.SimpleNamespace(client=clients.__getitem__),
+    )
+    namespace: dict[str, object] = {}
+    exec(compile(source, "recovery_cutover_guard.py", "exec"), namespace)
+    return namespace["handler"]
 
 
 @pytest.fixture(scope="module")
@@ -137,6 +200,18 @@ def test_required_inputs_have_no_template_defaults(synthesized_template):
     bedrock = parameters["BedrockInvokeResourceArns"]
     assert bedrock["Type"] == "CommaDelimitedList"
     assert "without wildcards" in bedrock["ConstraintDescription"]
+    recovery_table = parameters["RuntimeStateTableName"]
+    assert recovery_table["Default"] == ""
+    assert recovery_table["AllowedPattern"] == (
+        r"^$|^axonllm\-state"
+        r"-restore-validation-[A-Za-z0-9_.-]{1,222}$"
+    )
+    assert "PITR validation table" in recovery_table[
+        "ConstraintDescription"
+    ]
+    cutover_mode = parameters["RecoveryCutoverMode"]
+    assert cutover_mode["Default"] == "false"
+    assert cutover_mode["AllowedValues"] == ["false", "true"]
 
 
 def test_deploy_wrapper_requires_and_passes_every_stack_parameter():
@@ -151,6 +226,30 @@ def test_deploy_wrapper_requires_and_passes_every_stack_parameter():
 
     assert "ServiceServiceURL" not in script
     assert ".get('CloudFrontURL'" in script
+    assert 'DEPLOYMENT_MODE="${AXON_DEPLOYMENT_MODE:-staging}"' in script
+    assert (
+        '--parameters "AxonLLMStack:DeploymentMode=$DEPLOYMENT_MODE"'
+        in script
+    )
+    assert (
+        '--parameters "AxonLLMStack:RuntimeStateTableName='
+        '$RUNTIME_TABLE_NAME"'
+        in script
+    )
+    assert (
+        '--parameters "AxonLLMStack:RecoveryCutoverMode='
+        '$RECOVERY_CUTOVER_MODE"'
+        in script
+    )
+    assert "require_env AXON_OIDC_ISSUER" in script
+    assert "require_env AXON_OIDC_CLIENT_SECRET" in script
+    assert 'try_get_context("scim_tenants_secret_arn")' in (
+        _STACK.read_text(encoding="utf-8")
+    )
+    assert (
+        'CONTEXT+=(--context "scim_tenants_secret_arn=$SCIM_SECRET_ARN")'
+        in script
+    )
 
 
 def test_non_global_waf_region_fails_closed(tmp_path):
@@ -606,8 +705,24 @@ def test_production_oidc_is_conditional_and_bound_to_the_alb(
     assert environment["AXON_AWS_ACCOUNT_ID"] == {
         "Ref": "AWS::AccountId"
     }
+    selected_table = environment["AXON_DYNAMODB_TABLE"]["Fn::If"]
+    assert selected_table[:2] == [
+        "UseRecoveredState",
+        {"Ref": "RuntimeStateTableName"},
+    ]
+    primary_table_id = selected_table[2]["Ref"]
+    assert synthesized_template["Resources"][primary_table_id]["Type"] == (
+        "AWS::DynamoDB::Table"
+    )
     assert environment["AXON_EVENT_OUTBOX_QUEUE_URL"]["Ref"].startswith(
         "SecurityEventOutboxQueue"
+    )
+    target_group_output = synthesized_template["Outputs"][
+        "TargetGroupArn"
+    ]["Value"]
+    target_group_id = target_group_output["Ref"]
+    assert synthesized_template["Resources"][target_group_id]["Type"] == (
+        "AWS::ElasticLoadBalancingV2::TargetGroup"
     )
     assert environment["AXON_SECURITY_EVENT_SNS_TOPIC_ARN"][
         "Ref"
@@ -752,6 +867,10 @@ def test_state_is_kms_encrypted_protected_and_backed_up(
     vault = _one_resource(synthesized_template, "AWS::Backup::BackupVault")
     assert vault["DeletionPolicy"] == "Retain"
     assert vault["UpdateReplacePolicy"] == "Retain"
+    assert vault["Properties"]["LockConfiguration"] == {
+        "MaxRetentionDays": 365,
+        "MinRetentionDays": 30,
+    }
     vault_name = vault["Properties"]["BackupVaultName"]
     assert vault_name["Fn::Join"][1][0] == "axon-state"
     assert {"Ref": "AWS::StackId"} in _values_for_key(
@@ -765,13 +884,33 @@ def test_state_is_kms_encrypted_protected_and_backed_up(
         "DeleteAfterDays": 365,
         "MoveToColdStorageAfterDays": 30,
     }
-    selection = _one_resource(
+    selections = _resources(
         synthesized_template,
         "AWS::Backup::BackupSelection",
     )
-    assert selection["Properties"]["BackupSelection"]["Resources"][0][
+    assert len(selections) == 2
+    primary_selection = next(
+        selection
+        for selection in selections
+        if "Condition" not in selection
+    )
+    assert primary_selection["Properties"]["BackupSelection"][
+        "Resources"
+    ][0][
         "Fn::GetAtt"
     ][1] == "Arn"
+    recovered_selection = next(
+        selection
+        for selection in selections
+        if selection.get("Condition") == "UseRecoveredState"
+    )
+    recovered_resource = recovered_selection["Properties"][
+        "BackupSelection"
+    ]["Resources"][0]["Fn::Join"][1]
+    assert recovered_resource[-2:] == [
+        ":table/",
+        {"Ref": "RuntimeStateTableName"},
+    ]
 
     secret = _one_resource(
         synthesized_template,
@@ -977,6 +1116,38 @@ def test_task_role_has_item_permissions_for_atomic_state_transactions(
     assert "dynamodb:TransactGetItems" not in all_actions
     assert "dynamodb:TransactWriteItems" not in all_actions
 
+    recovered_state_policy = next(
+        policy
+        for policy in policies
+        if any(
+            statement.get("Sid") == "UseSelectedRecoveryTable"
+            for statement in policy["Properties"][
+                "PolicyDocument"
+            ]["Statement"]
+        )
+    )
+    assert recovered_state_policy["Condition"] == "UseRecoveredState"
+    recovered_state_access = recovered_state_policy["Properties"][
+        "PolicyDocument"
+    ]["Statement"][0]
+    assert {
+        "dynamodb:BatchGetItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable",
+        "dynamodb:GetItem",
+        "dynamodb:PutItem",
+        "dynamodb:Query",
+        "dynamodb:Scan",
+        "dynamodb:UpdateItem",
+    } == set(recovered_state_access["Action"])
+    resource_parts = recovered_state_access["Resource"]["Fn::Join"][1]
+    assert resource_parts[-2:] == [
+        ":table/",
+        {"Ref": "RuntimeStateTableName"},
+    ]
+
     publish = next(
         statement
         for statement in statements
@@ -1016,6 +1187,22 @@ def test_runtime_uses_only_the_release_verified_ecr_digest(
     assert synthesized_template["Outputs"]["RuntimeImageUri"]["Value"] == {
         "Ref": "VerifiedImageUri"
     }
+    assert synthesized_template["Outputs"]["DataKeyArn"]["Value"][
+        "Fn::GetAtt"
+    ][0].startswith("DataKey")
+    selected_table = synthesized_template["Outputs"][
+        "SelectedRuntimeStateTableName"
+    ][
+        "Value"
+    ]["Fn::If"]
+    assert selected_table[:2] == [
+        "UseRecoveredState",
+        {"Ref": "RuntimeStateTableName"},
+    ]
+    primary_table_id = selected_table[2]["Ref"]
+    assert synthesized_template["Resources"][primary_table_id]["Type"] == (
+        "AWS::DynamoDB::Table"
+    )
     assert "DockerImageAsset" not in _STACK.read_text(encoding="utf-8")
 
     execution_policy = next(
@@ -1048,6 +1235,164 @@ def test_runtime_uses_only_the_release_verified_ecr_digest(
         if statement["Action"] == "ecr:GetAuthorizationToken"
     )
     assert authorization["Resource"] == "*"
+
+
+def test_recovery_cutover_requires_a_quiesced_service(
+    synthesized_template,
+):
+    resources = synthesized_template["Resources"]
+    guard = resources["RecoveryCutoverGuard"]
+    assert guard["Type"] == "AWS::CloudFormation::CustomResource"
+    assert guard["Properties"]["ClusterName"] == "axonllm"
+    assert guard["Properties"]["CutoverMode"] == {
+        "Ref": "RecoveryCutoverMode"
+    }
+    assert guard["Properties"]["ServiceName"] == "axonllm"
+    assert guard["Properties"]["TargetTable"] == {
+        "Ref": "RuntimeStateTableName"
+    }
+
+    service_id, service = next(
+        (logical_id, resource)
+        for logical_id, resource in resources.items()
+        if resource["Type"] == "AWS::ECS::Service"
+    )
+    assert service_id
+    assert "RecoveryCutoverGuard" in service["DependsOn"]
+    assert service["Properties"]["DesiredCount"] == {
+        "Fn::If": ["RecoveryCutoverActive", 0, 2]
+    }
+
+    handler = next(
+        function
+        for function in _resources(
+            synthesized_template,
+            "AWS::Lambda::Function",
+        )
+        if function["Properties"].get("Description")
+        == "Blocks DynamoDB state cutover until AxonLLM is quiesced"
+    )
+    code = handler["Properties"]["Code"]["ZipFile"]
+    assert "RecoveryCutoverMode=true" in code
+    assert "previous_cutover_mode" in code
+    assert "rollback_from_cutover" in code
+    assert "target_changed" in code
+    assert 'target.get("MinCapacity") != 0' in code
+    assert "DynamicScalingInSuspended" in code
+    assert "DynamicScalingOutSuspended" in code
+    assert "ScheduledScalingSuspended" in code
+    assert '("desiredCount", "pendingCount", "runningCount")' in code
+
+    guard_policy = next(
+        policy
+        for policy in _resources(
+            synthesized_template,
+            "AWS::IAM::Policy",
+        )
+        if any(
+            _actions(statement)
+            == {"ecs:DescribeServices"}
+            for statement in policy["Properties"][
+                "PolicyDocument"
+            ]["Statement"]
+        )
+    )
+    statements = guard_policy["Properties"]["PolicyDocument"]["Statement"]
+    describe_service = next(
+        statement
+        for statement in statements
+        if _actions(statement) == {"ecs:DescribeServices"}
+    )
+    assert _values_for_key(
+        describe_service["Resource"],
+        "Fn::Join",
+    )[0][1][-1] == ":service/axonllm/axonllm"
+    describe_scaling = next(
+        statement
+        for statement in statements
+        if _actions(statement)
+        == {
+            "application-autoscaling:DescribeScalableTargets"
+        }
+    )
+    assert describe_scaling["Resource"] == "*"
+
+
+def test_recovery_guard_allows_safe_forward_and_rollback_updates(
+    monkeypatch,
+):
+    handler = _cutover_guard_handler(monkeypatch)
+    base = {
+        "ClusterName": "axonllm",
+        "ServiceName": "axonllm",
+    }
+
+    forward = handler(
+        {
+            "RequestType": "Update",
+            "ResourceProperties": {
+                **base,
+                "CutoverMode": "true",
+                "TargetTable": "axonllm-state-restore-validation-safe",
+            },
+            "OldResourceProperties": {
+                **base,
+                "CutoverMode": "false",
+                "TargetTable": "",
+            },
+        },
+        None,
+    )
+    rollback = handler(
+        {
+            "RequestType": "Update",
+            "ResourceProperties": {
+                **base,
+                "CutoverMode": "false",
+                "TargetTable": "",
+            },
+            "OldResourceProperties": {
+                **base,
+                "CutoverMode": "true",
+                "TargetTable": "axonllm-state-restore-validation-safe",
+            },
+        },
+        None,
+    )
+
+    assert forward["PhysicalResourceId"] == "AxonLLMRecoveryCutoverGuard"
+    assert rollback["PhysicalResourceId"] == "AxonLLMRecoveryCutoverGuard"
+
+
+def test_recovery_guard_rejects_unguarded_or_running_table_switch(
+    monkeypatch,
+):
+    base = {
+        "ClusterName": "axonllm",
+        "ServiceName": "axonllm",
+    }
+    unsafe = {
+        "RequestType": "Update",
+        "ResourceProperties": {
+            **base,
+            "CutoverMode": "false",
+            "TargetTable": "new-table",
+        },
+        "OldResourceProperties": {
+            **base,
+            "CutoverMode": "false",
+            "TargetTable": "old-table",
+        },
+    }
+    with pytest.raises(RuntimeError, match="RecoveryCutoverMode"):
+        _cutover_guard_handler(monkeypatch)(unsafe, None)
+
+    unsafe["OldResourceProperties"]["CutoverMode"] = "true"
+    with pytest.raises(RuntimeError, match="fully quiesced"):
+        _cutover_guard_handler(
+            monkeypatch,
+            desired_count=2,
+        )(unsafe, None)
 
 
 def test_operational_alarms_are_actionable(synthesized_template):
@@ -1126,6 +1471,35 @@ def test_operational_alarms_are_actionable(synthesized_template):
         "TransactGetItems",
         "TransactWriteItems",
     } <= monitored_operations
+    monitored_tables = {
+        json.dumps(dimension["Value"], sort_keys=True)
+        for alarm in alarms
+        for metric in alarm["Properties"].get("Metrics", [])
+        for dimension in metric.get("MetricStat", {})
+        .get("Metric", {})
+        .get("Dimensions", [])
+        if dimension["Name"] == "TableName"
+    }
+    assert monitored_tables == {
+        json.dumps(
+            {
+                "Fn::If": [
+                    "UseRecoveredState",
+                    {"Ref": "RuntimeStateTableName"},
+                    {
+                        "Ref": next(
+                            logical_id
+                            for logical_id, resource in synthesized_template[
+                                "Resources"
+                            ].items()
+                            if resource["Type"] == "AWS::DynamoDB::Table"
+                        )
+                    },
+                ]
+            },
+            sort_keys=True,
+        )
+    }
     assert len(
         _resources(synthesized_template, "AWS::CloudWatch::Dashboard")
     ) == 1
