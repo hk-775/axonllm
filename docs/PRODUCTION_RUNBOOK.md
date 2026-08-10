@@ -17,10 +17,13 @@ This is not a release certification. Obtain green required CI for the exact
 commit, then execute and retain the real tagged private-ECR/KMS-signature flow
 for the selected image digest.
 
-The immutable `v0.2.2` tag is not promotable. Its source and image scans
-completed, but GitHub rejected attestation persistence for the private
-organization plan before any evidence artifact was uploaded. Do not move or
-reuse that tag; use a new version with the KMS-backed flow.
+The immutable `v0.2.2` and `v0.2.3` tags are not promotable. For `v0.2.2`,
+GitHub rejected attestation persistence for the private organization plan
+before any evidence artifact was uploaded. For `v0.2.3`, every build, scan, and
+schema-v3 self-check passed, but AWS rejected the legacy name-only OIDC trust
+subject before signing; no signatures or evidence artifact were created. The
+immutable-ID trust fix merged after that tag. Do not move or reuse either tag;
+the first eligible KMS-backed release is `v0.2.4`.
 
 The operational workflow implements daily recovery metadata audits and a
 monthly temporary-table PITR exercise with separate audit and recovery roles.
