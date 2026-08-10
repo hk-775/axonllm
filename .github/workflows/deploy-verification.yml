@@ -271,9 +271,11 @@ jobs:
       - name: Re-scan exact deployment image
         env:
           IMAGE_REFERENCE: ${{ inputs.image_reference }}
+          VERIFIED_PLATFORM: ${{ steps.evidence.outputs.platform }}
         run: >-
           trivy image
           --disable-telemetry
+          --platform "${VERIFIED_PLATFORM}"
           --scanners vuln,secret
           --ignore-unfixed
           --severity HIGH,CRITICAL
