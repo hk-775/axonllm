@@ -254,9 +254,10 @@ Before production traffic:
    `AXON_AGENTCORE_DATA_KMS_KEY_ARN`. Configure the repository with the
    tag-only signer role, current exact signing-key ARN, and account ID. Protect
    `refs/tags/v*` with a ruleset that restricts creation and blocks update and
-   deletion. Create the new retained `alias/axonllm/release-signing-v*` alias
-   before changing the current key variable, and never repoint or delete
-   historical version aliases.
+   deletion. Confirm the IAM trust prefix matches GitHub's immutable OIDC
+   `sub_claim_prefix`. Create the new retained
+   `alias/axonllm/release-signing-v*` alias before changing the current key
+   variable, and never repoint or delete historical version aliases.
 2. Produce green required CI for the exact release commit.
 3. Execute the real tagged private-ECR and KMS-signature flow for the selected
    Fargate or AgentCore image digest.

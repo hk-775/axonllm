@@ -162,6 +162,16 @@ verifier can verify signatures and read images but cannot sign or write. Both
 operations roles trust only the exact protected `production` environment
 subject. Deploy this stack once per target account:
 
+The IAM trust subjects use GitHub's immutable organization and repository IDs,
+not rename-sensitive names. Before deploying after a repository transfer,
+compare `_GITHUB_SUBJECT_PREFIX` with:
+
+```bash
+gh api repos/AxonLLM/axonllm/actions/oidc/customization/sub
+```
+
+The returned `sub_claim_prefix` must match exactly.
+
 ```bash
 cd infra
 npx cdk deploy AxonLLMReleaseFoundationStack \
