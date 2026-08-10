@@ -13,9 +13,10 @@ import pytest
 _REPO = Path(__file__).resolve().parents[2]
 _INFRA = _REPO / "infra"
 _INFRA_PYTHON = _INFRA / ".venv" / "bin" / "python"
-_SIGNING_SUBJECT = "repo:AxonLLM/axonllm:ref:refs/tags/v*"
-_RELEASE_SUBJECT = "repo:AxonLLM/axonllm:environment:release"
-_PRODUCTION_SUBJECT = "repo:AxonLLM/axonllm:environment:production"
+_SUBJECT_PREFIX = "repo:AxonLLM@313590914/axonllm@1276398779"
+_SIGNING_SUBJECT = f"{_SUBJECT_PREFIX}:ref:refs/tags/v*"
+_RELEASE_SUBJECT = f"{_SUBJECT_PREFIX}:environment:release"
+_PRODUCTION_SUBJECT = f"{_SUBJECT_PREFIX}:environment:production"
 _WRITE_ACTIONS = {
     "ecr:CompleteLayerUpload",
     "ecr:InitiateLayerUpload",
@@ -202,6 +203,7 @@ def test_github_oidc_trust_is_exact_and_retained(synthesized_template):
     assert provider["UpdateReplacePolicy"] == "Retain"
 
     roles = _resources(synthesized_template, "AWS::IAM::Role")
+    assert "repo:AxonLLM/axonllm:" not in json.dumps(roles)
     assert len(roles) == 5
     assert {
         role["Properties"]["RoleName"] for role in roles

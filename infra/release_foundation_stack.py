@@ -15,10 +15,11 @@ from constructs import Construct
 
 
 _GITHUB_OIDC_ISSUER = "token.actions.githubusercontent.com"
-_GITHUB_SIGNING_SUBJECT = "repo:AxonLLM/axonllm:ref:refs/tags/v*"
-_GITHUB_RELEASE_SUBJECT = "repo:AxonLLM/axonllm:environment:release"
+_GITHUB_SUBJECT_PREFIX = "repo:AxonLLM@313590914/axonllm@1276398779"
+_GITHUB_SIGNING_SUBJECT = f"{_GITHUB_SUBJECT_PREFIX}:ref:refs/tags/v*"
+_GITHUB_RELEASE_SUBJECT = f"{_GITHUB_SUBJECT_PREFIX}:environment:release"
 _GITHUB_PRODUCTION_SUBJECT = (
-    "repo:AxonLLM/axonllm:environment:production"
+    f"{_GITHUB_SUBJECT_PREFIX}:environment:production"
 )
 
 
