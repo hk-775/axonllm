@@ -228,6 +228,10 @@ def main():
     )
     sub = parser.add_subparsers(dest="command")
 
+    from src.gateway.agentcore_setup import add_setup_subcommands
+
+    add_setup_subcommands(sub)
+
     # demo
     sub.add_parser("demo", help="Start server + generate real traffic for a live demo")
 
@@ -286,20 +290,31 @@ def main():
 
     args = parser.parse_args()
 
-    if args.command == "demo":
-        cmd_demo(args)
-    elif args.command == "serve":
-        cmd_serve(args)
-    elif args.command == "issue-key":
-        cmd_issue_key(args)
-    elif args.command == "bootstrap-tenant":
-        cmd_bootstrap_tenant(args)
-    elif args.command == "chat":
-        cmd_chat(args)
-    elif args.command == "models":
-        cmd_models(args)
-    else:
-        parser.print_help()
+    try:
+        if args.command == "setup" and args.setup_target == "agentcore":
+            from src.gateway.agentcore_setup import cmd_setup_agentcore
+
+            cmd_setup_agentcore(args)
+        elif args.command == "setup" and args.setup_target == "local-demo":
+            from src.gateway.agentcore_setup import cmd_setup_local_demo
+
+            cmd_setup_local_demo(args)
+        elif args.command == "demo":
+            cmd_demo(args)
+        elif args.command == "serve":
+            cmd_serve(args)
+        elif args.command == "issue-key":
+            cmd_issue_key(args)
+        elif args.command == "bootstrap-tenant":
+            cmd_bootstrap_tenant(args)
+        elif args.command == "chat":
+            cmd_chat(args)
+        elif args.command == "models":
+            cmd_models(args)
+        else:
+            parser.print_help()
+    except ValueError as exc:
+        parser.error(str(exc))
 
 
 def demo():

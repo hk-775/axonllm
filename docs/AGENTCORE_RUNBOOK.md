@@ -5,7 +5,8 @@ and CDK stack. It does not certify a checkout or AWS deployment.
 
 ## Current Status
 
-The AgentCore application and private-network CDK stack are implemented.
+The AgentCore application, private-network CDK stack, retained Cognito identity
+stack, and first-adopter deployment workflow are implemented.
 `DynamoPersistence` provides canonical per-tenant SCIM version and strongly
 consistent snapshot reads used during startup and runtime convergence.
 
@@ -59,8 +60,13 @@ Canonical roles are authoritative: tenant viewers cannot elevate through legacy
 admin roles/scopes, canonical services gain no control-plane authority from
 `admin:*`, and canonical key issuance rejects legacy admin scopes.
 
-AgentCore exposes no bootstrap action. Provision the first administrator out of
-band with the repository CLI against the AgentCore table before traffic:
+AgentCore exposes no bootstrap or identity-administration action. The
+first-adopter deployer performs this out of band: managed Cognito invites the
+first user and resolves its generated `sub`; external OIDC requires an existing
+user and exact `sub`. Both paths then run the same restartable canonical
+bootstrap against the deployed AgentCore table.
+
+For manual recovery, provision the administrator directly:
 
 ```bash
 LLM_ROUTER_DYNAMODB_ENABLED=true \
@@ -87,7 +93,10 @@ member writes are rejected. Canonical SCIM rows share
 `SCIM#USERNAME#{hash}`, and `SCIM#VERSION` sort keys. AgentCore itself exposes
 no membership-management action.
 
-AgentCore accepts OIDC JWTs at this boundary, not AxonLLM API keys.
+AgentCore accepts OIDC JWTs at this boundary, not AxonLLM API keys. Tenant and
+project claims are signed routing hints only. Cognito or the external IdP does
+not grant AxonLLM roles: the strongly resolved DynamoDB principal remains the
+authority for status, role, scopes, and project membership.
 
 ## Infrastructure
 
@@ -180,13 +189,132 @@ AgentCore reference that subsequently passes `deploy-verification.yml`. The
 `v0.2.4` AgentCore reference completed this flow; repeat it for every promoted
 release and retain the evidence.
 
-## CDK Setup
+## First-Adopter Setup
 
 Deploy the release foundation and configure the protected `release` and
 `production` GitHub environments as described in the
 [production runbook](PRODUCTION_RUNBOOK.md#release-foundation). After a tagged
 release is published, CI is green, and the `agentcore` target has passed
-deployment verification:
+deployment verification, choose one identity path. There is no unauthenticated
+AgentCore mode.
+
+### Managed Cognito
+
+The managed option creates `AxonLLMIdentityStack` separately from the runtime.
+Its user pool, public client, and hosted domain are retained and deletion
+protected. Self-signup and direct password/SRP client flows are disabled; TOTP
+MFA is required. The client has no secret and supports authorization code only.
+
+Set the common release and network inputs, then generate a reviewable setup
+file:
+
+```bash
+export AWS_DEFAULT_REGION=us-east-1
+export AXON_VERIFIED_IMAGE_URI='123456789012.dkr.ecr.us-east-1.amazonaws.com/axonllm/agentcore@sha256:<verified-arm64-digest>'
+export AXON_BEDROCK_INVOKE_RESOURCE_ARNS='arn:aws:bedrock:us-east-1::foundation-model/<model-id>'
+export AXON_APPROVED_HTTPS_PREFIX_LIST_ID='pl-0123456789abcdef0'
+
+uv run axon setup agentcore \
+  --identity-mode managed-cognito \
+  --tenant tenant-a \
+  --project project-a \
+  --project-name Production \
+  --budget-limit 1000 \
+  --admin-user-name admin@example.com \
+  --admin-email admin@example.com \
+  --admin-display-name "Tenant A Admin" \
+  --hosted-ui-domain-prefix axonllm-123456789012 \
+  --oauth-callback-url https://app.example.com/oauth/callback \
+  --output axonllm-agentcore.json
+```
+
+The domain prefix must be globally available. Every callback is HTTPS. The
+adopting OAuth client must generate a verifier and send
+`code_challenge_method=S256`; AxonLLM does not ship an OAuth callback
+application. Invoke AgentCore with the returned **ID token**, which carries
+`custom:tenant_id` and `custom:project_id`. Do not substitute the Cognito access
+token, which does not contain those user attributes by default.
+
+The deployer sends the initial invitation through Cognito, never handles a
+temporary password, and refuses to reassign an existing user to another tenant
+or project. A rerun verifies the same Cognito `sub` and then idempotently
+verifies canonical authority.
+
+### Existing OIDC
+
+The existing-IdP option deploys no identity resources. Provision the user and
+public client in the IdP first. Its signed token must contain `iss`, `sub`,
+`aud`, `exp`, and non-empty tenant/project string claims:
+
+```bash
+uv run axon setup agentcore \
+  --identity-mode external-oidc \
+  --tenant tenant-a \
+  --project project-a \
+  --project-name Production \
+  --admin-user-name admin@example.com \
+  --admin-email admin@example.com \
+  --admin-subject 00u-admin-subject \
+  --oidc-issuer https://idp.example.com/oauth2/default \
+  --oidc-discovery-url https://idp.example.com/oauth2/default/.well-known/openid-configuration \
+  --oidc-client-id axonllm-agentcore \
+  --oidc-audience api://axonllm \
+  --oidc-tenant-claim https://axonllm.example/tenant \
+  --oidc-project-claim https://axonllm.example/project \
+  --output axonllm-agentcore.json
+```
+
+This command also reads the three common `AXON_*` release/network variables
+shown above. The setup rejects client secrets; the runtime only needs public
+verification metadata. The discovery URL must be the exact issuer followed by
+`/.well-known/openid-configuration`. The external administrator must already
+exist, and `--admin-subject` must exactly match its immutable token `sub`.
+
+### Validate And Deploy
+
+Review the generated JSON, CDK templates, and diff before deployment:
+
+```bash
+./deploy-agentcore.sh --config axonllm-agentcore.json --validate-only
+
+# First deployment in an account/region:
+./deploy-agentcore.sh \
+  --config axonllm-agentcore.json \
+  --bootstrap-cdk
+```
+
+The wrapper requires Python 3.11+, uv, AWS credentials, and Node.js 22 or newer.
+It installs hash-pinned CDK dependencies when needed. Without `--yes`, CDK
+retains its security-change approval prompt; noninteractive runs must explicitly
+pass `--yes` after review.
+
+The operation is restartable:
+
+1. Deploy or update retained identity when `managed-cognito` is selected.
+2. Invite or strongly verify the same first Cognito administrator.
+3. Deploy the authenticated AgentCore runtime from the immutable image digest.
+4. Create or verify the canonical project, `tenant_admin`, and project grant.
+
+Setup JSON contains no password, token, or client secret and is written mode
+`0600`. CDK outputs are kept under `.axonllm/agentcore` by default. Protect
+those operational files even though they contain identifiers rather than
+credentials.
+
+For a local anonymous evaluation, use only the explicitly acknowledged
+development command:
+
+```bash
+uv run axon setup local-demo --start --acknowledge-non-production
+```
+
+It forces the development profile, fictional seed data, in-memory persistence,
+and `LOG_ONLY`. It is not a deployment input and cannot select AgentCore.
+
+### Manual CDK
+
+The deployer is the preferred path because it binds identity outputs, invitation,
+runtime deployment, and canonical bootstrap. For controlled manual deployment,
+the AgentCore stack still consumes standard OIDC inputs:
 
 ```bash
 cd infra
@@ -204,6 +332,8 @@ npx cdk deploy AxonLLMAgentCoreStack \
   --parameters AxonLLMAgentCoreStack:OidcDiscoveryUrl="$OIDC_DISCOVERY_URL" \
   --parameters AxonLLMAgentCoreStack:OidcClientId="$OIDC_CLIENT_ID" \
   --parameters AxonLLMAgentCoreStack:OidcAudience="$OIDC_AUDIENCE" \
+  --parameters AxonLLMAgentCoreStack:OidcTenantClaim="$OIDC_TENANT_CLAIM" \
+  --parameters AxonLLMAgentCoreStack:OidcProjectClaim="$OIDC_PROJECT_CLAIM" \
   --parameters AxonLLMAgentCoreStack:ApprovedHttpsPrefixListId="$APPROVED_HTTPS_PREFIX_LIST_ID" \
   --parameters AxonLLMAgentCoreStack:BedrockInvokeResourceArns="$BEDROCK_INVOKE_RESOURCE_ARNS"
 ```
@@ -211,7 +341,11 @@ npx cdk deploy AxonLLMAgentCoreStack \
 `BEDROCK_INVOKE_RESOURCE_ARNS` is a comma-separated list of concrete ARNs; the
 parameter rejects wildcards. The image must be a private ECR digest in the
 deployment region. Include the OIDC origin and every deliberately enabled
-external HTTPS destination in the approved prefix list.
+external HTTPS destination in the approved prefix list. A manual managed
+Cognito deployment must first synthesize/deploy `AxonLLMIdentityStack` with
+`deployment_target=identity`, consume its outputs, invite the user, and run
+`axon bootstrap-tenant`; skipping any of those steps is not equivalent to the
+first-adopter workflow.
 
 ## Verification
 

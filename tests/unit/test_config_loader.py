@@ -214,6 +214,8 @@ class TestLoadAppConfig:
         assert config.alb_signer_arn == ""
         assert config.alb_client_id == ""
         assert config.alb_issuer == ""
+        assert config.oidc_tenant_claim == "custom:tenant_id"
+        assert config.oidc_project_claim == "custom:project_id"
 
     def test_env_overrides(self, monkeypatch):
         monkeypatch.setenv("AWS_DEFAULT_REGION", "eu-west-1")
@@ -225,6 +227,8 @@ class TestLoadAppConfig:
         )
         monkeypatch.setenv("AXON_ALB_SIGNER_ARN", signer_arn)
         monkeypatch.setenv("AXON_ALB_CLIENT_ID", "client-123")
+        monkeypatch.setenv("AXON_OIDC_TENANT_CLAIM", "tenant")
+        monkeypatch.setenv("AXON_OIDC_PROJECT_CLAIM", "project")
         monkeypatch.setenv(
             "AXON_ENABLED_PROVIDERS",
             "bedrock, openai",
@@ -240,6 +244,8 @@ class TestLoadAppConfig:
         assert config.load_demo_data is True
         assert config.alb_signer_arn == signer_arn
         assert config.alb_client_id == "client-123"
+        assert config.oidc_tenant_claim == "tenant"
+        assert config.oidc_project_claim == "project"
         assert config.enabled_providers == frozenset({"bedrock", "openai"})
         assert (
             config.alb_issuer

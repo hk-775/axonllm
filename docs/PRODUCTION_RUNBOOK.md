@@ -55,9 +55,9 @@ current state table has PITR but lacks deletion protection, customer-managed
 encryption, TTL, an AWS Backup vault, and recovery points. The legacy provider
 secret lacks customer-managed encryption and rotation.
 
-The hardened AgentCore stack and state table are absent, so there is no
-deployed AxonLLM AgentCore target on which to run release canaries, recovery
-validation, or rollback checks.
+The hardened AgentCore, retained identity, and state stacks are absent, so
+there is no deployed AxonLLM AgentCore target on which to run release canaries,
+identity validation, recovery validation, or rollback checks.
 
 The account also lacks the production DNS zone, ACM certificates, approved
 HTTPS prefix list, dedicated OIDC configuration, and confirmed alarm/event
@@ -85,6 +85,7 @@ claiming multi-writer release governance.
 
 | Mode | Required settings | Security boundary |
 |---|---|---|
+| Local seeded demo | `axon setup local-demo --start --acknowledge-non-production` | Forces development, `LOG_ONLY`, fictional data, and in-memory persistence. Anonymous and never promotable. |
 | Single-user / legacy | `AXON_DEPLOYMENT_PROFILE=development`, `AXON_REQUIRE_CANONICAL_IDENTITY=false`; DynamoDB optional | Intended for local development or one isolated trust domain. Verified credential claims may supply roles, scopes, tenant, and project authority. It is not a boundary between untrusted tenants. |
 | Multi-tenant | `AXON_DEPLOYMENT_PROFILE=production`, `AXON_AUTH_MODE=ENFORCE`, `LLM_ROUTER_DYNAMODB_ENABLED=true`, `AXON_REQUIRE_CANONICAL_IDENTITY=true`, exact OIDC issuer and audience | Roles, scopes, status, tenant membership, and project grants come from strongly read DynamoDB principals. Production startup rejects any weaker combination. |
 
@@ -127,6 +128,12 @@ grants project membership through the canonical CAS transaction, and returns
 only after strongly resolving the active `tenant_admin` principal and grant. It
 is restartable and refuses to reuse a user name bound to a different issuer or
 subject.
+
+For AgentCore, `deploy-agentcore.sh` performs this same canonical bootstrap
+after deploying the runtime. With `managed-cognito`, it first deploys retained
+identity and invites the administrator; with `external-oidc`, it requires the
+already-provisioned immutable subject. The manual command remains the recovery
+path.
 
 Create canonical service credentials with the tenant-qualified key path:
 
@@ -401,6 +408,35 @@ including an unknown provider fails startup. The AgentCore stack fixes this
 value to `bedrock`, so that target advertises and invokes standard Bedrock
 models only.
 
+## AgentCore First-Adopter Deployment
+
+AgentCore has two production identity choices and no unauthenticated mode:
+
+| Identity mode | Operator responsibility | Automated work |
+|---|---|---|
+| `managed-cognito` | Choose a unique domain, HTTPS PKCE callback, tenant/project, administrator email, approved egress, Bedrock ARNs, and verified ARM64 digest | Deploy retained/deletion-protected Cognito, invite the user, deploy AgentCore, and bootstrap canonical authority |
+| `external-oidc` | Provision the IdP user/client and supply exact issuer, discovery URL, client, audience, immutable subject, and tenant/project claim names | Deploy AgentCore and bootstrap canonical authority |
+
+Generate the strict setup file with `uv run axon setup agentcore`, validate it
+with `./deploy-agentcore.sh --config FILE --validate-only`, then deploy it. Use
+`--bootstrap-cdk` only for the first deployment in an account/region and add
+`--yes` only in reviewed noninteractive automation. The setup rejects mutable
+image tags, wildcard Bedrock ARNs, non-HTTPS identity metadata, client secrets,
+and missing claim mappings.
+
+Managed Cognito is authorization-code only and has no client secret. The
+adopting application must use S256 PKCE and submit the Cognito **ID token** to
+AgentCore because that token carries `custom:tenant_id` and
+`custom:project_id`. The custom attributes select resources but grant no role;
+canonical DynamoDB principals remain authoritative.
+
+The complete commands, external-IdP example, manual CDK fallback, and invitation
+behavior are in the
+[AgentCore Runbook](AGENTCORE_RUNBOOK.md#first-adopter-setup). Before traffic,
+also configure alarm/event subscriptions, run authenticated and negative RBAC
+canaries, and retain restore evidence. Successful setup is not production
+certification.
+
 ## Security Event Delivery
 
 Both CDK stacks inject four runtime controls:
@@ -559,7 +595,9 @@ Before shifting traffic:
 4. Run authenticated model-list and completion canaries.
 5. Run negative canaries for missing credentials, inactive membership,
    ungranted and cross-tenant project claims, and viewer writes.
-6. Verify alarms, a confirmed SNS subscription, logs, tenant audit-chain
+6. For managed Cognito, verify S256 PKCE, required TOTP enrollment, the exact
+   ID-token issuer/audience/tenant/project claims, and access-token rejection.
+7. Verify alarms, a confirmed SNS subscription, logs, tenant audit-chain
    verification, and rollback.
 
 The production validation tool evaluates `query.mutate` against the checked-out

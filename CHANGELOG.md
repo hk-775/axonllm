@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **AgentCore first-adopter identity and deployment workflow.** `axon setup
+  agentcore` now writes a strict, mode-0600 configuration for either retained
+  managed Cognito or an existing OIDC provider; mutable image tags, wildcard
+  Bedrock ARNs, missing tenant/project claim mappings, client secrets, and
+  unauthenticated production are rejected. `AxonLLMIdentityStack` provides
+  admin-only Cognito enrollment, required TOTP, a strong password policy, and a
+  secretless authorization-code client with retained resources and deletion
+  protection. `deploy-agentcore.sh` deploys identity when selected, invites or
+  verifies the first administrator, deploys the runtime, and idempotently
+  verifies canonical tenant authority. Anonymous seeded use is separately
+  labeled and requires `axon setup local-demo --acknowledge-non-production`.
+
 ### Documentation
 
 - **Documented how admin aggregates read on a multi-instance deployment**, now

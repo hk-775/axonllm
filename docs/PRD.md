@@ -235,6 +235,7 @@ Stakeholders who need visibility into LLM spend and assurance that usage complie
 | FR-AC12 | **Atomic canonical project grants** | In canonical mode, `POST /admin/projects/{id}/members` accepts a SCIM resource id as `user_id`; POST/DELETE member operations use one CAS-guarded transaction to update `Project.members`, `ScimUser.project_ids`, authoritative `Principal.project_ids`, both authorization versions, and tenant `SCIM#VERSION`. Stored and returned members use `scim:<id>`. Project creation rejects a non-empty `members` list, and project PUT rejects any `members` field, so canonical grants cannot bypass the dedicated routes. Legacy member routes update only `Project.members`. |
 | FR-AC13 | **Restartable tenant bootstrap** | `axon bootstrap-tenant` conditionally creates or verifies the tenant project and first SCIM-backed administrator, applies the canonical project-membership transaction, and returns only after a strong principal lookup proves active `tenant_admin` authority and the project grant. Conflicting issuer/subject ownership fails closed. |
 | FR-AC14 | **Canonical service-key bootstrap** | `axon issue-key --tenant` uses tenant-qualified API-key/service-principal persistence, defaults to `model.list`, `inference.invoke`, and `query.select`, and rejects legacy `admin:` scopes. |
+| FR-AC15 | **First-adopter identity choices** | `axon setup agentcore` accepts only `managed-cognito` or `external-oidc`. Managed identity is a separate retained/deletion-protected pool with admin-only enrollment, required TOTP, strong passwords, a secretless authorization-code client, explicit HTTPS callbacks, and tenant/project custom claims. External OIDC requires exact issuer, discovery URL, client, audience, immutable first-admin subject, and tenant/project claim mappings. `deploy-agentcore.sh` invites or verifies the first identity, deploys the authenticated runtime, and invokes the canonical bootstrap idempotently. Anonymous seeded use is isolated to an acknowledged local-development command; no unauthenticated AgentCore mode exists. |
 
 ### 6.4.1 Policy Hierarchy and Quotas
 
@@ -464,7 +465,7 @@ stored and no request is slowed.
 | **SessionManager (inactive)** | AgentCore Memory abstraction exists but is not wired into bootstrap or the AgentCore entrypoint | `session_manager.py` |
 | **AdminAPI** | Admin REST API and the server-rendered dashboard | `admin/` |
 | **ChatAPI** | Client-facing chat API, OpenAI-compatible API, and web interfaces | `chat/` |
-| **CLI** | `axon` entry point — `demo`, `serve`, `issue-key`, `bootstrap-tenant`, `chat`, `models` | `cli.py` |
+| **CLI** | `axon` entry point — `setup`, `demo`, `serve`, `issue-key`, `bootstrap-tenant`, `chat`, `models` | `cli.py`, `agentcore_setup.py` |
 | **Bootstrap** | Centralized dependency injection and component wiring | `bootstrap.py` |
 
 ### 8.3 Provider Adapter Pattern
@@ -1002,7 +1003,7 @@ must therefore be evaluated separately.
 | Option | Description | Use Case |
 |--------|-------------|----------|
 | **ECS Fargate via CDK** | `infra/stack.py` requires a private regional ECR `@sha256` image. Production mode adds ALB OIDC and canonical identity to CloudFront/WAF, an internal TLS ALB, private tasks, DynamoDB/PITR/AWS Backup with governance Vault Lock, optional SCIM-secret injection, a KMS/TLS FIFO event outbox and DLQ, managed SNS/Logs sinks over private endpoints, alarms, rollback, an ALB `/ready` gate, and guarded restored-table cutover. `deploy-fargate.sh` defaults to staging but supplies the complete production parameter set when `AXON_DEPLOYMENT_MODE=production`. | Production candidate after release and operational gates |
-| **Amazon Bedrock AgentCore via CDK** | `infra/agentcore_stack.py` deploys the ARM64 action runtime with a JWT authorizer, `Authorization` forwarding, private VPC mode, DynamoDB/Bedrock/SQS/SNS/Logs endpoints, canonical identity, digest-only image input, backups, a KMS/TLS FIFO event outbox and DLQ, managed SNS/Logs sinks, alarms, and `GET /ready`. | Production candidate after a successful `agentcore` target verification and operational gates |
+| **Amazon Bedrock AgentCore via CDK** | `infra/agentcore_stack.py` deploys the ARM64 action runtime with a JWT authorizer, configurable tenant/project OIDC claim names, `Authorization` forwarding, private VPC mode, DynamoDB/Bedrock/SQS/SNS/Logs endpoints, canonical identity, digest-only image input, backups, a KMS/TLS FIFO event outbox and DLQ, managed SNS/Logs sinks, alarms, and `GET /ready`. `infra/identity_stack.py` optionally supplies retained managed Cognito; the setup/deploy workflow also supports an existing OIDC provider. | Production candidate after a successful `agentcore` target verification and operational gates |
 | **AWS App Runner** | `deploy.sh` remains a legacy reference path without the canonical identity, private-network, digest-verification, backup, and readiness controls of the CDK stacks. | Evaluation only |
 | **Docker / Compose** | `docker build` + `docker run`, or `docker compose up` using `docker-compose.yml` (gateway + DynamoDB Local). | Staging, on-premises |
 | **Local development** | `uv run python serve_dashboard.py`. Uvicorn dev server with demo data seeded and `AXON_AUTH_MODE=LOG_ONLY`. | Development |
@@ -1017,9 +1018,10 @@ injects no non-Bedrock provider secrets. A synchronous bootstrap worker cannot
 be forcibly cancelled if it outlives its deadline, so deployment must retain
 process-level startup containment.
 
-Both stacks require canonical identity and alarm subscriptions before traffic.
-Use `axon bootstrap-tenant` against the selected runtime table for the initial
-administrator. Fargate injects Anthropic/OpenAI provider secrets and can inject
+Both runtime stacks require canonical identity and alarm subscriptions before
+traffic. The AgentCore first-adopter workflow invokes the same canonical
+bootstrap automatically; use `axon bootstrap-tenant` directly for Fargate or
+manual recovery. Fargate injects Anthropic/OpenAI provider secrets and can inject
 the complete `AXON_SCIM_TENANTS` JSON from an optional Secrets Manager ARN.
 Both stacks configure governance-mode Vault Lock with 30-365 day retention. See the
 [Production Runbook](PRODUCTION_RUNBOOK.md) and
@@ -1029,11 +1031,13 @@ procedures.
 ### 12.1.1 CLI
 
 `pyproject.toml` exposes one console script, `axon` → `src.gateway.cli:main`, with
-six subcommands. `uv sync` installs it into `.venv/bin`, which is not on `PATH`,
+seven top-level subcommands. `uv sync` installs it into `.venv/bin`, which is not on `PATH`,
 so invoke it as `uv run axon <subcommand>` (or activate the venv first):
 
 | Command | Purpose |
 |---------|---------|
+| `axon setup local-demo` | Label and optionally start the seeded anonymous development mode; starting requires an explicit non-production acknowledgement |
+| `axon setup agentcore` | Generate, validate, or deploy a strict managed-Cognito/external-OIDC first-adopter configuration |
 | `axon demo` | Start the server and generate real traffic against it, for a live demo |
 | `axon serve` | Start the gateway server |
 | `axon issue-key` | Mint an API key in-process — the way to bootstrap a key under `ENFORCE`, where the admin API itself needs one |
@@ -1087,6 +1091,8 @@ so invoke it as `uv run axon <subcommand>` (or activate the venv first):
 | `AXON_PII_NER_TYPES` | — | Restrict entity types (default: name, address, age) |
 | `AXON_OIDC_ISSUER` | — | OIDC issuer, for JWKS discovery |
 | `AXON_OIDC_AUDIENCE` | — | Expected `aud` claim |
+| `AXON_OIDC_TENANT_CLAIM` | `custom:tenant_id` | Signed tenant routing-hint claim |
+| `AXON_OIDC_PROJECT_CLAIM` | `custom:project_id` | Signed project routing-hint claim |
 | `AXON_ALB_SIGNER_ARN` | — | Exact trusted ALB ARN when accepting ALB OIDC headers |
 | `AXON_ALB_CLIENT_ID` | — | Client id configured on the trusted ALB OIDC action |
 | `AXON_ALB_ISSUER` | — | Exact regional ALB public-key issuer |

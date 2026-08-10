@@ -67,6 +67,26 @@ class TestBuildGatewayComponents:
         assert len(comp.policies) == 0
         assert len(comp.cost_tracker._records) == 0
 
+    def test_custom_oidc_resource_claims_reach_the_verifier(
+        self,
+        minimal_app_config: AppConfig,
+    ):
+        minimal_app_config.oidc_tenant_claim = (
+            "https://axonllm.example/tenant"
+        )
+        minimal_app_config.oidc_project_claim = (
+            "https://axonllm.example/project"
+        )
+
+        comp = build_gateway_components(minimal_app_config)
+
+        assert comp.oidc_service._config.claim_mappings["tenant_id"] == (
+            "https://axonllm.example/tenant"
+        )
+        assert comp.oidc_service._config.claim_mappings["project_id"] == (
+            "https://axonllm.example/project"
+        )
+
     def test_pricing_loaded(self, demo_app_config: AppConfig):
         comp = build_gateway_components(demo_app_config)
         # Pricing should have been loaded from config/pricing.yaml

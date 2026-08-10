@@ -118,6 +118,24 @@ Conflicting issuer/subject ownership fails closed. Canonical service keys use
 `model.list`, `inference.invoke`, and `query.select`, and `admin:` scopes are
 rejected.
 
+**Q: What identity choice does a first AgentCore adopter get?**
+
+A: Two authenticated production choices. `managed-cognito` deploys a separate
+retained and deletion-protected user pool with self-signup disabled, required
+TOTP, strong passwords, and a public authorization-code client. The adopter's
+application uses S256 PKCE and sends the Cognito ID token, whose
+`custom:tenant_id` and `custom:project_id` values are routing hints.
+`external-oidc` uses an existing provider and requires exact issuer, discovery,
+client, audience, first-admin subject, and tenant/project claim names.
+
+`axon setup agentcore` writes a strict configuration with no password or client
+secret. `deploy-agentcore.sh` validates it, deploys managed identity when
+selected, invites or verifies the first user, deploys the runtime, and
+idempotently establishes canonical `tenant_admin` authority. Token claims never
+grant the role; DynamoDB remains authoritative. Anonymous use is available only
+through `axon setup local-demo --start --acknowledge-non-production`, which
+forces the development profile and cannot select AgentCore.
+
 After bootstrap,
 `POST /admin/projects/{id}/members` takes the SCIM resource id in `user_id`.
 POST/DELETE member operations atomically update `Project.members`,
@@ -322,9 +340,10 @@ remain retained.
 
 A: No. Local focused regressions and implemented controls do not certify an
 environment. `v0.2.4` has retained CI and private-ECR/KMS evidence for both
-target artifacts, but no hardened runtime currently deploys those digests. A
-real AWS restore exercise, canaries, alarm delivery, load validation, and
-operational approval still need retained evidence.
+target artifacts, but no hardened runtime or managed identity stack currently
+deploys those digests. A real AWS restore exercise, authenticated identity/RBAC
+canaries, alarm delivery, load validation, and operational approval still need
+retained evidence.
 
 See the [Production Runbook](PRODUCTION_RUNBOOK.md) and
 [AgentCore Runbook](AGENTCORE_RUNBOOK.md) for commands and release checks.
