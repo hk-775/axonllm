@@ -30,7 +30,11 @@ multi-tenant deployment:
   bounded retries, native DLQ redrive, and managed SNS/Logs allowlists;
 - Fargate and AgentCore CDK stacks with private networking, encryption,
   retained backups, alarms, immutable image parameters, and production runtime
-  profiles; and
+  profiles;
+- a separate retained/deletion-protected Cognito identity stack plus a strict
+  first-adopter workflow for managed Cognito or existing OIDC, with
+  restartable first-admin canonical bootstrap and no unauthenticated AgentCore
+  mode; and
 - locked CI, release-evidence, deployment-verification, recovery, and security
   workflows for both deployment targets.
 
@@ -40,10 +44,10 @@ digests. See the
 [production release record](docs/PRODUCTION_RUNBOOK.md#release-status).
 
 This is not production certification. A 2026-08-10 target-account audit found
-a stopped legacy Fargate deployment and no AxonLLM AgentCore stack. Promotion
-still requires target-account prerequisites, deployment of a verified digest,
-authenticated canaries, alarm/event delivery, and retained restore, cutover,
-rollback, and load evidence.
+a stopped legacy Fargate deployment and no AxonLLM AgentCore or managed
+identity stack. Promotion still requires target-account prerequisites,
+deployment of a verified digest, authenticated canaries, alarm/event delivery,
+and retained restore, cutover, rollback, and load evidence.
 
 ## Production Contract
 
@@ -65,8 +69,11 @@ development profile and is not a production deployment path.
 Direct OIDC also requires an exact HTTPS issuer and audience. Fargate production
 mode requires the ALB OIDC endpoints, client identity, client secret, issuer,
 audience, signer, and listener integration configured by the stack. AgentCore
-requires its JWT authorizer inputs and independently verifies the forwarded
-token before resolving canonical authority.
+requires its JWT authorizer inputs and tenant/project claim names, and
+independently verifies the forwarded token before resolving canonical
+authority. The first-adopter path can deploy retained managed Cognito or consume
+an existing OIDC provider; token attributes remain routing hints rather than
+authority.
 
 `AXON_ENABLED_PROVIDERS` is an optional comma-separated runtime provider
 allowlist. Providers outside it are neither advertised nor invoked, and empty or

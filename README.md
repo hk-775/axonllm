@@ -180,7 +180,7 @@ not a quick-start step.**
      Empty           Full demo                  immutable image digest
     gateway           seeded                    private network + state
        │                 │                                │
-    PATH 1            PATH 2                           PATH 3
+    PATH 1            PATH 2                         PATH 3 / 4
    development        a tour                 staging or approved release
      5 min             5 min                       release-gated
 ```
@@ -190,12 +190,15 @@ not a quick-start step.**
 | **1** | Laptop | No — empty | `LOG_ONLY` | 5 min | [Local, clean](#1-local-clean) |
 | **2** | Laptop | Yes — seeded | `LOG_ONLY` | 5 min | [Local, seeded demo](#2-local-seeded-demo) |
 | **3** | AWS Fargate | No — empty | `ENFORCE`; staging uses legacy identity | Varies | [AWS Fargate](#3-aws-fargate) |
+| **4** | AWS AgentCore | No — first tenant bootstrapped | `ENFORCE`; Cognito or external OIDC | Varies | [AWS AgentCore](#4-aws-agentcore) |
 
 **Not sure? Start with path 2**, click around, then throw it away and use path 1
 for development. Nothing in path 2 persists unless you enable DynamoDB.
 
 Paths 1 and 3 leave you with an empty gateway, which then needs configuring:
-provider keys, projects, authentication, and RBAC. That is
+provider keys, projects, authentication, and RBAC. Path 4 creates or verifies
+its first canonical project and administrator during deployment. The local
+configuration steps are in
 [Configuring a clean install](#configuring-a-clean-install), further down.
 
 ### Prerequisites
@@ -549,6 +552,55 @@ reminder when it mints a key for a project it cannot find.
 **Next:** [Configuring a clean install](#configuring-a-clean-install) for the
 legacy staging surface. The [Production Runbook](docs/PRODUCTION_RUNBOOK.md)
 defines the multi-tenant release gate.
+
+### 4. AWS AgentCore
+
+AgentCore is always an authenticated, canonical production profile. There is no
+anonymous AgentCore option. A first adopter chooses either:
+
+- `managed-cognito`: deploy a separate retained Cognito pool, public
+  authorization-code client, and hosted UI; or
+- `external-oidc`: use an existing issuer, client, audience, and explicit
+  tenant/project claim names.
+
+For a disposable anonymous tour, use the separately labeled local path:
+
+```bash
+uv run axon setup local-demo --start --acknowledge-non-production
+```
+
+For managed Cognito, supply the common release and network inputs through the
+environment, then create a reviewable setup file:
+
+```bash
+export AXON_VERIFIED_IMAGE_URI='123456789012.dkr.ecr.us-east-1.amazonaws.com/axonllm/agentcore@sha256:<verified-arm64-digest>'
+export AXON_BEDROCK_INVOKE_RESOURCE_ARNS='arn:aws:bedrock:us-east-1::foundation-model/<model-id>'
+export AXON_APPROVED_HTTPS_PREFIX_LIST_ID='pl-0123456789abcdef0'
+
+uv run axon setup agentcore \
+  --identity-mode managed-cognito \
+  --tenant tenant-a --project project-a --project-name Production \
+  --admin-user-name admin@example.com --admin-email admin@example.com \
+  --hosted-ui-domain-prefix axonllm-123456789012 \
+  --oauth-callback-url https://app.example.com/oauth/callback \
+  --output axonllm-agentcore.json
+
+./deploy-agentcore.sh --config axonllm-agentcore.json --validate-only
+./deploy-agentcore.sh --config axonllm-agentcore.json --bootstrap-cdk
+```
+
+The deployer retains the identity resources, invites the first Cognito
+administrator, deploys the authenticated runtime, and idempotently creates or
+verifies the canonical tenant, project, `tenant_admin`, and project grant. It
+stores no client secret or password. Review the CDK diff before adding `--yes`
+for noninteractive deployment.
+
+The managed client supports only OAuth authorization code. The adopting
+application must send an S256 PKCE challenge and use the returned **ID token**
+as the AgentCore bearer token; that token contains `custom:tenant_id` and
+`custom:project_id`. AxonLLM does not ship an OAuth callback application.
+Existing OIDC setup and the complete production checks are in the
+[AgentCore Runbook](docs/AGENTCORE_RUNBOOK.md#first-adopter-setup).
 
 ### AWS seeded demos
 
@@ -1160,9 +1212,10 @@ claim. Without a tenant hint, principal resolution succeeds only when exactly
 one active membership matches the issuer and subject. Canonical HTTP data-plane
 routes require a non-empty project context and return
 `400 project_context_required` when it is absent; AgentCore requires both tenant
-and project claims. Adjust claim names through `OIDCConfig.claim_mappings` when
-embedding the service; there are no environment variables for custom claim
-names.
+and project claims. Set `AXON_OIDC_TENANT_CLAIM` and
+`AXON_OIDC_PROJECT_CLAIM` when an external provider uses different claim names.
+The AgentCore setup file requires both mappings explicitly. Other mappings
+remain available through `OIDCConfig.claim_mappings` when embedding the service.
 
 > Signature verification needs `python-jose`. Without it the gateway **refuses to
 > decode** rather than trusting an unverified token — so every OIDC request fails
@@ -1942,6 +1995,8 @@ Two more caveats worth knowing before you rely on this layer:
 | `AXON_REQUIRE_CANONICAL_IDENTITY` | `false` (configuration), `true` (container) | Require every credential to resolve to an active server-held tenant principal. Because ordinary startup defaults to the production profile, leaving this false prevents startup |
 | `AXON_OIDC_ISSUER` | — | Exact OIDC token issuer URL; required for direct OIDC and AgentCore |
 | `AXON_OIDC_AUDIENCE` | — | Expected OIDC audience; required for direct OIDC and AgentCore |
+| `AXON_OIDC_TENANT_CLAIM` | `custom:tenant_id` | Signed tenant routing hint; canonical DynamoDB authority remains decisive |
+| `AXON_OIDC_PROJECT_CLAIM` | `custom:project_id` | Signed project routing hint; the principal must still hold the canonical grant |
 | `AXON_ALB_SIGNER_ARN` | — | Exact ARN of the trusted ALB; required when accepting ALB OIDC headers |
 | `AXON_ALB_CLIENT_ID` | — | OIDC client id configured on the trusted ALB listener auth action |
 | `AXON_ALB_ISSUER` | — | Exact regional ALB key issuer, such as `https://public-keys.auth.elb.us-east-1.amazonaws.com` |
@@ -2213,14 +2268,18 @@ The checked-in AgentCore CDK stack provides a JWT authorizer, `Authorization`
 header forwarding, private VPC networking, DynamoDB and Bedrock endpoints,
 concrete Bedrock resource permissions, an immutable private ECR ARM64 image,
 canonical identity, backups, encrypted one-year logs, alarms, and a dashboard.
+`infra/identity_stack.py` optionally provides retained managed Cognito identity;
+`axon setup agentcore` and `deploy-agentcore.sh` feed either that stack or an
+existing OIDC provider into the same AgentCore OIDC contract.
 
 The runtime exposes only `chat`, `list_models`, `health`, and `GET /ready`; it
 does not host the admin console. The stack sets
 `AXON_ENABLED_PROVIDERS=bedrock`, so AgentCore advertises and invokes only
 standard Bedrock model mappings, not Bedrock Mantle or HTTP providers. AgentCore
 Memory is not wired and non-Bedrock provider secrets are not injected. AgentCore
-exposes no bootstrap action, but `axon bootstrap-tenant` can provision its
-DynamoDB table out of band before traffic.
+exposes no bootstrap action. The first-adopter deployer invokes the restartable
+canonical bootstrap out of band against its DynamoDB table before traffic;
+`axon bootstrap-tenant` remains available for manual recovery.
 The release workflow records Fargate and AgentCore as distinct targets in its
 schema-v3 manifest and KMS-signed multi-target SLSA provenance. Deployment
 verification selects `fargate` or `agentcore`, binds the selected private ECR

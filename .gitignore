@@ -102,6 +102,8 @@ Thumbs.db
 infra/cdk.out/
 infra/.venv/
 infra/outputs.json
+.axonllm/
+axonllm-agentcore.json
 
 # Local data
 *.db

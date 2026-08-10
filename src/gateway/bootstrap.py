@@ -183,6 +183,13 @@ def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComp
 
     # --- Auth services ---
     api_key_service = APIKeyService(persistence=persistence)
+    oidc_claim_mappings = OIDCConfig().claim_mappings
+    oidc_claim_mappings.update(
+        {
+            "tenant_id": app_config.oidc_tenant_claim,
+            "project_id": app_config.oidc_project_claim,
+        }
+    )
     oidc_config = OIDCConfig(
         issuer=app_config.oidc_issuer,
         audience=app_config.oidc_audience,
@@ -190,6 +197,7 @@ def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComp
         alb_signer_arn=app_config.alb_signer_arn,
         alb_client_id=app_config.alb_client_id,
         alb_issuer=app_config.alb_issuer,
+        claim_mappings=oidc_claim_mappings,
     )
     oidc_service = OIDCService(config=oidc_config)
     principal_resolver = None

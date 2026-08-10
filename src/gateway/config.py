@@ -152,6 +152,8 @@ class AppConfig:
     load_demo_data: bool = False
     oidc_issuer: str = ""
     oidc_audience: str = ""
+    oidc_tenant_claim: str = "custom:tenant_id"
+    oidc_project_claim: str = "custom:project_id"
     alb_signer_arn: str = ""
     alb_client_id: str = ""
     alb_issuer: str = ""
@@ -172,6 +174,20 @@ class AppConfig:
     semantic_cache_threshold: float | None = None
 
     def __post_init__(self) -> None:
+        for field_name, claim_name in (
+            ("oidc_tenant_claim", self.oidc_tenant_claim),
+            ("oidc_project_claim", self.oidc_project_claim),
+        ):
+            if (
+                not isinstance(claim_name, str)
+                or not claim_name
+                or len(claim_name) > 256
+                or any(character.isspace() for character in claim_name)
+            ):
+                raise ValueError(
+                    f"{field_name} must be a non-empty claim name without "
+                    "whitespace"
+                )
         if self.enabled_providers is not None:
             if not self.enabled_providers:
                 raise ValueError("enabled_providers must not be empty")

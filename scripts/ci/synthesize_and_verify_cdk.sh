@@ -69,4 +69,5 @@ print(f"{target} CDK synthesis verified: zero Docker assets")
 
 verify_target "fargate" "AxonLLMStack"
 verify_target "agentcore" "AxonLLMAgentCoreStack"
+verify_target "identity" "AxonLLMIdentityStack"
 verify_target "release-foundation" "AxonLLMReleaseFoundationStack"

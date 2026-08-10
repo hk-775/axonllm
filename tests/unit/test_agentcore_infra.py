@@ -20,6 +20,8 @@ _REQUIRED_PARAMETERS = {
     "OidcDiscoveryUrl",
     "OidcClientId",
     "OidcAudience",
+    "OidcTenantClaim",
+    "OidcProjectClaim",
     "ApprovedHttpsPrefixListId",
     "BedrockInvokeResourceArns",
     "VerifiedImageUri",
@@ -165,6 +167,8 @@ def test_deployment_inputs_are_required_and_bedrock_arns_are_concrete(
     assert parameters["OidcDiscoveryUrl"]["AllowedPattern"].endswith(
         r"/\.well-known/openid-configuration$"
     )
+    assert parameters["OidcTenantClaim"]["AllowedPattern"] == r"^\S+$"
+    assert parameters["OidcProjectClaim"]["AllowedPattern"] == r"^\S+$"
     assert parameters["ApprovedHttpsPrefixListId"]["AllowedPattern"] == (
         "^pl-[0-9a-fA-F]+$"
     )
@@ -396,6 +400,12 @@ def test_runtime_enforces_jwt_identity_and_bounded_lifecycle(
     assert environment["AXON_LOAD_DEMO_DATA"] == "false"
     assert environment["AXON_OIDC_ISSUER"] == {"Ref": "OidcIssuer"}
     assert environment["AXON_OIDC_AUDIENCE"] == {"Ref": "OidcAudience"}
+    assert environment["AXON_OIDC_TENANT_CLAIM"] == {
+        "Ref": "OidcTenantClaim"
+    }
+    assert environment["AXON_OIDC_PROJECT_CLAIM"] == {
+        "Ref": "OidcProjectClaim"
+    }
     assert environment["AXON_REQUIRE_CANONICAL_IDENTITY"] == "true"
     assert environment["AXON_ENABLED_PROVIDERS"] == "bedrock"
     assert environment["LLM_ROUTER_DYNAMODB_ENABLED"] == "true"

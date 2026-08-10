@@ -67,6 +67,28 @@ class AxonLLMAgentCoreStack(Stack):
             min_length=1,
             description="OIDC audience allowed to invoke the runtime",
         )
+        oidc_tenant_claim = CfnParameter(
+            self,
+            "OidcTenantClaim",
+            type="String",
+            min_length=1,
+            max_length=256,
+            allowed_pattern=r"^\S+$",
+            description=(
+                "Signed OIDC claim containing the AxonLLM tenant hint"
+            ),
+        )
+        oidc_project_claim = CfnParameter(
+            self,
+            "OidcProjectClaim",
+            type="String",
+            min_length=1,
+            max_length=256,
+            allowed_pattern=r"^\S+$",
+            description=(
+                "Signed OIDC claim containing the AxonLLM project hint"
+            ),
+        )
         approved_https_prefix_list_id = CfnParameter(
             self,
             "ApprovedHttpsPrefixListId",
@@ -595,6 +617,12 @@ class AxonLLMAgentCoreStack(Stack):
                 "AXON_LOAD_DEMO_DATA": "false",
                 "AXON_OIDC_ISSUER": oidc_issuer.value_as_string,
                 "AXON_OIDC_AUDIENCE": oidc_audience.value_as_string,
+                "AXON_OIDC_TENANT_CLAIM": (
+                    oidc_tenant_claim.value_as_string
+                ),
+                "AXON_OIDC_PROJECT_CLAIM": (
+                    oidc_project_claim.value_as_string
+                ),
                 "AXON_REQUIRE_CANONICAL_IDENTITY": "true",
                 "AXON_ENABLED_PROVIDERS": "bedrock",
             },

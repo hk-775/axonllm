@@ -46,6 +46,14 @@ elif deployment_target == "agentcore":
         "AxonLLMAgentCoreStack",
         env=environment,
     )
+elif deployment_target == "identity":
+    from identity_stack import AxonLLMIdentityStack
+
+    AxonLLMIdentityStack(
+        app,
+        "AxonLLMIdentityStack",
+        env=environment,
+    )
 elif deployment_target == "release-foundation":
     from release_foundation_stack import AxonLLMReleaseFoundationStack
 
@@ -56,8 +64,8 @@ elif deployment_target == "release-foundation":
     )
 else:
     raise ValueError(
-        "deployment_target must be 'fargate', 'agentcore', or "
-        "'release-foundation'"
+        "deployment_target must be 'fargate', 'agentcore', 'identity', "
+        "or 'release-foundation'"
     )
 
 app.synth()
