@@ -13,9 +13,12 @@ Focused hardening regressions are green locally. The release workflow records
 Fargate and AgentCore as distinct schema-v3 targets, controlled publication
 copies both signed OCI archives to immutable private ECR repositories, and
 deployment verification can select and verify the AgentCore ARM64 target. This
-is not a production certification. Required CI must be green for the exact
-release commit. A real tagged private-ECR/KMS-signature flow for the AgentCore
-digest and a real AWS restore exercise remain externally unverified.
+is not a production certification. `v0.2.4` completed the KMS-backed
+private-ECR publication and current-policy verification flow for the AgentCore
+digest recorded in the
+[production release status](PRODUCTION_RUNBOOK.md#release-status). No hardened
+AgentCore stack is deployed, and a real AWS restore exercise remains
+unverified.
 
 ## Runtime Surface
 
@@ -174,8 +177,8 @@ records, then copies the original OCI archives into the release-foundation
 repositories without rebuilding. It verifies the remote digest and target
 evidence before emitting the immutable image references. Deploy only the
 AgentCore reference that subsequently passes `deploy-verification.yml`. The
-first real tagged private-ECR/KMS-signature execution remains externally
-unverified.
+`v0.2.4` AgentCore reference completed this flow; repeat it for every promoted
+release and retain the evidence.
 
 ## CDK Setup
 

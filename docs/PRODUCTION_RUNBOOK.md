@@ -13,9 +13,25 @@ Focused hardening regressions are green locally. Release evidence uses
 schema-v3 with distinct Fargate and AgentCore targets. Controlled publication
 copies both signed OCI archives into retained immutable private ECR
 repositories, and deployment verification selects and verifies either target.
-This is not a release certification. Obtain green required CI for the exact
-commit, then execute and retain the real tagged private-ECR/KMS-signature flow
-for the selected image digest.
+
+`v0.2.4` is the first completed KMS-backed release. Release evidence
+[run 31434900128](https://github.com/AxonLLM/axonllm/actions/runs/31434900128)
+and publication
+[run 31435171504](https://github.com/AxonLLM/axonllm/actions/runs/31435171504)
+succeeded for commit `2dcee34619b22a8288d734993eb3005757bda52c`.
+Current-policy verification also succeeded for
+[Fargate](https://github.com/AxonLLM/axonllm/actions/runs/31435684849) and
+[AgentCore](https://github.com/AxonLLM/axonllm/actions/runs/31435686001).
+The published target digests are:
+
+- Fargate:
+  `sha256:b0e6e063c1851c2f19a86a16e7c012c3fe926402fb75f3b5d43e5fa3845c91b2`
+- AgentCore:
+  `sha256:e368b7b4522f4838f3ebb4dcc04967682c73cb73e7e40ce16421a6a1ffda6147`
+
+The GitHub evidence artifact expires on 2026-11-08; retain it in the approved
+evidence system or produce a newer release before relying on it. These runs
+validate the release supply chain, not a runtime deployment.
 
 The immutable `v0.2.2` and `v0.2.3` tags are not promotable. For `v0.2.2`,
 GitHub rejected attestation persistence for the private organization plan
@@ -23,13 +39,49 @@ before any evidence artifact was uploaded. For `v0.2.3`, every build, scan, and
 schema-v3 self-check passed, but AWS rejected the legacy name-only OIDC trust
 subject before signing; no signatures or evidence artifact were created. The
 immutable-ID trust fix merged after that tag. Do not move or reuse either tag;
-the first eligible KMS-backed release is `v0.2.4`.
+the first successful KMS-backed release is `v0.2.4`.
 
 The operational workflow implements daily recovery metadata audits and a
 monthly temporary-table PITR exercise with separate audit and recovery roles.
 A real AWS restore exercise has not yet been externally verified. Configure the
 production roles and both target KMS keys, run the exercise in AWS, and retain
 recovery and application-cutover evidence before promotion.
+
+A read-only target-account audit on 2026-08-10 found no promotable AxonLLM
+runtime. The Fargate service is a stopped legacy/demo deployment with a public
+HTTP origin, mutable CDK asset image, open task egress, noncanonical runtime
+settings, and no hardened backup or customer-managed data-key posture. The
+current state table has PITR but lacks deletion protection, customer-managed
+encryption, TTL, an AWS Backup vault, and recovery points. The legacy provider
+secret lacks customer-managed encryption and rotation.
+
+The hardened AgentCore stack and state table are absent. An older public
+AgentCore runtime exists outside the stack, but it has no JWT authorizer, uses
+an S3 code bundle rather than the signed image, enables non-tenant-isolated
+memory, and has broad runtime permissions. Do not run release canaries against
+either legacy target or treat them as rollback environments.
+
+The account also lacks the production DNS zone, ACM certificates, approved
+HTTPS prefix list, dedicated OIDC configuration, and confirmed alarm/event
+subscribers. The protected GitHub `production` environment lacks both target
+data-key variables because the hardened stacks have not produced those keys.
+Until those prerequisites are supplied and a reviewed deployment is complete,
+restore/cutover, authenticated RBAC, load, security-event, and multi-replica
+canaries remain blocked.
+
+For the audited Fargate stack, synthesize with the existing physical table name
+as `-c table_name=...`. The 2026-08-10 synthesis preserved the table's
+CloudFormation logical identity and applied encryption, TTL, deletion
+protection, and backup controls as updates. Review the real change set before
+deployment and abort if it proposes replacing or deleting the state table or
+provider secret.
+
+The private-repository GitHub plan currently rejects rulesets and required
+environment reviewers, and the repository has only one administrator. This is
+workable for a single-maintainer preproduction flow, but it is not independent
+enterprise separation of duties. Upgrade the plan and add an independent
+release approver before granting write access to additional maintainers or
+claiming multi-writer release governance.
 
 ## Operating Modes
 
@@ -487,9 +539,9 @@ artifact hashes to a public transparency log.
 Never deploy a mutable tag or bypass a failing CI/evidence check. Record the
 commit, release tag, workflow run, ECR URI and digest, SBOMs, scan results,
 KMS signature verification, selected target, approvals, and canary results. The
-workflows publish and verify images but do not deploy either runtime. A real
-tagged private-ECR/KMS-signature execution remains externally unverified until
-its workflow evidence is retained.
+workflows publish and verify images but do not deploy either runtime. `v0.2.4`
+has retained KMS/private-ECR workflow evidence as listed in
+[Release Status](#release-status); repeat that flow for every promoted release.
 
 ## Readiness And Traffic Shift
 

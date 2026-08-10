@@ -49,10 +49,11 @@ listing, liveness, dependency readiness, canonical identity, private networking,
 backup, and monitoring. Canonical SCIM convergence, schema-v3 evidence for both
 image targets, and target-aware Fargate/AgentCore deployment verification are
 implemented. Focused hardening regressions are green locally, but promotion
-still requires green CI for the exact release commit. The first real tagged
-private-ECR/KMS-signature flow for a deployed digest and the first real AWS
-restore exercise remain externally unverified, so the implementation is not
-itself a production certification.
+still requires green CI for the exact release commit. `v0.2.4` completed the
+tagged private-ECR/KMS-signature flow for both image targets. No hardened
+runtime deployment, real AWS restore exercise, or application recovery
+rehearsal has been verified, so the implementation is not itself a production
+certification.
 
 ---
 
@@ -1316,9 +1317,9 @@ call. With no URL and no registered sink, the forwarder is inert.
 - [x] Schema-v3 release evidence and target-aware deployment verification for
       Fargate and AgentCore image identities, with exact manifest key ARNs
       constrained by account-scoped retained signing-key version aliases
-- [ ] Obtain and retain a green required CI run for the exact release commit
-- [ ] Execute and retain a real tagged private-ECR/KMS-signature verification flow
-      for each deployment target
+- [x] Obtain and retain green required CI for the `v0.2.4` release commit
+- [x] Execute and retain the `v0.2.4` tagged
+      private-ECR/KMS-signature verification flow for each deployment target
 - [ ] Execute and retain the first real AWS restore exercise and application
       recovery rehearsal
 - [ ] Process-level containment or an async/cancellable replacement for a

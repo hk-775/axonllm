@@ -100,9 +100,10 @@ currently persist conversation memory. A future memory implementation must
 namespace state by canonical tenant, principal, project, and an opaque
 server-controlled session identifier.
 
-**Repository controls are not deployment certification.** The first real tagged
-private-ECR/Sigstore execution, target-account restore exercise, and application
-cutover rehearsal remain external release evidence. See
+**Repository controls are not deployment certification.** `v0.2.4` completed
+the private-ECR/KMS release flow for both image targets, but a hardened runtime
+deployment, target-account restore exercise, and application cutover rehearsal
+remain external release evidence. See
 [ENTERPRISE_HARDENING.md](ENTERPRISE_HARDENING.md),
 [the production runbook](docs/PRODUCTION_RUNBOOK.md), and
 [the AgentCore runbook](docs/AGENTCORE_RUNBOOK.md).
