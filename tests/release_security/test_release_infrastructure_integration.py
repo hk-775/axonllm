@@ -208,6 +208,11 @@ def test_deployment_gate_selects_only_signed_target_identity() -> None:
     assert '[[ "${tag_sha}" == "${EXPECTED_COMMIT}" ]]' in workflow
     assert "gh attestation verify" not in workflow
     assert "--verify-remote" in workflow
+    assert (
+        "VERIFIED_PLATFORM: ${{ steps.evidence.outputs.platform }}"
+        in workflow
+    )
+    assert '--platform "${VERIFIED_PLATFORM}"' in workflow
     assert "VERIFIED_TARGET: ${{ steps.evidence.outputs.target }}" in workflow
 
 
