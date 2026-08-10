@@ -40,10 +40,10 @@ digests. See the
 [production release record](docs/PRODUCTION_RUNBOOK.md#release-status).
 
 This is not production certification. A 2026-08-10 target-account audit found
-only stopped or legacy Fargate and AgentCore resources, not either hardened
-stack. Promotion still requires target-account prerequisites, deployment of a
-verified digest, authenticated canaries, alarm/event delivery, and retained
-restore, cutover, rollback, and load evidence.
+a stopped legacy Fargate deployment and no AxonLLM AgentCore stack. Promotion
+still requires target-account prerequisites, deployment of a verified digest,
+authenticated canaries, alarm/event delivery, and retained restore, cutover,
+rollback, and load evidence.
 
 ## Production Contract
 

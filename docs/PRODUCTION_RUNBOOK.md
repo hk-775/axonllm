@@ -55,11 +55,9 @@ current state table has PITR but lacks deletion protection, customer-managed
 encryption, TTL, an AWS Backup vault, and recovery points. The legacy provider
 secret lacks customer-managed encryption and rotation.
 
-The hardened AgentCore stack and state table are absent. An older public
-AgentCore runtime exists outside the stack, but it has no JWT authorizer, uses
-an S3 code bundle rather than the signed image, enables non-tenant-isolated
-memory, and has broad runtime permissions. Do not run release canaries against
-either legacy target or treat them as rollback environments.
+The hardened AgentCore stack and state table are absent, so there is no
+deployed AxonLLM AgentCore target on which to run release canaries, recovery
+validation, or rollback checks.
 
 The account also lacks the production DNS zone, ACM certificates, approved
 HTTPS prefix list, dedicated OIDC configuration, and confirmed alarm/event
