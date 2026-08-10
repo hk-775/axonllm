@@ -314,13 +314,19 @@ class AxonLLMAgentCoreStack(Stack):
                 resources=["*"],
             )
         )
+        state_table_name = (
+            self.node.try_get_context("agentcore_table_name")
+            or "axonllm-agentcore-state"
+        )
+        if len(state_table_name) > 214:
+            raise ValueError(
+                "AgentCore state table name must be at most 214 characters "
+                "to preserve the PITR validation suffix"
+            )
         state_table = dynamodb.Table(
             self,
             "StateTable",
-            table_name=(
-                self.node.try_get_context("agentcore_table_name")
-                or "axonllm-agentcore-state"
-            ),
+            table_name=state_table_name,
             partition_key=dynamodb.Attribute(
                 name="PK",
                 type=dynamodb.AttributeType.STRING,
@@ -506,6 +512,10 @@ class AxonLLMAgentCoreStack(Stack):
                 ],
             ),
             encryption_key=backup_key,
+            lock_configuration=backup.LockConfiguration(
+                min_retention=Duration.days(30),
+                max_retention=Duration.days(365),
+            ),
             removal_policy=RemovalPolicy.RETAIN,
         )
         backup_plan = backup.BackupPlan(
@@ -811,6 +821,11 @@ class AxonLLMAgentCoreStack(Stack):
             self,
             "StateTableName",
             value=state_table.table_name,
+        )
+        CfnOutput(
+            self,
+            "DataKeyArn",
+            value=data_key.key_arn,
         )
         CfnOutput(
             self,

@@ -779,10 +779,10 @@ already-enforcing gateway, mint the key first and pass it here.
 > written `uv run axon`, which works from the repo root without activating
 > anything. If you would rather type `axon`, `source .venv/bin/activate` first.
 
-### 3. Issue API keys (and the one flag that matters)
+### 3. Bootstrap identity and issue API keys
 
-The CLI examples below create legacy/single-user keys because the CLI has no
-tenant bootstrap contract:
+For a legacy/single-trust-domain deployment, issue project-scoped compatibility
+keys directly:
 
 ```bash
 # A key for calling the gateway
@@ -804,6 +804,41 @@ reach any `/admin/*` endpoint under `ENFORCE` — verified:
 
 So **issue at least one `admin:*` key before switching to `ENFORCE`**, or the
 admin API becomes unreachable and you have to fall back to the CLI.
+
+For canonical multi-tenant mode, point the CLI at the production table and
+bootstrap the first tenant administrator before traffic:
+
+```bash
+LLM_ROUTER_DYNAMODB_ENABLED=true AXON_DYNAMODB_TABLE=axonllm-state \
+AWS_DEFAULT_REGION=us-east-1 \
+  uv run axon bootstrap-tenant \
+    --tenant tenant-a \
+    --project project-a \
+    --project-name Production \
+    --issuer https://idp.example.com/oauth2/default \
+    --subject 00u-admin-subject \
+    --user-name admin@example.com \
+    --display-name "Tenant A Admin"
+```
+
+This restartable command conditionally creates or verifies the tenant project
+and SCIM user, grants membership through the canonical transaction, and
+strongly verifies the active `tenant_admin` principal and project grant. It
+refuses to reuse a user name bound to a different issuer or subject.
+
+Issue a canonical service key with tenant-qualified persistence:
+
+```bash
+LLM_ROUTER_DYNAMODB_ENABLED=true AXON_DYNAMODB_TABLE=axonllm-state \
+AWS_DEFAULT_REGION=us-east-1 \
+  uv run axon issue-key \
+    --tenant tenant-a \
+    --project project-a \
+    --name production-service
+```
+
+Its default scopes are `model.list`, `inference.invoke`, and `query.select`.
+Canonical service keys reject all legacy `admin:` scopes.
 
 Keys are stored as SHA-256 hashes; **the raw value is returned once and never
 persisted.** There is no "show key again" — rotate instead (`POST
@@ -1207,8 +1242,10 @@ Canonical SCIM rows share `PK=TENANT#{tenant_id}` and use
 and advance the tenant version. Replicas read that version and the tenant
 snapshot with strongly consistent DynamoDB operations, then reload only the
 changed tenant. Canonical startup validates this persistence contract. The
-Fargate stack does not inject `AXON_SCIM_TENANTS`; add reviewed secret delivery
-when SCIM provisioning is part of the deployment.
+Fargate stack can inject `AXON_SCIM_TENANTS` from Secrets Manager: store the
+complete JSON map in one secret and pass its complete ARN as
+`AXON_SCIM_TENANTS_SECRET_ARN`. The credential JSON is not placed in the task
+definition.
 
 ### Putting it together — a minimal production config
 
@@ -1232,10 +1269,10 @@ AXON_OIDC_AUDIENCE=api://axonllm
 AXON_SCIM_TENANTS='{"tenant-a":{"issuer":"https://your-tenant.okta.com/oauth2/default","token":"<random-secret>"}}'
 ```
 
-This is a posture template, not a bootstrap procedure. Provision canonical
-tenant, project, principal, membership, role, grant, and service-scope rows
-before enabling it. The repository has no supported principal-bootstrap command,
-and existing legacy records are not migrated automatically.
+This is a posture template, not a migration procedure. Run
+`axon bootstrap-tenant` against the runtime table before enabling traffic, then
+use `axon issue-key --tenant ...` for service principals. Existing legacy
+records are not migrated automatically.
 
 Then confirm it rather than trusting it: **`GET /admin/production-checklist`**
 checks exactly the states that serve traffic without complaining — unpriced
@@ -2152,6 +2189,7 @@ release commit.
 - An ALB `/ready` gate for enabled DynamoDB and security-event outbox
   reachability
 - KMS-encrypted DynamoDB with deletion protection, PITR, and daily AWS Backup
+- Governance-mode Backup Vault Lock with 30-365 day retention
 - KMS-encrypted FIFO security-event outbox/DLQ, managed SNS/Logs sinks, and
   private SQS/SNS/Logs endpoints
 - Secrets Manager, alarms, and an operations dashboard
@@ -2160,8 +2198,12 @@ release commit.
 - CloudWatch Container Insights
 
 `deploy-fargate.sh` requires `AXON_VERIFIED_IMAGE_URI` and
-`AXON_BEDROCK_INVOKE_RESOURCE_ARNS`, but does not select production mode or
-supply its OIDC identity parameters. Use the direct CDK template in the
+`AXON_BEDROCK_INVOKE_RESOURCE_ARNS` and defaults to staging. Set
+`AXON_DEPLOYMENT_MODE=production` plus the required `AXON_OIDC_*` inputs for a
+production deployment. The wrapper also accepts a SCIM credential secret ARN,
+paired hosted-zone inputs, and the reviewed Fargate recovery-table selection.
+Set `AXON_RECOVERY_CUTOVER_MODE=true` only while a quiesced table switch is
+being deployed, then clear it after validation. See the complete contract in the
 [Production Runbook](docs/PRODUCTION_RUNBOOK.md#fargate-deployment).
 Staging mode is for an isolated trust domain; production mode is subject to the
 release, identity-bootstrap, canary, and recovery gates in that runbook.
@@ -2177,8 +2219,9 @@ The runtime exposes only `chat`, `list_models`, `health`, and `GET /ready`; it
 does not host the admin console. The stack sets
 `AXON_ENABLED_PROVIDERS=bedrock`, so AgentCore advertises and invokes only
 standard Bedrock model mappings, not Bedrock Mantle or HTTP providers. AgentCore
-Memory is not wired, non-Bedrock provider secrets are not injected, and no
-principal-bootstrap command ships.
+Memory is not wired and non-Bedrock provider secrets are not injected. AgentCore
+exposes no bootstrap action, but `axon bootstrap-tenant` can provision its
+DynamoDB table out of band before traffic.
 The release workflow records Fargate and AgentCore as distinct targets in its
 schema-v2 manifest and attests both image digests. Deployment verification
 selects `fargate` or `agentcore`, binds the selected private ECR digest to its
@@ -2233,6 +2276,11 @@ state or rebuild the image after configuration changes.
 Do not use a green liveness probe as the release gate. Run
 `/admin/production-checklist`, resolve every `FAIL`, investigate every
 `UNKNOWN`, and exercise authenticated positive and negative tenant canaries.
+Use `scripts/operations/run_production_validation.py` for the required RBAC
+categories and bodyless read load, and use
+`scripts/operations/fargate_recovery.py status --minimum-healthy-targets 2` to
+prove a Fargate service has at least two healthy ALB targets. This combination
+does not identify which task served each request.
 Require green CI and schema-v2 target-aware release evidence for the exact
 deployed digest. The first real tagged private-ECR/Sigstore flow and a real AWS
 restore exercise remain externally unverified.

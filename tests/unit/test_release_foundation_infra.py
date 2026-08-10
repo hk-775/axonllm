@@ -43,6 +43,17 @@ def _actions(statement: dict) -> set[str]:
     return set(actions)
 
 
+def _literal_parts(value: object) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict) and set(value) == {"Fn::Join"}:
+        separator, parts = value["Fn::Join"]
+        return separator.join(
+            part for part in parts if isinstance(part, str)
+        )
+    return ""
+
+
 @pytest.fixture(scope="module")
 def synthesized_template(tmp_path_factory: pytest.TempPathFactory) -> dict:
     if not _INFRA_PYTHON.is_file():
@@ -122,6 +133,26 @@ def test_registry_key_rotates_and_is_retained(synthesized_template):
     )
 
 
+def test_operations_table_names_are_explicit_parameters(
+    synthesized_template,
+):
+    parameters = synthesized_template["Parameters"]
+    assert parameters["FargateStateTableName"] == {
+        "Type": "String",
+        "Default": "axonllm-state",
+        "AllowedPattern": "^[A-Za-z0-9_.-]{3,214}$",
+        "Description": "Physical state table name used by AxonLLMStack",
+    }
+    assert parameters["AgentCoreStateTableName"] == {
+        "Type": "String",
+        "Default": "axonllm-agentcore-state",
+        "AllowedPattern": "^[A-Za-z0-9_.-]{3,214}$",
+        "Description": (
+            "Physical state table name used by AxonLLMAgentCoreStack"
+        ),
+    }
+
+
 def test_github_oidc_trust_is_exact_and_retained(synthesized_template):
     providers = _resources(
         synthesized_template,
@@ -137,12 +168,23 @@ def test_github_oidc_trust_is_exact_and_retained(synthesized_template):
     assert provider["UpdateReplacePolicy"] == "Retain"
 
     roles = _resources(synthesized_template, "AWS::IAM::Role")
-    assert len(roles) == 2
+    assert len(roles) == 4
     assert {
         role["Properties"]["RoleName"] for role in roles
-    } == {"AxonLLMReleasePublisher", "AxonLLMReleaseVerifier"}
+    } == {
+        "AxonLLMOperationsAudit",
+        "AxonLLMOperationsRecovery",
+        "AxonLLMReleasePublisher",
+        "AxonLLMReleaseVerifier",
+    }
     for role in roles:
-        assert role["Properties"]["MaxSessionDuration"] == 3600
+        expected_duration = (
+            7200
+            if role["Properties"]["RoleName"]
+            == "AxonLLMOperationsRecovery"
+            else 3600
+        )
+        assert role["Properties"]["MaxSessionDuration"] == expected_duration
         statements = role["Properties"][
             "AssumeRolePolicyDocument"
         ]["Statement"]
@@ -168,7 +210,7 @@ def test_publisher_and_verifier_permissions_are_separate(
     synthesized_template,
 ):
     policies = _resources(synthesized_template, "AWS::IAM::Policy")
-    assert len(policies) == 2
+    assert len(policies) == 4
     by_role: dict[str, list[dict]] = {}
     for policy in policies:
         role = policy["Properties"]["Roles"][0]["Ref"]
@@ -203,6 +245,163 @@ def test_publisher_and_verifier_permissions_are_separate(
     assert "ecr:GetAuthorizationToken" in verifier_actions
 
 
+def test_operations_roles_separate_metadata_audit_from_recovery(
+    synthesized_template,
+):
+    policies = _resources(synthesized_template, "AWS::IAM::Policy")
+    by_role: dict[str, list[dict]] = {}
+    for policy in policies:
+        role = policy["Properties"]["Roles"][0]["Ref"]
+        by_role[role] = policy["Properties"]["PolicyDocument"]["Statement"]
+
+    audit = next(
+        statements
+        for role, statements in by_role.items()
+        if "OperationsAuditRole" in role
+    )
+    recovery = next(
+        statements
+        for role, statements in by_role.items()
+        if "OperationsRecoveryRole" in role
+    )
+    audit_actions = {
+        action for statement in audit for action in _actions(statement)
+    }
+    recovery_actions = {
+        action for statement in recovery for action in _actions(statement)
+    }
+
+    assert {
+        "dynamodb:DescribeContinuousBackups",
+        "dynamodb:DescribeTable",
+        "kms:DescribeKey",
+        "kms:GetKeyRotationStatus",
+        "secretsmanager:DescribeSecret",
+        "secretsmanager:ListSecretVersionIds",
+    } <= audit_actions
+    assert not any(
+        action.startswith("dynamodb:")
+        and action
+        not in {
+            "dynamodb:DescribeContinuousBackups",
+            "dynamodb:DescribeTable",
+        }
+        for action in audit_actions
+    )
+    assert "kms:Decrypt" not in audit_actions
+    assert "secretsmanager:GetSecretValue" not in audit_actions
+    audit_key_statement = next(
+        statement
+        for statement in audit
+        if statement.get("Sid") == "InspectDataKeyRotation"
+    )
+    assert audit_key_statement["Condition"][
+        "ForAnyValue:StringEquals"
+    ]["kms:ResourceAliases"] == [
+        "alias/axonllm/data",
+        "alias/axonllm/agentcore-data",
+    ]
+    audit_resources = [
+        resource
+        for statement in audit
+        for resource in (
+            statement["Resource"]
+            if isinstance(statement["Resource"], list)
+            else [statement["Resource"]]
+        )
+    ]
+    audit_resource_literals = [
+        _literal_parts(resource) for resource in audit_resources
+    ]
+    assert any(
+        resource.endswith(":secret:AxonLLMStack-*")
+        for resource in audit_resource_literals
+    )
+    assert any(
+        resource.endswith(":backup-vault:axon-state-*")
+        for resource in audit_resource_literals
+    )
+    assert not any(
+        ":secret/" in resource or ":backup-vault/" in resource
+        for resource in audit_resource_literals
+    )
+    assert "dynamodb:RestoreTableToPointInTime" in recovery_actions
+    assert "dynamodb:DeleteTable" in recovery_actions
+    assert "kms:Decrypt" in recovery_actions
+    assert "kms:CreateGrant" in recovery_actions
+    assert not any(
+        action.startswith("secretsmanager:")
+        for action in recovery_actions
+    )
+    restored_table_statement = next(
+        statement
+        for statement in recovery
+        if statement.get("Sid") == "ValidateAndRemoveRestoredState"
+    )
+    assert _actions(restored_table_statement) == {
+        "dynamodb:DeleteTable",
+        "dynamodb:DescribeContinuousBackups",
+        "dynamodb:DescribeTable",
+        "dynamodb:DescribeTimeToLive",
+        "dynamodb:RestoreTableToPointInTime",
+        "dynamodb:Scan",
+        "dynamodb:UpdateContinuousBackups",
+        "dynamodb:UpdateTable",
+        "dynamodb:UpdateTimeToLive",
+    }
+
+    recovery_resources = [
+        resource
+        for statement in recovery
+        for resource in (
+            [statement["Resource"]]
+            if not isinstance(statement["Resource"], list)
+            else statement["Resource"]
+        )
+    ]
+    assert "*" not in recovery_resources
+    restored_resources = restored_table_statement["Resource"]
+    assert len(restored_resources) == 2
+    restored_table_parameters = set()
+    for resource in restored_resources:
+        parts = resource["Fn::Join"][1]
+        assert parts[-1] == "-restore-validation-*"
+        restored_table_parameters.add(parts[-2]["Ref"])
+    assert restored_table_parameters == {
+        "FargateStateTableName",
+        "AgentCoreStateTableName",
+    }
+
+    key_statements = [
+        statement
+        for statement in recovery
+        if any(action.startswith("kms:") for action in _actions(statement))
+    ]
+    assert key_statements
+    for statement in key_statements:
+        assert _literal_parts(statement["Resource"]).endswith(":key/*")
+        assert statement["Condition"]["ForAnyValue:StringEquals"][
+            "kms:ResourceAliases"
+        ] == [
+            "alias/axonllm/data",
+            "alias/axonllm/agentcore-data",
+        ]
+        assert statement["Condition"]["StringEquals"][
+            "kms:CallerAccount"
+        ] == {"Ref": "AWS::AccountId"}
+        assert statement["Condition"]["StringEquals"][
+            "kms:ViaService"
+        ] == {
+            "Fn::Join": [
+                "",
+                [
+                    "dynamodb.us-east-1.",
+                    {"Ref": "AWS::URLSuffix"},
+                ],
+            ]
+        }
+
+
 def test_repository_policy_denies_insecure_transport(
     synthesized_template,
 ):
@@ -233,6 +432,8 @@ def test_foundation_outputs_all_operator_inputs(synthesized_template):
         "AgentCoreRepositoryUri",
         "FargateRepositoryUri",
         "GitHubOidcProviderArn",
+        "OperationsAuditRoleArn",
+        "OperationsRecoveryRoleArn",
         "ReleasePublisherRoleArn",
         "ReleaseRegistryKeyArn",
         "ReleaseVerifierRoleArn",

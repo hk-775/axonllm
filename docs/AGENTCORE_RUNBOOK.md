@@ -56,9 +56,26 @@ Canonical roles are authoritative: tenant viewers cannot elevate through legacy
 admin roles/scopes, canonical services gain no control-plane authority from
 `admin:*`, and canonical key issuance rejects legacy admin scopes.
 
-The repository has no principal bootstrap CLI. Provision canonical tenants,
-projects, principals, memberships, grants, and service scopes before traffic.
-After a canonical SCIM user and principal exist, the HTTP admin project-member
+AgentCore exposes no bootstrap action. Provision the first administrator out of
+band with the repository CLI against the AgentCore table before traffic:
+
+```bash
+LLM_ROUTER_DYNAMODB_ENABLED=true \
+AXON_DYNAMODB_TABLE=axonllm-agentcore-state \
+AWS_DEFAULT_REGION=us-east-1 \
+uv run axon bootstrap-tenant \
+  --tenant tenant-a \
+  --project project-a \
+  --project-name Production \
+  --issuer "$OIDC_ISSUER" \
+  --subject "$ADMIN_SUBJECT" \
+  --user-name "$ADMIN_USER_NAME"
+```
+
+The restartable command conditionally creates or verifies the project and
+SCIM-backed administrator, grants canonical membership, and strongly verifies
+the active `tenant_admin` principal and project grant. After bootstrap, the
+HTTP admin project-member
 routes atomically synchronize `Project.members`, `ScimUser.project_ids`,
 authoritative `Principal.project_ids`, authorization versions, and the tenant
 SCIM version. Members are stored as `scim:<id>`; canonical create/PUT bulk
@@ -81,7 +98,8 @@ The AgentCore stack provides:
 - a private regional ECR image identified by `@sha256`;
 - canonical identity and enforced authentication;
 - a KMS-encrypted DynamoDB table with deletion protection and PITR;
-- daily AWS Backup at 05:30 UTC, 30-day cold transition, and 365-day deletion;
+- daily AWS Backup at 05:30 UTC, 30-day cold transition, 365-day deletion, and
+  governance-mode Vault Lock enforcing 30-365 day retention;
 - a KMS-encrypted FIFO security-event outbox and DLQ retained for 14 days;
 - a managed encrypted FIFO SNS event topic and retained encrypted CloudWatch
   event log group;
@@ -222,10 +240,14 @@ The scheduled operations workflow audits both Fargate and AgentCore daily and
 exercises PITR for both targets monthly. In the protected GitHub `production`
 environment, set `AXON_AGENTCORE_DATA_KMS_KEY_ARN` to the ARN of the AgentCore
 data key (the key behind `alias/axonllm/agentcore-data`); the audit and recovery
-job matrices both require it. Vault Lock is external to both stacks. A restore
-exercise validates a temporary table; there is no automated AgentCore cutover
-to that table. The first real AgentCore AWS restore exercise and application
-cutover rehearsal remain externally unverified.
+job matrices both require it. The stack configures governance-mode Vault Lock
+with 30-365 day retention. A restore exercise validates a temporary table and
+the workflow retains its JSON result as a 90-day evidence artifact.
+
+There is no AgentCore restored-table runtime parameter, quiescence guard, or
+application cutover workflow. `retain_fargate_restore` applies only to Fargate;
+do not use the Fargate recovery helper or claim AgentCore cutover. The first real
+AgentCore AWS restore exercise remains externally unverified.
 
 Use the incident and key-rotation procedure in the
 [Production Runbook](PRODUCTION_RUNBOOK.md#rotation-and-incident-response).

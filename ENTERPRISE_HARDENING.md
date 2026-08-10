@@ -207,7 +207,13 @@ exact commit, release tag, workflow run, target, and Sigstore bundle before a
 fresh image scan.
 
 The release-foundation stack creates retained KMS-encrypted immutable ECR
-repositories plus separate GitHub OIDC publisher and verifier roles. The
+repositories plus separate GitHub OIDC publisher, verifier, metadata-audit, and
+PITR-recovery roles. Audit cannot read secret values or restore data; recovery
+cannot read secrets and is limited to the two state tables and their temporary
+restore-validation namespaces. Fargate recovery cutover uses an exact selected
+table policy and fails deployment unless autoscaling and every old task are
+quiesced; cutover mode pins the declared task count to zero until validation,
+and its alarms and backup selection follow the selected table. The
 protected publication workflow copies the original signed OCI archives without
 rebuilding, validates fixed destinations, and verifies both remote digests and
 attestations. No workflow deploys a runtime automatically; deploy only the

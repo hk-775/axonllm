@@ -87,8 +87,10 @@ class TestTheTaskDefinitionEnvironment:
         """
         assert isinstance(env["LLM_ROUTER_DYNAMODB_ENABLED"], ast.Constant)
         assert env["LLM_ROUTER_DYNAMODB_ENABLED"].value == "true"
-        assert isinstance(env["AXON_DYNAMODB_TABLE"], ast.Attribute)
-        assert env["AXON_DYNAMODB_TABLE"].attr == "table_name"
+        assert isinstance(env["AXON_DYNAMODB_TABLE"], ast.Name)
+        assert env["AXON_DYNAMODB_TABLE"].id == (
+            "selected_state_table_name"
+        )
 
     def test_the_port_matches_the_container_port(self, env):
         """`AXON_SERVER_PORT` is what uvicorn binds; `container_port` is what the
@@ -154,6 +156,14 @@ class TestTheResourcesTheDocsAddressByName:
         source = _STACK.read_text(encoding="utf-8")
         assert '"ProviderSecretArn"' in source
         assert "value=api_keys_secret.secret_arn" in source
+
+    def test_scim_credentials_use_an_optional_exact_secret_arn(self):
+        source = _STACK.read_text(encoding="utf-8")
+
+        assert 'try_get_context("scim_tenants_secret_arn")' in source
+        assert "Secret.from_secret_complete_arn" in source
+        assert 'container_secrets["AXON_SCIM_TENANTS"]' in source
+        assert '"ScimTenantsSecretArn"' in source
 
     def test_the_table_name_defaults_to_the_documented_one_but_is_overridable(self):
         """`axonllm-state` stays the default, and `-c table_name=` can replace it.

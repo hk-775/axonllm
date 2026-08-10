@@ -91,6 +91,43 @@ def _verify_table(table: dict[str, Any]) -> None:
         raise RecoveryValidationError("DynamoDB state table key schema is unexpected")
 
 
+def _vault_lock_posture(
+    vault: dict[str, Any],
+    *,
+    required: bool,
+) -> dict[str, Any]:
+    locked = vault.get("Locked") is True
+    lock_date = vault.get("LockDate")
+    minimum = vault.get("MinRetentionDays")
+    maximum = vault.get("MaxRetentionDays")
+    mode = (
+        "UNLOCKED"
+        if not locked
+        else "COMPLIANCE"
+        if lock_date is not None
+        else "GOVERNANCE"
+    )
+    if required:
+        if not locked:
+            raise RecoveryValidationError(
+                "AWS Backup Vault Lock is not enabled"
+            )
+        if minimum != 30 or maximum != 365:
+            raise RecoveryValidationError(
+                "AWS Backup Vault Lock must enforce 30-365 day retention"
+            )
+        if mode != "GOVERNANCE":
+            raise RecoveryValidationError(
+                "AWS Backup Vault Lock must remain in governance mode"
+            )
+    return {
+        "locked": locked,
+        "mode": mode,
+        "minRetentionDays": minimum,
+        "maxRetentionDays": maximum,
+    }
+
+
 def _wait_for_active_table(
     aws: AwsCli,
     table_name: str,
@@ -123,6 +160,128 @@ def _wait_for_active_table(
     raise RecoveryValidationError(f"table {table_name} did not reach {expected} in time")
 
 
+def _wait_for_continuous_backups(
+    aws: AwsCli,
+    table_name: str,
+    *,
+    poll_interval: float,
+    timeout_seconds: int,
+    sleep: Callable[[float], None],
+) -> None:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        description = aws.json(
+            "dynamodb",
+            "describe-continuous-backups",
+            "--table-name",
+            table_name,
+        ).get("ContinuousBackupsDescription", {})
+        pitr = description.get("PointInTimeRecoveryDescription", {})
+        if pitr.get("PointInTimeRecoveryStatus") == "ENABLED":
+            return
+        sleep(poll_interval)
+    raise RecoveryValidationError(
+        f"table {table_name} did not enable point-in-time recovery"
+    )
+
+
+def _wait_for_ttl(
+    aws: AwsCli,
+    table_name: str,
+    *,
+    poll_interval: float,
+    timeout_seconds: int,
+    sleep: Callable[[float], None],
+) -> None:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        description = aws.json(
+            "dynamodb",
+            "describe-time-to-live",
+            "--table-name",
+            table_name,
+        ).get("TimeToLiveDescription", {})
+        if (
+            description.get("TimeToLiveStatus") == "ENABLED"
+            and description.get("AttributeName") == "expires_at"
+        ):
+            return
+        sleep(poll_interval)
+    raise RecoveryValidationError(
+        f"table {table_name} did not enable expires_at TTL"
+    )
+
+
+def _protect_retained_restore(
+    aws: AwsCli,
+    table_name: str,
+    *,
+    poll_interval: float,
+    timeout_seconds: int,
+    sleep: Callable[[float], None],
+) -> None:
+    aws.json(
+        "dynamodb",
+        "update-continuous-backups",
+        "--table-name",
+        table_name,
+        "--point-in-time-recovery-specification",
+        "PointInTimeRecoveryEnabled=true",
+    )
+    _wait_for_continuous_backups(
+        aws,
+        table_name,
+        poll_interval=poll_interval,
+        timeout_seconds=timeout_seconds,
+        sleep=sleep,
+    )
+    ttl = aws.json(
+        "dynamodb",
+        "describe-time-to-live",
+        "--table-name",
+        table_name,
+    ).get("TimeToLiveDescription", {})
+    ttl_status = ttl.get("TimeToLiveStatus")
+    if (
+        ttl_status == "ENABLED"
+        and ttl.get("AttributeName") != "expires_at"
+    ):
+        raise RecoveryValidationError(
+            f"table {table_name} uses an unexpected TTL attribute"
+        )
+    if ttl_status not in {"ENABLED", "ENABLING"}:
+        aws.json(
+            "dynamodb",
+            "update-time-to-live",
+            "--table-name",
+            table_name,
+            "--time-to-live-specification",
+            "Enabled=true,AttributeName=expires_at",
+        )
+    _wait_for_ttl(
+        aws,
+        table_name,
+        poll_interval=poll_interval,
+        timeout_seconds=timeout_seconds,
+        sleep=sleep,
+    )
+    aws.json(
+        "dynamodb",
+        "update-table",
+        "--table-name",
+        table_name,
+        "--deletion-protection-enabled",
+    )
+    _wait_for_active_table(
+        aws,
+        table_name,
+        poll_interval=poll_interval,
+        timeout_seconds=min(timeout_seconds, 300),
+        sleep=sleep,
+        deletion_protection=True,
+    )
+
+
 def _exercise_restore(
     aws: AwsCli,
     source_table: dict[str, Any],
@@ -135,8 +294,13 @@ def _exercise_restore(
     source_name = source_table["TableName"]
     suffix = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
     target_name = f"{source_name}-restore-validation-{suffix}-{secrets.token_hex(3)}"
-    target_name = target_name[:255].rstrip("-")
+    if len(target_name) > 255:
+        raise RecoveryValidationError(
+            "source table name is too long for a scoped restore-validation "
+            "target"
+        )
     created = False
+    retained_ready = False
     try:
         aws.json(
             "dynamodb",
@@ -184,13 +348,27 @@ def _exercise_restore(
         ).get("Count")
         if source_sample and not restored_sample:
             raise RecoveryValidationError("source contains data but restored table sample is empty")
+        if keep:
+            _protect_retained_restore(
+                aws,
+                target_name,
+                poll_interval=poll_interval,
+                timeout_seconds=timeout_seconds,
+                sleep=sleep,
+            )
+            retained_ready = True
         return {
             "targetTable": target_name,
             "status": "validated",
-            "retained": keep,
+            "retained": retained_ready,
+            "pointInTimeRecovery": (
+                "ENABLED" if retained_ready else None
+            ),
+            "timeToLive": "ENABLED" if retained_ready else None,
+            "deletionProtection": retained_ready,
         }
     finally:
-        if created and not keep:
+        if created and not retained_ready:
             try:
                 restored_table = aws.json(
                     "dynamodb",
@@ -281,9 +459,10 @@ def validate_recovery(
     )
     if not vault.get("EncryptionKeyArn"):
         raise RecoveryValidationError("AWS Backup vault has no KMS encryption key")
-    locked = vault.get("Locked") is True
-    if require_vault_lock and not locked:
-        raise RecoveryValidationError("AWS Backup Vault Lock is not enabled")
+    vault_lock = _vault_lock_posture(
+        vault,
+        required=require_vault_lock,
+    )
 
     recovery_points = aws.json(
         "backup",
@@ -309,7 +488,14 @@ def validate_recovery(
             2,
         ),
         "backupVault": vault_name,
-        "backupVaultLocked": locked,
+        "backupVaultLocked": vault_lock["locked"],
+        "backupVaultLockMode": vault_lock["mode"],
+        "backupVaultMinRetentionDays": vault_lock[
+            "minRetentionDays"
+        ],
+        "backupVaultMaxRetentionDays": vault_lock[
+            "maxRetentionDays"
+        ],
         "latestBackupAgeHours": round(backup_age.total_seconds() / 3600, 2),
         "restoreExercise": None,
     }

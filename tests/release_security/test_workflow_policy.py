@@ -212,6 +212,23 @@ jobs:
             for item in audit["strategy"]["matrix"]["include"]
         }
         self.assertEqual(targets, {"fargate", "agentcore"})
+        table_names = {
+            item["target"]: item["table_name"]
+            for item in audit["strategy"]["matrix"]["include"]
+        }
+        self.assertEqual(
+            table_names,
+            {
+                "fargate": (
+                    "${{ vars.AXON_FARGATE_STATE_TABLE_NAME "
+                    "|| 'axonllm-state' }}"
+                ),
+                "agentcore": (
+                    "${{ vars.AXON_AGENTCORE_STATE_TABLE_NAME "
+                    "|| 'axonllm-agentcore-state' }}"
+                ),
+            },
+        )
 
     def test_operations_restore_is_monthly_and_uses_separate_role(self) -> None:
         workflow = _load_operations_workflow()
@@ -224,16 +241,64 @@ jobs:
         self.assertNotIn("30 11 1 * *", audit["if"])
         self.assertIn("30 11 1 * *", recovery["if"])
         self.assertIn("inputs.exercise_restore", recovery["if"])
+        dispatch_inputs = workflow["on"]["workflow_dispatch"]["inputs"]
+        self.assertIn("retain_fargate_restore", dispatch_inputs)
+        self.assertEqual(
+            dispatch_inputs["retain_fargate_restore"]["default"],
+            "false",
+        )
         self.assertGreaterEqual(recovery["timeout-minutes"], 60)
         self.assertEqual(
             recovery["steps"][2]["with"]["role-to-assume"],
             "${{ secrets.AXON_OPERATIONS_RECOVERY_ROLE_ARN }}",
+        )
+        role_duration = recovery["steps"][2]["with"][
+            "role-duration-seconds"
+        ]
+        self.assertGreater(
+            role_duration,
+            recovery["timeout-minutes"] * 60,
         )
         targets = {
             item["target"]
             for item in recovery["strategy"]["matrix"]["include"]
         }
         self.assertEqual(targets, {"fargate", "agentcore"})
+        restore = next(
+            step
+            for step in recovery["steps"]
+            if step.get("id") == "restore"
+        )
+        self.assertIn(
+            "matrix.target == 'fargate'",
+            restore["env"]["RETAIN_RESTORE"],
+        )
+        self.assertIn("--keep-restored-table", restore["run"])
+        evidence = next(
+            step
+            for step in recovery["steps"]
+            if step.get("name") == "Preserve recovery evidence"
+        )
+        self.assertTrue(
+            evidence["uses"].startswith("actions/upload-artifact@")
+        )
+        self.assertEqual(evidence["with"]["retention-days"], 90)
+        self.assertEqual(
+            {
+                item["target"]: item["table_name"]
+                for item in recovery["strategy"]["matrix"]["include"]
+            },
+            {
+                "fargate": (
+                    "${{ vars.AXON_FARGATE_STATE_TABLE_NAME "
+                    "|| 'axonllm-state' }}"
+                ),
+                "agentcore": (
+                    "${{ vars.AXON_AGENTCORE_STATE_TABLE_NAME "
+                    "|| 'axonllm-agentcore-state' }}"
+                ),
+            },
+        )
         recovery_commands = "\n".join(step.get("run", "") for step in recovery["steps"])
         self.assertIn("--exercise-restore", recovery_commands)
         audit_commands = "\n".join(step.get("run", "") for step in audit["steps"])
@@ -260,8 +325,20 @@ jobs:
         restore_statement = next(
             statement for statement in policy["Statement"] if statement["Resource"] == restore_tables
         )
-        self.assertIn("dynamodb:DeleteTable", restore_statement["Action"])
-        self.assertIn("dynamodb:UpdateTable", restore_statement["Action"])
+        self.assertEqual(
+            set(restore_statement["Action"]),
+            {
+                "dynamodb:DeleteTable",
+                "dynamodb:DescribeContinuousBackups",
+                "dynamodb:DescribeTable",
+                "dynamodb:DescribeTimeToLive",
+                "dynamodb:RestoreTableToPointInTime",
+                "dynamodb:Scan",
+                "dynamodb:UpdateContinuousBackups",
+                "dynamodb:UpdateTable",
+                "dynamodb:UpdateTimeToLive",
+            },
+        )
 
         decrypt_statement = next(statement for statement in policy["Statement"] if "kms:Decrypt" in statement["Action"])
         self.assertEqual(
@@ -290,7 +367,7 @@ jobs:
     def test_operations_workflow_passes_repository_policy(self) -> None:
         self.assertEqual(
             validate_workflows.validate_workflow(OPERATIONS_WORKFLOW),
-            6,
+            7,
         )
 
 

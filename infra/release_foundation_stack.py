@@ -1,7 +1,9 @@
 """Private release registries and GitHub OIDC roles for AxonLLM."""
 
 from aws_cdk import (
+    ArnFormat,
     CfnOutput,
+    CfnParameter,
     Duration,
     RemovalPolicy,
     Stack,
@@ -33,6 +35,29 @@ class AxonLLMReleaseFoundationStack(Stack):
             raise ValueError(
                 "AxonLLM release foundation must be deployed in us-east-1"
             )
+
+        fargate_state_table_name = CfnParameter(
+            self,
+            "FargateStateTableName",
+            type="String",
+            default="axonllm-state",
+            allowed_pattern=r"^[A-Za-z0-9_.-]{3,214}$",
+            description="Physical state table name used by AxonLLMStack",
+        )
+        agentcore_state_table_name = CfnParameter(
+            self,
+            "AgentCoreStateTableName",
+            type="String",
+            default="axonllm-agentcore-state",
+            allowed_pattern=r"^[A-Za-z0-9_.-]{3,214}$",
+            description=(
+                "Physical state table name used by AxonLLMAgentCoreStack"
+            ),
+        )
+        state_table_names = (
+            fargate_state_table_name.value_as_string,
+            agentcore_state_table_name.value_as_string,
+        )
 
         release_key = kms.Key(
             self,
@@ -86,6 +111,34 @@ class AxonLLMReleaseFoundationStack(Stack):
             ),
             max_session_duration=Duration.hours(1),
         )
+        operations_audit = iam.Role(
+            self,
+            "OperationsAuditRole",
+            role_name="AxonLLMOperationsAudit",
+            description=(
+                "Audits AxonLLM recovery and secret-rotation metadata from "
+                "the protected GitHub production environment"
+            ),
+            assumed_by=self._github_principal(
+                github_provider,
+                subject=_GITHUB_PRODUCTION_SUBJECT,
+            ),
+            max_session_duration=Duration.hours(1),
+        )
+        operations_recovery = iam.Role(
+            self,
+            "OperationsRecoveryRole",
+            role_name="AxonLLMOperationsRecovery",
+            description=(
+                "Exercises AxonLLM point-in-time recovery from the protected "
+                "GitHub production environment"
+            ),
+            assumed_by=self._github_principal(
+                github_provider,
+                subject=_GITHUB_PRODUCTION_SUBJECT,
+            ),
+            max_session_duration=Duration.hours(2),
+        )
 
         repository_arns = [
             repository.repository_arn
@@ -126,6 +179,14 @@ class AxonLLMReleaseFoundationStack(Stack):
                 resources=repository_arns,
             )
         )
+        self._grant_operations_audit(
+            operations_audit,
+            state_table_names=state_table_names,
+        )
+        self._grant_operations_recovery(
+            operations_recovery,
+            state_table_names=state_table_names,
+        )
 
         CfnOutput(
             self,
@@ -146,6 +207,16 @@ class AxonLLMReleaseFoundationStack(Stack):
             self,
             "ReleaseVerifierRoleArn",
             value=verifier.role_arn,
+        )
+        CfnOutput(
+            self,
+            "OperationsAuditRoleArn",
+            value=operations_audit.role_arn,
+        )
+        CfnOutput(
+            self,
+            "OperationsRecoveryRoleArn",
+            value=operations_recovery.role_arn,
         )
         CfnOutput(
             self,
@@ -185,6 +256,225 @@ class AxonLLMReleaseFoundationStack(Stack):
             )
         )
         return repository
+
+    def _grant_operations_audit(
+        self,
+        role: iam.Role,
+        *,
+        state_table_names: tuple[str, str],
+    ) -> None:
+        role.add_to_policy(
+            iam.PolicyStatement(
+                sid="InspectRecoveryInfrastructure",
+                actions=[
+                    "cloudformation:DescribeStacks",
+                    "cloudformation:ListStackResources",
+                ],
+                resources=self._runtime_stack_arns(),
+            )
+        )
+        role.add_to_policy(
+            iam.PolicyStatement(
+                sid="InspectRecoveryPoints",
+                actions=[
+                    "backup:DescribeBackupVault",
+                    "backup:ListRecoveryPointsByBackupVault",
+                ],
+                resources=self._backup_vault_arns(),
+            )
+        )
+        role.add_to_policy(
+            iam.PolicyStatement(
+                sid="InspectStateProtection",
+                actions=[
+                    "dynamodb:DescribeContinuousBackups",
+                    "dynamodb:DescribeTable",
+                ],
+                resources=self._source_table_arns(state_table_names),
+            )
+        )
+        role.add_to_policy(
+            iam.PolicyStatement(
+                sid="InspectProviderSecretMetadata",
+                actions=[
+                    "secretsmanager:DescribeSecret",
+                    "secretsmanager:ListSecretVersionIds",
+                ],
+                resources=[
+                    self.format_arn(
+                        service="secretsmanager",
+                        resource="secret",
+                        resource_name="AxonLLMStack-*",
+                        arn_format=ArnFormat.COLON_RESOURCE_NAME,
+                    )
+                ],
+            )
+        )
+        role.add_to_policy(
+            iam.PolicyStatement(
+                sid="InspectDataKeyRotation",
+                actions=[
+                    "kms:DescribeKey",
+                    "kms:GetKeyRotationStatus",
+                ],
+                resources=[self._account_key_arn()],
+                conditions=self._data_key_alias_condition(),
+            )
+        )
+
+    def _grant_operations_recovery(
+        self,
+        role: iam.Role,
+        *,
+        state_table_names: tuple[str, str],
+    ) -> None:
+        role.add_to_policy(
+            iam.PolicyStatement(
+                sid="InspectRecoveryInfrastructure",
+                actions=[
+                    "cloudformation:DescribeStacks",
+                    "cloudformation:ListStackResources",
+                ],
+                resources=self._runtime_stack_arns(),
+            )
+        )
+        role.add_to_policy(
+            iam.PolicyStatement(
+                sid="InspectRecoveryPoints",
+                actions=[
+                    "backup:DescribeBackupVault",
+                    "backup:ListRecoveryPointsByBackupVault",
+                ],
+                resources=self._backup_vault_arns(),
+            )
+        )
+        role.add_to_policy(
+            iam.PolicyStatement(
+                sid="RestoreStateTable",
+                actions=[
+                    "dynamodb:DescribeContinuousBackups",
+                    "dynamodb:DescribeTable",
+                    "dynamodb:RestoreTableToPointInTime",
+                    "dynamodb:Scan",
+                ],
+                resources=self._source_table_arns(state_table_names),
+            )
+        )
+        role.add_to_policy(
+            iam.PolicyStatement(
+                sid="ValidateAndRemoveRestoredState",
+                actions=[
+                    "dynamodb:DeleteTable",
+                    "dynamodb:DescribeContinuousBackups",
+                    "dynamodb:DescribeTable",
+                    "dynamodb:DescribeTimeToLive",
+                    "dynamodb:RestoreTableToPointInTime",
+                    "dynamodb:Scan",
+                    "dynamodb:UpdateContinuousBackups",
+                    "dynamodb:UpdateTable",
+                    "dynamodb:UpdateTimeToLive",
+                ],
+                resources=self._restored_table_arns(state_table_names),
+            )
+        )
+        via_dynamodb = {
+            "kms:CallerAccount": self.account,
+            "kms:ViaService": (
+                f"dynamodb.{self.region}.{self.url_suffix}"
+            ),
+        }
+        role.add_to_policy(
+            iam.PolicyStatement(
+                sid="UseStateKeysForRestore",
+                actions=[
+                    "kms:Decrypt",
+                    "kms:DescribeKey",
+                    "kms:Encrypt",
+                    "kms:GenerateDataKey",
+                    "kms:GenerateDataKeyWithoutPlaintext",
+                    "kms:ReEncryptFrom",
+                    "kms:ReEncryptTo",
+                ],
+                resources=[self._account_key_arn()],
+                conditions={
+                    **self._data_key_alias_condition(),
+                    "StringEquals": via_dynamodb,
+                },
+            )
+        )
+        role.add_to_policy(
+            iam.PolicyStatement(
+                sid="GrantStateKeysToDynamoDb",
+                actions=["kms:CreateGrant"],
+                resources=[self._account_key_arn()],
+                conditions={
+                    **self._data_key_alias_condition(),
+                    "Bool": {"kms:GrantIsForAWSResource": "true"},
+                    "StringEquals": via_dynamodb,
+                },
+            )
+        )
+
+    def _runtime_stack_arns(self) -> list[str]:
+        return [
+            self.format_arn(
+                service="cloudformation",
+                resource="stack",
+                resource_name=f"{name}/*",
+            )
+            for name in ("AxonLLMStack", "AxonLLMAgentCoreStack")
+        ]
+
+    def _source_table_arns(
+        self,
+        state_table_names: tuple[str, str],
+    ) -> list[str]:
+        return [
+            self.format_arn(
+                service="dynamodb",
+                resource="table",
+                resource_name=name,
+            )
+            for name in state_table_names
+        ]
+
+    def _restored_table_arns(
+        self,
+        state_table_names: tuple[str, str],
+    ) -> list[str]:
+        return [
+            f"{table_arn}-restore-validation-*"
+            for table_arn in self._source_table_arns(state_table_names)
+        ]
+
+    def _backup_vault_arns(self) -> list[str]:
+        return [
+            self.format_arn(
+                service="backup",
+                resource="backup-vault",
+                resource_name=prefix,
+                arn_format=ArnFormat.COLON_RESOURCE_NAME,
+            )
+            for prefix in ("axon-state-*", "axon-agent-*")
+        ]
+
+    def _account_key_arn(self) -> str:
+        return self.format_arn(
+            service="kms",
+            resource="key",
+            resource_name="*",
+        )
+
+    @staticmethod
+    def _data_key_alias_condition() -> dict[str, dict[str, list[str]]]:
+        return {
+            "ForAnyValue:StringEquals": {
+                "kms:ResourceAliases": [
+                    "alias/axonllm/data",
+                    "alias/axonllm/agentcore-data",
+                ]
+            }
+        }
 
     @staticmethod
     def _github_principal(

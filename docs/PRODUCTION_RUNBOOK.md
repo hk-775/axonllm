@@ -45,19 +45,52 @@ audit event is written for that same tenant before dispatch, and only then is
 the handler context rebound. Missing, duplicate, malformed, or conflicting
 tenant selectors are rejected.
 
-There is no supported tenant/principal bootstrap CLI. Before enabling canonical
-mode, provision:
+Bootstrap the first canonical administrator against the same DynamoDB table the
+runtime will use:
 
-- the tenant-owned project row;
-- a canonical principal keyed by issuer, subject, authentication method, and
-  tenant;
-- active membership, tenant role, project grants, and service scopes;
-- tenant-bound SCIM credentials through `AXON_SCIM_TENANTS` when SCIM is used.
+```bash
+LLM_ROUTER_DYNAMODB_ENABLED=true \
+AXON_DYNAMODB_TABLE=axonllm-state \
+AWS_DEFAULT_REGION=us-east-1 \
+uv run axon bootstrap-tenant \
+  --tenant tenant-a \
+  --project project-a \
+  --project-name Production \
+  --issuer https://idp.example.com/oauth2/default \
+  --subject 00u-admin-subject \
+  --user-name admin@example.com \
+  --display-name "Tenant A Admin" \
+  --email admin@example.com \
+  --budget-limit 1000
+```
 
-The Fargate stack does not inject `AXON_SCIM_TENANTS`. Its Secrets Manager
-integration injects only Anthropic and OpenAI provider keys. Add a reviewed
-tenant bootstrap and SCIM-secret delivery process before relying on automated
-provisioning.
+The command conditionally creates or verifies the tenant project and SCIM user,
+grants project membership through the canonical CAS transaction, and returns
+only after strongly resolving the active `tenant_admin` principal and grant. It
+is restartable and refuses to reuse a user name bound to a different issuer or
+subject.
+
+Create canonical service credentials with the tenant-qualified key path:
+
+```bash
+LLM_ROUTER_DYNAMODB_ENABLED=true \
+AXON_DYNAMODB_TABLE=axonllm-state \
+AWS_DEFAULT_REGION=us-east-1 \
+uv run axon issue-key \
+  --tenant tenant-a \
+  --project project-a \
+  --name production-service
+```
+
+The default canonical scopes are `model.list`, `inference.invoke`, and
+`query.select`; canonical issuance rejects every legacy `admin:` scope. The raw
+key is shown once.
+
+When SCIM provisioning is required, create a Secrets Manager value containing
+the complete `AXON_SCIM_TENANTS` JSON map, then pass its complete ARN as
+`AXON_SCIM_TENANTS_SECRET_ARN` to `deploy-fargate.sh`. The stack injects that
+secret as `AXON_SCIM_TENANTS`; it never stores the credential JSON in a
+CloudFormation parameter or task-definition environment value.
 
 After a canonical SCIM user and principal exist,
 `POST /admin/projects/{id}/members` accepts the SCIM resource id in `user_id`.
@@ -66,8 +99,7 @@ POST/DELETE membership operations use one CAS-guarded transaction to update
 `Principal.project_ids`, both authorization versions, and `SCIM#VERSION`.
 Stored and returned member values are normalized to `scim:<id>`. A canonical
 project POST rejects non-empty bulk members, and project PUT rejects any
-`members` field; use the member routes. Initial tenant and administrator
-bootstrap remains external.
+`members` field; use the member routes after the initial CLI bootstrap.
 
 Canonical SCIM users, groups, username uniqueness edges, and convergence state
 share `PK=TENANT#{tenant_id}` with sort keys `SCIM#USER#{id}`,
@@ -107,26 +139,43 @@ datasource adapter, HTTP route, AgentCore action, or backend query contract.
 - immutable tags, scan-on-push, and a retained rotation-enabled KMS key;
 - an account-global GitHub Actions OIDC provider;
 - an `AxonLLMReleasePublisher` role trusted only by the protected GitHub
-  `release` environment; and
+  `release` environment;
 - an `AxonLLMReleaseVerifier` role trusted only by the protected GitHub
-  `production` environment.
+  `production` environment;
+- an `AxonLLMOperationsAudit` role that can read recovery, secret-version, and
+  key-rotation metadata but cannot read secret values or restore data; and
+- an `AxonLLMOperationsRecovery` role that can run PITR validation and remove
+  only temporary `*-restore-validation-*` tables.
 
 The publisher can upload and read image layers but cannot delete images or
-repositories. The verifier is read-only. Deploy this stack once per target
-account:
+repositories. The verifier is read-only. Both operations roles trust only the
+exact protected `production` environment subject. Deploy this stack once per
+target account:
 
 ```bash
 cd infra
 npx cdk deploy AxonLLMReleaseFoundationStack \
   -c deployment_target=release-foundation \
-  -c region=us-east-1
+  -c region=us-east-1 \
+  --parameters AxonLLMReleaseFoundationStack:FargateStateTableName=axonllm-state \
+  --parameters AxonLLMReleaseFoundationStack:AgentCoreStateTableName=axonllm-agentcore-state
 ```
+
+If either runtime uses a nondefault physical table name, pass the same name to
+the foundation parameter. The operations IAM policies are generated from these
+parameters and will not reach a different table.
 
 Create two protected GitHub environments:
 
 - `release`: require approval and restrict deployment refs to version tags;
 - `production`: require approval and restrict deployment refs to protected
   production branches and tags.
+
+Required reviewers and wait timers for private repositories depend on the
+organization's GitHub plan. Verify that GitHub actually returns the reviewer
+rule after configuration. A custom branch/tag policy by itself is not an
+approval gate; if the plan rejects reviewers, upgrade the plan before claiming
+that either environment has separation-of-duties approval.
 
 Configure `release` with:
 
@@ -137,10 +186,14 @@ Configure `release` with:
 | Variable | `AXON_FARGATE_ECR_REPOSITORY` | `FargateRepositoryUri` output |
 | Variable | `AXON_AGENTCORE_ECR_REPOSITORY` | `AgentCoreRepositoryUri` output |
 
-Configure `production` with the same three variables and set secret
-`AWS_ROLE_ARN` to the `ReleaseVerifierRoleArn` output. The operations roles and
-data-key variables described in [Backup And Restore](#backup-and-restore) are
-additional production-environment settings.
+Configure `production` with the same three variables. Set `AWS_ROLE_ARN` to the
+`ReleaseVerifierRoleArn` output, `AXON_OPERATIONS_AUDIT_ROLE_ARN` to
+`OperationsAuditRoleArn`, and `AXON_OPERATIONS_RECOVERY_ROLE_ARN` to
+`OperationsRecoveryRoleArn`. Also set `AXON_FARGATE_STATE_TABLE_NAME` and
+`AXON_AGENTCORE_STATE_TABLE_NAME` to the physical names supplied to the
+foundation stack. The target data-key variables described in
+[Backup And Restore](#backup-and-restore) are additional production-environment
+settings.
 
 ## Fargate Deployment
 
@@ -153,16 +206,24 @@ additional production-environment settings.
 - canonical identity and enforced authentication in production mode;
 - a private ECR image parameter that accepts only `@sha256` URIs;
 - KMS-encrypted DynamoDB with deletion protection and PITR;
-- daily AWS Backup at 05:00 UTC, 30-day cold transition, and 365-day deletion;
+- daily AWS Backup at 05:00 UTC, 30-day cold transition, 365-day deletion, and
+  governance-mode Vault Lock enforcing 30-365 day retention;
 - a KMS-encrypted FIFO security-event outbox and DLQ retained for 14 days;
 - a managed encrypted FIFO SNS topic, retained encrypted CloudWatch log group,
   and resource-scoped private SQS/SNS/Logs endpoints;
+- optional Secrets Manager delivery of the complete `AXON_SCIM_TENANTS` value;
+- a controlled restored-table parameter, exact task access, selected-table
+  alarms/backups, and a quiescence guard for Fargate recovery cutover;
 - alarms, an operations dashboard, and two tasks scaling to ten.
 
 `deploy-fargate.sh` requires `AXON_VERIFIED_IMAGE_URI` and
-`AXON_BEDROCK_INVOKE_RESOURCE_ARNS`, but leaves `DeploymentMode` at `staging`
-and does not supply production OIDC parameters. It is not the production
-deployment command.
+`AXON_BEDROCK_INVOKE_RESOURCE_ARNS`. It defaults to staging, but is
+production-capable: set `AXON_DEPLOYMENT_MODE=production` and all seven
+`AXON_OIDC_*` inputs. It also accepts `AXON_SCIM_TENANTS_SECRET_ARN`, paired
+hosted-zone inputs, `AXON_RUNTIME_STATE_TABLE_NAME`, and
+`AXON_RECOVERY_CUTOVER_MODE` for an approved recovery cutover. Review the CDK
+diff before using `--yes`; pass protected secrets through deployment automation
+because command arguments can appear in process listings and shell history.
 
 Install CDK dependencies and bootstrap the target account:
 
@@ -181,6 +242,7 @@ npx cdk synth AxonLLMStack \
 
 npx cdk deploy AxonLLMStack \
   -c deployment_target=fargate -c region=us-east-1 \
+  -c scim_tenants_secret_arn="$SCIM_TENANTS_SECRET_ARN" \
   --parameters AxonLLMStack:DeploymentMode=production \
   --parameters AxonLLMStack:VerifiedImageUri="$VERIFIED_IMAGE_URI" \
   --parameters AxonLLMStack:ViewerDomainName="$VIEWER_DOMAIN_NAME" \
@@ -195,13 +257,14 @@ npx cdk deploy AxonLLMStack \
   --parameters AxonLLMStack:OidcUserInfoEndpoint="$OIDC_USER_INFO_ENDPOINT" \
   --parameters AxonLLMStack:OidcClientId="$OIDC_CLIENT_ID" \
   --parameters AxonLLMStack:OidcClientSecret="$OIDC_CLIENT_SECRET" \
-  --parameters AxonLLMStack:OidcAudience="$OIDC_AUDIENCE"
+  --parameters AxonLLMStack:OidcAudience="$OIDC_AUDIENCE" \
+  --parameters AxonLLMStack:RuntimeStateTableName="" \
+  --parameters AxonLLMStack:RecoveryCutoverMode=false
 ```
 
-Pass the OIDC client secret through protected deployment automation; command
-arguments can be exposed in process listings and shell history. The approved
-prefix list must contain only required IdP, AWS API, and provider destinations.
-The stack has no open-egress fallback.
+Omit the SCIM context when SCIM is not configured. The approved prefix list must
+contain only required IdP, AWS API, and provider destinations. The stack has no
+open-egress fallback.
 
 `AXON_BEDROCK_INVOKE_RESOURCE_ARNS` must be a comma-separated list of concrete
 Bedrock model or inference-profile ARNs. The CloudFormation parameter rejects
@@ -377,24 +440,33 @@ Before shifting traffic:
 3. Confirm readiness on every target.
 4. Run authenticated model-list and completion canaries.
 5. Run negative canaries for missing credentials, inactive membership,
-   ungranted and cross-tenant projects, viewer writes, and `query.mutate`.
+   ungranted and cross-tenant project claims, and viewer writes.
 6. Verify alarms, a confirmed SNS subscription, logs, tenant audit-chain
    verification, and rollback.
+
+The production validation tool evaluates `query.mutate` against the checked-out
+authorization policy only. There is no remote query route on which to run that
+canary.
 
 Neither stack creates an SNS subscription. Add and confirm alarm and
 security-event receivers before launch.
 
 ## Backup And Restore
 
-Both AWS stacks enable DynamoDB PITR and daily AWS Backup. CDK does not configure
-Vault Lock; enable it separately where immutable recovery points are required.
+Both AWS stacks enable DynamoDB PITR, daily AWS Backup, and governance-mode
+Vault Lock with a 30-day minimum and 365-day maximum retention.
 `.github/workflows/operations-security.yml` uses a Fargate/AgentCore matrix for
 the daily metadata audit and monthly PITR restore exercise, with separate
 least-privilege audit and recovery roles. Configure
 `AXON_OPERATIONS_AUDIT_ROLE_ARN`, `AXON_OPERATIONS_RECOVERY_ROLE_ARN`,
 `AXON_AWS_ACCOUNT_ID`, `AXON_DATA_KMS_KEY_ARN`, and
-`AXON_AGENTCORE_DATA_KMS_KEY_ARN` in the protected production environment. The
-two KMS variables must contain the data-key ARN for their respective stack.
+`AXON_AGENTCORE_DATA_KMS_KEY_ARN` in the protected production environment.
+Set `AXON_FARGATE_STATE_TABLE_NAME` and
+`AXON_AGENTCORE_STATE_TABLE_NAME` when either physical name differs from its
+documented default. The two KMS variables must contain the data-key ARN for
+their respective stack. With `--require-vault-lock`, the validator checks the
+exact 30-day minimum, 365-day maximum, and governance mode rather than accepting
+an arbitrary locked vault.
 
 Validate Fargate:
 
@@ -406,17 +478,119 @@ python scripts/operations/validate_state_recovery.py --exercise-restore
 
 The restore exercise creates a temporary table and deletes it unless
 `--keep-restored-table` is set. It validates table recovery, not application
-cutover. Rehearse restored-table selection, authorization and tenant-integrity
-checks, traffic shift, and rollback separately.
+cutover. A retained table is returned only after the validator enables and
+verifies PITR, `expires_at` TTL, and deletion protection. A manually dispatched
+workflow can set `retain_fargate_restore=true`; only the Fargate matrix entry is
+retained, and each result is preserved as a 90-day evidence artifact.
+
+For a controlled Fargate cutover rehearsal:
+
+1. Run the validator with `--exercise-restore --keep-restored-table` using the
+   recovery role and record
+   `restoreExercise.targetTable` from its JSON output.
+2. Confirm the table name begins with the deployed primary table name followed
+   by `-restore-validation-`. The Fargate parameter and task IAM role reject
+   every other table namespace.
+3. Enter the approved maintenance window, stop new client traffic, and use the
+   recovery helper to preserve the existing scaling state, suspend all three
+   scaling paths, set minimum capacity to zero, and prove the service is fully
+   quiesced:
+
+```bash
+python scripts/operations/fargate_recovery.py \
+  quiesce --state-file recovery-cutover.json
+```
+
+   The state file is created with mode `0600` and records the original desired
+   count, capacity bounds, and suspension state. Run this helper as the
+   deployment operator with scoped ECS, Application Auto Scaling, ELB target
+   health, and CloudFormation read access. The PITR recovery role intentionally
+   remains limited to restoring, protecting, validating, and removing temporary
+   tables.
+4. Repeat the reviewed production deployment with every original input
+   unchanged except
+   `AXON_RUNTIME_STATE_TABLE_NAME=$RESTORED_TABLE_NAME` and
+   `AXON_RECOVERY_CUTOVER_MODE=true`. CloudFormation rejects the state switch
+   unless step 3 is still true and pins the service's declared desired count to
+   zero. The update grants the task role only the selected table, moves
+   DynamoDB alarms to it, and adds it to the backup plan.
+5. Start the recorded number of canary tasks. The helper leaves autoscaling
+   suspended and returns only after ECS is stable and at least that many ALB
+   targets are healthy:
+
+```bash
+python scripts/operations/fargate_recovery.py \
+  start \
+  --state-file recovery-cutover.json \
+  --expected-table "$RESTORED_TABLE_NAME"
+```
+
+6. Confirm the selected table and healthy target count, then run the fail-closed
+   canary/load harness with credentials supplied only through environment
+   variables:
+
+```bash
+python scripts/operations/fargate_recovery.py \
+  status --minimum-healthy-targets 2
+python scripts/operations/run_production_validation.py \
+  --config scripts/operations/production_validation.example.json \
+  --base-url "$FARGATE_HTTPS_ORIGIN" \
+  --output production-validation.json
+```
+
+   Customize the example with real signed tenant/project claim variants and
+   credential environment names. It requires an authenticated read,
+   viewer-write denial, cross-tenant-claim denial, and ungranted-project-claim
+   denial before running a bodyless GET/HEAD load. Those ingress-boundary claim
+   mismatches return 403; the report's separate source-policy contract proves
+   404 concealment once an owned resource reaches authorization. Reports redact
+   credential values. One Fargate ALB origin plus
+   `status --minimum-healthy-targets 2` proves load through a service with at
+   least two healthy targets; it does not identify which task served each
+   request and reports that claim as false.
+7. After canaries pass, restore the exact recorded autoscaling configuration:
+
+```bash
+python scripts/operations/fargate_recovery.py \
+  resume \
+  --state-file recovery-cutover.json \
+  --expected-table "$RESTORED_TABLE_NAME"
+```
+
+   Then repeat the unchanged deployment with
+   `AXON_RECOVERY_CUTOVER_MODE=false` while retaining
+   `AXON_RUNTIME_STATE_TABLE_NAME=$RESTORED_TABLE_NAME`. This reconciles the
+   stack's declared desired count with the validated running service. Do not
+   leave the stack in cutover mode; a later unrelated stack update would
+   correctly reconcile it back to zero tasks.
+8. Rehearse rollback with a new state file: quiesce again, redeploy with an empty
+   `AXON_RUNTIME_STATE_TABLE_NAME` and
+   `AXON_RECOVERY_CUTOVER_MODE=true`, start against the primary table, rerun
+   step 6, and resume. Redeploy once more with cutover mode `false`, then verify
+   status. Only after rollback is verified and cutover mode is false may the
+   recovery role remove the temporary table:
+
+```bash
+python scripts/operations/fargate_recovery.py \
+  cleanup --table-name "$RESTORED_TABLE_NAME"
+```
+
+The runtime role can use only the retained primary table and the exact selected
+recovery table. The recovery role cannot deploy the application or read
+provider secret values. Keep deployment authority separate. Do not use a
+rolling task update for a table switch; the custom resource intentionally fails
+that deployment while any old task or scaling path is active.
 
 The scheduled workflow validates both `AxonLLMStack` and
-`AxonLLMAgentCoreStack`. For an ad hoc AgentCore run, pass
-`--stack-name AxonLLMAgentCoreStack`.
+`AxonLLMAgentCoreStack`. For an ad hoc AgentCore restore validation, pass
+`--stack-name AxonLLMAgentCoreStack`. The retained-table parameter, quiescence
+guard, runtime IAM switch, and `fargate_recovery.py` workflow are Fargate-only;
+there is no supported AgentCore application cutover.
 
 The scripts and schedule do not prove that AWS accepted a restore or that the
-application can cut over. The first real AWS restore exercise and application
-recovery rehearsal remain externally unverified; retain their evidence before
-promotion.
+application cutover succeeded. The first real AWS restore exercise and
+application recovery rehearsal remain externally unverified; retain their
+evidence before promotion.
 
 ## Rotation And Incident Response
 

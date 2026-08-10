@@ -1,6 +1,7 @@
 """AxonLLM CLI — start the gateway, run demos, and manage configuration."""
 
 import argparse
+import json
 import os
 import sys
 from pathlib import Path
@@ -67,18 +68,39 @@ def cmd_issue_key(args):
     async def _issue():
         if persistence.enabled:
             await persistence.create_table_if_not_exists()
-        scopes = args.scopes.split(",") if args.scopes else ["chat"]
+        tenant_id = getattr(args, "tenant", None)
+        default_scopes = (
+            ["model.list", "inference.invoke", "query.select"]
+            if tenant_id
+            else ["chat"]
+        )
+        scopes = args.scopes.split(",") if args.scopes else default_scopes
+        scopes = [scope.strip() for scope in scopes if scope.strip()]
+        if tenant_id:
+            legacy_admin = sorted(
+                scope for scope in scopes if scope.startswith("admin:")
+            )
+            if legacy_admin:
+                raise ValueError(
+                    "canonical service keys cannot carry legacy admin scopes: "
+                    + ", ".join(legacy_admin)
+                )
         _, raw_key = await service.issue_key(
             project_id=args.project,
             name=args.name,
-            scopes=[s.strip() for s in scopes if s.strip()],
+            scopes=scopes,
             created_by="cli",
+            tenant_id=tenant_id,
         )
         # Checked after minting, never before: this is a note, not a precondition,
         # and a failed read must not cost anyone their key. get_project() returns
         # None for a transient DynamoDB error as well as for a genuine absence,
         # which is why the note below is worded as a suggestion.
-        project_exists = await persistence.get_project(args.project) is not None
+        project_exists = (
+            await persistence.get_project(args.project, tenant_id)
+            if tenant_id
+            else await persistence.get_project(args.project)
+        ) is not None
         return raw_key, project_exists
 
     raw_key, project_exists = asyncio.run(_issue())
@@ -100,10 +122,46 @@ def cmd_issue_key(args):
             "(and point AXON_DYNAMODB_TABLE at the server's table) to mint a usable key.",
             file=sys.stderr,
         )
-    print(f"\033[1mAPI key issued for project '{args.project}':\033[0m")
+    tenant_label = (
+        f" in tenant '{args.tenant}'"
+        if getattr(args, "tenant", None)
+        else ""
+    )
+    print(
+        f"\033[1mAPI key issued for project '{args.project}'"
+        f"{tenant_label}:\033[0m"
+    )
     print(raw_key)
     print("\n\033[2mStore this now — it is shown only once. Use it as:")
     print("  Authorization: Bearer <key>   or   X-Api-Key: <key>\033[0m")
+
+
+def cmd_bootstrap_tenant(args):
+    """Provision the first canonical tenant administrator and project."""
+    import asyncio
+
+    os.chdir(ROOT)
+    from src.gateway.auth.tenant_bootstrap import bootstrap_tenant
+    from src.gateway.persistence import DynamoPersistence
+
+    persistence = DynamoPersistence(
+        region=os.environ.get("AWS_DEFAULT_REGION", "us-east-1")
+    )
+    result = asyncio.run(
+        bootstrap_tenant(
+            persistence,
+            tenant_id=args.tenant,
+            project_id=args.project,
+            project_name=args.project_name or args.project,
+            issuer=args.issuer,
+            subject=args.subject,
+            user_name=args.user_name,
+            display_name=args.display_name,
+            email=args.email,
+            budget_limit=args.budget_limit,
+        )
+    )
+    print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
 
 
 def cmd_chat(args):
@@ -181,14 +239,38 @@ def main():
     # issue-key
     p_key = sub.add_parser("issue-key", help="Mint an API key (in-process; works under ENFORCE)")
     p_key.add_argument("-P", "--project", default="default", help="Project ID to scope the key to")
+    p_key.add_argument(
+        "-T",
+        "--tenant",
+        help=(
+            "Tenant ID for a canonical service key. The default scopes become "
+            "model.list,inference.invoke,query.select."
+        ),
+    )
     p_key.add_argument("-n", "--name", default="cli-issued", help="Human-readable key name")
     p_key.add_argument(
-        "-s", "--scopes", default="chat",
-        help="Comma-separated scopes (default: chat). Admin scopes take an "
+        "-s", "--scopes",
+        help="Comma-separated scopes (default: chat, or canonical read/invoke "
+             "scopes with --tenant). Admin scopes take an "
              "optional access level: 'admin:quotas:read' for read-only, "
              "'admin:quotas:write' or bare 'admin:quotas' for both, "
              "'admin:*' for everything, 'admin:*:read' to read everything",
     )
+
+    # canonical tenant bootstrap
+    p_bootstrap = sub.add_parser(
+        "bootstrap-tenant",
+        help="Create or verify a canonical tenant, project, and first administrator",
+    )
+    p_bootstrap.add_argument("-T", "--tenant", required=True)
+    p_bootstrap.add_argument("-P", "--project", required=True)
+    p_bootstrap.add_argument("--project-name")
+    p_bootstrap.add_argument("--issuer", required=True)
+    p_bootstrap.add_argument("--subject", required=True)
+    p_bootstrap.add_argument("--user-name", required=True)
+    p_bootstrap.add_argument("--display-name", default="")
+    p_bootstrap.add_argument("--email")
+    p_bootstrap.add_argument("--budget-limit", type=float)
 
     # chat
     p_chat = sub.add_parser("chat", help="Send a chat message")
@@ -210,6 +292,8 @@ def main():
         cmd_serve(args)
     elif args.command == "issue-key":
         cmd_issue_key(args)
+    elif args.command == "bootstrap-tenant":
+        cmd_bootstrap_tenant(args)
     elif args.command == "chat":
         cmd_chat(args)
     elif args.command == "models":

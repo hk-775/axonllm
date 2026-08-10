@@ -13,6 +13,20 @@
 #
 # Optional:
 #   AXON_DYNAMODB_TABLE_NAME (defaults to axonllm-state)
+#   AXON_RUNTIME_STATE_TABLE_NAME (blank selects the primary table)
+#   AXON_RECOVERY_CUTOVER_MODE (true only during a quiesced table switch)
+#   AXON_DEPLOYMENT_MODE (staging or production; defaults to staging)
+#   AXON_SCIM_TENANTS_SECRET_ARN (complete us-east-1 Secrets Manager ARN)
+#   AXON_PUBLIC_HOSTED_ZONE_ID and AXON_PUBLIC_HOSTED_ZONE_NAME
+#
+# Production mode also requires:
+#   AXON_OIDC_ISSUER
+#   AXON_OIDC_AUTHORIZATION_ENDPOINT
+#   AXON_OIDC_TOKEN_ENDPOINT
+#   AXON_OIDC_USER_INFO_ENDPOINT
+#   AXON_OIDC_CLIENT_ID
+#   AXON_OIDC_CLIENT_SECRET
+#   AXON_OIDC_AUDIENCE
 #
 # --yes skips CDK's approval prompt for security-sensitive changes (IAM roles,
 # security group rules). Without it the script cannot run unattended at all: CDK
@@ -87,6 +101,22 @@ require_env AXON_APPROVED_HTTPS_PREFIX_LIST_ID
 require_env AXON_BEDROCK_INVOKE_RESOURCE_ARNS
 require_env AXON_VERIFIED_IMAGE_URI
 
+DEPLOYMENT_MODE="${AXON_DEPLOYMENT_MODE:-staging}"
+if [ "$DEPLOYMENT_MODE" != "staging" ] &&
+   [ "$DEPLOYMENT_MODE" != "production" ]; then
+    echo "AXON_DEPLOYMENT_MODE must be staging or production." >&2
+    exit 2
+fi
+if [ "$DEPLOYMENT_MODE" = "production" ]; then
+    require_env AXON_OIDC_ISSUER
+    require_env AXON_OIDC_AUTHORIZATION_ENDPOINT
+    require_env AXON_OIDC_TOKEN_ENDPOINT
+    require_env AXON_OIDC_USER_INFO_ENDPOINT
+    require_env AXON_OIDC_CLIENT_ID
+    require_env AXON_OIDC_CLIENT_SECRET
+    require_env AXON_OIDC_AUDIENCE
+fi
+
 if [[ ! "$AXON_APPROVED_HTTPS_PREFIX_LIST_ID" =~ ^pl-[0-9a-fA-F]+$ ]]; then
     echo "AXON_APPROVED_HTTPS_PREFIX_LIST_ID must be an EC2 prefix list id." >&2
     exit 2
@@ -102,6 +132,26 @@ if [[ "$AXON_VIEWER_CERTIFICATE_ARN" != arn:aws:acm:us-east-1:* ]] ||
 fi
 
 TABLE_NAME="${AXON_DYNAMODB_TABLE_NAME:-axonllm-state}"
+RUNTIME_TABLE_NAME="${AXON_RUNTIME_STATE_TABLE_NAME:-}"
+RECOVERY_CUTOVER_MODE="${AXON_RECOVERY_CUTOVER_MODE:-false}"
+SCIM_SECRET_ARN="${AXON_SCIM_TENANTS_SECRET_ARN:-}"
+HOSTED_ZONE_ID="${AXON_PUBLIC_HOSTED_ZONE_ID:-}"
+HOSTED_ZONE_NAME="${AXON_PUBLIC_HOSTED_ZONE_NAME:-}"
+if [ -n "$SCIM_SECRET_ARN" ] &&
+   [[ ! "$SCIM_SECRET_ARN" =~ ^arn:aws:secretsmanager:us-east-1:[0-9]{12}:secret:[A-Za-z0-9/_+=.@-]+$ ]]; then
+    echo "AXON_SCIM_TENANTS_SECRET_ARN must be a complete us-east-1 secret ARN." >&2
+    exit 2
+fi
+if { [ -n "$HOSTED_ZONE_ID" ] && [ -z "$HOSTED_ZONE_NAME" ]; } ||
+   { [ -z "$HOSTED_ZONE_ID" ] && [ -n "$HOSTED_ZONE_NAME" ]; }; then
+    echo "AXON_PUBLIC_HOSTED_ZONE_ID and AXON_PUBLIC_HOSTED_ZONE_NAME must be set together." >&2
+    exit 2
+fi
+if [ "$RECOVERY_CUTOVER_MODE" != "false" ] &&
+   [ "$RECOVERY_CUTOVER_MODE" != "true" ]; then
+    echo "AXON_RECOVERY_CUTOVER_MODE must be false or true." >&2
+    exit 2
+fi
 
 # "broadening" still prompts, and only when a change widens IAM or network
 # access; "never" prompts for nothing. Anything else CDK would reject.
@@ -129,16 +179,43 @@ source .venv/bin/activate
 
 # Synthesize and deploy
 echo "==> Running cdk deploy..."
+CONTEXT=(
+    --context "region=$REGION"
+    --context "table_name=$TABLE_NAME"
+)
+if [ -n "$SCIM_SECRET_ARN" ]; then
+    CONTEXT+=(--context "scim_tenants_secret_arn=$SCIM_SECRET_ARN")
+fi
+
+PARAMETERS=(
+    --parameters "AxonLLMStack:DeploymentMode=$DEPLOYMENT_MODE"
+    --parameters "AxonLLMStack:ViewerDomainName=${AXON_VIEWER_DOMAIN_NAME}"
+    --parameters "AxonLLMStack:ViewerCertificateArn=${AXON_VIEWER_CERTIFICATE_ARN}"
+    --parameters "AxonLLMStack:OriginDomainName=${AXON_ORIGIN_DOMAIN_NAME}"
+    --parameters "AxonLLMStack:OriginCertificateArn=${AXON_ORIGIN_CERTIFICATE_ARN}"
+    --parameters "AxonLLMStack:ApprovedHttpsPrefixListId=${AXON_APPROVED_HTTPS_PREFIX_LIST_ID}"
+    --parameters "AxonLLMStack:BedrockInvokeResourceArns=${AXON_BEDROCK_INVOKE_RESOURCE_ARNS}"
+    --parameters "AxonLLMStack:VerifiedImageUri=${AXON_VERIFIED_IMAGE_URI}"
+    --parameters "AxonLLMStack:RuntimeStateTableName=$RUNTIME_TABLE_NAME"
+    --parameters "AxonLLMStack:RecoveryCutoverMode=$RECOVERY_CUTOVER_MODE"
+    --parameters "AxonLLMStack:PublicHostedZoneId=$HOSTED_ZONE_ID"
+    --parameters "AxonLLMStack:PublicHostedZoneName=$HOSTED_ZONE_NAME"
+)
+if [ "$DEPLOYMENT_MODE" = "production" ]; then
+    PARAMETERS+=(
+        --parameters "AxonLLMStack:OidcIssuer=${AXON_OIDC_ISSUER}"
+        --parameters "AxonLLMStack:OidcAuthorizationEndpoint=${AXON_OIDC_AUTHORIZATION_ENDPOINT}"
+        --parameters "AxonLLMStack:OidcTokenEndpoint=${AXON_OIDC_TOKEN_ENDPOINT}"
+        --parameters "AxonLLMStack:OidcUserInfoEndpoint=${AXON_OIDC_USER_INFO_ENDPOINT}"
+        --parameters "AxonLLMStack:OidcClientId=${AXON_OIDC_CLIENT_ID}"
+        --parameters "AxonLLMStack:OidcClientSecret=${AXON_OIDC_CLIENT_SECRET}"
+        --parameters "AxonLLMStack:OidcAudience=${AXON_OIDC_AUDIENCE}"
+    )
+fi
+
 npx cdk deploy \
-    --context region="$REGION" \
-    --context table_name="$TABLE_NAME" \
-    --parameters "AxonLLMStack:ViewerDomainName=${AXON_VIEWER_DOMAIN_NAME}" \
-    --parameters "AxonLLMStack:ViewerCertificateArn=${AXON_VIEWER_CERTIFICATE_ARN}" \
-    --parameters "AxonLLMStack:OriginDomainName=${AXON_ORIGIN_DOMAIN_NAME}" \
-    --parameters "AxonLLMStack:OriginCertificateArn=${AXON_ORIGIN_CERTIFICATE_ARN}" \
-    --parameters "AxonLLMStack:ApprovedHttpsPrefixListId=${AXON_APPROVED_HTTPS_PREFIX_LIST_ID}" \
-    --parameters "AxonLLMStack:BedrockInvokeResourceArns=${AXON_BEDROCK_INVOKE_RESOURCE_ARNS}" \
-    --parameters "AxonLLMStack:VerifiedImageUri=${AXON_VERIFIED_IMAGE_URI}" \
+    "${CONTEXT[@]}" \
+    "${PARAMETERS[@]}" \
     --require-approval "$APPROVAL" \
     --outputs-file outputs.json
 
