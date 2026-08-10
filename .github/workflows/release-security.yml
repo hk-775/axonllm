@@ -19,11 +19,11 @@ jobs:
     timeout-minutes: 90
     env:
       EVIDENCE_DIR: /tmp/axonllm-release-evidence
+      SIGNING_KEY_ARN: ${{ vars.AXON_RELEASE_SIGNING_KEY_ARN }}
     outputs:
       agentcore_digest: ${{ steps.evidence.outputs.agentcore_digest }}
       fargate_digest: ${{ steps.evidence.outputs.fargate_digest }}
     permissions:
-      attestations: write
       contents: read
       id-token: write
 
@@ -170,16 +170,19 @@ jobs:
             --workflow-ref "${RELEASE_WORKFLOW_REF}" \
             --run-id "${GITHUB_RUN_ID}" \
             --run-attempt "${GITHUB_RUN_ATTEMPT}" \
-            --event-name "${RELEASE_EVENT}"
+            --event-name "${RELEASE_EVENT}" \
+            --signing-key-arn "${SIGNING_KEY_ARN}"
           python scripts/release/release_evidence.py verify \
             --directory "${EVIDENCE_DIR}" \
             --repository "${RELEASE_REPOSITORY}" \
             --commit "${GITHUB_SHA}" \
+            --signing-key-arn "${SIGNING_KEY_ARN}" \
             --target fargate
           python scripts/release/release_evidence.py verify \
             --directory "${EVIDENCE_DIR}" \
             --repository "${RELEASE_REPOSITORY}" \
             --commit "${GITHUB_SHA}" \
+            --signing-key-arn "${SIGNING_KEY_ARN}" \
             --target agentcore
 
       - name: Read immutable evidence identities
@@ -196,43 +199,47 @@ jobs:
           printf 'fargate_digest=%s\n' "${fargate_digest}" >>"${GITHUB_OUTPUT}"
           printf 'agentcore_digest=%s\n' "${agentcore_digest}" >>"${GITHUB_OUTPUT}"
 
-      - name: Keylessly attest Fargate image digest
-        id: attest-fargate
-        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+      - name: Configure release-signing AWS credentials
+        uses: aws-actions/configure-aws-credentials@00943011d9042930efac3dcd3a170e4273319bc8 # v5.1.0
         with:
-          subject-name: axonllm-linux-amd64
-          subject-digest: ${{ steps.evidence.outputs.fargate_digest }}
-          push-to-registry: false
-          show-summary: false
+          aws-region: us-east-1
+          role-to-assume: ${{ vars.AXON_RELEASE_SIGN_ROLE_ARN }}
+          role-session-name: AxonLLMReleaseSign
+          allowed-account-ids: ${{ vars.AXON_AWS_ACCOUNT_ID }}
+          mask-aws-account-id: true
+          inline-session-policy: >-
+            {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "kms:Sign",
+                    "kms:Verify"
+                  ],
+                  "Resource": "${{ vars.AXON_RELEASE_SIGNING_KEY_ARN }}"
+                }
+              ]
+            }
 
-      - name: Keylessly attest AgentCore image digest
-        id: attest-agentcore
-        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
-        with:
-          subject-name: axonllm-agentcore-linux-arm64
-          subject-digest: ${{ steps.evidence.outputs.agentcore_digest }}
-          push-to-registry: false
-          show-summary: false
-
-      - name: Keylessly attest evidence manifest
-        id: attest-manifest
-        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
-        with:
-          subject-path: ${{ env.EVIDENCE_DIR }}/release-manifest.json
-          push-to-registry: false
-          show-summary: false
-
-      - name: Preserve verification bundles
-        env:
-          AGENTCORE_BUNDLE: ${{ steps.attest-agentcore.outputs.bundle-path }}
-          FARGATE_BUNDLE: ${{ steps.attest-fargate.outputs.bundle-path }}
-          MANIFEST_BUNDLE: ${{ steps.attest-manifest.outputs.bundle-path }}
+      - name: Sign and verify private release evidence
         run: |
-          cp "${FARGATE_BUNDLE}" \
-            "${EVIDENCE_DIR}/image-provenance.sigstore.jsonl"
-          cp "${AGENTCORE_BUNDLE}" \
-            "${EVIDENCE_DIR}/agentcore-image-provenance.sigstore.jsonl"
-          cp "${MANIFEST_BUNDLE}" "${EVIDENCE_DIR}/manifest-provenance.sigstore.jsonl"
+          python scripts/release/kms_evidence.py sign \
+            --artifact "${EVIDENCE_DIR}/provenance.intoto.json" \
+            --bundle "${EVIDENCE_DIR}/provenance-kms-signature.json" \
+            --key-arn "${SIGNING_KEY_ARN}"
+          python scripts/release/kms_evidence.py sign \
+            --artifact "${EVIDENCE_DIR}/release-manifest.json" \
+            --bundle "${EVIDENCE_DIR}/manifest-kms-signature.json" \
+            --key-arn "${SIGNING_KEY_ARN}"
+          python scripts/release/kms_evidence.py verify \
+            --artifact "${EVIDENCE_DIR}/provenance.intoto.json" \
+            --bundle "${EVIDENCE_DIR}/provenance-kms-signature.json" \
+            --key-arn "${SIGNING_KEY_ARN}"
+          python scripts/release/kms_evidence.py verify \
+            --artifact "${EVIDENCE_DIR}/release-manifest.json" \
+            --bundle "${EVIDENCE_DIR}/manifest-kms-signature.json" \
+            --key-arn "${SIGNING_KEY_ARN}"
 
       - name: Store private release evidence
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

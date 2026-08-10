@@ -154,6 +154,26 @@ jobs:
         ):
             validate_workflows.validate_workflow(path)
 
+    def test_rejects_github_attestation_write_permission(self) -> None:
+        path = self._write(
+            """
+name: Test
+on:
+  push:
+permissions:
+  attestations: write
+jobs:
+  test:
+    steps:
+      - run: true
+"""
+        )
+        with self.assertRaisesRegex(
+            validate_workflows.WorkflowPolicyError,
+            "write permission is not allowlisted",
+        ):
+            validate_workflows.validate_workflow(path)
+
     def test_rejects_pull_request_target(self) -> None:
         path = self._write(
             """

@@ -14,18 +14,26 @@ from pathlib import Path
 from typing import Any
 
 
-SCHEMA = "https://axonllm.dev/schemas/release-evidence/v2"
+SCHEMA = "https://axonllm.dev/schemas/release-evidence/v3"
 PROVENANCE_TYPE = "https://slsa.dev/provenance/v1"
 STATEMENT_TYPE = "https://in-toto.io/Statement/v1"
+SIGNING_PROVIDER = "AWS_KMS"
+SIGNING_ALGORITHM = "ECDSA_SHA_256"
 BUILD_TYPE = (
     "https://github.com/AxonLLM/axonllm/"
-    ".github/workflows/release-security.yml@v2"
+    ".github/workflows/release-security.yml@v3"
 )
 WORKFLOW_PATH = ".github/workflows/release-security.yml"
 SHA256 = re.compile(r"^sha256:([0-9a-f]{64})$")
 COMMIT = re.compile(r"^[0-9a-f]{40}$")
 REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 REF = re.compile(r"^refs/(?:heads|tags)/[A-Za-z0-9_./+-]+$")
+KMS_KEY_ARN = re.compile(
+    r"^arn:aws:kms:us-east-1:(?P<account_id>[0-9]{12}):key/"
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
+    r"[0-9a-f]{4}-[0-9a-f]{12}$"
+)
+AWS_ACCOUNT_ID = re.compile(r"^[0-9]{12}$")
 
 SOURCE_ARCHIVE = "axonllm-source.tar.gz"
 IMAGE_ARCHIVE = "axonllm-linux-amd64.oci.tar"
@@ -34,14 +42,14 @@ SOURCE_SBOM = "source.cyclonedx.json"
 IMAGE_SBOM = "image.cyclonedx.json"
 SOURCE_SCAN = "source-security.json"
 IMAGE_SCAN = "image-security.json"
-IMAGE_BUNDLE = "image-provenance.sigstore.jsonl"
 AGENTCORE_IMAGE_ARCHIVE = "axonllm-agentcore-linux-arm64.oci.tar"
 AGENTCORE_BUILD_METADATA = "agentcore-build-metadata.json"
 AGENTCORE_IMAGE_SBOM = "agentcore-image.cyclonedx.json"
 AGENTCORE_IMAGE_SCAN = "agentcore-image-security.json"
-AGENTCORE_IMAGE_BUNDLE = "agentcore-image-provenance.sigstore.jsonl"
 PROVENANCE = "provenance.intoto.json"
 MANIFEST = "release-manifest.json"
+PROVENANCE_SIGNATURE = "provenance-kms-signature.json"
+MANIFEST_SIGNATURE = "manifest-kms-signature.json"
 
 
 @dataclass(frozen=True)
@@ -54,7 +62,6 @@ class TargetSpec:
     metadata: str
     sbom: str
     scan: str
-    bundle: str
 
 
 TARGETS = {
@@ -65,7 +72,6 @@ TARGETS = {
         metadata=BUILD_METADATA,
         sbom=IMAGE_SBOM,
         scan=IMAGE_SCAN,
-        bundle=IMAGE_BUNDLE,
     ),
     "agentcore": TargetSpec(
         subject="axonllm-agentcore-linux-arm64",
@@ -74,7 +80,6 @@ TARGETS = {
         metadata=AGENTCORE_BUILD_METADATA,
         sbom=AGENTCORE_IMAGE_SBOM,
         scan=AGENTCORE_IMAGE_SCAN,
-        bundle=AGENTCORE_IMAGE_BUNDLE,
     ),
 }
 SOURCE_ARTIFACTS = (
@@ -136,6 +141,70 @@ def _validate_source(
     expected = f"{repository}/{WORKFLOW_PATH}@{ref}"
     if workflow_ref != expected:
         raise EvidenceError(f"workflow ref must be {expected}")
+
+
+def _validate_signing_key_arn(signing_key_arn: str) -> re.Match[str]:
+    if not isinstance(signing_key_arn, str):
+        raise EvidenceError(
+            "signing key must be a full us-east-1 AWS KMS key ARN"
+        )
+    match = KMS_KEY_ARN.fullmatch(signing_key_arn)
+    if match is None:
+        raise EvidenceError(
+            "signing key must be a full us-east-1 AWS KMS key ARN"
+        )
+    return match
+
+
+def _trusted_signing_key_arn(
+    signing: Any,
+    *,
+    signing_key_arn: str | None,
+    signing_account_id: str | None,
+) -> str:
+    if (signing_key_arn is None) == (signing_account_id is None):
+        raise EvidenceError(
+            "exactly one signing key ARN or signing account ID is required"
+        )
+    if signing_key_arn is not None:
+        _validate_signing_key_arn(signing_key_arn)
+    if signing_account_id is not None and (
+        not isinstance(signing_account_id, str)
+        or not AWS_ACCOUNT_ID.fullmatch(signing_account_id)
+    ):
+        raise EvidenceError("signing account ID must be exactly 12 digits")
+
+    if not isinstance(signing, dict) or set(signing) != {
+        "provider",
+        "algorithm",
+        "keyArn",
+        "provenanceSignature",
+        "manifestSignature",
+    }:
+        raise EvidenceError("release signing identity is malformed")
+    manifest_key_arn = signing.get("keyArn")
+    if not isinstance(manifest_key_arn, str):
+        raise EvidenceError("release signing key ARN is malformed")
+    match = _validate_signing_key_arn(manifest_key_arn)
+    expected_signing = {
+        "provider": SIGNING_PROVIDER,
+        "algorithm": SIGNING_ALGORITHM,
+        "keyArn": manifest_key_arn,
+        "provenanceSignature": PROVENANCE_SIGNATURE,
+        "manifestSignature": MANIFEST_SIGNATURE,
+    }
+    if signing != expected_signing:
+        raise EvidenceError("release signing identity does not match expectation")
+    if signing_key_arn is not None and manifest_key_arn != signing_key_arn:
+        raise EvidenceError("release signing identity does not match expectation")
+    if (
+        signing_account_id is not None
+        and match.group("account_id") != signing_account_id
+    ):
+        raise EvidenceError(
+            "release signing key is not in the trusted AWS account"
+        )
+    return manifest_key_arn
 
 
 def _tar_members(archive: Path) -> dict[str, tarfile.TarInfo]:
@@ -336,7 +405,6 @@ def _assert_clean_scan(path: Path) -> None:
 def _target_record(spec: TargetSpec, digest: str) -> dict[str, str]:
     return {
         "archive": spec.archive,
-        "attestationBundle": spec.bundle,
         "digest": digest,
         "metadata": spec.metadata,
         "platform": spec.platform,
@@ -355,6 +423,7 @@ def _provenance_statement(
     run_id: str,
     run_attempt: str,
     event_name: str,
+    signing_key_arn: str,
     artifacts: dict[str, dict[str, Any]],
     targets: dict[str, dict[str, str]],
 ) -> dict[str, Any]:
@@ -383,6 +452,7 @@ def _provenance_statement(
                     "commit": commit,
                     "ref": ref,
                     "repository": repository,
+                    "signingKeyArn": signing_key_arn,
                     "targets": {
                         name: {
                             "digest": targets[name]["digest"],
@@ -426,8 +496,10 @@ def create_evidence(
     run_id: str,
     run_attempt: str,
     event_name: str,
+    signing_key_arn: str,
 ) -> dict[str, Any]:
     _validate_source(repository, commit, ref, workflow_ref)
+    _validate_signing_key_arn(signing_key_arn)
     if not run_id.isdigit() or not run_attempt.isdigit():
         raise EvidenceError("run ID and attempt must be numeric")
     if not re.fullmatch(r"[A-Za-z0-9_]+", event_name):
@@ -458,6 +530,7 @@ def create_evidence(
         run_id=run_id,
         run_attempt=run_attempt,
         event_name=event_name,
+        signing_key_arn=signing_key_arn,
         artifacts=artifact_records,
         targets=target_records,
     )
@@ -479,6 +552,13 @@ def create_evidence(
             "runAttempt": run_attempt,
             "eventName": event_name,
         },
+        "signing": {
+            "provider": SIGNING_PROVIDER,
+            "algorithm": SIGNING_ALGORITHM,
+            "keyArn": signing_key_arn,
+            "provenanceSignature": PROVENANCE_SIGNATURE,
+            "manifestSignature": MANIFEST_SIGNATURE,
+        },
         "targets": target_records,
         "artifacts": artifact_records,
     }
@@ -493,6 +573,8 @@ def verify_evidence(
     commit: str,
     image_digest: str | None,
     require_release_tag: bool,
+    signing_key_arn: str | None = None,
+    signing_account_id: str | None = None,
     target: str = "fargate",
     expected_run_id: str | None = None,
 ) -> dict[str, Any]:
@@ -504,8 +586,19 @@ def verify_evidence(
     manifest = _read_json(manifest_path)
     if not isinstance(manifest, dict) or manifest.get("schema") != SCHEMA:
         raise EvidenceError("unsupported release manifest schema")
-    if set(manifest) != {"schema", "source", "targets", "artifacts"}:
+    if set(manifest) != {
+        "schema",
+        "source",
+        "signing",
+        "targets",
+        "artifacts",
+    }:
         raise EvidenceError("release manifest structure is unexpected")
+    manifest_signing_key_arn = _trusted_signing_key_arn(
+        manifest.get("signing"),
+        signing_key_arn=signing_key_arn,
+        signing_account_id=signing_account_id,
+    )
     source = manifest.get("source")
     if not isinstance(source, dict):
         raise EvidenceError("release manifest lacks source identity")
@@ -608,6 +701,7 @@ def verify_evidence(
         run_id=run_id,
         run_attempt=run_attempt,
         event_name=event_name,
+        signing_key_arn=manifest_signing_key_arn,
         artifacts=artifacts,
         targets=target_records,
     )
@@ -626,6 +720,7 @@ def _create_command(args: argparse.Namespace) -> int:
         run_id=args.run_id,
         run_attempt=args.run_attempt,
         event_name=args.event_name,
+        signing_key_arn=args.signing_key_arn,
     )
     identities = ", ".join(
         f"{name}={manifest['targets'][name]['digest']}" for name in TARGETS
@@ -642,7 +737,6 @@ def _write_github_output(
 ) -> None:
     record = manifest["targets"][target]
     values = {
-        "bundle": record["attestationBundle"],
         "digest": record["digest"],
         "platform": record["platform"],
         "release_ref": manifest["source"]["ref"],
@@ -651,6 +745,7 @@ def _write_github_output(
         "event_name": manifest["source"]["eventName"],
         "subject": record["subject"],
         "target": target,
+        "signing_key_arn": manifest["signing"]["keyArn"],
     }
     try:
         with path.open("a", encoding="utf-8") as output:
@@ -667,6 +762,8 @@ def _verify_command(args: argparse.Namespace) -> int:
         commit=args.commit,
         image_digest=args.image_digest,
         require_release_tag=args.require_release_tag,
+        signing_key_arn=args.signing_key_arn,
+        signing_account_id=args.signing_account_id,
         target=args.target,
         expected_run_id=args.run_id,
     )
@@ -696,6 +793,7 @@ def _parser() -> argparse.ArgumentParser:
     create.add_argument("--run-id", required=True)
     create.add_argument("--run-attempt", required=True)
     create.add_argument("--event-name", required=True)
+    create.add_argument("--signing-key-arn", required=True)
     create.set_defaults(handler=_create_command)
     verify = commands.add_parser("verify")
     verify.add_argument("--directory", type=Path, required=True)
@@ -703,6 +801,9 @@ def _parser() -> argparse.ArgumentParser:
     verify.add_argument("--commit", required=True)
     verify.add_argument("--image-digest")
     verify.add_argument("--require-release-tag", action="store_true")
+    signing_trust = verify.add_mutually_exclusive_group(required=True)
+    signing_trust.add_argument("--signing-key-arn")
+    signing_trust.add_argument("--signing-account-id")
     verify.add_argument("--target", choices=tuple(TARGETS), default="fargate")
     verify.add_argument("--run-id")
     verify.add_argument("--github-output", type=Path)

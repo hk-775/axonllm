@@ -17,7 +17,7 @@ PINNED_ACTION = re.compile(
     r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_./-]+)?@[0-9a-f]{40}$"
 )
 VALID_PERMISSION = {"read", "write", "none"}
-ALLOWED_WRITE_PERMISSIONS = {"attestations", "id-token", "security-events"}
+ALLOWED_WRITE_PERMISSIONS = {"id-token", "security-events"}
 
 
 class WorkflowPolicyError(RuntimeError):

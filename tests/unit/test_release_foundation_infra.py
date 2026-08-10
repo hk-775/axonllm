@@ -13,6 +13,7 @@ import pytest
 _REPO = Path(__file__).resolve().parents[2]
 _INFRA = _REPO / "infra"
 _INFRA_PYTHON = _INFRA / ".venv" / "bin" / "python"
+_SIGNING_SUBJECT = "repo:AxonLLM/axonllm:ref:refs/tags/v*"
 _RELEASE_SUBJECT = "repo:AxonLLM/axonllm:environment:release"
 _PRODUCTION_SUBJECT = "repo:AxonLLM/axonllm:environment:production"
 _WRITE_ACTIONS = {
@@ -119,18 +120,51 @@ def test_release_repositories_are_retained_immutable_and_kms_encrypted(
         assert repository["UpdateReplacePolicy"] == "Retain"
 
 
-def test_registry_key_rotates_and_is_retained(synthesized_template):
-    key = _resources(synthesized_template, "AWS::KMS::Key")
-    assert len(key) == 1
-    assert key[0]["Properties"]["EnableKeyRotation"] is True
-    assert key[0]["DeletionPolicy"] == "Retain"
-    assert key[0]["UpdateReplacePolicy"] == "Retain"
-
-    alias = _resources(synthesized_template, "AWS::KMS::Alias")
-    assert len(alias) == 1
-    assert alias[0]["Properties"]["AliasName"] == (
-        "alias/axonllm/release-ecr"
+def test_release_keys_are_retained_and_purpose_scoped(synthesized_template):
+    keys = _resources(synthesized_template, "AWS::KMS::Key")
+    assert len(keys) == 2
+    signing_key_logical_id, signing_key = next(
+        (logical_id, resource)
+        for logical_id, resource in synthesized_template["Resources"].items()
+        if resource["Type"] == "AWS::KMS::Key"
+        and resource["Properties"]["Description"]
+        == "AxonLLM private release evidence signing"
     )
+    registry_key = next(
+        key
+        for key in keys
+        if key["Properties"]["Description"]
+        == "AxonLLM private release registry encryption"
+    )
+    assert registry_key["Properties"]["EnableKeyRotation"] is True
+    assert "KeySpec" not in registry_key["Properties"]
+    assert signing_key["Properties"]["KeySpec"] == "ECC_NIST_P256"
+    assert signing_key["Properties"]["KeyUsage"] == "SIGN_VERIFY"
+    assert "EnableKeyRotation" not in signing_key["Properties"]
+    for key in keys:
+        assert key["DeletionPolicy"] == "Retain"
+        assert key["UpdateReplacePolicy"] == "Retain"
+
+    aliases = _resources(synthesized_template, "AWS::KMS::Alias")
+    aliases_by_name = {
+        alias["Properties"]["AliasName"]: alias for alias in aliases
+    }
+    assert set(aliases_by_name) == {
+        "alias/axonllm/release-ecr",
+        "alias/axonllm/release-signing",
+        "alias/axonllm/release-signing-v1",
+    }
+    signing_key_target = {
+        "Fn::GetAtt": [signing_key_logical_id, "Arn"],
+    }
+    for alias_name in (
+        "alias/axonllm/release-signing",
+        "alias/axonllm/release-signing-v1",
+    ):
+        assert (
+            aliases_by_name[alias_name]["Properties"]["TargetKeyId"]
+            == signing_key_target
+        )
 
 
 def test_operations_table_names_are_explicit_parameters(
@@ -168,13 +202,14 @@ def test_github_oidc_trust_is_exact_and_retained(synthesized_template):
     assert provider["UpdateReplacePolicy"] == "Retain"
 
     roles = _resources(synthesized_template, "AWS::IAM::Role")
-    assert len(roles) == 4
+    assert len(roles) == 5
     assert {
         role["Properties"]["RoleName"] for role in roles
     } == {
         "AxonLLMOperationsAudit",
         "AxonLLMOperationsRecovery",
         "AxonLLMReleasePublisher",
+        "AxonLLMReleaseSigner",
         "AxonLLMReleaseVerifier",
     }
     for role in roles:
@@ -191,26 +226,34 @@ def test_github_oidc_trust_is_exact_and_retained(synthesized_template):
         assert len(statements) == 1
         statement = statements[0]
         assert statement["Action"] == "sts:AssumeRoleWithWebIdentity"
-        conditions = statement["Condition"]["StringEquals"]
-        assert conditions[
+        conditions = statement["Condition"]
+        assert conditions["StringEquals"][
             "token.actions.githubusercontent.com:aud"
         ] == "sts.amazonaws.com"
+        if role["Properties"]["RoleName"] == "AxonLLMReleaseSigner":
+            assert "token.actions.githubusercontent.com:sub" not in (
+                conditions["StringEquals"]
+            )
+            assert conditions["StringLike"][
+                "token.actions.githubusercontent.com:sub"
+            ] == _SIGNING_SUBJECT
+            continue
         expected_subject = (
             _RELEASE_SUBJECT
             if role["Properties"]["RoleName"]
             == "AxonLLMReleasePublisher"
             else _PRODUCTION_SUBJECT
         )
-        assert conditions[
+        assert conditions["StringEquals"][
             "token.actions.githubusercontent.com:sub"
         ] == expected_subject
 
 
-def test_publisher_and_verifier_permissions_are_separate(
+def test_signer_publisher_and_verifier_permissions_are_separate(
     synthesized_template,
 ):
     policies = _resources(synthesized_template, "AWS::IAM::Policy")
-    assert len(policies) == 4
+    assert len(policies) == 5
     by_role: dict[str, list[dict]] = {}
     for policy in policies:
         role = policy["Properties"]["Roles"][0]["Ref"]
@@ -226,11 +269,19 @@ def test_publisher_and_verifier_permissions_are_separate(
         for role, statements in by_role.items()
         if "ReleaseVerifierRole" in role
     )
+    signer = next(
+        statements
+        for role, statements in by_role.items()
+        if "ReleaseSignerRole" in role
+    )
     publisher_actions = {
         action for statement in publisher for action in _actions(statement)
     }
     verifier_actions = {
         action for statement in verifier for action in _actions(statement)
+    }
+    signer_actions = {
+        action for statement in signer for action in _actions(statement)
     }
 
     assert _WRITE_ACTIONS <= publisher_actions
@@ -243,6 +294,66 @@ def test_publisher_and_verifier_permissions_are_separate(
     assert "ecr:DeleteRepository" not in publisher_actions
     assert "ecr:GetAuthorizationToken" in publisher_actions
     assert "ecr:GetAuthorizationToken" in verifier_actions
+    assert "kms:Verify" in publisher_actions
+    assert "kms:Sign" not in publisher_actions
+    assert "kms:Verify" in verifier_actions
+    assert "kms:Sign" not in verifier_actions
+    assert signer_actions == {"kms:Sign", "kms:Verify"}
+
+    signing_key_logical_id = next(
+        logical_id
+        for logical_id, resource in synthesized_template["Resources"].items()
+        if resource["Type"] == "AWS::KMS::Key"
+        and resource["Properties"]["Description"]
+        == "AxonLLM private release evidence signing"
+    )
+    signer_kms_statements = [
+        statement
+        for statement in signer
+        if any(action.startswith("kms:") for action in _actions(statement))
+    ]
+    assert len(signer_kms_statements) == 1
+    assert _actions(signer_kms_statements[0]) == {
+        "kms:Sign",
+        "kms:Verify",
+    }
+    assert signer_kms_statements[0]["Resource"] == {
+        "Fn::GetAtt": [signing_key_logical_id, "Arn"],
+    }
+    assert "Condition" not in signer_kms_statements[0]
+
+    account_key_resource = {
+        "Fn::Join": [
+            "",
+            [
+                "arn:",
+                {"Ref": "AWS::Partition"},
+                ":kms:us-east-1:",
+                {"Ref": "AWS::AccountId"},
+                ":key/*",
+            ],
+        ]
+    }
+    alias_condition = {
+        "ForAnyValue:StringLike": {
+            "kms:ResourceAliases": [
+                "alias/axonllm/release-signing-v*",
+            ]
+        }
+    }
+    for statements in (publisher, verifier):
+        kms_statements = [
+            statement
+            for statement in statements
+            if any(
+                action.startswith("kms:")
+                for action in _actions(statement)
+            )
+        ]
+        assert len(kms_statements) == 1
+        assert _actions(kms_statements[0]) == {"kms:Verify"}
+        assert kms_statements[0]["Resource"] == account_key_resource
+        assert kms_statements[0]["Condition"] == alias_condition
 
 
 def test_operations_roles_separate_metadata_audit_from_recovery(
@@ -436,6 +547,8 @@ def test_foundation_outputs_all_operator_inputs(synthesized_template):
         "OperationsRecoveryRoleArn",
         "ReleasePublisherRoleArn",
         "ReleaseRegistryKeyArn",
+        "ReleaseSigningKeyArn",
+        "ReleaseSignerRoleArn",
         "ReleaseVerifierRoleArn",
     }
 

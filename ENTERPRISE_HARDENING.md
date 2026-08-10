@@ -201,22 +201,27 @@ the event resource outputs, add and confirm topic subscribers, and rehearse the
 controlled DLQ recovery procedure.
 
 The release workflow builds separate Fargate AMD64 and AgentCore ARM64 images,
-scans them, creates SBOMs and target-qualified evidence, and emits keyless
-attestations. Deployment verification binds a selected private-ECR digest to the
-exact commit, release tag, workflow run, target, and Sigstore bundle before a
-fresh image scan.
+scans them, creates SBOMs and target-qualified schema-v3 evidence, and KMS-signs
+the multi-target SLSA provenance and manifest. Deployment verification binds a
+selected private-ECR digest to the exact commit, release tag, workflow run, and
+target, verifies both KMS signatures, and performs a fresh image scan. The
+tag-producing signer records its current exact key ARN; consumers accept that
+manifest identity only when it belongs to `AXON_AWS_ACCOUNT_ID` and is targeted
+by a retained `alias/axonllm/release-signing-v*` alias.
 
 The release-foundation stack creates retained KMS-encrypted immutable ECR
-repositories plus separate GitHub OIDC publisher, verifier, metadata-audit, and
-PITR-recovery roles. Audit cannot read secret values or restore data; recovery
-cannot read secrets and is limited to the two state tables and their temporary
-restore-validation namespaces. Fargate recovery cutover uses an exact selected
-table policy and fails deployment unless autoscaling and every old task are
-quiesced; cutover mode pins the declared task count to zero until validation,
+repositories, a retained asymmetric evidence-signing key, and separate GitHub
+OIDC signer, publisher, verifier, metadata-audit, and PITR-recovery roles. The
+tag-only signer cannot access ECR, and the publisher cannot sign. Audit cannot
+read secret values or restore data; recovery cannot read secrets and is limited
+to the two state tables and their temporary restore-validation namespaces.
+Fargate recovery cutover uses an exact selected table policy and fails
+deployment unless autoscaling and every old task are quiesced; cutover mode
+pins the declared task count to zero until validation,
 and its alarms and backup selection follow the selected table. The
 protected publication workflow copies the original signed OCI archives without
 rebuilding, validates fixed destinations, and verifies both remote digests and
-attestations. No workflow deploys a runtime automatically; deploy only the
+KMS evidence. No workflow deploys a runtime automatically; deploy only the
 digest returned by deployment verification.
 
 ## Known Design Residuals
@@ -241,14 +246,19 @@ These limitations are explicit and must not be represented as completed:
 Before production traffic:
 
 1. Deploy the release foundation. Configure the protected `release` environment
-   with the publisher role and fixed ECR variables, and configure the protected
-   `production` environment with the verifier role, including
+   with the publisher role, account ID, and fixed ECR variables, and configure
+   the protected `production` environment with the verifier role,
    `AXON_OPERATIONS_AUDIT_ROLE_ARN`,
    `AXON_OPERATIONS_RECOVERY_ROLE_ARN`, `AXON_AWS_ACCOUNT_ID`, and
    both target data-key variables: `AXON_DATA_KMS_KEY_ARN` and
-   `AXON_AGENTCORE_DATA_KMS_KEY_ARN`.
+   `AXON_AGENTCORE_DATA_KMS_KEY_ARN`. Configure the repository with the
+   tag-only signer role, current exact signing-key ARN, and account ID. Protect
+   `refs/tags/v*` with a ruleset that restricts creation and blocks update and
+   deletion. Create the new retained `alias/axonllm/release-signing-v*` alias
+   before changing the current key variable, and never repoint or delete
+   historical version aliases.
 2. Produce green required CI for the exact release commit.
-3. Execute the real tagged private-ECR and Sigstore flow for the selected
+3. Execute the real tagged private-ECR and KMS-signature flow for the selected
    Fargate or AgentCore image digest.
 4. Run authenticated positive and negative tenant canaries, including wrong
    tenant, wrong project, inactive membership, viewer write denial, service

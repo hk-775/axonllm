@@ -123,6 +123,11 @@ class ReleaseEvidenceTests(unittest.TestCase):
         )
         self.digest = self.digests["fargate"]
         self.agentcore_digest = self.digests["agentcore"]
+        self.signing_key_arn = (
+            "arn:aws:kms:us-east-1:123456789012:key/"
+            "12345678-1234-1234-1234-123456789abc"
+        )
+        self.signing_account_id = "123456789012"
 
     def _create(self) -> None:
         release_evidence.create_evidence(
@@ -134,6 +139,7 @@ class ReleaseEvidenceTests(unittest.TestCase):
             run_id="123",
             run_attempt="1",
             event_name="push",
+            signing_key_arn=self.signing_key_arn,
         )
 
     def test_create_and_verify_release_evidence(self) -> None:
@@ -144,6 +150,7 @@ class ReleaseEvidenceTests(unittest.TestCase):
             commit=self.commit,
             image_digest=self.digest,
             require_release_tag=True,
+            signing_key_arn=self.signing_key_arn,
         )
         self.assertEqual(manifest["targets"]["fargate"]["digest"], self.digest)
         self.assertEqual(
@@ -173,11 +180,161 @@ class ReleaseEvidenceTests(unittest.TestCase):
         ]
         self.assertEqual(parameters["workflowRef"], self.workflow_ref)
         self.assertEqual(
+            parameters["signingKeyArn"],
+            self.signing_key_arn,
+        )
+        self.assertEqual(
             set(parameters["targets"]),
             {"fargate", "agentcore"},
         )
 
-    def test_agentcore_target_selects_its_digest_and_bundle(self) -> None:
+    def test_account_trust_accepts_rotated_manifest_key(self) -> None:
+        self.signing_key_arn = (
+            "arn:aws:kms:us-east-1:123456789012:key/"
+            "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        )
+        self._create()
+
+        manifest = release_evidence.verify_evidence(
+            self.directory,
+            repository=self.repository,
+            commit=self.commit,
+            image_digest=self.digest,
+            require_release_tag=True,
+            signing_account_id=self.signing_account_id,
+        )
+
+        self.assertEqual(
+            manifest["signing"]["keyArn"],
+            self.signing_key_arn,
+        )
+
+    def test_account_trust_rejects_key_from_another_account(self) -> None:
+        self._create()
+        with self.assertRaisesRegex(
+            release_evidence.EvidenceError,
+            "not in the trusted AWS account",
+        ):
+            release_evidence.verify_evidence(
+                self.directory,
+                repository=self.repository,
+                commit=self.commit,
+                image_digest=self.digest,
+                require_release_tag=True,
+                signing_account_id="210987654321",
+            )
+
+    def test_account_trust_rejects_malformed_account_ids(self) -> None:
+        self._create()
+        for account_id in (
+            "",
+            "12345678901",
+            "1234567890123",
+            "12345678901a",
+        ):
+            with self.subTest(account_id=account_id):
+                with self.assertRaisesRegex(
+                    release_evidence.EvidenceError,
+                    "exactly 12 digits",
+                ):
+                    release_evidence.verify_evidence(
+                        self.directory,
+                        repository=self.repository,
+                        commit=self.commit,
+                        image_digest=self.digest,
+                        require_release_tag=True,
+                        signing_account_id=account_id,
+                    )
+
+    def test_account_trust_rejects_malformed_manifest_key(self) -> None:
+        self._create()
+        manifest_path = self.directory / release_evidence.MANIFEST
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["signing"]["keyArn"] = (
+            "arn:aws:kms:us-east-1:123456789012:key/not-a-key-id"
+        )
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+        with self.assertRaisesRegex(
+            release_evidence.EvidenceError,
+            "signing key must be a full",
+        ):
+            release_evidence.verify_evidence(
+                self.directory,
+                repository=self.repository,
+                commit=self.commit,
+                image_digest=self.digest,
+                require_release_tag=True,
+                signing_account_id=self.signing_account_id,
+            )
+
+    def test_exactly_one_signing_trust_selector_is_required(self) -> None:
+        self._create()
+        common = {
+            "repository": self.repository,
+            "commit": self.commit,
+            "image_digest": self.digest,
+            "require_release_tag": True,
+        }
+        for selectors in (
+            {},
+            {
+                "signing_key_arn": self.signing_key_arn,
+                "signing_account_id": self.signing_account_id,
+            },
+        ):
+            with self.subTest(selectors=selectors):
+                with self.assertRaisesRegex(
+                    release_evidence.EvidenceError,
+                    "exactly one signing key ARN or signing account ID",
+                ):
+                    release_evidence.verify_evidence(
+                        self.directory,
+                        **common,
+                        **selectors,
+                    )
+
+    def test_verify_cli_requires_exactly_one_signing_trust_selector(self) -> None:
+        arguments = [
+            "verify",
+            "--directory",
+            str(self.directory),
+            "--repository",
+            self.repository,
+            "--commit",
+            self.commit,
+        ]
+        parser = release_evidence._parser()
+
+        with self.assertRaises(SystemExit):
+            parser.parse_args(arguments)
+        with self.assertRaises(SystemExit):
+            parser.parse_args(
+                [
+                    *arguments,
+                    "--signing-key-arn",
+                    self.signing_key_arn,
+                    "--signing-account-id",
+                    self.signing_account_id,
+                ]
+            )
+
+        by_key = parser.parse_args(
+            [*arguments, "--signing-key-arn", self.signing_key_arn]
+        )
+        self.assertEqual(by_key.signing_key_arn, self.signing_key_arn)
+        self.assertIsNone(by_key.signing_account_id)
+
+        by_account = parser.parse_args(
+            [*arguments, "--signing-account-id", self.signing_account_id]
+        )
+        self.assertEqual(
+            by_account.signing_account_id,
+            self.signing_account_id,
+        )
+        self.assertIsNone(by_account.signing_key_arn)
+
+    def test_agentcore_target_selects_its_digest_and_signing_key(self) -> None:
         self._create()
         manifest = release_evidence.verify_evidence(
             self.directory,
@@ -185,6 +342,7 @@ class ReleaseEvidenceTests(unittest.TestCase):
             commit=self.commit,
             image_digest=self.agentcore_digest,
             require_release_tag=True,
+            signing_key_arn=self.signing_key_arn,
             target="agentcore",
         )
         output = self.directory / "github-output"
@@ -201,8 +359,8 @@ class ReleaseEvidenceTests(unittest.TestCase):
         self.assertEqual(values["digest"], self.agentcore_digest)
         self.assertEqual(values["platform"], "linux/arm64")
         self.assertEqual(
-            values["bundle"],
-            release_evidence.AGENTCORE_IMAGE_BUNDLE,
+            values["signing_key_arn"],
+            self.signing_key_arn,
         )
 
     def test_tampered_agentcore_artifact_is_rejected_for_fargate(self) -> None:
@@ -221,17 +379,21 @@ class ReleaseEvidenceTests(unittest.TestCase):
                 commit=self.commit,
                 image_digest=self.digest,
                 require_release_tag=True,
+                signing_key_arn=self.signing_key_arn,
             )
 
-    def test_tampered_target_bundle_name_is_rejected(self) -> None:
+    def test_tampered_signing_key_is_rejected(self) -> None:
         self._create()
         manifest_path = self.directory / release_evidence.MANIFEST
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        manifest["targets"]["agentcore"]["attestationBundle"] = "caller.jsonl"
+        manifest["signing"]["keyArn"] = (
+            "arn:aws:kms:us-east-1:123456789012:key/"
+            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        )
         manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
         with self.assertRaisesRegex(
             release_evidence.EvidenceError,
-            "target identity is malformed: agentcore",
+            "signing identity does not match",
         ):
             release_evidence.verify_evidence(
                 self.directory,
@@ -239,6 +401,7 @@ class ReleaseEvidenceTests(unittest.TestCase):
                 commit=self.commit,
                 image_digest=self.digest,
                 require_release_tag=True,
+                signing_key_arn=self.signing_key_arn,
             )
 
     def test_target_digest_cannot_be_used_for_other_target(self) -> None:
@@ -253,6 +416,7 @@ class ReleaseEvidenceTests(unittest.TestCase):
                 commit=self.commit,
                 image_digest=self.agentcore_digest,
                 require_release_tag=True,
+                signing_key_arn=self.signing_key_arn,
                 target="fargate",
             )
 
@@ -268,6 +432,7 @@ class ReleaseEvidenceTests(unittest.TestCase):
                 commit=self.commit,
                 image_digest=self.digest,
                 require_release_tag=True,
+                signing_key_arn=self.signing_key_arn,
                 expected_run_id="456",
             )
 
@@ -324,6 +489,7 @@ class ReleaseEvidenceTests(unittest.TestCase):
                 commit=self.commit,
                 image_digest=self.digest,
                 require_release_tag=True,
+                signing_key_arn=self.signing_key_arn,
             )
 
     def test_non_release_ref_is_rejected_by_deployment_gate(self) -> None:
@@ -342,6 +508,7 @@ class ReleaseEvidenceTests(unittest.TestCase):
                 commit=self.commit,
                 image_digest=self.digest,
                 require_release_tag=True,
+                signing_key_arn=self.signing_key_arn,
             )
 
 

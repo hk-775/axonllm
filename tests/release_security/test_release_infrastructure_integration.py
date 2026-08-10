@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
+
+import yaml
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -13,6 +16,49 @@ RELEASE_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release-security.yml"
 DEPLOY_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "deploy-verification.yml"
 PUBLISH_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "publish-release.yml"
 REGISTRY_INSTALLER = REPO_ROOT / "scripts" / "ci" / "install_registry_tools.sh"
+
+
+def _inline_policy_statements(workflow_path: Path) -> list[dict]:
+    workflow = yaml.safe_load(workflow_path.read_text(encoding="utf-8"))
+    statements = []
+    for job in workflow["jobs"].values():
+        for step in job["steps"]:
+            policy = step.get("with", {}).get("inline-session-policy")
+            if policy is not None:
+                statements.extend(json.loads(policy)["Statement"])
+    return statements
+
+
+def _actions(statement: dict) -> set[str]:
+    actions = statement["Action"]
+    if isinstance(actions, str):
+        return {actions}
+    return set(actions)
+
+
+def _kms_statements(workflow_path: Path) -> list[dict]:
+    return [
+        statement
+        for statement in _inline_policy_statements(workflow_path)
+        if any(action.startswith("kms:") for action in _actions(statement))
+    ]
+
+
+def _assert_rotation_safe_verify_policy(workflow_path: Path) -> None:
+    statements = _kms_statements(workflow_path)
+    assert len(statements) == 1
+    assert _actions(statements[0]) == {"kms:Verify"}
+    assert statements[0]["Resource"] == (
+        "arn:aws:kms:us-east-1:"
+        "${{ vars.AXON_AWS_ACCOUNT_ID }}:key/*"
+    )
+    assert statements[0]["Condition"] == {
+        "ForAnyValue:StringLike": {
+            "kms:ResourceAliases": (
+                "alias/axonllm/release-signing-v*"
+            ),
+        },
+    }
 
 
 def test_fargate_deploy_requires_and_passes_verified_image() -> None:
@@ -76,7 +122,7 @@ def test_runtime_dockerfiles_use_architecture_specific_digest_pins() -> None:
         assert all("@sha256:" in source for source in external_sources)
 
 
-def test_release_builds_scans_attests_and_privately_stores_both_images() -> None:
+def test_release_builds_scans_kms_signs_and_stores_both_images() -> None:
     workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
 
     assert "--platform linux/amd64" in workflow
@@ -92,12 +138,31 @@ def test_release_builds_scans_attests_and_privately_stores_both_images() -> None
     identity_step = workflow.split(
         "- name: Read immutable evidence identities",
         maxsplit=1,
-    )[1].split("- name: Keylessly attest Fargate", maxsplit=1)[0]
+    )[1].split("- name: Configure release-signing", maxsplit=1)[0]
     assert "build-metadata.json" not in identity_step
-    assert "subject-name: axonllm-agentcore-linux-arm64" in workflow
-    assert workflow.count("push-to-registry: false") == 3
-    assert "agentcore-image-provenance.sigstore.jsonl" in workflow
-    assert "image-provenance.sigstore.jsonl" in workflow
+    assert "AXON_RELEASE_SIGNING_KEY_ARN" in workflow
+    assert "AXON_RELEASE_SIGN_ROLE_ARN" in workflow
+    assert "AXON_RELEASE_PUBLISH_ROLE_ARN" not in workflow
+    assert '"kms:Sign"' in workflow
+    assert '"kms:Verify"' in workflow
+    assert workflow.count("kms_evidence.py sign") == 2
+    assert workflow.count("kms_evidence.py verify") == 2
+    assert "provenance-kms-signature.json" in workflow
+    assert "manifest-kms-signature.json" in workflow
+    assert workflow.count("--signing-key-arn") == 3
+    assert "--signing-account-id" not in workflow
+    assert "actions/attest-build-provenance@" not in workflow
+    assert "attestations: write" not in workflow
+    signing_statements = _kms_statements(RELEASE_WORKFLOW)
+    assert len(signing_statements) == 1
+    assert _actions(signing_statements[0]) == {
+        "kms:Sign",
+        "kms:Verify",
+    }
+    assert signing_statements[0]["Resource"] == (
+        "${{ vars.AXON_RELEASE_SIGNING_KEY_ARN }}"
+    )
+    assert "Condition" not in signing_statements[0]
 
     assert "axonllm-release-evidence-${{ github.sha }}" in workflow
     assert "actions/upload-artifact@" in workflow
@@ -119,14 +184,18 @@ def test_deployment_gate_selects_only_signed_target_identity() -> None:
     assert '--github-output "${GITHUB_OUTPUT}"' in workflow
 
     assert "EXPECTED_DIGEST: ${{ steps.evidence.outputs.digest }}" in workflow
-    assert (
-        "IMAGE_BUNDLE: ${{ runner.temp }}/release-evidence/"
-        "${{ steps.evidence.outputs.bundle }}"
-    ) in workflow
     assert "--expected-digest \"${EXPECTED_DIGEST}\"" in workflow
-    assert '--bundle "${IMAGE_BUNDLE}"' in workflow
-    assert "inputs.bundle" not in workflow
+    assert "AXON_RELEASE_SIGNING_KEY_ARN" not in workflow
+    assert workflow.count("--signing-account-id") == 1
+    assert "--signing-key-arn" not in workflow
+    assert (
+        "SIGNING_KEY_ARN: "
+        "${{ steps.evidence.outputs.signing_key_arn }}"
+    ) in workflow
+    assert workflow.count("kms_evidence.py verify") == 2
+    assert "kms:Sign" not in workflow
     assert "inputs.digest" not in workflow
+    _assert_rotation_safe_verify_policy(DEPLOY_WORKFLOW)
 
     assert "--require-release-tag" in workflow
     assert "git/ref/tags/${release_tag}" in workflow
@@ -134,12 +203,10 @@ def test_deployment_gate_selects_only_signed_target_identity() -> None:
     assert "actions/runs/${EVIDENCE_RUN_ID}" in workflow
     assert '.path == ".github/workflows/release-security.yml"' in workflow
     assert '.conclusion == "success"' in workflow
+    assert '.event == "push"' in workflow
     assert '[[ "${tag_type}" == "commit" ]]' in workflow
     assert '[[ "${tag_sha}" == "${EXPECTED_COMMIT}" ]]' in workflow
-    assert "--signer-workflow" in workflow
-    assert '--signer-digest "${EXPECTED_COMMIT}"' in workflow
-    assert '--source-digest "${EXPECTED_COMMIT}"' in workflow
-    assert '--source-ref "${RELEASE_REF}"' in workflow
+    assert "gh attestation verify" not in workflow
     assert "--verify-remote" in workflow
     assert "VERIFIED_TARGET: ${{ steps.evidence.outputs.target }}" in workflow
 
@@ -150,9 +217,18 @@ def test_publication_preserves_signed_digests_in_private_ecr() -> None:
     assert "environment: release" in workflow
     assert "id-token: write" in workflow
     assert "AXON_RELEASE_PUBLISH_ROLE_ARN" in workflow
+    assert "AXON_RELEASE_SIGNING_KEY_ARN" not in workflow
     assert "allowed-account-ids: ${{ vars.AXON_AWS_ACCOUNT_ID }}" in workflow
     assert "--require-release-tag" in workflow
     assert workflow.count("--run-id \"${EVIDENCE_RUN_ID}\"") == 2
+    assert workflow.count("--signing-account-id") == 2
+    assert "--signing-key-arn" not in workflow
+    assert "signing_key_arn=$(sed -n" in workflow
+    assert (
+        "SIGNING_KEY_ARN: "
+        "${{ steps.evidence.outputs.signing_key_arn }}"
+    ) in workflow
+    _assert_rotation_safe_verify_policy(PUBLISH_WORKFLOW)
     assert '[[ "${release_ref}" == "refs/tags/${EXPECTED_TAG}" ]]' in workflow
     assert '.path == ".github/workflows/release-security.yml"' in workflow
     assert '.conclusion == "success"' in workflow
@@ -163,7 +239,8 @@ def test_publication_preserves_signed_digests_in_private_ecr() -> None:
     assert '"${archive}@${digest}"' in workflow
     assert '"${repository}:${RELEASE_TAG}"' in workflow
     assert "--verify-remote" in workflow
-    assert workflow.count("gh attestation verify") == 2
+    assert workflow.count("kms_evidence.py verify") == 2
+    assert "gh attestation verify" not in workflow
     assert "ecr:BatchDeleteImage" not in workflow
     assert "ImageNotFoundException" in workflow
     assert "2>/dev/null || true" not in workflow

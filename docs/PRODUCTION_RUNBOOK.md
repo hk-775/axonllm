@@ -10,12 +10,17 @@ transactions advance `SCIM#VERSION`, and `DynamoPersistence` provides strongly
 consistent tenant version and snapshot reads.
 
 Focused hardening regressions are green locally. Release evidence uses
-schema-v2 with distinct Fargate and AgentCore targets. Controlled publication
+schema-v3 with distinct Fargate and AgentCore targets. Controlled publication
 copies both signed OCI archives into retained immutable private ECR
 repositories, and deployment verification selects and verifies either target.
 This is not a release certification. Obtain green required CI for the exact
-commit, then execute and retain the real tagged private-ECR/Sigstore flow for
-the selected image digest.
+commit, then execute and retain the real tagged private-ECR/KMS-signature flow
+for the selected image digest.
+
+The immutable `v0.2.2` tag is not promotable. Its source and image scans
+completed, but GitHub rejected attestation persistence for the private
+organization plan before any evidence artifact was uploaded. Do not move or
+reuse that tag; use a new version with the KMS-backed flow.
 
 The operational workflow implements daily recovery metadata audits and a
 monthly temporary-table PITR exercise with separate audit and recovery roles.
@@ -136,8 +141,12 @@ datasource adapter, HTTP route, AgentCore action, or backend query contract.
 `infra/release_foundation_stack.py` is restricted to `us-east-1` and creates:
 
 - retained `axonllm/fargate` and `axonllm/agentcore` private ECR repositories;
-- immutable tags, scan-on-push, and a retained rotation-enabled KMS key;
+- immutable tags, scan-on-push, a retained rotation-enabled ECR KMS key, and
+  retained P-256 asymmetric release-signing keys with version aliases named
+  `alias/axonllm/release-signing-v*`;
 - an account-global GitHub Actions OIDC provider;
+- an `AxonLLMReleaseSigner` role trusted only by `v*` tag refs and permitted
+  only to sign and verify with the release-signing key;
 - an `AxonLLMReleasePublisher` role trusted only by the protected GitHub
   `release` environment;
 - an `AxonLLMReleaseVerifier` role trusted only by the protected GitHub
@@ -147,10 +156,11 @@ datasource adapter, HTTP route, AgentCore action, or backend query contract.
 - an `AxonLLMOperationsRecovery` role that can run PITR validation and remove
   only temporary `*-restore-validation-*` tables.
 
-The publisher can upload and read image layers but cannot delete images or
-repositories. The verifier is read-only. Both operations roles trust only the
-exact protected `production` environment subject. Deploy this stack once per
-target account:
+The signer cannot access ECR. The publisher can verify evidence and upload and
+read image layers, but cannot sign or delete images or repositories. The
+verifier can verify signatures and read images but cannot sign or write. Both
+operations roles trust only the exact protected `production` environment
+subject. Deploy this stack once per target account:
 
 ```bash
 cd infra
@@ -171,11 +181,24 @@ Create two protected GitHub environments:
 - `production`: require approval and restrict deployment refs to protected
   production branches and tags.
 
+Create an active repository tag ruleset targeting `refs/tags/v*`. Restrict tag
+creation to the release-manager bypass list and block tag updates and deletion.
+The signer role trusts version-tag OIDC subjects directly, so environment
+protection does not substitute for this tag ruleset.
+
 Required reviewers and wait timers for private repositories depend on the
 organization's GitHub plan. Verify that GitHub actually returns the reviewer
 rule after configuration. A custom branch/tag policy by itself is not an
 approval gate; if the plan rejects reviewers, upgrade the plan before claiming
 that either environment has separation-of-duties approval.
+
+Configure these repository variables for the tag-triggered signing workflow:
+
+| Name | Value |
+|---|---|
+| `AXON_RELEASE_SIGN_ROLE_ARN` | `ReleaseSignerRoleArn` output |
+| `AXON_RELEASE_SIGNING_KEY_ARN` | Current exact `ReleaseSigningKeyArn` output; never an alias |
+| `AXON_AWS_ACCOUNT_ID` | Twelve-digit deployment account |
 
 Configure `release` with:
 
@@ -186,14 +209,35 @@ Configure `release` with:
 | Variable | `AXON_FARGATE_ECR_REPOSITORY` | `FargateRepositoryUri` output |
 | Variable | `AXON_AGENTCORE_ECR_REPOSITORY` | `AgentCoreRepositoryUri` output |
 
-Configure `production` with the same three variables. Set `AWS_ROLE_ARN` to the
-`ReleaseVerifierRoleArn` output, `AXON_OPERATIONS_AUDIT_ROLE_ARN` to
+Configure `production` with `AXON_AWS_ACCOUNT_ID`. Set `AWS_ROLE_ARN` to the
+`ReleaseVerifierRoleArn` output,
+`AXON_OPERATIONS_AUDIT_ROLE_ARN` to
 `OperationsAuditRoleArn`, and `AXON_OPERATIONS_RECOVERY_ROLE_ARN` to
 `OperationsRecoveryRoleArn`. Also set `AXON_FARGATE_STATE_TABLE_NAME` and
 `AXON_AGENTCORE_STATE_TABLE_NAME` to the physical names supplied to the
 foundation stack. The target data-key variables described in
 [Backup And Restore](#backup-and-restore) are additional production-environment
 settings.
+
+`AXON_RELEASE_SIGNING_KEY_ARN` is a repository variable used only by the
+tag-producing signer. Publication and production do not read it. Their trust
+root is `AXON_AWS_ACCOUNT_ID` plus retained KMS aliases matching
+`alias/axonllm/release-signing-v*`. Each consumer obtains the exact key ARN from
+the schema-v3 manifest, requires that ARN to belong to the trusted account and
+to be the target of one of those version aliases, and only then verifies both
+KMS signatures.
+
+Rotate the asymmetric signing key through a reviewed migration:
+
+1. Create the new retained P-256 signing key.
+2. Create the next retained version alias, such as
+   `alias/axonllm/release-signing-v2`, and point it to the new key before
+   changing `AXON_RELEASE_SIGNING_KEY_ARN`.
+3. Set the repository variable to the new key's exact ARN and cut a new release
+   tag. The manifest records that exact ARN.
+4. Retain every historical signing key and version alias. Never repoint or
+   delete an existing `release-signing-v*` alias; doing so invalidates the trust
+   record needed to verify rollback evidence.
 
 ## Fargate Deployment
 
@@ -395,33 +439,44 @@ It:
 - builds AMD64 Fargate and ARM64 AgentCore OCI images;
 - scans both images and emits CycloneDX SBOMs;
 - creates a deterministic source archive;
-- creates a schema-v2 manifest with distinct Fargate and AgentCore target
-  identities and keylessly attests both image digests and the manifest;
+- creates a schema-v3 manifest and multi-target SLSA provenance record with
+  distinct Fargate and AgentCore image digests;
+- signs both records with the retained asymmetric AWS KMS key and immediately
+  verifies the signatures;
 - stores private evidence for 90 days.
 
 `.github/workflows/publish-release.yml` is the controlled publication step. It
 runs only in the protected `release` environment, validates the exact tag,
 commit, release workflow run and attempt, successful CI, signed manifest, both
-target identities, and fixed account/region repository names. It then uses a
-checksum-pinned ORAS client to copy each signed OCI digest without rebuilding,
-verifies both remote digests and Sigstore bundles, and emits immutable
+target identities, KMS signatures, and fixed account/region repository names.
+It then uses a checksum-pinned ORAS client to copy each signed OCI digest
+without rebuilding, verifies both remote digests, and emits immutable
 `@sha256` references. Existing immutable tags are accepted only when their
 digest already matches; AWS lookup failures fail closed.
 
 `.github/workflows/deploy-verification.yml` requires a release tag, successful
 CI for the exact commit, signed evidence, an immutable private ECR digest, and a
 fresh image scan. Its `target` input selects `fargate` or `agentcore`; the
-schema-v2 verifier binds the supplied digest to the selected target and emits
-the matching subject, platform, and Sigstore bundle. The workflow verifies the
-manifest attestation, selected target's remote private ECR digest and keyless
-attestation, then rescans that exact image.
+schema-v3 verifier binds the supplied digest to the selected target, source
+commit, release tag, workflow run, platform, manifest, and SLSA provenance.
+The workflow verifies both KMS signatures, the selected target's remote
+private ECR digest, and then rescans that exact image.
+
+Publication and deployment take the exact signing key ARN from the manifest,
+not from the current signer variable. They accept it only when its account is
+`AXON_AWS_ACCOUNT_ID` and a retained
+`alias/axonllm/release-signing-v*` resolves to that exact key.
+
+This KMS-backed flow works for a private repository without GitHub's paid
+artifact-attestation API and does not send private release identities or
+artifact hashes to a public transparency log.
 
 Never deploy a mutable tag or bypass a failing CI/evidence check. Record the
 commit, release tag, workflow run, ECR URI and digest, SBOMs, scan results,
-attestation verification, selected target, approvals, and canary results. The
+KMS signature verification, selected target, approvals, and canary results. The
 workflows publish and verify images but do not deploy either runtime. A real
-tagged private-ECR/Sigstore execution remains externally unverified until its
-workflow evidence is retained.
+tagged private-ECR/KMS-signature execution remains externally unverified until
+its workflow evidence is retained.
 
 ## Readiness And Traffic Shift
 

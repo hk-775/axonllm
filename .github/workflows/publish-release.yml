@@ -36,7 +36,6 @@ jobs:
     environment: release
     permissions:
       actions: read
-      attestations: read
       contents: read
       id-token: write
     outputs:
@@ -77,6 +76,7 @@ jobs:
           EVIDENCE_RUN_ID: ${{ inputs.evidence_run_id }}
           EXPECTED_COMMIT: ${{ inputs.commit_sha }}
           EXPECTED_REPOSITORY: ${{ github.repository }}
+          EXPECTED_SIGNING_ACCOUNT_ID: ${{ vars.AXON_AWS_ACCOUNT_ID }}
           EXPECTED_TAG: ${{ inputs.release_tag }}
         run: |
           set -euo pipefail
@@ -90,6 +90,7 @@ jobs:
             --directory "${EVIDENCE_DIR}" \
             --repository "${EXPECTED_REPOSITORY}" \
             --commit "${EXPECTED_COMMIT}" \
+            --signing-account-id "${EXPECTED_SIGNING_ACCOUNT_ID}" \
             --require-release-tag \
             --target fargate \
             --run-id "${EVIDENCE_RUN_ID}" \
@@ -98,6 +99,7 @@ jobs:
             --directory "${EVIDENCE_DIR}" \
             --repository "${EXPECTED_REPOSITORY}" \
             --commit "${EXPECTED_COMMIT}" \
+            --signing-account-id "${EXPECTED_SIGNING_ACCOUNT_ID}" \
             --require-release-tag \
             --target agentcore \
             --run-id "${EVIDENCE_RUN_ID}" \
@@ -107,23 +109,26 @@ jobs:
           agentcore_digest=$(sed -n 's/^digest=//p' "${agentcore_output}")
           release_ref=$(sed -n 's/^release_ref=//p' "${fargate_output}")
           run_attempt=$(sed -n 's/^run_attempt=//p' "${fargate_output}")
+          signing_key_arn=$(sed -n 's/^signing_key_arn=//p' "${fargate_output}")
           [[ "${release_ref}" == "refs/tags/${EXPECTED_TAG}" ]]
           [[ "$(sed -n 's/^release_ref=//p' "${agentcore_output}")" == "${release_ref}" ]]
           [[ "${run_attempt}" =~ ^[1-9][0-9]*$ ]]
           [[ "$(sed -n 's/^run_attempt=//p' "${agentcore_output}")" == "${run_attempt}" ]]
           [[ "${fargate_digest}" =~ ^sha256:[0-9a-f]{64}$ ]]
           [[ "${agentcore_digest}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "${signing_key_arn}" =~ ^arn:aws:kms:us-east-1:${EXPECTED_SIGNING_ACCOUNT_ID}:key/[0-9a-f-]+$ ]]
+          [[ "$(sed -n 's/^signing_key_arn=//p' "${agentcore_output}")" == "${signing_key_arn}" ]]
 
           {
             printf 'agentcore_digest=%s\n' "${agentcore_digest}"
             printf 'fargate_digest=%s\n' "${fargate_digest}"
             printf 'release_ref=%s\n' "${release_ref}"
             printf 'run_attempt=%s\n' "${run_attempt}"
+            printf 'signing_key_arn=%s\n' "${signing_key_arn}"
           } >>"${GITHUB_OUTPUT}"
 
-      - name: Verify manifest attestation and release lineage
+      - name: Verify release lineage
         env:
-          EVIDENCE_DIR: ${{ runner.temp }}/release-evidence
           EVIDENCE_RUN_ID: ${{ inputs.evidence_run_id }}
           EXPECTED_COMMIT: ${{ inputs.commit_sha }}
           EXPECTED_REPOSITORY: ${{ github.repository }}
@@ -133,16 +138,6 @@ jobs:
           RELEASE_RUN_ATTEMPT: ${{ steps.evidence.outputs.run_attempt }}
         run: |
           set -euo pipefail
-          gh attestation verify \
-            "${EVIDENCE_DIR}/release-manifest.json" \
-            --bundle "${EVIDENCE_DIR}/manifest-provenance.sigstore.jsonl" \
-            --repo "${EXPECTED_REPOSITORY}" \
-            --signer-workflow "${EXPECTED_REPOSITORY}/.github/workflows/release-security.yml" \
-            --signer-digest "${EXPECTED_COMMIT}" \
-            --source-digest "${EXPECTED_COMMIT}" \
-            --source-ref "${RELEASE_REF}" \
-            --deny-self-hosted-runners
-
           release_run=$(gh api \
             "repos/${EXPECTED_REPOSITORY}/actions/runs/${EVIDENCE_RUN_ID}")
           jq -e \
@@ -208,6 +203,58 @@ jobs:
           role-session-name: AxonLLMReleasePublish
           allowed-account-ids: ${{ vars.AXON_AWS_ACCOUNT_ID }}
           mask-aws-account-id: true
+          inline-session-policy: >-
+            {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": "ecr:GetAuthorizationToken",
+                  "Resource": "*"
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "ecr:BatchCheckLayerAvailability",
+                    "ecr:BatchGetImage",
+                    "ecr:CompleteLayerUpload",
+                    "ecr:DescribeImages",
+                    "ecr:GetDownloadUrlForLayer",
+                    "ecr:InitiateLayerUpload",
+                    "ecr:PutImage",
+                    "ecr:UploadLayerPart"
+                  ],
+                  "Resource": [
+                    "arn:aws:ecr:${{ inputs.aws_region }}:${{ vars.AXON_AWS_ACCOUNT_ID }}:repository/axonllm/fargate",
+                    "arn:aws:ecr:${{ inputs.aws_region }}:${{ vars.AXON_AWS_ACCOUNT_ID }}:repository/axonllm/agentcore"
+                  ]
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": "kms:Verify",
+                  "Resource": "arn:aws:kms:us-east-1:${{ vars.AXON_AWS_ACCOUNT_ID }}:key/*",
+                  "Condition": {
+                    "ForAnyValue:StringLike": {
+                      "kms:ResourceAliases": "alias/axonllm/release-signing-v*"
+                    }
+                  }
+                }
+              ]
+            }
+
+      - name: Verify KMS-signed release evidence
+        env:
+          EVIDENCE_DIR: ${{ runner.temp }}/release-evidence
+          SIGNING_KEY_ARN: ${{ steps.evidence.outputs.signing_key_arn }}
+        run: |
+          python scripts/release/kms_evidence.py verify \
+            --artifact "${EVIDENCE_DIR}/provenance.intoto.json" \
+            --bundle "${EVIDENCE_DIR}/provenance-kms-signature.json" \
+            --key-arn "${SIGNING_KEY_ARN}"
+          python scripts/release/kms_evidence.py verify \
+            --artifact "${EVIDENCE_DIR}/release-manifest.json" \
+            --bundle "${EVIDENCE_DIR}/manifest-kms-signature.json" \
+            --key-arn "${SIGNING_KEY_ARN}"
 
       - name: Authenticate to private ECR
         env:
@@ -268,45 +315,29 @@ jobs:
             "${AGENTCORE_DIGEST}" \
             "${AGENTCORE_REPOSITORY}"
 
-      - name: Verify remote digests and image attestations
+      - name: Verify remote image digests
         env:
-          AGENTCORE_BUNDLE: ${{ runner.temp }}/release-evidence/agentcore-image-provenance.sigstore.jsonl
           AGENTCORE_DIGEST: ${{ steps.evidence.outputs.agentcore_digest }}
           AGENTCORE_REPOSITORY: ${{ vars.AXON_AGENTCORE_ECR_REPOSITORY }}
           AWS_REGION: ${{ inputs.aws_region }}
-          EXPECTED_COMMIT: ${{ inputs.commit_sha }}
-          EXPECTED_REPOSITORY: ${{ github.repository }}
-          FARGATE_BUNDLE: ${{ runner.temp }}/release-evidence/image-provenance.sigstore.jsonl
           FARGATE_DIGEST: ${{ steps.evidence.outputs.fargate_digest }}
           FARGATE_REPOSITORY: ${{ vars.AXON_FARGATE_ECR_REPOSITORY }}
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_REF: ${{ steps.evidence.outputs.release_ref }}
         run: |
           set -euo pipefail
           verify_target() {
             local repository=$1
             local digest=$2
-            local bundle=$3
             local image="${repository}@${digest}"
             python scripts/release/verify_ecr_image.py \
               "${image}" \
               --region "${AWS_REGION}" \
               --expected-digest "${digest}" \
               --verify-remote
-            gh attestation verify \
-              "oci://${image}" \
-              --bundle "${bundle}" \
-              --repo "${EXPECTED_REPOSITORY}" \
-              --signer-workflow "${EXPECTED_REPOSITORY}/.github/workflows/release-security.yml" \
-              --signer-digest "${EXPECTED_COMMIT}" \
-              --source-digest "${EXPECTED_COMMIT}" \
-              --source-ref "${RELEASE_REF}" \
-              --deny-self-hosted-runners
           }
           verify_target \
-            "${FARGATE_REPOSITORY}" "${FARGATE_DIGEST}" "${FARGATE_BUNDLE}"
+            "${FARGATE_REPOSITORY}" "${FARGATE_DIGEST}"
           verify_target \
-            "${AGENTCORE_REPOSITORY}" "${AGENTCORE_DIGEST}" "${AGENTCORE_BUNDLE}"
+            "${AGENTCORE_REPOSITORY}" "${AGENTCORE_DIGEST}"
 
       - name: Emit immutable publication result
         id: result

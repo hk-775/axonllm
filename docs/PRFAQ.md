@@ -29,10 +29,10 @@ release requirements.
 
 The production implementation includes tenant SCIM version/snapshot reads and
 transactional version increments. Focused hardening regressions are green
-locally, and schema-v2 evidence plus target-aware deployment verification cover
+locally, and schema-v3 evidence plus target-aware deployment verification cover
 both Fargate and AgentCore. Promotion still requires successful repository CI
-for the exact commit. A real tagged private-ECR/Sigstore flow for the deployed
-digest and a real AWS restore exercise remain externally unverified.
+for the exact commit. A real tagged private-ECR/KMS-signature flow for the
+deployed digest and a real AWS restore exercise remain externally unverified.
 
 ## Frequently Asked Questions
 
@@ -275,7 +275,7 @@ A:
 - no automatic SNS alarm or security-event topic subscription;
 - a synchronous bootstrap worker cannot be forcibly canceled by Python;
 - no image publication or deployment step in the evidence and verification
-  workflows; the real tagged private-ECR/Sigstore flow remains externally
+  workflows; the real tagged private-ECR/KMS-signature flow remains externally
   unverified.
 
 The checked-in `.bedrock_agentcore.yaml` is generated local state with public
@@ -284,35 +284,45 @@ the infrastructure source of truth.
 
 **Q: Is ARM64 release evidence generated?**
 
-A: Yes. `release-security.yml` builds, scans, SBOMs, and keylessly attests both
-images. Its schema-v2 manifest records distinct `fargate` and `agentcore`
-targets. `deploy-verification.yml` selects either target, binds the supplied
-private ECR digest to that target's metadata, scan, SBOM, source commit, release
-tag, CI result, and Sigstore bundle, verifies the remote image, and rescans it.
-The implementation is locally tested; a real tagged private-ECR/Sigstore run
-remains externally unverified.
+A: Yes. `release-security.yml` builds, scans, and SBOMs both images, records
+their digests in schema-v3 multi-target SLSA provenance, and KMS-signs both the
+provenance and manifest. `deploy-verification.yml` selects either target, binds
+the supplied private ECR digest to that target's metadata, scan, SBOM, source
+commit, release tag, and CI result, verifies both KMS signatures and the remote
+image, and rescans it. The implementation is locally tested; a real tagged
+private-ECR/KMS-signature run remains externally unverified.
 
 ### Release Governance
 
 **Q: What evidence is required for a release?**
 
 A: Green CI for the exact commit, a `v*` release ref, source/image scans, SBOMs,
-immutable image digests, verified keyless attestations, private ECR publication,
-a fresh remote scan, deployment approval, readiness, authorization canaries,
-alarm delivery, and recovery evidence. The release workflow creates evidence
-but does not publish or deploy. The separate protected publication workflow
-copies the verified OCI archives to immutable private ECR without rebuilding;
-no workflow deploys a runtime. The first real tagged
-private-ECR/Sigstore flow and real AWS restore exercise remain externally
-unverified.
+immutable image digests, verified KMS signatures, private ECR publication, a
+fresh remote scan, deployment approval, readiness, authorization canaries, alarm
+delivery, and recovery evidence. The release workflow creates evidence but does
+not publish or deploy. The separate protected publication workflow copies the
+verified OCI archives to immutable private ECR without rebuilding; no workflow
+deploys a runtime. The first real tagged private-ECR/KMS-signature flow and real
+AWS restore exercise remain externally unverified.
+
+**Q: How is release-signing key rotation kept rollback-safe?**
+
+A: `AXON_RELEASE_SIGNING_KEY_ARN` is a repository variable used only by the
+tag-producing signer and always contains the current exact key ARN. Before
+changing it, create a new retained version alias matching
+`alias/axonllm/release-signing-v*` for the new key. Publication and production
+read the exact key ARN from the manifest and accept it only when the ARN belongs
+to `AXON_AWS_ACCOUNT_ID` and one retained version alias resolves to it.
+Historical version aliases are never repointed or deleted, and their keys
+remain retained.
 
 **Q: Is the current worktree production-ready?**
 
 A: No. Local focused regressions and implemented controls do not certify a
 specific artifact or environment. Required CI for the exact release commit, a
-real tagged private-ECR/Sigstore verification for the deployed digest, a real
-AWS restore exercise, canaries, alarm delivery, and operational approval still
-need retained evidence.
+real tagged private-ECR/KMS-signature verification for the deployed digest, a
+real AWS restore exercise, canaries, alarm delivery, and operational approval
+still need retained evidence.
 
 See the [Production Runbook](PRODUCTION_RUNBOOK.md) and
 [AgentCore Runbook](AGENTCORE_RUNBOOK.md) for commands and release checks.

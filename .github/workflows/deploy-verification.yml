@@ -79,7 +79,6 @@ jobs:
     environment: production
     permissions:
       actions: read
-      attestations: read
       contents: read
       id-token: write
     outputs:
@@ -126,34 +125,18 @@ jobs:
           EXPECTED_COMMIT: ${{ inputs.commit_sha }}
           EXPECTED_DIGEST: ${{ steps.image.outputs.digest }}
           EXPECTED_REPOSITORY: ${{ github.repository }}
+          EXPECTED_SIGNING_ACCOUNT_ID: ${{ vars.AXON_AWS_ACCOUNT_ID }}
         run: |
           python scripts/release/release_evidence.py verify \
             --directory "${EVIDENCE_DIR}" \
             --repository "${EXPECTED_REPOSITORY}" \
             --commit "${EXPECTED_COMMIT}" \
             --image-digest "${EXPECTED_DIGEST}" \
+            --signing-account-id "${EXPECTED_SIGNING_ACCOUNT_ID}" \
             --require-release-tag \
             --target "${DEPLOY_TARGET}" \
             --run-id "${EVIDENCE_RUN_ID}" \
             --github-output "${GITHUB_OUTPUT}"
-
-      - name: Verify keyless manifest attestation
-        env:
-          EVIDENCE_DIR: ${{ runner.temp }}/release-evidence
-          EXPECTED_COMMIT: ${{ inputs.commit_sha }}
-          EXPECTED_REPOSITORY: ${{ github.repository }}
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_REF: ${{ steps.evidence.outputs.release_ref }}
-        run: >-
-          gh attestation verify
-          "${EVIDENCE_DIR}/release-manifest.json"
-          --bundle "${EVIDENCE_DIR}/manifest-provenance.sigstore.jsonl"
-          --repo "${EXPECTED_REPOSITORY}"
-          --signer-workflow "${EXPECTED_REPOSITORY}/.github/workflows/release-security.yml"
-          --signer-digest "${EXPECTED_COMMIT}"
-          --source-digest "${EXPECTED_COMMIT}"
-          --source-ref "${RELEASE_REF}"
-          --deny-self-hosted-runners
 
       - name: Require successful release run, matching tag, and CI
         env:
@@ -161,7 +144,6 @@ jobs:
           EXPECTED_COMMIT: ${{ inputs.commit_sha }}
           EXPECTED_REPOSITORY: ${{ github.repository }}
           GH_TOKEN: ${{ github.token }}
-          RELEASE_EVENT: ${{ steps.evidence.outputs.event_name }}
           RELEASE_REF: ${{ steps.evidence.outputs.release_ref }}
           RELEASE_RUN_ATTEMPT: ${{ steps.evidence.outputs.run_attempt }}
         run: |
@@ -170,12 +152,11 @@ jobs:
           jq -e \
             --arg attempt "${RELEASE_RUN_ATTEMPT}" \
             --arg commit "${EXPECTED_COMMIT}" \
-            --arg event "${RELEASE_EVENT}" \
             --arg run_id "${EVIDENCE_RUN_ID}" \
             '(.id | tostring) == $run_id
               and (.run_attempt | tostring) == $attempt
               and .head_sha == $commit
-              and .event == $event
+              and .event == "push"
               and .status == "completed"
               and .conclusion == "success"
               and .path == ".github/workflows/release-security.yml"' \
@@ -234,9 +215,33 @@ jobs:
                     "ecr:GetDownloadUrlForLayer"
                   ],
                   "Resource": "arn:aws:ecr:${{ inputs.aws_region }}:${{ steps.image.outputs.account_id }}:repository/${{ steps.image.outputs.repository }}"
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": "kms:Verify",
+                  "Resource": "arn:aws:kms:us-east-1:${{ vars.AXON_AWS_ACCOUNT_ID }}:key/*",
+                  "Condition": {
+                    "ForAnyValue:StringLike": {
+                      "kms:ResourceAliases": "alias/axonllm/release-signing-v*"
+                    }
+                  }
                 }
               ]
             }
+
+      - name: Verify KMS-signed release evidence
+        env:
+          EVIDENCE_DIR: ${{ runner.temp }}/release-evidence
+          SIGNING_KEY_ARN: ${{ steps.evidence.outputs.signing_key_arn }}
+        run: |
+          python scripts/release/kms_evidence.py verify \
+            --artifact "${EVIDENCE_DIR}/provenance.intoto.json" \
+            --bundle "${EVIDENCE_DIR}/provenance-kms-signature.json" \
+            --key-arn "${SIGNING_KEY_ARN}"
+          python scripts/release/kms_evidence.py verify \
+            --artifact "${EVIDENCE_DIR}/release-manifest.json" \
+            --bundle "${EVIDENCE_DIR}/manifest-kms-signature.json" \
+            --key-arn "${SIGNING_KEY_ARN}"
 
       - name: Authenticate to private ECR
         env:
@@ -247,32 +252,16 @@ jobs:
           aws ecr get-login-password --region "${AWS_REGION}" |
             docker login --username AWS --password-stdin "${REGISTRY}"
 
-      - name: Verify remote manifest and keyless image attestation
+      - name: Verify remote image digest
         env:
-          EXPECTED_COMMIT: ${{ inputs.commit_sha }}
           EXPECTED_DIGEST: ${{ steps.evidence.outputs.digest }}
-          EXPECTED_REPOSITORY: ${{ github.repository }}
-          GH_TOKEN: ${{ github.token }}
-          IMAGE_BUNDLE: ${{ runner.temp }}/release-evidence/${{ steps.evidence.outputs.bundle }}
           IMAGE_REFERENCE: ${{ inputs.image_reference }}
-          RELEASE_REF: ${{ steps.evidence.outputs.release_ref }}
         run: |
-          test -f "${IMAGE_BUNDLE}"
-          test ! -L "${IMAGE_BUNDLE}"
           python scripts/release/verify_ecr_image.py \
             "${IMAGE_REFERENCE}" \
             --region "${{ inputs.aws_region }}" \
             --expected-digest "${EXPECTED_DIGEST}" \
             --verify-remote
-          gh attestation verify \
-            "oci://${IMAGE_REFERENCE}" \
-            --bundle "${IMAGE_BUNDLE}" \
-            --repo "${EXPECTED_REPOSITORY}" \
-            --signer-workflow "${EXPECTED_REPOSITORY}/.github/workflows/release-security.yml" \
-            --signer-digest "${EXPECTED_COMMIT}" \
-            --source-digest "${EXPECTED_COMMIT}" \
-            --source-ref "${RELEASE_REF}" \
-            --deny-self-hosted-runners
 
       - name: Install checksum-verified scanner
         run: |
