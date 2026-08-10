@@ -116,10 +116,11 @@ selector aggregates users without a tenant filter and has no canonical action
 mapping.
 
 > **Current release status.** Focused hardening regressions are green locally,
-> and schema-v2 release evidence plus target-aware deployment verification cover
+> and schema-v3 release evidence plus target-aware deployment verification cover
 > both Fargate and AgentCore. This is not production certification. Green
-> required CI for the exact release commit, a real tagged private-ECR/Sigstore
-> flow for the deployed digest, and a real AWS restore exercise remain
+> required CI for the exact release commit, a real tagged
+> private-ECR/KMS-signature flow for the deployed digest, and a real AWS restore
+> exercise remain
 > externally unverified. See the
 > [Production Runbook](docs/PRODUCTION_RUNBOOK.md#release-status) and
 > [AgentCore Runbook](docs/AGENTCORE_RUNBOOK.md#current-status).
@@ -2223,13 +2224,17 @@ Memory is not wired and non-Bedrock provider secrets are not injected. AgentCore
 exposes no bootstrap action, but `axon bootstrap-tenant` can provision its
 DynamoDB table out of band before traffic.
 The release workflow records Fargate and AgentCore as distinct targets in its
-schema-v2 manifest and attests both image digests. Deployment verification
-selects `fargate` or `agentcore`, binds the selected private ECR digest to its
-target-specific evidence and Sigstore bundle, verifies the remote image, and
-rescans it. A separate protected workflow copies the signed OCI archives into
-retained KMS-encrypted immutable ECR repositories without rebuilding and
-verifies both remote attestations. The workflows do not deploy either runtime,
-and a real tagged private-ECR/Sigstore execution remains externally unverified.
+schema-v3 manifest and KMS-signed multi-target SLSA provenance. Deployment
+verification selects `fargate` or `agentcore`, binds the selected private ECR
+digest to its target evidence, verifies both KMS signatures and the remote
+image, and rescans it. A separate protected workflow copies the signed OCI
+archives into retained KMS-encrypted immutable ECR repositories without
+rebuilding and verifies both remote digests. The workflows do not deploy either
+runtime. Only the tag-producing signer uses the repository's current exact
+`AXON_RELEASE_SIGNING_KEY_ARN`; publication and deployment obtain the exact key
+ARN from the manifest and require it to belong to `AXON_AWS_ACCOUNT_ID` and a
+retained `alias/axonllm/release-signing-v*` alias. A real tagged
+private-ECR/KMS-signature execution remains externally unverified.
 See the [AgentCore Runbook](docs/AGENTCORE_RUNBOOK.md).
 
 ### AWS App Runner
@@ -2281,9 +2286,9 @@ categories and bodyless read load, and use
 `scripts/operations/fargate_recovery.py status --minimum-healthy-targets 2` to
 prove a Fargate service has at least two healthy ALB targets. This combination
 does not identify which task served each request.
-Require green CI and schema-v2 target-aware release evidence for the exact
-deployed digest. The first real tagged private-ECR/Sigstore flow and a real AWS
-restore exercise remain externally unverified.
+Require green CI and schema-v3 target-aware release evidence for the exact
+deployed digest. The first real tagged private-ECR/KMS-signature flow and a real
+AWS restore exercise remain externally unverified.
 
 ## Embedding in Ostiari (trace forwarding)
 

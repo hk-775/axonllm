@@ -15,6 +15,7 @@ from constructs import Construct
 
 
 _GITHUB_OIDC_ISSUER = "token.actions.githubusercontent.com"
+_GITHUB_SIGNING_SUBJECT = "repo:AxonLLM/axonllm:ref:refs/tags/v*"
 _GITHUB_RELEASE_SUBJECT = "repo:AxonLLM/axonllm:environment:release"
 _GITHUB_PRODUCTION_SUBJECT = (
     "repo:AxonLLM/axonllm:environment:production"
@@ -67,6 +68,24 @@ class AxonLLMReleaseFoundationStack(Stack):
             enable_key_rotation=True,
             removal_policy=RemovalPolicy.RETAIN,
         )
+        release_signing_key = kms.Key(
+            self,
+            "ReleaseSigningKey",
+            alias="alias/axonllm/release-signing",
+            description="AxonLLM private release evidence signing",
+            key_spec=kms.KeySpec.ECC_NIST_P256,
+            key_usage=kms.KeyUsage.SIGN_VERIFY,
+            removal_policy=RemovalPolicy.RETAIN,
+        )
+        release_signing_version_alias = kms.Alias(
+            self,
+            "ReleaseSigningKeyVersionAlias",
+            alias_name="alias/axonllm/release-signing-v1",
+            target_key=release_signing_key,
+        )
+        release_signing_version_alias.apply_removal_policy(
+            RemovalPolicy.RETAIN
+        )
 
         repositories = {
             target: self._release_repository(
@@ -84,6 +103,16 @@ class AxonLLMReleaseFoundationStack(Stack):
             removal_policy=RemovalPolicy.RETAIN,
         )
 
+        signer = iam.Role(
+            self,
+            "ReleaseSignerRole",
+            role_name="AxonLLMReleaseSigner",
+            description=(
+                "Signs AxonLLM release evidence from v-prefixed Git tags"
+            ),
+            assumed_by=self._github_signing_principal(github_provider),
+            max_session_duration=Duration.hours(1),
+        )
         publisher = iam.Role(
             self,
             "ReleasePublisherRole",
@@ -179,6 +208,16 @@ class AxonLLMReleaseFoundationStack(Stack):
                 resources=repository_arns,
             )
         )
+        release_signing_key.grant_sign_verify(signer)
+        for role in (publisher, verifier):
+            role.add_to_policy(
+                iam.PolicyStatement(
+                    sid="VerifyApprovedReleaseEvidence",
+                    actions=["kms:Verify"],
+                    resources=[self._account_key_arn()],
+                    conditions=self._release_signing_alias_condition(),
+                )
+            )
         self._grant_operations_audit(
             operations_audit,
             state_table_names=state_table_names,
@@ -195,6 +234,11 @@ class AxonLLMReleaseFoundationStack(Stack):
         )
         CfnOutput(
             self,
+            "ReleaseSigningKeyArn",
+            value=release_signing_key.key_arn,
+        )
+        CfnOutput(
+            self,
             "GitHubOidcProviderArn",
             value=github_provider.oidc_provider_arn,
         )
@@ -202,6 +246,11 @@ class AxonLLMReleaseFoundationStack(Stack):
             self,
             "ReleasePublisherRoleArn",
             value=publisher.role_arn,
+        )
+        CfnOutput(
+            self,
+            "ReleaseSignerRoleArn",
+            value=signer.role_arn,
         )
         CfnOutput(
             self,
@@ -477,6 +526,19 @@ class AxonLLMReleaseFoundationStack(Stack):
         }
 
     @staticmethod
+    def _release_signing_alias_condition() -> dict[
+        str,
+        dict[str, list[str]],
+    ]:
+        return {
+            "ForAnyValue:StringLike": {
+                "kms:ResourceAliases": [
+                    "alias/axonllm/release-signing-v*",
+                ]
+            }
+        }
+
+    @staticmethod
     def _github_principal(
         provider: iam.IOidcProvider,
         *,
@@ -489,5 +551,21 @@ class AxonLLMReleaseFoundationStack(Stack):
                     f"{_GITHUB_OIDC_ISSUER}:aud": "sts.amazonaws.com",
                     f"{_GITHUB_OIDC_ISSUER}:sub": subject,
                 }
+            },
+        )
+
+    @staticmethod
+    def _github_signing_principal(
+        provider: iam.IOidcProvider,
+    ) -> iam.OpenIdConnectPrincipal:
+        return iam.OpenIdConnectPrincipal(
+            provider,
+            conditions={
+                "StringEquals": {
+                    f"{_GITHUB_OIDC_ISSUER}:aud": "sts.amazonaws.com",
+                },
+                "StringLike": {
+                    f"{_GITHUB_OIDC_ISSUER}:sub": _GITHUB_SIGNING_SUBJECT,
+                },
             },
         )

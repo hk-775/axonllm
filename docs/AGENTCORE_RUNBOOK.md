@@ -10,12 +10,12 @@ The AgentCore application and private-network CDK stack are implemented.
 consistent snapshot reads used during startup and runtime convergence.
 
 Focused hardening regressions are green locally. The release workflow records
-Fargate and AgentCore as distinct schema-v2 targets, controlled publication
+Fargate and AgentCore as distinct schema-v3 targets, controlled publication
 copies both signed OCI archives to immutable private ECR repositories, and
 deployment verification can select and verify the AgentCore ARM64 target. This
 is not a production certification. Required CI must be green for the exact
-release commit. A real tagged private-ECR/Sigstore flow for the AgentCore digest
-and a real AWS restore exercise remain externally unverified.
+release commit. A real tagged private-ECR/KMS-signature flow for the AgentCore
+digest and a real AWS restore exercise remain externally unverified.
 
 ## Runtime Surface
 
@@ -147,26 +147,35 @@ external process/runtime startup deadline.
 
 `.github/workflows/release-security.yml` creates the ARM64 image with the
 AgentCore Dockerfile, scans it, emits an image SBOM, captures BuildKit metadata,
-and creates a keyless digest attestation. Its schema-v2 release manifest records
-both deployment targets. The AgentCore evidence bundle contains:
+and records its digest in KMS-signed SLSA provenance. Its schema-v3 release
+manifest records both deployment targets. The evidence bundle contains:
 
 - `axonllm-agentcore-linux-arm64.oci.tar`;
 - `agentcore-build-metadata.json`;
 - `agentcore-image-security.json`;
 - `agentcore-image.cyclonedx.json`;
-- `agentcore-image-provenance.sigstore.jsonl`.
+- `provenance.intoto.json`;
+- `provenance-kms-signature.json`;
+- `release-manifest.json`;
+- `manifest-kms-signature.json`.
 
 `deploy-verification.yml` accepts `target=agentcore`, binds the supplied private
 ECR digest to the AgentCore subject, ARM64 platform, metadata, scan, SBOM, source
-commit, release tag, CI result, and target-specific Sigstore bundle, verifies the
-remote digest and attestation, and performs a fresh image scan.
+commit, release tag, CI result, signed manifest, and signed provenance, verifies
+the remote digest, and performs a fresh image scan.
+
+The consumer obtains the exact signing key ARN from the manifest and accepts it
+only when it belongs to `AXON_AWS_ACCOUNT_ID` and is the target of a retained
+`alias/axonllm/release-signing-v*` alias. It does not use the signer's current
+`AXON_RELEASE_SIGNING_KEY_ARN` repository variable.
 
 `publish-release.yml` verifies the tagged release lineage and both signed target
 records, then copies the original OCI archives into the release-foundation
 repositories without rebuilding. It verifies the remote digest and target
-attestation before emitting the immutable image references. Deploy only the
+evidence before emitting the immutable image references. Deploy only the
 AgentCore reference that subsequently passes `deploy-verification.yml`. The
-first real tagged private-ECR/Sigstore execution remains externally unverified.
+first real tagged private-ECR/KMS-signature execution remains externally
+unverified.
 
 ## CDK Setup
 

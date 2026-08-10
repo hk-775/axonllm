@@ -46,13 +46,13 @@ AxonLLM is a unified gateway that sits between applications and LLM providers, g
 AxonLLM's full HTTP and admin surface runs as a Starlette application. A
 separate Amazon Bedrock AgentCore adapter and CDK stack provide chat, model
 listing, liveness, dependency readiness, canonical identity, private networking,
-backup, and monitoring. Canonical SCIM convergence, schema-v2 evidence for both
+backup, and monitoring. Canonical SCIM convergence, schema-v3 evidence for both
 image targets, and target-aware Fargate/AgentCore deployment verification are
 implemented. Focused hardening regressions are green locally, but promotion
 still requires green CI for the exact release commit. The first real tagged
-private-ECR/Sigstore flow for a deployed digest and the first real AWS restore
-exercise remain externally unverified, so the implementation is not itself a
-production certification.
+private-ECR/KMS-signature flow for a deployed digest and the first real AWS
+restore exercise remain externally unverified, so the implementation is not
+itself a production certification.
 
 ---
 
@@ -98,7 +98,7 @@ A single gateway endpoint that applications target instead of individual provide
 | G5 | **Content safety** | Configurable guardrail rules (keyword blocking, regex matching, content category filtering) inspect requests and responses, with block/warn/redact actions. |
 | G6 | **High availability** | Automatic retry with exponential backoff on transient failures, multi-provider fallback chains, and health-aware routing ensure application continuity during provider outages. |
 | G7 | **Operational visibility** | A web-based admin console provides real-time dashboards for usage monitoring, cost analytics, project management, and provider health status. |
-| G8 | **Managed AgentCore deployment** | Provide target-specific release evidence and deployment verification for the checked-in private-networked stack and its JWT, readiness, backup, and monitoring controls. |
+| G8 | **Managed AgentCore deployment** | Provide target-specific release evidence and deployment verification for the checked-in private-networked stack and its JWT, readiness, backup, monitoring, and rotation-safe KMS signing controls. |
 
 ### 3.2 Non-Goals
 
@@ -1263,7 +1263,7 @@ call. With no URL and no registered sink, the forwarder is inert.
 | In-memory state loss on restart (without DynamoDB) | High | Medium | DynamoDB persistence is available; document as required for production |
 | Process-local provider health and response caches | Medium | Medium | Cache namespaces include tenant/project, but hit rates and provider-health routing can differ by replica; use fleet canaries and do not treat cache contents as durable state |
 | Canonical bootstrap uses deployment credentials | Medium | High | Run the restartable CLI against the exact runtime table under a narrowly scoped operator role, verify its JSON result, and deliver optional Fargate `AXON_SCIM_TENANTS` only through the reviewed Secrets Manager ARN |
-| Tagged private-ECR/Sigstore release flow is not externally verified | High | High | Run the schema-v2 gate for each selected target against a real `v*` release and private ECR digest, then retain the target-specific attestation, scan, approval, and canary evidence |
+| Tagged private-ECR/KMS-signature release flow is not externally verified | High | High | Run the schema-v3 gate for each selected target against a real `v*` release and private ECR digest, retain the KMS signatures, target evidence, scan, approval, and canary evidence, and preserve immutable `alias/axonllm/release-signing-v*` mappings for rollback verification |
 | Real AWS restore exercise is not externally verified | High | High | Configure the audit/recovery roles and KMS key, execute the PITR restore workflow in the production account, validate tenant integrity, and retain recovery evidence |
 | Cost tracking accuracy drift from pricing changes | Medium | Low | Pricing config is externalized in YAML; update cadence tracked |
 | Single-region deployment limits availability | Low | High | Architecture supports multi-region; future milestone |
@@ -1313,10 +1313,11 @@ call. With no URL and no registered sink, the forwarder is inert.
 - [x] AgentCore explicit initialization with an admission deadline,
       OIDC/DynamoDB dependency readiness, authoritative project resolution, and
       graceful provider/OTLP shutdown
-- [x] Schema-v2 release evidence and target-aware deployment verification for
-      Fargate and AgentCore image identities
+- [x] Schema-v3 release evidence and target-aware deployment verification for
+      Fargate and AgentCore image identities, with exact manifest key ARNs
+      constrained by account-scoped retained signing-key version aliases
 - [ ] Obtain and retain a green required CI run for the exact release commit
-- [ ] Execute and retain a real tagged private-ECR/Sigstore verification flow
+- [ ] Execute and retain a real tagged private-ECR/KMS-signature verification flow
       for each deployment target
 - [ ] Execute and retain the first real AWS restore exercise and application
       recovery rehearsal
