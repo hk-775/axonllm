@@ -1,6 +1,6 @@
 # AxonLLM Enterprise Hardening Status
 
-This document describes the current repository as of 2026-08-07. It separates
+This document describes the current repository as of 2026-08-10. It separates
 controls implemented in the repository from deployment and operational evidence
 that must still be produced in the target AWS account.
 
@@ -34,10 +34,16 @@ multi-tenant deployment:
 - locked CI, release-evidence, deployment-verification, recovery, and security
   workflows for both deployment targets.
 
-This is not production certification. Promotion still requires green protected
-CI for the exact release commit, target-account configuration, verified release
-evidence for the deployed image digest, authenticated canaries, and retained
-recovery evidence.
+`v0.2.4` completed protected CI, KMS-signed schema-v3 evidence, immutable
+private-ECR publication, and current-policy verification for both target
+digests. See the
+[production release record](docs/PRODUCTION_RUNBOOK.md#release-status).
+
+This is not production certification. A 2026-08-10 target-account audit found
+only stopped or legacy Fargate and AgentCore resources, not either hardened
+stack. Promotion still requires target-account prerequisites, deployment of a
+verified digest, authenticated canaries, alarm/event delivery, and retained
+restore, cutover, rollback, and load evidence.
 
 ## Production Contract
 

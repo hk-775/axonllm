@@ -31,8 +31,9 @@ The production implementation includes tenant SCIM version/snapshot reads and
 transactional version increments. Focused hardening regressions are green
 locally, and schema-v3 evidence plus target-aware deployment verification cover
 both Fargate and AgentCore. Promotion still requires successful repository CI
-for the exact commit. A real tagged private-ECR/KMS-signature flow for the
-deployed digest and a real AWS restore exercise remain externally unverified.
+for the exact commit. `v0.2.4` completed the private-ECR/KMS-signature flow for
+both target digests. A hardened runtime deployment and real AWS restore
+exercise remain externally unverified.
 
 ## Frequently Asked Questions
 
@@ -275,8 +276,8 @@ A:
 - no automatic SNS alarm or security-event topic subscription;
 - a synchronous bootstrap worker cannot be forcibly canceled by Python;
 - no image publication or deployment step in the evidence and verification
-  workflows; the real tagged private-ECR/KMS-signature flow remains externally
-  unverified.
+  workflows; publication is a separate protected workflow and no workflow
+  deploys a runtime.
 
 The checked-in `.bedrock_agentcore.yaml` is generated local state with public
 networking and no production JWT/header contract. `infra/agentcore_stack.py` is
@@ -289,8 +290,8 @@ their digests in schema-v3 multi-target SLSA provenance, and KMS-signs both the
 provenance and manifest. `deploy-verification.yml` selects either target, binds
 the supplied private ECR digest to that target's metadata, scan, SBOM, source
 commit, release tag, and CI result, verifies both KMS signatures and the remote
-image, and rescans it. The implementation is locally tested; a real tagged
-private-ECR/KMS-signature run remains externally unverified.
+image, and rescans it. `v0.2.4` completed the real tagged
+private-ECR/KMS-signature run for both targets.
 
 ### Release Governance
 
@@ -302,8 +303,9 @@ fresh remote scan, deployment approval, readiness, authorization canaries, alarm
 delivery, and recovery evidence. The release workflow creates evidence but does
 not publish or deploy. The separate protected publication workflow copies the
 verified OCI archives to immutable private ECR without rebuilding; no workflow
-deploys a runtime. The first real tagged private-ECR/KMS-signature flow and real
-AWS restore exercise remain externally unverified.
+deploys a runtime. `v0.2.4` completed the first tagged
+private-ECR/KMS-signature flow. A real hardened deployment and AWS restore
+exercise remain externally unverified.
 
 **Q: How is release-signing key rotation kept rollback-safe?**
 
@@ -318,11 +320,11 @@ remain retained.
 
 **Q: Is the current worktree production-ready?**
 
-A: No. Local focused regressions and implemented controls do not certify a
-specific artifact or environment. Required CI for the exact release commit, a
-real tagged private-ECR/KMS-signature verification for the deployed digest, a
-real AWS restore exercise, canaries, alarm delivery, and operational approval
-still need retained evidence.
+A: No. Local focused regressions and implemented controls do not certify an
+environment. `v0.2.4` has retained CI and private-ECR/KMS evidence for both
+target artifacts, but no hardened runtime currently deploys those digests. A
+real AWS restore exercise, canaries, alarm delivery, load validation, and
+operational approval still need retained evidence.
 
 See the [Production Runbook](PRODUCTION_RUNBOOK.md) and
 [AgentCore Runbook](AGENTCORE_RUNBOOK.md) for commands and release checks.

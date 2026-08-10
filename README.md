@@ -115,13 +115,11 @@ Canonical mode default-denies every unmapped `/api/*` and `/v1/*` route.
 selector aggregates users without a tenant filter and has no canonical action
 mapping.
 
-> **Current release status.** Focused hardening regressions are green locally,
-> and schema-v3 release evidence plus target-aware deployment verification cover
-> both Fargate and AgentCore. This is not production certification. Green
-> required CI for the exact release commit, a real tagged
-> private-ECR/KMS-signature flow for the deployed digest, and a real AWS restore
-> exercise remain
-> externally unverified. See the
+> **Current release status.** `v0.2.4` completed the schema-v3 KMS signing,
+> immutable private-ECR publication, and current-policy verification flow for
+> both Fargate and AgentCore. Neither image is deployed to a hardened runtime.
+> A real AWS restore/cutover rehearsal, authenticated tenant canaries, load
+> validation, and alarm/event delivery remain unverified. See the
 > [Production Runbook](docs/PRODUCTION_RUNBOOK.md#release-status) and
 > [AgentCore Runbook](docs/AGENTCORE_RUNBOOK.md#current-status).
 
@@ -2233,8 +2231,9 @@ rebuilding and verifies both remote digests. The workflows do not deploy either
 runtime. Only the tag-producing signer uses the repository's current exact
 `AXON_RELEASE_SIGNING_KEY_ARN`; publication and deployment obtain the exact key
 ARN from the manifest and require it to belong to `AXON_AWS_ACCOUNT_ID` and a
-retained `alias/axonllm/release-signing-v*` alias. A real tagged
-private-ECR/KMS-signature execution remains externally unverified.
+retained `alias/axonllm/release-signing-v*` alias. `v0.2.4` completed this flow
+for both targets; see the
+[production release record](docs/PRODUCTION_RUNBOOK.md#release-status).
 See the [AgentCore Runbook](docs/AGENTCORE_RUNBOOK.md).
 
 ### AWS App Runner
@@ -2287,8 +2286,9 @@ categories and bodyless read load, and use
 prove a Fargate service has at least two healthy ALB targets. This combination
 does not identify which task served each request.
 Require green CI and schema-v3 target-aware release evidence for the exact
-deployed digest. The first real tagged private-ECR/KMS-signature flow and a real
-AWS restore exercise remain externally unverified.
+deployed digest. `v0.2.4` has retained private-ECR/KMS evidence, but no hardened
+runtime deployment, AWS restore exercise, or application recovery rehearsal has
+been verified.
 
 ## Embedding in Ostiari (trace forwarding)
 
