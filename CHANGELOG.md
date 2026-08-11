@@ -35,6 +35,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Deployment verification now scans the exact signed target platform.**
   Multi-architecture ECR references are resolved to the platform recorded in
   release evidence before Trivy rescans the deployment image.
+- **GitHub workflows now use first-party actions built for Node 24.**
+  `actions/checkout`, `actions/setup-python`, and `actions/setup-node` are
+  upgraded across CI, release, deployment-verification, and operations
+  workflows while remaining pinned to immutable commit SHAs.
 
 ### Fixed
 
