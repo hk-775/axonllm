@@ -21,6 +21,7 @@ DATA_PLANE_ACTIONS: dict[tuple[str, str], Action] = {
     ("POST", "/api/chat"): Action.INFERENCE_INVOKE,
     ("POST", "/api/chat/stream"): Action.INFERENCE_INVOKE,
     ("POST", "/v1/chat/completions"): Action.INFERENCE_INVOKE,
+    ("POST", "/v1/query"): Action.QUERY_SELECT,
 }
 
 _CANONICAL_API_PREFIXES = ("/api/", "/v1/")

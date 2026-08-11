@@ -10,10 +10,12 @@ import subprocess
 
 import pytest
 
+from scripts.operations import deploy_agentcore as deployment
 from scripts.operations.deploy_agentcore import (
     AgentCoreDeploymentError,
     IdentityValues,
     agentcore_deploy_command,
+    control_plane_deploy_command,
     ensure_managed_cognito_admin,
     identity_deploy_command,
 )
@@ -30,12 +32,23 @@ from src.gateway.agentcore_setup import (
 _REPO = Path(__file__).resolve().parents[2]
 _DIGEST = "e368b7b4522f4838f3ebb4dcc04967682c73cb73e7e40ce16421a6a1ffda6147"
 _IMAGE = f"123456789012.dkr.ecr.us-east-1.amazonaws.com/axonllm/agentcore@sha256:{_DIGEST}"
+_CONTROL_IMAGE = (
+    "123456789012.dkr.ecr.us-east-1.amazonaws.com/"
+    f"axonllm/control-plane@sha256:{_DIGEST}"
+)
 _BEDROCK_ARN = "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-5-sonnet-20241022-v2:0"
+_ATHENA_ROLE_ARN = (
+    "arn:aws:iam::123456789012:role/axon-athena-project-a"
+)
+_CERTIFICATE_ARN = (
+    "arn:aws:acm:us-east-1:123456789012:"
+    "certificate/11111111-2222-3333-4444-555555555555"
+)
 
 
 def _base() -> dict:
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "target": "agentcore",
         "identity_mode": "managed-cognito",
         "aws_region": "us-east-1",
@@ -59,6 +72,14 @@ def _base() -> dict:
             "hosted_ui_domain_prefix": "axonllm-123456789012",
             "oauth_callback_urls": ["https://app.example.com/oauth/callback"],
         },
+        "control_plane": {
+            "domain_name": "axon.example.com",
+            "verified_image_uri": _CONTROL_IMAGE,
+            "certificate_arn": _CERTIFICATE_ARN,
+            "public_hosted_zone_id": "Z123ABC",
+            "approved_ingress_prefix_list_id": "pl-123abc",
+            "approved_https_prefix_list_id": "pl-456def",
+        },
     }
 
 
@@ -66,6 +87,7 @@ def _external() -> dict:
     value = _base()
     value["identity_mode"] = "external-oidc"
     value.pop("managed_cognito")
+    value.pop("control_plane")
     value["admin"]["subject"] = "00u-admin-subject"
     value["external_oidc"] = {
         "issuer": "https://idp.example.com/oauth2/default",
@@ -78,6 +100,37 @@ def _external() -> dict:
     return value
 
 
+def _athena_roles_for_bindings_length(target_length: int) -> list[str]:
+    roles = [
+        f"arn:aws:iam::{123456789012 + index}:role/r{index}"
+        for index in range(4)
+    ]
+
+    def serialize() -> str:
+        return json.dumps(
+            [
+                {
+                    "tenant_id": "tenant-a",
+                    "project_id": "project-a",
+                    "role_arn": role,
+                }
+                for role in roles
+            ],
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+
+    remaining = target_length - len(serialize())
+    for index, role in enumerate(roles):
+        role_path_length = len(role.split("role/", maxsplit=1)[1])
+        added = min(remaining, 512 - role_path_length)
+        roles[index] += "x" * added
+        remaining -= added
+    assert remaining == 0
+    assert len(serialize()) == target_length
+    return roles
+
+
 def test_managed_setup_round_trips_without_a_secret_or_subject(tmp_path):
     config = AgentCoreSetupConfig.from_mapping(_base())
     output = write_agentcore_setup(config, tmp_path / "agentcore.json")
@@ -87,6 +140,7 @@ def test_managed_setup_round_trips_without_a_secret_or_subject(tmp_path):
 
     assert loaded == config
     assert payload["identity_mode"] == "managed-cognito"
+    assert payload["control_plane"]["domain_name"] == "axon.example.com"
     assert "subject" not in payload["admin"]
     assert "secret" not in output.read_text(encoding="utf-8").casefold()
     assert output.stat().st_mode & 0o777 == 0o600
@@ -130,11 +184,44 @@ def test_agentcore_has_no_unauthenticated_setup_mode():
         AgentCoreSetupConfig.from_mapping(value)
 
 
+def test_control_plane_is_managed_cognito_only_and_region_bound():
+    missing = _base()
+    missing.pop("control_plane")
+    with pytest.raises(
+        AgentCoreSetupError,
+        match="requires managed_cognito and control_plane",
+    ):
+        AgentCoreSetupConfig.from_mapping(missing)
+
+    external = _external()
+    external["control_plane"] = _base()["control_plane"]
+    with pytest.raises(
+        AgentCoreSetupError,
+        match="forbids managed_cognito and control_plane",
+    ):
+        AgentCoreSetupConfig.from_mapping(external)
+
+    wrong_region = _base()
+    wrong_region["control_plane"]["certificate_arn"] = (
+        _CERTIFICATE_ARN.replace("us-east-1", "us-west-2")
+    )
+    with pytest.raises(
+        AgentCoreSetupError,
+        match="regional ACM certificate ARN in us-east-1",
+    ):
+        AgentCoreSetupConfig.from_mapping(wrong_region)
+
+
 def test_setup_rejects_boolean_schema_versions_and_local_identity_urls():
     boolean_schema = _base()
     boolean_schema["schema_version"] = True
-    with pytest.raises(AgentCoreSetupError, match="schema_version must be 1"):
+    with pytest.raises(AgentCoreSetupError, match="schema_version must be 2"):
         AgentCoreSetupConfig.from_mapping(boolean_schema)
+
+    previous_schema = _base()
+    previous_schema["schema_version"] = 1
+    with pytest.raises(AgentCoreSetupError, match="schema_version must be 2"):
+        AgentCoreSetupConfig.from_mapping(previous_schema)
 
     local_issuer = _external()
     local_issuer["external_oidc"]["issuer"] = "https://127.0.0.1"
@@ -161,6 +248,62 @@ def test_setup_rejects_mutable_images_wildcards_and_client_secrets():
         match="unsupported fields: client_secret",
     ):
         AgentCoreSetupConfig.from_mapping(secret)
+
+
+def test_optional_athena_query_setup_is_exact_and_bounded():
+    value = _base()
+    value["runtime"]["athena_query"] = {
+        "role_arns": [_ATHENA_ROLE_ARN],
+        "timeout_seconds": 12.5,
+        "max_rows": 250,
+        "max_result_bytes": 524288,
+        "max_bytes_scanned": 104857600,
+        "poll_interval_seconds": 0.5,
+        "project_rpm": 30,
+        "principal_rpm": 10,
+        "project_concurrency": 5,
+        "principal_concurrency": 2,
+        "project_scan_bytes_per_minute": 5 * 1024 * 1024 * 1024,
+        "principal_scan_bytes_per_minute": 2 * 1024 * 1024 * 1024,
+        "max_datasources_per_tenant": 500,
+    }
+
+    config = AgentCoreSetupConfig.from_mapping(value)
+
+    assert config.runtime.athena_query is not None
+    assert config.runtime.athena_query.role_arns == (
+        _ATHENA_ROLE_ARN,
+    )
+    assert config.to_dict()["runtime"]["athena_query"] == (
+        value["runtime"]["athena_query"]
+    )
+
+
+@pytest.mark.parametrize(
+    "athena_query",
+    [
+        {"role_arns": []},
+        {"role_arns": ["arn:aws:iam::123456789012:role/*"]},
+        {"role_arns": [_ATHENA_ROLE_ARN, _ATHENA_ROLE_ARN]},
+        {"role_arns": [_ATHENA_ROLE_ARN], "max_rows": 0},
+        {
+            "role_arns": [_ATHENA_ROLE_ARN],
+            "max_result_bytes": 1023,
+        },
+        {
+            "role_arns": [_ATHENA_ROLE_ARN],
+            "timeout_seconds": float("inf"),
+        },
+    ],
+)
+def test_athena_query_setup_rejects_unsafe_values(
+    athena_query: dict,
+):
+    value = _base()
+    value["runtime"]["athena_query"] = athena_query
+
+    with pytest.raises(AgentCoreSetupError):
+        AgentCoreSetupConfig.from_mapping(value)
 
 
 def test_redaction_is_recursive_and_does_not_mutate_input():
@@ -197,6 +340,8 @@ def test_local_demo_environment_is_explicitly_non_production():
     assert environment["AXON_LOAD_DEMO_DATA"] == "true"
     assert environment["AXON_REQUIRE_CANONICAL_IDENTITY"] == "false"
     assert environment["LLM_ROUTER_DYNAMODB_ENABLED"] == "false"
+    assert environment["AXON_ATHENA_QUERY_ENABLED"] == "false"
+    assert environment["AXON_CONTROL_PLANE_ONLY"] == "false"
 
 
 def test_cli_parses_and_writes_managed_setup(monkeypatch, tmp_path, capsys):
@@ -230,6 +375,18 @@ def test_cli_parses_and_writes_managed_setup(monkeypatch, tmp_path, capsys):
             "axonllm-123456789012",
             "--oauth-callback-url",
             "https://app.example.com/oauth/callback",
+            "--control-plane-domain-name",
+            "axon.example.com",
+            "--control-plane-verified-image-uri",
+            _CONTROL_IMAGE,
+            "--control-plane-certificate-arn",
+            _CERTIFICATE_ARN,
+            "--control-plane-public-hosted-zone-id",
+            "Z123ABC",
+            "--control-plane-approved-ingress-prefix-list-id",
+            "pl-123abc",
+            "--control-plane-approved-https-prefix-list-id",
+            "pl-456def",
             "--output",
             str(output),
         ],
@@ -250,6 +407,10 @@ def test_deploy_commands_pass_only_validated_standard_oidc_inputs(tmp_path):
     )
     assert "deployment_target=identity" in identity_command
     assert any(value.startswith("AxonLLMIdentityStack:OAuthCallbackUrls=https://") for value in identity_command)
+    assert (
+        "AxonLLMIdentityStack:ControlPlaneDomainName=axon.example.com"
+        in identity_command
+    )
     assert "never" in identity_command
 
     external = AgentCoreSetupConfig.from_mapping(_external())
@@ -275,6 +436,115 @@ def test_deploy_commands_pass_only_validated_standard_oidc_inputs(tmp_path):
     assert "AxonLLMAgentCoreStack:BedrockInvokeResourceArns=" in joined
     assert "broadening" in runtime_command
     assert "client_secret" not in joined.casefold()
+
+
+def test_control_plane_deploy_command_is_bound_to_managed_identity(
+    tmp_path,
+):
+    config = AgentCoreSetupConfig.from_mapping(_base())
+    command = control_plane_deploy_command(
+        config,
+        outputs_file=tmp_path / "control.json",
+        assume_yes=True,
+    )
+    joined = "\n".join(command)
+
+    assert "deployment_target=control-plane" in command
+    assert (
+        "AxonLLMControlPlaneStack:AgentCoreStackName="
+        "AxonLLMAgentCoreStack"
+    ) in command
+    assert (
+        "AxonLLMControlPlaneStack:IdentityStackName="
+        "AxonLLMIdentityStack"
+    ) in command
+    assert (
+        "AxonLLMControlPlaneStack:ControlPlaneVerifiedImageUri="
+        f"{_CONTROL_IMAGE}"
+    ) in command
+    assert (
+        "AxonLLMControlPlaneStack:CertificateArn="
+        f"{_CERTIFICATE_ARN}"
+    ) in command
+    assert "client_secret" not in joined.casefold()
+
+    with pytest.raises(
+        AgentCoreDeploymentError,
+        match="requires managed-cognito",
+    ):
+        control_plane_deploy_command(
+            AgentCoreSetupConfig.from_mapping(_external()),
+            outputs_file=tmp_path / "external-control.json",
+            assume_yes=True,
+        )
+
+
+def test_agentcore_deploy_command_binds_exact_athena_roles(tmp_path):
+    value = _external()
+    value["runtime"]["athena_query"] = {
+        "role_arns": [_ATHENA_ROLE_ARN],
+        "max_rows": 250,
+    }
+    config = AgentCoreSetupConfig.from_mapping(value)
+    oidc = config.external_oidc
+    assert oidc is not None
+
+    command = agentcore_deploy_command(
+        config,
+        IdentityValues(
+            issuer=oidc.issuer,
+            discovery_url=oidc.discovery_url,
+            client_id=oidc.client_id,
+            audience=oidc.audience,
+            tenant_claim=oidc.tenant_claim,
+            project_claim=oidc.project_claim,
+        ),
+        outputs_file=tmp_path / "runtime.json",
+        assume_yes=True,
+    )
+    joined = "\n".join(command)
+
+    assert "athena_query_bindings=" in joined
+    assert '"tenant_id":"tenant-a"' in joined
+    assert '"project_id":"project-a"' in joined
+    assert f'"role_arn":"{_ATHENA_ROLE_ARN}"' in joined
+    assert "athena_query_max_rows=250" in joined
+
+    control_command = control_plane_deploy_command(
+        AgentCoreSetupConfig.from_mapping(
+            {
+                **_base(),
+                "runtime": value["runtime"],
+            }
+        ),
+        outputs_file=tmp_path / "control.json",
+        assume_yes=True,
+    )
+    control_joined = "\n".join(control_command)
+    assert "athena_query_bindings=" in control_joined
+    assert "athena_query_max_rows=250" in control_joined
+
+
+def test_deployer_enforces_agentcore_binding_character_boundary():
+    value = _external()
+    value["runtime"]["athena_query"] = {
+        "role_arns": _athena_roles_for_bindings_length(2_048),
+    }
+    contexts = deployment._athena_contexts(
+        AgentCoreSetupConfig.from_mapping(value)
+    )
+    assert len(contexts["athena_query_bindings"]) == 2_048
+
+    value["runtime"]["athena_query"]["role_arns"] = (
+        _athena_roles_for_bindings_length(2_049)
+    )
+    with pytest.raises(
+        AgentCoreDeploymentError,
+        match="2,048-character",
+    ):
+        deployment._athena_contexts(
+            AgentCoreSetupConfig.from_mapping(value)
+        )
 
 
 class _AwsError(Exception):
@@ -351,6 +621,117 @@ def test_managed_admin_rerun_refuses_tenant_reassignment():
             tenant_id="tenant-a",
             project_id="project-a",
         )
+
+
+def test_managed_deploy_provisions_identity_runtime_and_control_plane(
+    monkeypatch,
+    tmp_path,
+    capsys,
+):
+    config = AgentCoreSetupConfig.from_mapping(_base())
+    cognito = _Cognito()
+    commands: list[list[str]] = []
+    bootstrap_calls: list[dict] = []
+
+    class _Session:
+        def client(self, service_name, *, region_name):
+            assert service_name == "cognito-idp"
+            assert region_name == "us-east-1"
+            return cognito
+
+    outputs = {
+        deployment.IDENTITY_STACK: {
+            "TenantClaimName": "custom:tenant_id",
+            "ProjectClaimName": "custom:project_id",
+            "OidcClientId": "public-client",
+            "OidcAudience": "public-client",
+            "OidcIssuer": (
+                "https://cognito-idp.us-east-1.amazonaws.com/"
+                "us-east-1_POOL"
+            ),
+            "OidcDiscoveryUrl": (
+                "https://cognito-idp.us-east-1.amazonaws.com/"
+                "us-east-1_POOL/.well-known/openid-configuration"
+            ),
+            "HostedUiDomain": (
+                "https://axonllm-123456789012.auth."
+                "us-east-1.amazoncognito.com"
+            ),
+            "UserPoolId": "us-east-1_POOL",
+        },
+        deployment.AGENTCORE_STACK: {
+            "StateTableName": "axonllm-agentcore-state",
+            "RuntimeExecutionRoleArn": (
+                "arn:aws:iam::123456789012:"
+                "role/axonllm-agentcore-runtime-us-east-1"
+            ),
+            "RuntimeArn": (
+                "arn:aws:bedrock-agentcore:us-east-1:123456789012:"
+                "runtime/axonllm"
+            ),
+        },
+        deployment.CONTROL_PLANE_STACK: {
+            "LoadBalancerDnsName": "internal.example.elb.amazonaws.com",
+        },
+    }
+
+    def runner(command: list[str], cwd: Path) -> None:
+        assert cwd == deployment.INFRA_ROOT
+        commands.append(command)
+        stack_name = command[3]
+        output_path = Path(
+            command[command.index("--outputs-file") + 1]
+        )
+        output_path.write_text(
+            json.dumps({stack_name: outputs[stack_name]}),
+            encoding="utf-8",
+        )
+
+    def bootstrap(config, **kwargs):
+        bootstrap_calls.append(kwargs)
+        return {
+            "principal_id": "principal-1",
+            "project_id": config.tenant.project_id,
+        }
+
+    monkeypatch.setattr(
+        deployment,
+        "_assert_deployment_prerequisites",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        deployment,
+        "bootstrap_canonical_admin",
+        bootstrap,
+    )
+
+    deployment.deploy(
+        config,
+        outputs_dir=tmp_path / "outputs",
+        assume_yes=True,
+        bootstrap_cdk=False,
+        runner=runner,
+        boto3_session=_Session(),
+    )
+
+    assert [command[3] for command in commands] == [
+        deployment.IDENTITY_STACK,
+        deployment.AGENTCORE_STACK,
+        deployment.CONTROL_PLANE_STACK,
+    ]
+    assert bootstrap_calls == [
+        {
+            "table_name": "axonllm-agentcore-state",
+            "issuer": outputs[deployment.IDENTITY_STACK][
+                "OidcIssuer"
+            ],
+            "subject": "cognito-subject",
+        }
+    ]
+    output = capsys.readouterr().out
+    assert "Control plane: https://axon.example.com" in output
+    assert "Runtime execution role:" in output
+    assert "Runtime ARN:" in output
 
 
 def test_deployment_wrapper_validates_without_aws(tmp_path):

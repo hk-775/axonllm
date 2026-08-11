@@ -159,6 +159,30 @@ jobs:
           --exit-code 1
           "${CDK_CI_OUTDIR}/agentcore/AxonLLMAgentCoreStack.template.json"
 
+      - name: Scan synthesized identity CloudFormation
+        env:
+          CDK_CI_OUTDIR: ${{ runner.temp }}/cdk.out
+        run: >-
+          trivy config
+          --disable-telemetry
+          --skip-check-update
+          --ignorefile .github/trivyignore.yaml
+          --severity HIGH,CRITICAL
+          --exit-code 1
+          "${CDK_CI_OUTDIR}/identity/AxonLLMIdentityStack.template.json"
+
+      - name: Scan synthesized control-plane CloudFormation
+        env:
+          CDK_CI_OUTDIR: ${{ runner.temp }}/cdk.out
+        run: >-
+          trivy config
+          --disable-telemetry
+          --skip-check-update
+          --ignorefile .github/trivyignore.yaml
+          --severity HIGH,CRITICAL
+          --exit-code 1
+          "${CDK_CI_OUTDIR}/control-plane/AxonLLMControlPlaneStack.template.json"
+
       - name: Scan synthesized release-foundation CloudFormation
         env:
           CDK_CI_OUTDIR: ${{ runner.temp }}/cdk.out

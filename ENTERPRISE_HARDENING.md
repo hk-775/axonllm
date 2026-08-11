@@ -1,6 +1,6 @@
 # AxonLLM Enterprise Hardening Status
 
-This document describes the current repository as of 2026-08-10. It separates
+This document describes the current repository as of 2026-08-11. It separates
 controls implemented in the repository from deployment and operational evidence
 that must still be produced in the target AWS account.
 
@@ -9,6 +9,7 @@ Use these documents for detailed procedures:
 - [Production runbook](docs/PRODUCTION_RUNBOOK.md)
 - [AgentCore runbook](docs/AGENTCORE_RUNBOOK.md)
 - [Feature catalog](README.md#features)
+- [Features and principal flows](docs/FEATURES_AND_FLOWS.md)
 - [Architecture and request flow](README.md#architecture)
 - [Product requirements](docs/PRD.md)
 
@@ -28,13 +29,20 @@ multi-tenant deployment:
 - durable, conditional multi-instance state updates and refresh;
 - tenant-bound security-event delivery through a KMS/TLS FIFO SQS outbox,
   bounded retries, native DLQ redrive, and managed SNS/Logs allowlists;
+- shared HTTP and AgentCore Athena `SELECT` execution through one canonical
+  service, with exact role bindings, strict AST policy, bounded results, and
+  durable hash-only query audit;
+- credential-free tenant datasource administration with admin-write,
+  member/auditor-read, service-denied RBAC and revision compare-and-swap;
 - Fargate and AgentCore CDK stacks with private networking, encryption,
   retained backups, alarms, immutable image parameters, and production runtime
   profiles;
 - a separate retained/deletion-protected Cognito identity stack plus a strict
-  first-adopter workflow for managed Cognito or existing OIDC, with
+  schema-v2 first-adopter workflow for managed Cognito or existing OIDC, with
   restartable first-admin canonical bootstrap and no unauthenticated AgentCore
-  mode; and
+  mode;
+- a dedicated managed-Cognito shared-state Fargate control plane that
+  suppresses execution routes and has no Athena/STS authority; and
 - locked CI, release-evidence, deployment-verification, recovery, and security
   workflows for both deployment targets.
 
@@ -48,6 +56,10 @@ a stopped legacy Fargate deployment and no AxonLLM AgentCore or managed
 identity stack. Promotion still requires target-account prerequisites,
 deployment of a verified digest, authenticated canaries, alarm/event delivery,
 and retained restore, cutover, rollback, and load evidence.
+
+The query and shared control-plane work postdates `v0.2.4`. Existing release
+evidence does not certify it, and no deployed Athena or control-plane canary has
+been retained.
 
 ## Production Contract
 
@@ -75,6 +87,13 @@ authority. The first-adopter path can deploy retained managed Cognito or consume
 an existing OIDC provider; token attributes remain routing hints rather than
 authority.
 
+Managed-Cognito schema-v2 setup additionally requires a stable control-plane
+hostname, regional ACM certificate, Route 53 public zone, verified AMD64 image,
+and managed ingress/HTTPS egress prefix lists. It deploys identity, AgentCore,
+canonical bootstrap, and the shared-state control plane. External OIDC deploys
+AgentCore/bootstrap only and currently has no automated
+Cognito-authenticated web control plane.
+
 `AXON_ENABLED_PROVIDERS` is an optional comma-separated runtime provider
 allowlist. Providers outside it are neither advertised nor invoked, and empty or
 unknown values fail startup. The AgentCore stack sets it to `bedrock`, limiting
@@ -86,6 +105,12 @@ exact managed SNS and CloudWatch destination ARNs. Queue access participates in
 readiness. Those ARN values are allowlists, not tenant destination
 configuration; administrators still create the desired destinations through
 the tenant control plane.
+
+Athena query enablement is derived from exact deployment tuples of tenant,
+project, and concrete role ARN. A normal Starlette data-plane process then
+registers `POST /v1/query`, while AgentCore exposes `query`. The shared
+`AXON_CONTROL_PLANE_ONLY` process receives binding metadata for datasource
+validation but suppresses execution routes.
 
 ## Canonical Identity
 
@@ -114,9 +139,9 @@ token claims or legacy in-memory authority.
 
 | Role | Effective access |
 |---|---|
-| `tenant_member` | Tenant configuration reads plus granted-project model listing, inference, and reserved `query.select` |
+| `tenant_member` | Tenant and datasource configuration reads plus granted-project model listing, inference, and `query.select` |
 | `tenant_auditor` | Member access plus tenant membership, key, webhook, usage, audit, policy, and quota reads and exports |
-| `tenant_admin` | Auditor access plus tenant-owned membership, API-key, policy, quota, webhook, project, and configuration writes |
+| `tenant_admin` | Auditor access plus tenant-owned membership, API-key, policy, quota, webhook, project, datasource, and configuration writes |
 | `service` | Granted-project data-plane actions explicitly present in server-held scopes; no control-plane access |
 | `platform_admin` | Platform resources; tenant access only through validated and audited break glass |
 
@@ -133,28 +158,38 @@ Ordinary same-tenant denials return `403`. Canonical mode default-denies unmappe
 Legacy `admin` and `admin:*` authority exists only for noncanonical migration
 contexts. It cannot elevate a canonical viewer or service identity.
 
-`query.select` is reserved authorization vocabulary. AxonLLM does not currently
-ship a SQL parser, datasource adapter, or query endpoint. `query.mutate` always
-denies.
+`query.select` gates normal-Starlette `POST /v1/query` and the AgentCore
+`query` action. Both call the same canonical `QueryService`. Datasource
+administration remains control-plane access, so canonical services cannot
+create or read datasource records even when they hold `query.select`.
+`query.mutate` always denies.
 
 ## Request Flow
 
-For Starlette and AgentCore data-plane requests:
+Common Starlette and AgentCore data-plane admission:
 
 1. Verify the credential and reject duplicate or ambiguous credential sources.
 2. Resolve canonical identity from DynamoDB.
 3. Require explicit tenant and project context.
 4. Resolve authoritative project ownership.
 5. Evaluate role, project grant, and service scope.
-6. Apply distributed rate and budget reservations.
-7. Run request validation, policy, PII, guardrail, cache, routing, and provider
-   stages.
-8. Persist tenant-qualified usage and audit records.
+
+Chat then applies shared rate/budget admission, request policy, PII,
+guardrails, cache, region/provider routing, cost tracking, and audit.
+
+Query instead resolves tenant/project datasource metadata and the exact
+deployment role binding, parses one Athena `SELECT` AST, appends durable request
+audit, reserves fleet RPM/concurrency/aggregate scan capacity, assumes the role,
+validates the enforced KMS workgroup immediately before execution, persists the
+Athena execution id, applies time/row/serialized-result/scan bounds, reconciles
+terminal capacity, and appends durable result audit. SQL literals are not
+written to query audit.
 
 AgentCore rejects payload-supplied identity and reads identity only from trusted
 runtime headers. Its `health` action is liveness only. Use `/ready`,
-authenticated `list_models`, and a low-cost authenticated completion as release
-canaries.
+authenticated `list_models`, a low-cost completion, and an authenticated query
+when enabled as release canaries. `/ready` does not enumerate datasource roles
+or validate Athena workgroups.
 
 ## Control Plane And Break Glass
 
@@ -162,6 +197,20 @@ Tenant control-plane routes use the canonical tenant selected by middleware.
 Tenant members and auditors can read but cannot mutate. Tenant administrators
 can mutate tenant-owned configuration. Region topology and other platform
 resources require `platform_admin`.
+
+Datasource metadata follows that policy explicitly: `tenant_admin` writes,
+`tenant_member` and `tenant_auditor` read with the role ARN concealed, and
+`service` is denied. Project ownership and the exact deployment role binding
+are checked before a CAS create/update/delete succeeds. Listing is paginated,
+tenant cardinality is transactionally capped, and writes produce durable
+redacted mutation request/result records.
+
+The managed-Cognito `AxonLLMControlPlaneStack` imports AgentCore's table, KMS
+key, outbox, SNS topic, and event log into a separate private-task AMD64 Fargate
+service behind an HTTPS Cognito ALB and stable Route 53 alias. It sets
+`AXON_CONTROL_PLANE_ONLY=true`, suppressing chat/model/query execution. The task
+has no Athena or STS authority. External OIDC currently receives no automated
+web control plane.
 
 Platform access to tenant resources additionally requires:
 
@@ -177,8 +226,8 @@ Handlers then perform resource-specific, tenant-qualified authoritative lookups.
 
 DynamoDB is authoritative in production. Conditional writes and revisioned
 compare-and-swap updates protect topology, webhooks, policies, quotas, budgets,
-rate windows, API keys, SCIM state, principals, audit chains, and configuration
-epochs from lost updates.
+rate windows, API keys, datasource metadata, SCIM state, principals, audit
+chains, and configuration epochs from lost updates.
 
 Fleet refresh rejects stale revisions. Topology parsing completes before the
 live object is mutated, and a shared mutation/refresh lock prevents hybrid
@@ -199,6 +248,14 @@ redriving because each message retains its enqueue-time destination snapshot.
 Both checked-in AWS stacks require immutable private-ECR image URIs ending in a
 digest. CI synthesizes and lints both stacks under Node 22, rejects local CDK
 Docker assets, scans both templates, and validates all workflow action pins.
+
+The AgentCore execution role is deterministically named
+`axonllm-agentcore-runtime-<region>` and exported as
+`RuntimeExecutionRoleArn`. Operators can preconfigure each datasource role to
+trust that exact account/region ARN for `sts:AssumeRole`, `sts:TagSession`, and
+`sts:SetSourceIdentity`, then verify the ARN from deployment output before
+enabling the datasource. Runtime IAM and the private STS endpoint restrict the
+same three actions to the exact deployment-bound datasource role ARNs.
 
 The Fargate stack also requires `BedrockInvokeResourceArns`; deployment through
 `deploy-fargate.sh` supplies it from
@@ -251,6 +308,13 @@ These limitations are explicit and must not be represented as completed:
 - AgentCore conversation memory is not enabled. Any future memory namespace
   must include canonical tenant, principal, project, and an opaque
   server-controlled session identifier.
+- External-OIDC first-adopter deployment does not create the
+  Cognito-authenticated shared web control plane.
+- The query/control-plane implementation has no tagged release evidence or
+  deployed Athena/control-plane canary yet.
+- A process lost after Athena starts can leave a nonterminal lifecycle record.
+  Admission slots expire and scan reservations are minute-window bounded, but
+  automatic historical lifecycle closure still needs a scheduled reconciler.
 - `GET /api/users` remains unavailable in canonical mode because the legacy
   aggregate has no safe tenant selector or canonical action mapping.
 
@@ -277,11 +341,16 @@ Before production traffic:
 4. Run authenticated positive and negative tenant canaries, including wrong
    tenant, wrong project, inactive membership, viewer write denial, service
    scope denial, and break-glass attribution.
-5. Execute a real AWS restore exercise and an application cutover and rollback
+5. When query is enabled, verify `RuntimeExecutionRoleArn`, all three STS trust
+   actions, datasource RBAC/CAS, HTTP and AgentCore `SELECT`, unsafe SQL and
+   workgroup rejection, serialized-result/scan limits, cancellation, and
+   durable audit. Verify control-plane data routes are absent and its task has
+   no Athena/STS authority.
+6. Execute a real AWS restore exercise and an application cutover and rollback
    rehearsal. Retain the recovery evidence.
-6. Exercise each security-event destination, its receiver, DLQ alarm, and
+7. Exercise each security-event destination, its receiver, DLQ alarm, and
    controlled redrive procedure.
-7. Validate load, throttling, quotas, audit continuity, revocation propagation,
+8. Validate load, throttling, quotas, audit continuity, revocation propagation,
    and topology refresh with the intended replica count.
 
 Never recover production access by switching to `LOG_ONLY` or disabling

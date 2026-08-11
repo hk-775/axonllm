@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import math
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
@@ -18,6 +19,10 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from src.gateway.admin.audit_routes import AuditAPI, create_audit_routes
+from src.gateway.admin.datasource_routes import (
+    DatasourceAPI,
+    create_datasource_routes,
+)
 from src.gateway.admin.key_routes import KeyManagementAPI, create_key_routes
 from src.gateway.admin.policy_routes import PolicyHierarchyAPI, create_policy_hierarchy_routes
 from src.gateway.admin.quota_routes import QuotaAPI, create_quota_routes
@@ -99,6 +104,18 @@ from src.gateway.persistence import DynamoPersistence
 from src.gateway.provider_config import ProviderConfig
 from src.gateway.provider_loader import load_provider_configs
 from src.gateway.rate_limiter import SlidingWindowRateLimiter
+from src.gateway.query.admission import (
+    QueryAdmissionController,
+    QueryAdmissionLimits,
+)
+from src.gateway.query.athena import AthenaExecutor, AthenaQueryLimits
+from src.gateway.query.models import AthenaRoleBindings
+from src.gateway.query.repository import (
+    DatasourceRepository,
+    DynamoDatasourceRepository,
+)
+from src.gateway.query.routes import QueryAPI, create_query_routes
+from src.gateway.query.service import QueryService
 from src.gateway.request_validator import RequestValidator
 from src.gateway.router import Router
 from src.gateway.semantic_efficiency import SemanticEfficiencyEngine
@@ -156,6 +173,11 @@ class GatewayComponents:
     # so this is also the set the readiness checklist can distinguish
     # "configured" from "in models.yaml but unusable".
     provider_configs: dict[str, ProviderConfig] = field(default_factory=dict)
+    datasource_repository: DatasourceRepository | None = None
+    athena_role_bindings: AthenaRoleBindings = field(
+        default_factory=AthenaRoleBindings
+    )
+    query_service: QueryService | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -258,6 +280,74 @@ def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComp
     # runs now when standalone, defers to the running loop when embedded (Ostiari)
     # — never calls asyncio.run inside an active loop.
     audit_trail.initialize_sync()
+    athena_role_bindings = AthenaRoleBindings.from_json(
+        app_config.athena_query_bindings
+    )
+    datasource_repository: DatasourceRepository | None = None
+    query_service: QueryService | None = None
+    if app_config.athena_query_enabled:
+        datasource_repository = DynamoDatasourceRepository(
+            persistence,
+            max_datasources_per_tenant=(
+                app_config.athena_query_max_datasources_per_tenant
+            ),
+        )
+        query_admission = QueryAdmissionController(
+            persistence,
+            limits=QueryAdmissionLimits(
+                project_rpm=app_config.athena_query_project_rpm,
+                principal_rpm=app_config.athena_query_principal_rpm,
+                project_concurrency=(
+                    app_config.athena_query_project_concurrency
+                ),
+                principal_concurrency=(
+                    app_config.athena_query_principal_concurrency
+                ),
+                project_scan_bytes_per_minute=(
+                    app_config
+                    .athena_query_project_scan_bytes_per_minute
+                ),
+                principal_scan_bytes_per_minute=(
+                    app_config
+                    .athena_query_principal_scan_bytes_per_minute
+                ),
+                lease_seconds=max(
+                    30,
+                    math.ceil(
+                        app_config.athena_query_timeout_seconds
+                    )
+                    + 30,
+                ),
+            ),
+            max_scan_bytes_per_query=(
+                app_config.athena_query_max_bytes_scanned
+            ),
+        )
+        query_service = QueryService(
+            repository=datasource_repository,
+            bindings=athena_role_bindings,
+            executor=AthenaExecutor(
+                limits=AthenaQueryLimits(
+                    timeout_seconds=(
+                        app_config.athena_query_timeout_seconds
+                    ),
+                    max_rows=app_config.athena_query_max_rows,
+                    max_result_bytes=(
+                        app_config.athena_query_max_result_bytes
+                    ),
+                    max_bytes_scanned=(
+                        app_config.athena_query_max_bytes_scanned
+                    ),
+                    poll_interval_seconds=(
+                        app_config.athena_query_poll_interval_seconds
+                    ),
+                )
+            ),
+            audit_trail=audit_trail,
+            require_durable_audit=True,
+            admission=query_admission,
+            require_durable_admission=True,
+        )
     event_dispatcher = EventDispatcher()
     # Forwards request traces to an embedding Ostiari when detected (OSTIARI_TRACES_URL
     # set, or an in-process sink registered via observability.trace_forwarder). No-op
@@ -546,6 +636,9 @@ def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComp
         semantic_engine=semantic_engine,
         semantic_cache=semantic_cache,
         provider_configs=provider_configs,
+        datasource_repository=datasource_repository,
+        athena_role_bindings=athena_role_bindings,
+        query_service=query_service,
     )
 
 
@@ -676,6 +769,28 @@ def build_starlette_app(app_config: AppConfig | None = None) -> Starlette:
         ),
     )
     saml_api = SamlAPI(service=comp.saml_service)
+    datasource_routes: list[Route] = []
+    query_routes: list[Route] = []
+    if app_config.athena_query_enabled:
+        if (
+            comp.datasource_repository is None
+            or comp.query_service is None
+        ):
+            raise RuntimeError(
+                "Athena query services were not initialized"
+            )
+        datasource_api = DatasourceAPI(
+            repository=comp.datasource_repository,
+            bindings=comp.athena_role_bindings,
+            project_resolver=comp.project_resolver,
+            audit_trail=comp.audit_trail,
+            require_durable_audit=True,
+        )
+        datasource_routes = create_datasource_routes(datasource_api)
+        if not app_config.control_plane_only:
+            query_routes = create_query_routes(
+                QueryAPI(comp.query_service)
+            )
 
     # Default chat project is the first demo project or "default"
     default_project = next(iter(comp.projects), "default")
@@ -725,12 +840,8 @@ def build_starlette_app(app_config: AppConfig | None = None) -> Starlette:
             status_code=200 if ready else 503,
         )
 
-    routes = (
-        [
-            Route("/health", health_check),
-            Route("/ready", readiness_check),
-        ]
-        + create_admin_routes(admin_api)
+    control_routes = (
+        create_admin_routes(admin_api)
         + create_key_routes(key_api)
         + create_policy_hierarchy_routes(policy_api)
         + create_audit_routes(audit_api)
@@ -739,10 +850,23 @@ def build_starlette_app(app_config: AppConfig | None = None) -> Starlette:
         + create_quota_routes(quota_api)
         + create_scim_routes(scim_api)
         + create_saml_routes(saml_api)
-        + create_chat_routes(chat_api)
-        + create_openai_routes(openai_api)
-        # Last: this one is a bare "/{path}" serving site/, and Starlette matches
-        # in order, so anything after it would be unreachable.
+        + datasource_routes
+    )
+    data_routes = (
+        []
+        if app_config.control_plane_only
+        else (
+            create_chat_routes(chat_api)
+            + create_openai_routes(openai_api)
+            + query_routes
+        )
+    )
+    routes = (
+        [Route("/health", health_check), Route("/ready", readiness_check)]
+        + control_routes
+        + data_routes
+        # Last: this one is a bare "/{path}" serving site/, and Starlette
+        # matches in order, so anything after it would be unreachable.
         + create_site_routes(admin_api)
     )
 

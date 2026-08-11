@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import ipaddress
 import json
+import math
 import os
 import re
 import subprocess
@@ -14,7 +15,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 MANAGED_COGNITO = "managed-cognito"
 EXTERNAL_OIDC = "external-oidc"
 IDENTITY_MODES = (MANAGED_COGNITO, EXTERNAL_OIDC)
@@ -23,11 +24,21 @@ DEFAULT_PROJECT_CLAIM = "custom:project_id"
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _DOMAIN_PREFIX_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9-]{1,61}[a-z0-9])$")
+_DOMAIN_NAME_PATTERN = re.compile(
+    r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}"
+    r"[a-z0-9])?\.)+[a-z]{2,63}$"
+)
 _PREFIX_LIST_PATTERN = re.compile(r"^pl-[0-9a-fA-F]+$")
+_HOSTED_ZONE_PATTERN = re.compile(r"^Z[A-Z0-9]+$")
 _IMAGE_PATTERN = re.compile(
     r"^(?P<account>[0-9]{12})\.dkr\.ecr\."
     r"(?P<region>[a-z0-9-]+)\.amazonaws\.com/"
     r"[a-z0-9]+(?:[._/-][a-z0-9]+)*@sha256:[0-9a-f]{64}$"
+)
+_ACM_CERTIFICATE_ARN_PATTERN = re.compile(
+    r"^arn:(?:aws|aws-us-gov|aws-cn):acm:"
+    r"(?P<region>[a-z0-9-]+):[0-9]{12}:"
+    r"certificate/[0-9a-fA-F-]+$"
 )
 _BEDROCK_ARN_PATTERN = re.compile(
     r"^arn:(?:aws|aws-us-gov|aws-cn):bedrock:"
@@ -35,6 +46,10 @@ _BEDROCK_ARN_PATTERN = re.compile(
     r"(?:foundation-model|inference-profile|"
     r"application-inference-profile|custom-model|provisioned-model|"
     r"imported-model)/[A-Za-z0-9][A-Za-z0-9._:/+-]*$"
+)
+_IAM_ROLE_ARN_PATTERN = re.compile(
+    r"^arn:(?:aws|aws-us-gov|aws-cn):iam::[0-9]{12}:"
+    r"role/[A-Za-z0-9+=,.@_/-]{1,512}$"
 )
 _SENSITIVE_KEY_PARTS = (
     "api_key",
@@ -181,6 +196,241 @@ def _budget_limit(value: Any) -> float | None:
     return normalized
 
 
+def _bounded_integer(
+    value: Any,
+    name: str,
+    *,
+    minimum: int,
+    maximum: int | None = None,
+) -> int:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or value < minimum
+        or maximum is not None
+        and value > maximum
+    ):
+        qualifier = (
+            f"between {minimum} and {maximum}"
+            if maximum is not None
+            else f"at least {minimum}"
+        )
+        raise AgentCoreSetupError(f"{name} must be {qualifier}")
+    return value
+
+
+def _bounded_float(
+    value: Any,
+    name: str,
+    *,
+    minimum: float,
+    maximum: float,
+) -> float:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+    ):
+        raise AgentCoreSetupError(
+            f"{name} must be between {minimum} and {maximum}"
+        )
+    try:
+        normalized = float(value)
+    except (OverflowError, ValueError) as exc:
+        raise AgentCoreSetupError(f"{name} must be finite") from exc
+    if (
+        not math.isfinite(normalized)
+        or not minimum <= normalized <= maximum
+    ):
+        raise AgentCoreSetupError(
+            f"{name} must be between {minimum} and {maximum}"
+        )
+    return normalized
+
+
+@dataclass(frozen=True)
+class AthenaQuerySetup:
+    """Optional deployment-bound query roles and result limits."""
+
+    role_arns: tuple[str, ...]
+    timeout_seconds: float = 30.0
+    max_rows: int = 1000
+    max_result_bytes: int = 1024 * 1024
+    max_bytes_scanned: int = 1024 * 1024 * 1024
+    poll_interval_seconds: float = 0.25
+    project_rpm: int = 30
+    principal_rpm: int = 10
+    project_concurrency: int = 5
+    principal_concurrency: int = 2
+    project_scan_bytes_per_minute: int = 5 * 1024 * 1024 * 1024
+    principal_scan_bytes_per_minute: int = 2 * 1024 * 1024 * 1024
+    max_datasources_per_tenant: int = 500
+
+    def __post_init__(self) -> None:
+        if self.principal_rpm > self.project_rpm:
+            raise AgentCoreSetupError(
+                "runtime.athena_query.principal_rpm must not exceed "
+                "project_rpm"
+            )
+        if self.principal_concurrency > self.project_concurrency:
+            raise AgentCoreSetupError(
+                "runtime.athena_query.principal_concurrency must not "
+                "exceed project_concurrency"
+            )
+        if (
+            self.principal_scan_bytes_per_minute
+            > self.project_scan_bytes_per_minute
+        ):
+            raise AgentCoreSetupError(
+                "runtime.athena_query principal scan budget must not "
+                "exceed the project scan budget"
+            )
+        if (
+            self.max_bytes_scanned
+            > self.principal_scan_bytes_per_minute
+        ):
+            raise AgentCoreSetupError(
+                "runtime.athena_query.max_bytes_scanned must fit within "
+                "the principal aggregate scan budget"
+            )
+
+    @classmethod
+    def from_mapping(cls, raw: Any) -> AthenaQuerySetup:
+        value = _strict_object(
+            raw,
+            "runtime.athena_query",
+            required={"role_arns"},
+            optional={
+                "timeout_seconds",
+                "max_rows",
+                "max_result_bytes",
+                "max_bytes_scanned",
+                "poll_interval_seconds",
+                "project_rpm",
+                "principal_rpm",
+                "project_concurrency",
+                "principal_concurrency",
+                "project_scan_bytes_per_minute",
+                "principal_scan_bytes_per_minute",
+                "max_datasources_per_tenant",
+            },
+        )
+        raw_roles = value["role_arns"]
+        if not isinstance(raw_roles, list) or not raw_roles:
+            raise AgentCoreSetupError(
+                "runtime.athena_query.role_arns must be a non-empty array"
+            )
+        roles: list[str] = []
+        for index, raw_role in enumerate(raw_roles):
+            role = _required_string(
+                raw_role,
+                f"runtime.athena_query.role_arns[{index}]",
+                max_length=600,
+            )
+            if (
+                "*" in role
+                or _IAM_ROLE_ARN_PATTERN.fullmatch(role) is None
+            ):
+                raise AgentCoreSetupError(
+                    "Athena query roles must be concrete IAM role ARNs"
+                )
+            if role in roles:
+                raise AgentCoreSetupError(
+                    "runtime.athena_query.role_arns must not contain "
+                    "duplicates"
+                )
+            roles.append(role)
+        return cls(
+            role_arns=tuple(roles),
+            timeout_seconds=_bounded_float(
+                value.get("timeout_seconds", 30.0),
+                "runtime.athena_query.timeout_seconds",
+                minimum=0.001,
+                maximum=300.0,
+            ),
+            max_rows=_bounded_integer(
+                value.get("max_rows", 1000),
+                "runtime.athena_query.max_rows",
+                minimum=1,
+                maximum=10_000,
+            ),
+            max_result_bytes=_bounded_integer(
+                value.get("max_result_bytes", 1024 * 1024),
+                "runtime.athena_query.max_result_bytes",
+                minimum=1024,
+                maximum=16 * 1024 * 1024,
+            ),
+            max_bytes_scanned=_bounded_integer(
+                value.get(
+                    "max_bytes_scanned",
+                    1024 * 1024 * 1024,
+                ),
+                "runtime.athena_query.max_bytes_scanned",
+                minimum=1,
+            ),
+            poll_interval_seconds=_bounded_float(
+                value.get("poll_interval_seconds", 0.25),
+                "runtime.athena_query.poll_interval_seconds",
+                minimum=0.05,
+                maximum=5.0,
+            ),
+            project_rpm=_bounded_integer(
+                value.get("project_rpm", 30),
+                "runtime.athena_query.project_rpm",
+                minimum=1,
+                maximum=10_000,
+            ),
+            principal_rpm=_bounded_integer(
+                value.get("principal_rpm", 10),
+                "runtime.athena_query.principal_rpm",
+                minimum=1,
+                maximum=10_000,
+            ),
+            project_concurrency=_bounded_integer(
+                value.get("project_concurrency", 5),
+                "runtime.athena_query.project_concurrency",
+                minimum=1,
+                maximum=100,
+            ),
+            principal_concurrency=_bounded_integer(
+                value.get("principal_concurrency", 2),
+                "runtime.athena_query.principal_concurrency",
+                minimum=1,
+                maximum=100,
+            ),
+            project_scan_bytes_per_minute=_bounded_integer(
+                value.get(
+                    "project_scan_bytes_per_minute",
+                    5 * 1024 * 1024 * 1024,
+                ),
+                (
+                    "runtime.athena_query."
+                    "project_scan_bytes_per_minute"
+                ),
+                minimum=1,
+            ),
+            principal_scan_bytes_per_minute=_bounded_integer(
+                value.get(
+                    "principal_scan_bytes_per_minute",
+                    2 * 1024 * 1024 * 1024,
+                ),
+                (
+                    "runtime.athena_query."
+                    "principal_scan_bytes_per_minute"
+                ),
+                minimum=1,
+            ),
+            max_datasources_per_tenant=_bounded_integer(
+                value.get("max_datasources_per_tenant", 500),
+                (
+                    "runtime.athena_query."
+                    "max_datasources_per_tenant"
+                ),
+                minimum=1,
+                maximum=10_000,
+            ),
+        )
+
+
 @dataclass(frozen=True)
 class TenantSetup:
     tenant_id: str
@@ -246,6 +496,7 @@ class RuntimeSetup:
     verified_image_uri: str
     bedrock_invoke_resource_arns: tuple[str, ...]
     approved_https_prefix_list_id: str
+    athena_query: AthenaQuerySetup | None = None
 
     @classmethod
     def from_mapping(cls, raw: Any, *, aws_region: str) -> RuntimeSetup:
@@ -257,6 +508,7 @@ class RuntimeSetup:
                 "bedrock_invoke_resource_arns",
                 "approved_https_prefix_list_id",
             },
+            optional={"athena_query"},
         )
         image = _required_string(
             value["verified_image_uri"],
@@ -294,6 +546,11 @@ class RuntimeSetup:
             verified_image_uri=image,
             bedrock_invoke_resource_arns=tuple(arns),
             approved_https_prefix_list_id=prefix_list_id,
+            athena_query=(
+                AthenaQuerySetup.from_mapping(value["athena_query"])
+                if value.get("athena_query") is not None
+                else None
+            ),
         )
 
 
@@ -337,6 +594,115 @@ class ManagedCognitoSetup:
         return cls(
             hosted_ui_domain_prefix=prefix,
             oauth_callback_urls=tuple(urls),
+        )
+
+
+@dataclass(frozen=True)
+class ControlPlaneSetup:
+    """Managed-Cognito web control-plane deployment inputs."""
+
+    domain_name: str
+    verified_image_uri: str
+    certificate_arn: str
+    public_hosted_zone_id: str
+    approved_ingress_prefix_list_id: str
+    approved_https_prefix_list_id: str
+
+    @classmethod
+    def from_mapping(
+        cls,
+        raw: Any,
+        *,
+        aws_region: str,
+    ) -> ControlPlaneSetup:
+        value = _strict_object(
+            raw,
+            "control_plane",
+            required={
+                "domain_name",
+                "verified_image_uri",
+                "certificate_arn",
+                "public_hosted_zone_id",
+                "approved_ingress_prefix_list_id",
+                "approved_https_prefix_list_id",
+            },
+        )
+        domain_name = _required_string(
+            value["domain_name"],
+            "control_plane.domain_name",
+            max_length=253,
+        )
+        if _DOMAIN_NAME_PATTERN.fullmatch(domain_name) is None:
+            raise AgentCoreSetupError(
+                "control_plane.domain_name must be a lowercase fully "
+                "qualified DNS hostname"
+            )
+        image = _required_string(
+            value["verified_image_uri"],
+            "control_plane.verified_image_uri",
+        )
+        image_match = _IMAGE_PATTERN.fullmatch(image)
+        if image_match is None or image_match.group("region") != aws_region:
+            raise AgentCoreSetupError(
+                "control_plane.verified_image_uri must be an immutable "
+                f"private ECR digest URI in {aws_region}"
+            )
+        certificate_arn = _required_string(
+            value["certificate_arn"],
+            "control_plane.certificate_arn",
+            max_length=512,
+        )
+        certificate_match = _ACM_CERTIFICATE_ARN_PATTERN.fullmatch(
+            certificate_arn
+        )
+        if (
+            certificate_match is None
+            or certificate_match.group("region") != aws_region
+        ):
+            raise AgentCoreSetupError(
+                "control_plane.certificate_arn must be a regional ACM "
+                f"certificate ARN in {aws_region}"
+            )
+        public_hosted_zone_id = _required_string(
+            value["public_hosted_zone_id"],
+            "control_plane.public_hosted_zone_id",
+            max_length=64,
+        )
+        if (
+            _HOSTED_ZONE_PATTERN.fullmatch(public_hosted_zone_id)
+            is None
+        ):
+            raise AgentCoreSetupError(
+                "control_plane.public_hosted_zone_id must be a Route 53 "
+                "public hosted-zone ID"
+            )
+        prefix_lists: dict[str, str] = {}
+        for field_name in (
+            "approved_ingress_prefix_list_id",
+            "approved_https_prefix_list_id",
+        ):
+            prefix_list_id = _required_string(
+                value[field_name],
+                f"control_plane.{field_name}",
+                max_length=64,
+            )
+            if _PREFIX_LIST_PATTERN.fullmatch(prefix_list_id) is None:
+                raise AgentCoreSetupError(
+                    f"control_plane.{field_name} must be an EC2 managed "
+                    "prefix list ID"
+                )
+            prefix_lists[field_name] = prefix_list_id
+        return cls(
+            domain_name=domain_name,
+            verified_image_uri=image,
+            certificate_arn=certificate_arn,
+            public_hosted_zone_id=public_hosted_zone_id,
+            approved_ingress_prefix_list_id=(
+                prefix_lists["approved_ingress_prefix_list_id"]
+            ),
+            approved_https_prefix_list_id=(
+                prefix_lists["approved_https_prefix_list_id"]
+            ),
         )
 
 
@@ -410,6 +776,7 @@ class AgentCoreSetupConfig:
     admin: AdminSetup
     runtime: RuntimeSetup
     managed_cognito: ManagedCognitoSetup | None = None
+    control_plane: ControlPlaneSetup | None = None
     external_oidc: ExternalOidcSetup | None = None
 
     @classmethod
@@ -426,7 +793,11 @@ class AgentCoreSetupConfig:
                 "admin",
                 "runtime",
             },
-            optional={"managed_cognito", "external_oidc"},
+            optional={
+                "managed_cognito",
+                "control_plane",
+                "external_oidc",
+            },
         )
         if (
             isinstance(value["schema_version"], bool)
@@ -444,12 +815,27 @@ class AgentCoreSetupConfig:
             )
         aws_region = _identifier(value["aws_region"], "aws_region")
         managed_raw = value.get("managed_cognito")
+        control_plane_raw = value.get("control_plane")
         external_raw = value.get("external_oidc")
         if identity_mode == MANAGED_COGNITO:
-            if managed_raw is None or external_raw is not None:
-                raise AgentCoreSetupError("managed-cognito requires managed_cognito and forbids external_oidc")
-        elif external_raw is None or managed_raw is not None:
-            raise AgentCoreSetupError("external-oidc requires external_oidc and forbids managed_cognito")
+            if (
+                managed_raw is None
+                or control_plane_raw is None
+                or external_raw is not None
+            ):
+                raise AgentCoreSetupError(
+                    "managed-cognito requires managed_cognito and "
+                    "control_plane and forbids external_oidc"
+                )
+        elif (
+            external_raw is None
+            or managed_raw is not None
+            or control_plane_raw is not None
+        ):
+            raise AgentCoreSetupError(
+                "external-oidc requires external_oidc and forbids "
+                "managed_cognito and control_plane"
+            )
         return cls(
             schema_version=SCHEMA_VERSION,
             target="agentcore",
@@ -465,6 +851,14 @@ class AgentCoreSetupConfig:
                 aws_region=aws_region,
             ),
             managed_cognito=(ManagedCognitoSetup.from_mapping(managed_raw) if managed_raw is not None else None),
+            control_plane=(
+                ControlPlaneSetup.from_mapping(
+                    control_plane_raw,
+                    aws_region=aws_region,
+                )
+                if control_plane_raw is not None
+                else None
+            ),
             external_oidc=(ExternalOidcSetup.from_mapping(external_raw) if external_raw is not None else None),
         )
 
@@ -476,9 +870,17 @@ class AgentCoreSetupConfig:
             value.pop("managed_cognito")
         else:
             value["managed_cognito"]["oauth_callback_urls"] = list(self.managed_cognito.oauth_callback_urls)
+        if self.control_plane is None:
+            value.pop("control_plane")
         if self.external_oidc is None:
             value.pop("external_oidc")
         value["runtime"]["bedrock_invoke_resource_arns"] = list(self.runtime.bedrock_invoke_resource_arns)
+        if self.runtime.athena_query is None:
+            value["runtime"].pop("athena_query")
+        else:
+            value["runtime"]["athena_query"]["role_arns"] = list(
+                self.runtime.athena_query.role_arns
+            )
         return value
 
 
@@ -577,6 +979,39 @@ def config_from_args(args: argparse.Namespace) -> AgentCoreSetupConfig:
             "approved_https_prefix_list_id": (args.approved_https_prefix_list_id),
         },
     }
+    athena_role_arns = list(args.athena_query_role_arn or [])
+    if not athena_role_arns:
+        athena_role_arns = _comma_values(
+            os.environ.get("AXON_ATHENA_QUERY_ROLE_ARNS")
+        )
+    if athena_role_arns:
+        mapping["runtime"]["athena_query"] = {
+            "role_arns": athena_role_arns,
+            "timeout_seconds": args.athena_query_timeout_seconds,
+            "max_rows": args.athena_query_max_rows,
+            "max_result_bytes": args.athena_query_max_result_bytes,
+            "max_bytes_scanned": args.athena_query_max_bytes_scanned,
+            "poll_interval_seconds": (
+                args.athena_query_poll_interval_seconds
+            ),
+            "project_rpm": args.athena_query_project_rpm,
+            "principal_rpm": args.athena_query_principal_rpm,
+            "project_concurrency": (
+                args.athena_query_project_concurrency
+            ),
+            "principal_concurrency": (
+                args.athena_query_principal_concurrency
+            ),
+            "project_scan_bytes_per_minute": (
+                args.athena_query_project_scan_bytes_per_minute
+            ),
+            "principal_scan_bytes_per_minute": (
+                args.athena_query_principal_scan_bytes_per_minute
+            ),
+            "max_datasources_per_tenant": (
+                args.athena_query_max_datasources_per_tenant
+            ),
+        }
     if mode == MANAGED_COGNITO:
         callback_urls = list(args.oauth_callback_url or [])
         if not callback_urls:
@@ -584,6 +1019,22 @@ def config_from_args(args: argparse.Namespace) -> AgentCoreSetupConfig:
         mapping["managed_cognito"] = {
             "hosted_ui_domain_prefix": args.hosted_ui_domain_prefix,
             "oauth_callback_urls": callback_urls,
+        }
+        mapping["control_plane"] = {
+            "domain_name": args.control_plane_domain_name,
+            "verified_image_uri": (
+                args.control_plane_verified_image_uri
+            ),
+            "certificate_arn": args.control_plane_certificate_arn,
+            "public_hosted_zone_id": (
+                args.control_plane_public_hosted_zone_id
+            ),
+            "approved_ingress_prefix_list_id": (
+                args.control_plane_approved_ingress_prefix_list_id
+            ),
+            "approved_https_prefix_list_id": (
+                args.control_plane_approved_https_prefix_list_id
+            ),
         }
     elif mode == EXTERNAL_OIDC:
         mapping["admin"]["subject"] = args.admin_subject
@@ -683,6 +1134,110 @@ def add_setup_subcommands(subparsers: argparse._SubParsersAction) -> None:
         default=_env("AXON_APPROVED_HTTPS_PREFIX_LIST_ID"),
     )
     agentcore.add_argument(
+        "--athena-query-role-arn",
+        action="append",
+        help=(
+            "Enable read-only queries with an exact project IAM role; "
+            "repeat to approve more than one role"
+        ),
+    )
+    agentcore.add_argument(
+        "--athena-query-timeout-seconds",
+        type=float,
+        default=float(
+            _env("AXON_ATHENA_QUERY_TIMEOUT_SECONDS", "30")
+        ),
+    )
+    agentcore.add_argument(
+        "--athena-query-max-rows",
+        type=int,
+        default=int(_env("AXON_ATHENA_QUERY_MAX_ROWS", "1000")),
+    )
+    agentcore.add_argument(
+        "--athena-query-max-result-bytes",
+        type=int,
+        default=int(
+            _env(
+                "AXON_ATHENA_QUERY_MAX_RESULT_BYTES",
+                str(1024 * 1024),
+            )
+        ),
+    )
+    agentcore.add_argument(
+        "--athena-query-max-bytes-scanned",
+        type=int,
+        default=int(
+            _env(
+                "AXON_ATHENA_QUERY_MAX_BYTES_SCANNED",
+                str(1024 * 1024 * 1024),
+            )
+        ),
+    )
+    agentcore.add_argument(
+        "--athena-query-poll-interval-seconds",
+        type=float,
+        default=float(
+            _env(
+                "AXON_ATHENA_QUERY_POLL_INTERVAL_SECONDS",
+                "0.25",
+            )
+        ),
+    )
+    agentcore.add_argument(
+        "--athena-query-project-rpm",
+        type=int,
+        default=int(_env("AXON_ATHENA_QUERY_PROJECT_RPM", "30")),
+    )
+    agentcore.add_argument(
+        "--athena-query-principal-rpm",
+        type=int,
+        default=int(_env("AXON_ATHENA_QUERY_PRINCIPAL_RPM", "10")),
+    )
+    agentcore.add_argument(
+        "--athena-query-project-concurrency",
+        type=int,
+        default=int(
+            _env("AXON_ATHENA_QUERY_PROJECT_CONCURRENCY", "5")
+        ),
+    )
+    agentcore.add_argument(
+        "--athena-query-principal-concurrency",
+        type=int,
+        default=int(
+            _env("AXON_ATHENA_QUERY_PRINCIPAL_CONCURRENCY", "2")
+        ),
+    )
+    agentcore.add_argument(
+        "--athena-query-project-scan-bytes-per-minute",
+        type=int,
+        default=int(
+            _env(
+                "AXON_ATHENA_QUERY_PROJECT_SCAN_BYTES_PER_MINUTE",
+                str(5 * 1024 * 1024 * 1024),
+            )
+        ),
+    )
+    agentcore.add_argument(
+        "--athena-query-principal-scan-bytes-per-minute",
+        type=int,
+        default=int(
+            _env(
+                "AXON_ATHENA_QUERY_PRINCIPAL_SCAN_BYTES_PER_MINUTE",
+                str(2 * 1024 * 1024 * 1024),
+            )
+        ),
+    )
+    agentcore.add_argument(
+        "--athena-query-max-datasources-per-tenant",
+        type=int,
+        default=int(
+            _env(
+                "AXON_ATHENA_QUERY_MAX_DATASOURCES_PER_TENANT",
+                "500",
+            )
+        ),
+    )
+    agentcore.add_argument(
         "--hosted-ui-domain-prefix",
         default=_env("AXON_COGNITO_DOMAIN_PREFIX"),
     )
@@ -690,6 +1245,34 @@ def add_setup_subcommands(subparsers: argparse._SubParsersAction) -> None:
         "--oauth-callback-url",
         action="append",
         help="Repeat for every managed Cognito PKCE callback URL",
+    )
+    agentcore.add_argument(
+        "--control-plane-domain-name",
+        default=_env("AXON_CONTROL_PLANE_DOMAIN_NAME"),
+    )
+    agentcore.add_argument(
+        "--control-plane-verified-image-uri",
+        default=_env("AXON_CONTROL_PLANE_VERIFIED_IMAGE_URI"),
+    )
+    agentcore.add_argument(
+        "--control-plane-certificate-arn",
+        default=_env("AXON_CONTROL_PLANE_CERTIFICATE_ARN"),
+    )
+    agentcore.add_argument(
+        "--control-plane-public-hosted-zone-id",
+        default=_env("AXON_CONTROL_PLANE_PUBLIC_HOSTED_ZONE_ID"),
+    )
+    agentcore.add_argument(
+        "--control-plane-approved-ingress-prefix-list-id",
+        default=_env(
+            "AXON_CONTROL_PLANE_APPROVED_INGRESS_PREFIX_LIST_ID"
+        ),
+    )
+    agentcore.add_argument(
+        "--control-plane-approved-https-prefix-list-id",
+        default=_env(
+            "AXON_CONTROL_PLANE_APPROVED_HTTPS_PREFIX_LIST_ID"
+        ),
     )
     agentcore.add_argument(
         "--oidc-issuer",
@@ -770,6 +1353,8 @@ def local_demo_environment(
             "LLM_ROUTER_DYNAMODB_ENABLED": "false",
             "AXON_AUTH_MODE": "LOG_ONLY",
             "AXON_LOAD_DEMO_DATA": "true",
+            "AXON_ATHENA_QUERY_ENABLED": "false",
+            "AXON_CONTROL_PLANE_ONLY": "false",
         }
     )
     return environment

@@ -61,7 +61,7 @@ class TestTranslateRequest:
         # Regression: o1/o3/o4 reasoning models reject max_tokens (require
         # max_completion_tokens) and only accept the default temperature.
         # Sending max_tokens/temperature 400s and trips the openai breaker.
-        for model in ("o4-mini", "o1", "o3-mini", "o3-2025-01-31"):
+        for model in ("o4-mini", "o1", "O1", "o3-mini", "o3-2025-01-31"):
             req = ChatCompletionRequest(
                 messages=[{"role": "user", "content": "2+2"}],
                 model=model, max_tokens=50, temperature=0.7, top_p=0.9,

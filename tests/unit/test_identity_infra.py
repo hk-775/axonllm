@@ -25,6 +25,17 @@ def _one_resource(template: dict, resource_type: str) -> dict:
     return resources[0]
 
 
+def _client(template: dict, client_name: str) -> dict:
+    clients = _resources(template, "AWS::Cognito::UserPoolClient")
+    matches = [
+        client
+        for client in clients
+        if client["Properties"]["ClientName"] == client_name
+    ]
+    assert len(matches) == 1
+    return matches[0]
+
+
 @pytest.fixture(scope="module")
 def identity_template(tmp_path_factory: pytest.TempPathFactory) -> dict:
     if not _INFRA_PYTHON.is_file():
@@ -64,10 +75,14 @@ def test_identity_inputs_are_explicit_https_values(identity_template):
     parameters = identity_template["Parameters"]
     assert "Default" not in parameters["HostedUiDomainPrefix"]
     assert "Default" not in parameters["OAuthCallbackUrls"]
+    assert "Default" not in parameters["ControlPlaneDomainName"]
     assert parameters["HostedUiDomainPrefix"]["MinLength"] == 3
     assert parameters["HostedUiDomainPrefix"]["MaxLength"] == 63
     assert parameters["OAuthCallbackUrls"]["Type"] == "CommaDelimitedList"
     assert parameters["OAuthCallbackUrls"]["AllowedPattern"].startswith("^https://")
+    assert parameters["ControlPlaneDomainName"]["AllowedPattern"].endswith(
+        r"[a-z]{2,63}$"
+    )
 
 
 def test_user_pool_is_retained_and_operator_enrolled(identity_template):
@@ -120,9 +135,9 @@ def test_tenant_and_project_are_operator_controlled_claims(identity_template):
         for item in custom_schema.values()
     )
 
-    client = _one_resource(
+    client = _client(
         identity_template,
-        "AWS::Cognito::UserPoolClient",
+        "axonllm-agentcore-pkce",
     )["Properties"]
     assert {"custom:tenant_id", "custom:project_id"} <= set(client["ReadAttributes"])
     assert "custom:tenant_id" not in client["WriteAttributes"]
@@ -132,9 +147,9 @@ def test_tenant_and_project_are_operator_controlled_claims(identity_template):
 def test_public_client_is_code_pkce_shaped_without_implicit_flow(
     identity_template,
 ):
-    client_resource = _one_resource(
+    client_resource = _client(
         identity_template,
-        "AWS::Cognito::UserPoolClient",
+        "axonllm-agentcore-pkce",
     )
     client = client_resource["Properties"]
     assert client_resource["DeletionPolicy"] == "Retain"
@@ -154,6 +169,35 @@ def test_public_client_is_code_pkce_shaped_without_implicit_flow(
     assert client["AccessTokenValidity"] == 15
 
 
+def test_confidential_alb_client_has_its_own_exact_callback(
+    identity_template,
+):
+    client_resource = _client(
+        identity_template,
+        "axonllm-control-plane-alb",
+    )
+    client = client_resource["Properties"]
+    assert client_resource["DeletionPolicy"] == "Retain"
+    assert client_resource["UpdateReplacePolicy"] == "Retain"
+    assert client["GenerateSecret"] is True
+    assert client["AllowedOAuthFlows"] == ["code"]
+    assert client["AllowedOAuthScopes"] == ["openid", "email", "profile"]
+    assert client["CallbackURLs"] == [
+        {
+            "Fn::Join": [
+                "",
+                [
+                    "https://",
+                    {"Ref": "ControlPlaneDomainName"},
+                    "/oauth2/idpresponse",
+                ],
+            ]
+        }
+    ]
+    assert client["PreventUserExistenceErrors"] == "ENABLED"
+    assert "ExplicitAuthFlows" not in client
+
+
 def test_hosted_ui_and_standard_oidc_outputs_are_retained(identity_template):
     domain = _one_resource(
         identity_template,
@@ -168,7 +212,10 @@ def test_hosted_ui_and_standard_oidc_outputs_are_retained(identity_template):
         "OidcDiscoveryUrl",
         "OidcClientId",
         "OidcAudience",
+        "AlbClientId",
+        "ControlPlaneDomainName",
         "HostedUiDomain",
+        "HostedUiDomainName",
         "TenantClaimName",
         "ProjectClaimName",
     } <= set(outputs)

@@ -92,7 +92,99 @@ def load_app_config() -> AppConfig:
         ),
         semantic_cache_model=os.environ.get("AXON_SEMANTIC_CACHE_MODEL", ""),
         semantic_cache_threshold=_load_semantic_threshold(),
+        athena_query_enabled=_load_strict_bool(
+            "AXON_ATHENA_QUERY_ENABLED",
+            False,
+        ),
+        athena_query_bindings=os.environ.get(
+            "AXON_ATHENA_QUERY_BINDINGS",
+            "",
+        ),
+        athena_query_timeout_seconds=_load_float(
+            "AXON_ATHENA_QUERY_TIMEOUT_SECONDS",
+            30.0,
+        ),
+        athena_query_max_rows=_load_int(
+            "AXON_ATHENA_QUERY_MAX_ROWS",
+            1000,
+        ),
+        athena_query_max_result_bytes=_load_int(
+            "AXON_ATHENA_QUERY_MAX_RESULT_BYTES",
+            1024 * 1024,
+        ),
+        athena_query_max_bytes_scanned=_load_int(
+            "AXON_ATHENA_QUERY_MAX_BYTES_SCANNED",
+            1024 * 1024 * 1024,
+        ),
+        athena_query_poll_interval_seconds=_load_float(
+            "AXON_ATHENA_QUERY_POLL_INTERVAL_SECONDS",
+            0.25,
+        ),
+        athena_query_project_rpm=_load_int(
+            "AXON_ATHENA_QUERY_PROJECT_RPM",
+            30,
+        ),
+        athena_query_principal_rpm=_load_int(
+            "AXON_ATHENA_QUERY_PRINCIPAL_RPM",
+            10,
+        ),
+        athena_query_project_concurrency=_load_int(
+            "AXON_ATHENA_QUERY_PROJECT_CONCURRENCY",
+            5,
+        ),
+        athena_query_principal_concurrency=_load_int(
+            "AXON_ATHENA_QUERY_PRINCIPAL_CONCURRENCY",
+            2,
+        ),
+        athena_query_project_scan_bytes_per_minute=_load_int(
+            "AXON_ATHENA_QUERY_PROJECT_SCAN_BYTES_PER_MINUTE",
+            5 * 1024 * 1024 * 1024,
+        ),
+        athena_query_principal_scan_bytes_per_minute=_load_int(
+            "AXON_ATHENA_QUERY_PRINCIPAL_SCAN_BYTES_PER_MINUTE",
+            2 * 1024 * 1024 * 1024,
+        ),
+        athena_query_max_datasources_per_tenant=_load_int(
+            "AXON_ATHENA_QUERY_MAX_DATASOURCES_PER_TENANT",
+            500,
+        ),
+        control_plane_only=_load_strict_bool(
+            "AXON_CONTROL_PLANE_ONLY",
+            False,
+        ),
     )
+
+
+def _load_strict_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    normalized = raw.strip().lower()
+    if normalized == "true":
+        return True
+    if normalized == "false":
+        return False
+    raise ValueError(f"{name} must be 'true' or 'false'")
+
+
+def _load_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an integer") from exc
+
+
+def _load_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a number") from exc
 
 
 def _load_enabled_providers() -> frozenset[str] | None:
