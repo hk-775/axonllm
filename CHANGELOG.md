@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **All pinned workflow actions now run natively on Node 24.** Artifact
+  upload/download, AWS credential configuration, and Docker QEMU/Buildx setup
+  actions were upgraded to their Node 24 majors, removing GitHub's forced
+  compatibility runtime from release, publication, deployment-verification,
+  and operations workflows.
+
 ## [0.2.5] - 2026-08-11
 
 ### Added

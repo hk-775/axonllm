@@ -16,7 +16,7 @@ sys.path.insert(0, str(REPO_ROOT / "scripts" / "ci"))
 import validate_workflows  # noqa: E402
 
 
-PIN = "a" * 40
+CHECKOUT_PIN = validate_workflows.APPROVED_ACTION_PINS["actions/checkout"]
 OPERATIONS_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "operations-security.yml"
 
 
@@ -85,7 +85,7 @@ permissions:
 jobs:
   test:
     steps:
-      - uses: actions/checkout@{PIN}
+      - uses: actions/checkout@{CHECKOUT_PIN}
         with:
           persist-credentials: false
 """
@@ -125,12 +125,54 @@ permissions:
 jobs:
   test:
     steps:
-      - uses: actions/checkout@{PIN}
+      - uses: actions/checkout@{CHECKOUT_PIN}
 """
         )
         with self.assertRaisesRegex(
             validate_workflows.WorkflowPolicyError,
             "persist-credentials",
+        ):
+            validate_workflows.validate_workflow(path)
+
+    def test_rejects_unapproved_action(self) -> None:
+        path = self._write(
+            f"""
+name: Test
+on:
+  push:
+permissions:
+  contents: read
+jobs:
+  test:
+    steps:
+      - uses: example/unreviewed-action@{"a" * 40}
+"""
+        )
+        with self.assertRaisesRegex(
+            validate_workflows.WorkflowPolicyError,
+            "not approved",
+        ):
+            validate_workflows.validate_workflow(path)
+
+    def test_rejects_unapproved_action_pin(self) -> None:
+        path = self._write(
+            f"""
+name: Test
+on:
+  push:
+permissions:
+  contents: read
+jobs:
+  test:
+    steps:
+      - uses: actions/checkout@{"a" * 40}
+        with:
+          persist-credentials: false
+"""
+        )
+        with self.assertRaisesRegex(
+            validate_workflows.WorkflowPolicyError,
+            "pin is not approved",
         ):
             validate_workflows.validate_workflow(path)
 
