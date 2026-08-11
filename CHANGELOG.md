@@ -44,6 +44,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A recovery cutover left the primary state table writable.** The Fargate task
+  role always retained its stack-managed table grant while a second conditional
+  policy added the restored table. State access now resolves through the same
+  CloudFormation condition as `AXON_DYNAMODB_TABLE`, so the role can reach only
+  the selected table and its indexes.
 - **A project or per-user config written through the API gated only the task that
   served the write.** `self.projects` and `self._user_configs` are hydrated once at
   startup and thereafter mutated only by the instance that took the write. Both
