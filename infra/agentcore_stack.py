@@ -1,5 +1,10 @@
 """Production Bedrock AgentCore deployment for the AxonLLM agent entrypoint."""
 
+import json
+import math
+import re
+from dataclasses import dataclass
+
 from aws_cdk import (
     CfnOutput,
     CfnParameter,
@@ -24,6 +29,332 @@ from aws_cdk import (
 from constructs import Construct
 
 
+_ATHENA_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_ATHENA_ROLE_ARN = re.compile(
+    r"^arn:(?:aws|aws-us-gov|aws-cn):iam::[0-9]{12}:"
+    r"role/[A-Za-z0-9+=,.@_/-]{1,512}$"
+)
+ATHENA_QUERY_ACTIONS = [
+    "athena:GetQueryExecution",
+    "athena:GetQueryResults",
+    "athena:GetWorkGroup",
+    "athena:StartQueryExecution",
+    "athena:StopQueryExecution",
+]
+ATHENA_ASSUME_ROLE_ACTIONS = [
+    "sts:AssumeRole",
+    "sts:SetSourceIdentity",
+    "sts:TagSession",
+]
+_MAX_ATHENA_BINDINGS_CHARACTERS = 2_048
+
+
+@dataclass(frozen=True)
+class AthenaInfrastructureConfig:
+    """Deployment-bound query role allow-list and execution limits."""
+
+    bindings_json: str
+    role_arns: tuple[str, ...]
+    timeout_seconds: str
+    max_rows: str
+    max_result_bytes: str
+    max_bytes_scanned: str
+    poll_interval_seconds: str
+    project_rpm: str
+    principal_rpm: str
+    project_concurrency: str
+    principal_concurrency: str
+    project_scan_bytes_per_minute: str
+    principal_scan_bytes_per_minute: str
+    max_datasources_per_tenant: str
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.role_arns)
+
+    def environment(self) -> dict[str, str]:
+        return {
+            "AXON_ATHENA_QUERY_ENABLED": (
+                "true" if self.enabled else "false"
+            ),
+            "AXON_ATHENA_QUERY_BINDINGS": self.bindings_json,
+            "AXON_ATHENA_QUERY_TIMEOUT_SECONDS": self.timeout_seconds,
+            "AXON_ATHENA_QUERY_MAX_ROWS": self.max_rows,
+            "AXON_ATHENA_QUERY_MAX_RESULT_BYTES": self.max_result_bytes,
+            "AXON_ATHENA_QUERY_MAX_BYTES_SCANNED": (
+                self.max_bytes_scanned
+            ),
+            "AXON_ATHENA_QUERY_POLL_INTERVAL_SECONDS": (
+                self.poll_interval_seconds
+            ),
+            "AXON_ATHENA_QUERY_PROJECT_RPM": self.project_rpm,
+            "AXON_ATHENA_QUERY_PRINCIPAL_RPM": self.principal_rpm,
+            "AXON_ATHENA_QUERY_PROJECT_CONCURRENCY": (
+                self.project_concurrency
+            ),
+            "AXON_ATHENA_QUERY_PRINCIPAL_CONCURRENCY": (
+                self.principal_concurrency
+            ),
+            "AXON_ATHENA_QUERY_PROJECT_SCAN_BYTES_PER_MINUTE": (
+                self.project_scan_bytes_per_minute
+            ),
+            "AXON_ATHENA_QUERY_PRINCIPAL_SCAN_BYTES_PER_MINUTE": (
+                self.principal_scan_bytes_per_minute
+            ),
+            "AXON_ATHENA_QUERY_MAX_DATASOURCES_PER_TENANT": (
+                self.max_datasources_per_tenant
+            ),
+            "AWS_STS_REGIONAL_ENDPOINTS": "regional",
+        }
+
+
+def load_athena_infrastructure_config(
+    construct: Construct,
+) -> AthenaInfrastructureConfig:
+    """Validate CDK context before it can become runtime authority."""
+
+    raw_bindings = construct.node.try_get_context("athena_query_bindings")
+    if raw_bindings in (None, ""):
+        bindings: object = []
+    elif isinstance(raw_bindings, str):
+        try:
+            bindings = json.loads(raw_bindings)
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                "athena_query_bindings must be valid JSON"
+            ) from exc
+    else:
+        bindings = raw_bindings
+    if not isinstance(bindings, list):
+        raise ValueError("athena_query_bindings must be a JSON array")
+
+    normalized: list[dict[str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for index, binding in enumerate(bindings):
+        if not isinstance(binding, dict):
+            raise ValueError(
+                f"athena_query_bindings[{index}] must be an object"
+            )
+        expected = {"tenant_id", "project_id", "role_arn"}
+        if set(binding) != expected:
+            raise ValueError(
+                f"athena_query_bindings[{index}] must contain exactly "
+                "tenant_id, project_id, and role_arn"
+            )
+        tenant_id = binding["tenant_id"]
+        project_id = binding["project_id"]
+        role_arn = binding["role_arn"]
+        if (
+            not isinstance(tenant_id, str)
+            or _ATHENA_IDENTIFIER.fullmatch(tenant_id) is None
+        ):
+            raise ValueError(
+                f"athena_query_bindings[{index}].tenant_id is invalid"
+            )
+        if (
+            not isinstance(project_id, str)
+            or _ATHENA_IDENTIFIER.fullmatch(project_id) is None
+        ):
+            raise ValueError(
+                f"athena_query_bindings[{index}].project_id is invalid"
+            )
+        if (
+            not isinstance(role_arn, str)
+            or "*" in role_arn
+            or _ATHENA_ROLE_ARN.fullmatch(role_arn) is None
+        ):
+            raise ValueError(
+                f"athena_query_bindings[{index}].role_arn must be a "
+                "concrete IAM role ARN"
+            )
+        identity = (tenant_id, project_id, role_arn)
+        if identity in seen:
+            raise ValueError("athena_query_bindings contains a duplicate")
+        seen.add(identity)
+        normalized.append(
+            {
+                "tenant_id": tenant_id,
+                "project_id": project_id,
+                "role_arn": role_arn,
+            }
+        )
+
+    bindings_json = json.dumps(
+        normalized,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    if len(bindings_json) > _MAX_ATHENA_BINDINGS_CHARACTERS:
+        raise ValueError(
+            "athena_query_bindings exceeds the AgentCore "
+            "2,048-character environment value limit"
+        )
+
+    def integer_limit(
+        context_name: str,
+        default: int,
+        minimum: int,
+        maximum: int | None = None,
+    ) -> str:
+        value = construct.node.try_get_context(context_name)
+        resolved = default if value in (None, "") else value
+        if (
+            isinstance(resolved, str)
+            and re.fullmatch(r"[0-9]+", resolved) is not None
+        ):
+            resolved = int(resolved)
+        if (
+            isinstance(resolved, bool)
+            or not isinstance(resolved, int)
+            or resolved < minimum
+            or (maximum is not None and resolved > maximum)
+        ):
+            if maximum is None:
+                raise ValueError(
+                    f"{context_name} must be at least {minimum}"
+                )
+            raise ValueError(
+                f"{context_name} must be between {minimum} and {maximum}"
+            )
+        return str(resolved)
+
+    def float_limit(
+        context_name: str,
+        default: float,
+        minimum: float,
+        maximum: float,
+    ) -> str:
+        value = construct.node.try_get_context(context_name)
+        resolved = default if value in (None, "") else value
+        if isinstance(resolved, str):
+            try:
+                resolved = float(resolved)
+            except ValueError:
+                pass
+        if (
+            isinstance(resolved, bool)
+            or not isinstance(resolved, (int, float))
+            or not math.isfinite(resolved)
+            or not minimum <= resolved <= maximum
+        ):
+            raise ValueError(
+                f"{context_name} must be between {minimum} and {maximum}"
+            )
+        return f"{resolved:g}"
+
+    max_bytes_scanned = integer_limit(
+        "athena_query_max_bytes_scanned",
+        1024 * 1024 * 1024,
+        1,
+    )
+    project_rpm = integer_limit(
+        "athena_query_project_rpm",
+        30,
+        1,
+        10_000,
+    )
+    principal_rpm = integer_limit(
+        "athena_query_principal_rpm",
+        10,
+        1,
+        10_000,
+    )
+    project_concurrency = integer_limit(
+        "athena_query_project_concurrency",
+        5,
+        1,
+        100,
+    )
+    principal_concurrency = integer_limit(
+        "athena_query_principal_concurrency",
+        2,
+        1,
+        100,
+    )
+    project_scan_bytes_per_minute = integer_limit(
+        "athena_query_project_scan_bytes_per_minute",
+        5 * 1024 * 1024 * 1024,
+        1,
+    )
+    principal_scan_bytes_per_minute = integer_limit(
+        "athena_query_principal_scan_bytes_per_minute",
+        2 * 1024 * 1024 * 1024,
+        1,
+    )
+    max_datasources_per_tenant = integer_limit(
+        "athena_query_max_datasources_per_tenant",
+        500,
+        1,
+        10_000,
+    )
+    if int(principal_rpm) > int(project_rpm):
+        raise ValueError(
+            "athena_query_principal_rpm must not exceed "
+            "athena_query_project_rpm"
+        )
+    if int(principal_concurrency) > int(project_concurrency):
+        raise ValueError(
+            "athena_query_principal_concurrency must not exceed "
+            "athena_query_project_concurrency"
+        )
+    if int(principal_scan_bytes_per_minute) > int(
+        project_scan_bytes_per_minute
+    ):
+        raise ValueError(
+            "principal query scan budget must not exceed project budget"
+        )
+    if int(max_bytes_scanned) > int(
+        principal_scan_bytes_per_minute
+    ):
+        raise ValueError(
+            "athena_query_max_bytes_scanned must fit within the "
+            "principal aggregate scan budget"
+        )
+
+    return AthenaInfrastructureConfig(
+        bindings_json=bindings_json,
+        role_arns=tuple(
+            sorted({binding["role_arn"] for binding in normalized})
+        ),
+        timeout_seconds=float_limit(
+            "athena_query_timeout_seconds",
+            30.0,
+            0.001,
+            300.0,
+        ),
+        max_rows=integer_limit(
+            "athena_query_max_rows",
+            1000,
+            1,
+            10_000,
+        ),
+        max_result_bytes=integer_limit(
+            "athena_query_max_result_bytes",
+            1024 * 1024,
+            1024,
+            16 * 1024 * 1024,
+        ),
+        max_bytes_scanned=max_bytes_scanned,
+        poll_interval_seconds=float_limit(
+            "athena_query_poll_interval_seconds",
+            0.25,
+            0.05,
+            5.0,
+        ),
+        project_rpm=project_rpm,
+        principal_rpm=principal_rpm,
+        project_concurrency=project_concurrency,
+        principal_concurrency=principal_concurrency,
+        project_scan_bytes_per_minute=(
+            project_scan_bytes_per_minute
+        ),
+        principal_scan_bytes_per_minute=(
+            principal_scan_bytes_per_minute
+        ),
+        max_datasources_per_tenant=max_datasources_per_tenant,
+    )
+
+
 class AxonLLMAgentCoreStack(Stack):
     """Contained AgentCore runtime with tenant-safe identity and state."""
 
@@ -34,6 +365,7 @@ class AxonLLMAgentCoreStack(Stack):
         **kwargs,
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
+        query_config = load_athena_infrastructure_config(self)
 
         oidc_issuer = CfnParameter(
             self,
@@ -292,6 +624,29 @@ class AxonLLMAgentCoreStack(Stack):
                 subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS
             ),
         )
+        athena_endpoint = None
+        sts_endpoint = None
+        if query_config.enabled:
+            athena_endpoint = vpc.add_interface_endpoint(
+                "AthenaEndpoint",
+                service=ec2.InterfaceVpcEndpointAwsService.ATHENA,
+                open=False,
+                private_dns_enabled=True,
+                security_groups=[endpoint_security_group],
+                subnets=ec2.SubnetSelection(
+                    subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS
+                ),
+            )
+            sts_endpoint = vpc.add_interface_endpoint(
+                "StsEndpoint",
+                service=ec2.InterfaceVpcEndpointAwsService.STS,
+                open=False,
+                private_dns_enabled=True,
+                security_groups=[endpoint_security_group],
+                subnets=ec2.SubnetSelection(
+                    subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS
+                ),
+            )
 
         data_key = kms.Key(
             self,
@@ -583,6 +938,30 @@ class AxonLLMAgentCoreStack(Stack):
             removal_policy=RemovalPolicy.RETAIN,
         )
 
+        runtime_execution_role = iam.Role(
+            self,
+            "RuntimeExecutionRole",
+            role_name=Fn.join(
+                "-",
+                ["axonllm-agentcore-runtime", self.region],
+            ),
+            assumed_by=iam.ServicePrincipal(
+                "bedrock-agentcore.amazonaws.com",
+                conditions={
+                    "StringEquals": {
+                        "aws:SourceAccount": self.account,
+                    },
+                    "ArnLike": {
+                        "aws:SourceArn": (
+                            f"arn:{self.partition}:bedrock-agentcore:"
+                            f"{self.region}:{self.account}:runtime/axonllm*"
+                        )
+                    },
+                },
+            ),
+            description="Execution role for Bedrock Agent Core Runtime",
+            max_session_duration=Duration.hours(8),
+        )
         runtime_artifact = agentcore.AgentRuntimeArtifact.from_image_uri(
             verified_image_uri.value_as_string
         )
@@ -592,6 +971,7 @@ class AxonLLMAgentCoreStack(Stack):
             runtime_name="axonllm",
             description="Tenant-isolated AxonLLM production runtime",
             agent_runtime_artifact=runtime_artifact,
+            execution_role=runtime_execution_role,
             authorizer_configuration=(
                 agentcore.RuntimeAuthorizerConfiguration.using_jwt(
                     oidc_discovery_url.value_as_string,
@@ -625,6 +1005,7 @@ class AxonLLMAgentCoreStack(Stack):
                 ),
                 "AXON_REQUIRE_CANONICAL_IDENTITY": "true",
                 "AXON_ENABLED_PROVIDERS": "bedrock",
+                **query_config.environment(),
             },
             lifecycle_configuration=agentcore.LifecycleConfiguration(
                 idle_runtime_session_timeout=Duration.minutes(10),
@@ -696,6 +1077,34 @@ class AxonLLMAgentCoreStack(Stack):
                 resources=bedrock_invoke_resource_arns.value_as_list,
             )
         )
+        if query_config.enabled:
+            runtime.add_to_role_policy(
+                iam.PolicyStatement(
+                    actions=ATHENA_ASSUME_ROLE_ACTIONS,
+                    resources=list(query_config.role_arns),
+                )
+            )
+            if sts_endpoint is None or athena_endpoint is None:
+                raise RuntimeError(
+                    "query endpoints must exist when Athena is enabled"
+                )
+            sts_endpoint.add_to_policy(
+                iam.PolicyStatement(
+                    principals=[runtime.role],
+                    actions=ATHENA_ASSUME_ROLE_ACTIONS,
+                    resources=list(query_config.role_arns),
+                )
+            )
+            athena_endpoint.add_to_policy(
+                iam.PolicyStatement(
+                    principals=[
+                        iam.ArnPrincipal(role_arn)
+                        for role_arn in query_config.role_arns
+                    ],
+                    actions=ATHENA_QUERY_ACTIONS,
+                    resources=["*"],
+                )
+            )
         endpoint = runtime.add_endpoint(
             "production",
             description="AxonLLM production endpoint",
@@ -842,6 +1251,15 @@ class AxonLLMAgentCoreStack(Stack):
         )
         CfnOutput(
             self,
+            "RuntimeExecutionRoleArn",
+            value=runtime.role.role_arn,
+            description=(
+                "Exact principal that approved Athena datasource roles "
+                "must trust"
+            ),
+        )
+        CfnOutput(
+            self,
             "RuntimeEndpointArn",
             value=endpoint.agent_runtime_endpoint_arn,
         )
@@ -849,16 +1267,37 @@ class AxonLLMAgentCoreStack(Stack):
             self,
             "StateTableName",
             value=state_table.table_name,
+            export_name=Fn.join(
+                ":",
+                [self.stack_name, "StateTableName"],
+            ),
         )
         CfnOutput(
             self,
             "DataKeyArn",
             value=data_key.key_arn,
+            export_name=Fn.join(
+                ":",
+                [self.stack_name, "DataKeyArn"],
+            ),
         )
         CfnOutput(
             self,
             "SecurityEventOutboxQueueUrl",
             value=event_outbox_queue.queue_url,
+            export_name=Fn.join(
+                ":",
+                [self.stack_name, "SecurityEventOutboxQueueUrl"],
+            ),
+        )
+        CfnOutput(
+            self,
+            "SecurityEventOutboxQueueArn",
+            value=event_outbox_queue.queue_arn,
+            export_name=Fn.join(
+                ":",
+                [self.stack_name, "SecurityEventOutboxQueueArn"],
+            ),
         )
         CfnOutput(
             self,
@@ -869,11 +1308,19 @@ class AxonLLMAgentCoreStack(Stack):
             self,
             "SecurityEventTopicArn",
             value=security_event_topic.topic_arn,
+            export_name=Fn.join(
+                ":",
+                [self.stack_name, "SecurityEventTopicArn"],
+            ),
         )
         CfnOutput(
             self,
             "SecurityEventLogGroupArn",
             value=security_event_log_group.log_group_arn,
+            export_name=Fn.join(
+                ":",
+                [self.stack_name, "SecurityEventLogGroupArn"],
+            ),
         )
         CfnOutput(
             self,

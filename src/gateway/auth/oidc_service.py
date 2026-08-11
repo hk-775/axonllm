@@ -102,7 +102,8 @@ class OIDCService:
         """
         try:
             trust = self._alb_trust_config()
-            if trust is None:
+            identity_issuer = self._validated_oidc_issuer()
+            if trust is None or identity_issuer is None:
                 return None
             signer, client_id, issuer, key_base_url = trust
 
@@ -158,7 +159,10 @@ class OIDCService:
                 return None
 
             context = self._map_claims_to_context(claims)
-            context.issuer = issuer
+            # The ALB key issuer proves which load balancer signed the token.
+            # Canonical membership remains keyed by the upstream OIDC issuer
+            # configured on that trusted ALB client.
+            context.issuer = identity_issuer
             context.subject = subject
             return context
 

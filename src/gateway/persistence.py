@@ -35,6 +35,19 @@ _BUDGET_ALERT_THRESHOLDS = (
     Decimal("0.9"),
     Decimal("1.0"),
 )
+_TENANT_DATASOURCE_DOCUMENT_FIELDS = frozenset(
+    {
+        "name",
+        "role_arn",
+        "region",
+        "catalog",
+        "database",
+        "workgroup",
+        "enabled",
+        "created_at",
+        "updated_at",
+    }
+)
 
 
 class CanonicalMembershipNotFoundError(RuntimeError):
@@ -47,6 +60,10 @@ class CanonicalMembershipConflictError(RuntimeError):
 
 class PersistenceConflictError(RuntimeError):
     """A conditional full-document write lost a concurrent update race."""
+
+
+class PersistenceQuotaExceededError(RuntimeError):
+    """A transactional tenant resource quota rejected a create."""
 
 
 def tenant_project_partition_key(tenant_id: str) -> str:
@@ -1141,6 +1158,616 @@ class DynamoPersistence:
                 exc_info=True,
             )
             raise RuntimeError("tenant project listing failed") from exc
+
+    # --- Tenant Athena datasources ---
+
+    @staticmethod
+    def _tenant_datasource_sort_key(
+        project_id: str,
+        datasource_id: str,
+    ) -> str:
+        for name, value in (
+            ("project_id", project_id),
+            ("datasource_id", datasource_id),
+        ):
+            if (
+                not isinstance(value, str)
+                or not value
+                or value != value.strip()
+                or len(value) > 128
+                or "#" in value
+                or any(ord(character) < 32 for character in value)
+            ):
+                raise ValueError(
+                    f"{name} must be a delimiter-safe non-empty string"
+                )
+        return f"DATASOURCE#{project_id}#{datasource_id}"
+
+    @classmethod
+    def serialize_tenant_datasource(
+        cls,
+        tenant_id: str,
+        project_id: str,
+        datasource_id: str,
+        document: dict,
+        *,
+        revision: int,
+    ) -> dict:
+        """Serialize one tenant datasource without storing credentials."""
+        tenant_id = _require_tenant_id(tenant_id)
+        if not isinstance(document, dict):
+            raise ValueError("datasource document must be an object")
+        unknown = set(document).difference(
+            _TENANT_DATASOURCE_DOCUMENT_FIELDS
+        )
+        missing = _TENANT_DATASOURCE_DOCUMENT_FIELDS.difference(
+            document
+        )
+        if unknown or missing:
+            raise ValueError(
+                "datasource document fields do not match the "
+                "credential-free schema"
+            )
+        revision = _require_revision(
+            revision,
+            name="datasource revision",
+        )
+        return {
+            "PK": tenant_project_partition_key(tenant_id),
+            "SK": cls._tenant_datasource_sort_key(
+                project_id,
+                datasource_id,
+            ),
+            "entity_type": "athena_datasource",
+            "tenant_id": tenant_id,
+            "project_id": project_id,
+            "datasource_id": datasource_id,
+            "revision": revision,
+            "document": json.dumps(
+                document,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+        }
+
+    @staticmethod
+    def deserialize_tenant_datasource(item: dict) -> dict:
+        raw = item.get("document")
+        if not isinstance(raw, str):
+            raise ValueError("datasource document is missing")
+        document = json.loads(raw)
+        if not isinstance(document, dict):
+            raise ValueError("datasource document must be an object")
+        document.update(
+            {
+                "tenant_id": item["tenant_id"],
+                "project_id": item["project_id"],
+                "datasource_id": item["datasource_id"],
+                "revision": int(item["revision"]),
+            }
+        )
+        return document
+
+    @staticmethod
+    def _tenant_datasource_quota_key(
+        tenant_id: str,
+    ) -> dict[str, str]:
+        return {
+            "PK": tenant_project_partition_key(tenant_id),
+            "SK": "QUOTA#ATHENA_DATASOURCES",
+        }
+
+    def _ensure_tenant_datasource_quota(
+        self,
+        table,
+        tenant_id: str,
+        *,
+        max_datasources: int,
+    ) -> None:
+        """Initialize a legacy tenant's quota counter exactly once."""
+        quota_key = self._tenant_datasource_quota_key(tenant_id)
+        response = table.get_item(Key=quota_key, ConsistentRead=True)
+        item = response.get("Item")
+        if item is not None:
+            if (
+                item.get("entity_type") != "athena_datasource_quota"
+                or item.get("tenant_id") != tenant_id
+                or _require_revision(
+                    item.get("datasource_count"),
+                    name="datasource quota count",
+                )
+                < 0
+            ):
+                raise RuntimeError("datasource quota state is invalid")
+            return
+
+        from boto3.dynamodb.conditions import Key
+
+        kwargs = {
+            "KeyConditionExpression": (
+                Key("PK").eq(tenant_project_partition_key(tenant_id))
+                & Key("SK").begins_with("DATASOURCE#")
+            ),
+            "ConsistentRead": True,
+            "Select": "COUNT",
+        }
+        count = 0
+        while True:
+            page = table.query(**kwargs)
+            count += int(page.get("Count", 0))
+            last_key = page.get("LastEvaluatedKey")
+            if not last_key:
+                break
+            kwargs["ExclusiveStartKey"] = last_key
+        try:
+            table.put_item(
+                Item={
+                    **quota_key,
+                    "entity_type": "athena_datasource_quota",
+                    "tenant_id": tenant_id,
+                    "datasource_count": count,
+                },
+                ConditionExpression=(
+                    "attribute_not_exists(PK) AND "
+                    "attribute_not_exists(SK)"
+                ),
+            )
+        except Exception as exc:
+            if not self._api_key_condition_failed(exc, 0):
+                raise
+            winner = table.get_item(
+                Key=quota_key,
+                ConsistentRead=True,
+            ).get("Item")
+            if (
+                not isinstance(winner, dict)
+                or winner.get("entity_type")
+                != "athena_datasource_quota"
+                or winner.get("tenant_id") != tenant_id
+            ):
+                raise RuntimeError(
+                    "datasource quota initialization raced invalid state"
+                ) from exc
+
+    async def save_tenant_datasource(
+        self,
+        tenant_id: str,
+        project_id: str,
+        datasource_id: str,
+        document: dict,
+        *,
+        expected_revision: int,
+        max_datasources: int = 500,
+    ) -> int:
+        """Conditionally create or replace one tenant datasource."""
+        tenant_id = _require_tenant_id(tenant_id)
+        expected_revision = _require_revision(
+            expected_revision,
+            name="expected datasource revision",
+        )
+        if (
+            isinstance(max_datasources, bool)
+            or not isinstance(max_datasources, int)
+            or not 1 <= max_datasources <= 10_000
+        ):
+            raise ValueError(
+                "max_datasources must be between 1 and 10000"
+            )
+        if not self._enabled:
+            raise RuntimeError("datasource persistence is disabled")
+        next_revision = expected_revision + 1
+
+        def _put() -> None:
+            item = self.serialize_tenant_datasource(
+                tenant_id,
+                project_id,
+                datasource_id,
+                document,
+                revision=next_revision,
+            )
+            kwargs = {
+                "Item": item,
+                "ExpressionAttributeNames": {
+                    "#revision": "revision",
+                    "#entity_type": "entity_type",
+                },
+            }
+            if expected_revision == 0:
+                table = self._get_table()
+                self._ensure_tenant_datasource_quota(
+                    table,
+                    tenant_id,
+                    max_datasources=max_datasources,
+                )
+                client = getattr(
+                    getattr(table, "meta", None),
+                    "client",
+                    None,
+                )
+                if client is None:
+                    raise RuntimeError(
+                        "atomic datasource quota requires transactions"
+                    )
+                client.transact_write_items(
+                    TransactItems=[
+                        {
+                            "Put": {
+                                "TableName": self._table_name,
+                                "Item": self._serialize_dynamo_map(item),
+                                "ConditionExpression": (
+                                    "attribute_not_exists(PK) AND "
+                                    "attribute_not_exists(SK)"
+                                ),
+                            }
+                        },
+                        {
+                            "Update": {
+                                "TableName": self._table_name,
+                                "Key": self._serialize_dynamo_map(
+                                    self._tenant_datasource_quota_key(
+                                        tenant_id
+                                    )
+                                ),
+                                "UpdateExpression": (
+                                    "ADD datasource_count :one"
+                                ),
+                                "ConditionExpression": (
+                                    "entity_type = :entity_type AND "
+                                    "tenant_id = :tenant_id AND "
+                                    "datasource_count < :limit"
+                                ),
+                                "ExpressionAttributeValues": (
+                                    self._serialize_dynamo_map(
+                                        {
+                                            ":one": 1,
+                                            ":entity_type": (
+                                                "athena_datasource_quota"
+                                            ),
+                                            ":tenant_id": tenant_id,
+                                            ":limit": max_datasources,
+                                        }
+                                    )
+                                ),
+                            }
+                        },
+                    ],
+                    ClientRequestToken=self._api_key_transaction_token(
+                        "datasource-create"
+                    ),
+                )
+                return
+            else:
+                kwargs.update(
+                    {
+                        "ConditionExpression": (
+                            "attribute_exists(PK) AND "
+                            "attribute_exists(SK) AND "
+                            "#entity_type = :entity_type AND "
+                            "#revision = :expected"
+                        ),
+                        "ExpressionAttributeValues": {
+                            ":entity_type": "athena_datasource",
+                            ":expected": expected_revision,
+                        },
+                    }
+                )
+            self._get_table().put_item(**kwargs)
+
+        try:
+            await asyncio.to_thread(_put)
+        except Exception as exc:
+            if (
+                expected_revision == 0
+                and self._api_key_condition_failed(exc, 1)
+            ):
+                raise PersistenceQuotaExceededError(
+                    "tenant datasource quota exceeded"
+                ) from exc
+            if self._api_key_condition_failed(exc, 0):
+                raise PersistenceConflictError(
+                    "datasource changed concurrently"
+                ) from exc
+            self._record_write_failure(
+                "Athena datasource",
+                f"{tenant_id}/{project_id}/{datasource_id}",
+            )
+            raise RuntimeError("datasource write failed") from exc
+        return next_revision
+
+    async def get_tenant_datasource(
+        self,
+        tenant_id: str,
+        project_id: str,
+        datasource_id: str,
+    ) -> dict | None:
+        """Strongly read one tenant/project datasource."""
+        tenant_id = _require_tenant_id(tenant_id)
+        if not self._enabled:
+            raise RuntimeError("datasource persistence is disabled")
+
+        def _get() -> dict | None:
+            response = self._get_table().get_item(
+                Key={
+                    "PK": tenant_project_partition_key(tenant_id),
+                    "SK": self._tenant_datasource_sort_key(
+                        project_id,
+                        datasource_id,
+                    ),
+                },
+                ConsistentRead=True,
+            )
+            return response.get("Item")
+
+        try:
+            item = await asyncio.to_thread(_get)
+            if item is None:
+                return None
+            converted = self._convert_decimals_to_native(item)
+            if (
+                converted.get("entity_type") != "athena_datasource"
+                or converted.get("tenant_id") != tenant_id
+                or converted.get("project_id") != project_id
+                or converted.get("datasource_id") != datasource_id
+            ):
+                raise ValueError(
+                    "datasource row identity does not match its key"
+                )
+            return self.deserialize_tenant_datasource(converted)
+        except Exception as exc:
+            if isinstance(exc, ValueError):
+                logger.error(
+                    "Malformed datasource row tenant=%s project=%s id=%s",
+                    tenant_id,
+                    project_id,
+                    datasource_id,
+                    exc_info=True,
+                )
+            else:
+                logger.warning(
+                    "Failed to load datasource tenant=%s project=%s id=%s",
+                    tenant_id,
+                    project_id,
+                    datasource_id,
+                    exc_info=True,
+                )
+            raise RuntimeError("datasource read failed") from exc
+
+    async def list_tenant_datasources(
+        self,
+        tenant_id: str,
+        *,
+        project_id: str | None = None,
+        limit: int = 50,
+        exclusive_start_key: str | None = None,
+    ) -> tuple[list[dict], str | None]:
+        """Strongly read one bounded datasource page."""
+        tenant_id = _require_tenant_id(tenant_id)
+        if project_id is not None and (
+            not isinstance(project_id, str) or not project_id.strip()
+        ):
+            raise ValueError("project_id must be None or non-empty")
+        if (
+            isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or not 1 <= limit <= 100
+        ):
+            raise ValueError("datasource page limit must be between 1 and 100")
+        prefix = (
+            f"DATASOURCE#{project_id}#"
+            if project_id is not None
+            else "DATASOURCE#"
+        )
+        if exclusive_start_key is not None and (
+            not isinstance(exclusive_start_key, str)
+            or not exclusive_start_key.startswith(prefix)
+        ):
+            raise ValueError(
+                "datasource start key does not match the requested scope"
+            )
+        if not self._enabled:
+            raise RuntimeError("datasource persistence is disabled")
+
+        def _query() -> tuple[list[dict], str | None]:
+            from boto3.dynamodb.conditions import Key
+
+            kwargs = {
+                "KeyConditionExpression": (
+                    Key("PK").eq(tenant_project_partition_key(tenant_id))
+                    & Key("SK").begins_with(prefix)
+                ),
+                "ConsistentRead": True,
+                "Limit": limit,
+            }
+            if exclusive_start_key is not None:
+                kwargs["ExclusiveStartKey"] = {
+                    "PK": tenant_project_partition_key(tenant_id),
+                    "SK": exclusive_start_key,
+                }
+            response = self._get_table().query(**kwargs)
+            last_key = response.get("LastEvaluatedKey")
+            next_key = (
+                last_key.get("SK")
+                if isinstance(last_key, dict)
+                else None
+            )
+            if next_key is not None and (
+                not isinstance(next_key, str)
+                or not next_key.startswith(prefix)
+            ):
+                raise ValueError(
+                    "datasource query returned an invalid continuation key"
+                )
+            return response.get("Items", []), next_key
+
+        try:
+            items, next_key = await asyncio.to_thread(_query)
+            documents = []
+            for item in items:
+                converted = self._convert_decimals_to_native(item)
+                if (
+                    converted.get("entity_type")
+                    != "athena_datasource"
+                    or converted.get("tenant_id") != tenant_id
+                    or (
+                        project_id is not None
+                        and converted.get("project_id") != project_id
+                    )
+                ):
+                    raise ValueError(
+                        "datasource query returned a mismatched owner"
+                    )
+                documents.append(
+                    self.deserialize_tenant_datasource(converted)
+                )
+            return documents, next_key
+        except Exception as exc:
+            logger.warning(
+                "Failed to list datasources tenant=%s project=%s",
+                tenant_id,
+                project_id,
+                exc_info=True,
+            )
+            raise RuntimeError("datasource listing failed") from exc
+
+    async def delete_tenant_datasource(
+        self,
+        tenant_id: str,
+        project_id: str,
+        datasource_id: str,
+        *,
+        expected_revision: int,
+        max_datasources: int = 500,
+    ) -> None:
+        """Conditionally remove one datasource after an explicit CAS check."""
+        tenant_id = _require_tenant_id(tenant_id)
+        expected_revision = _require_revision(
+            expected_revision,
+            name="expected datasource revision",
+        )
+        if expected_revision == 0:
+            raise ValueError(
+                "expected datasource revision must be positive"
+            )
+        if (
+            isinstance(max_datasources, bool)
+            or not isinstance(max_datasources, int)
+            or not 1 <= max_datasources <= 10_000
+        ):
+            raise ValueError(
+                "max_datasources must be between 1 and 10000"
+            )
+        if not self._enabled:
+            raise RuntimeError("datasource persistence is disabled")
+
+        def _delete() -> None:
+            table = self._get_table()
+            self._ensure_tenant_datasource_quota(
+                table,
+                tenant_id,
+                max_datasources=max_datasources,
+            )
+            client = getattr(
+                getattr(table, "meta", None),
+                "client",
+                None,
+            )
+            if client is None:
+                raise RuntimeError(
+                    "atomic datasource quota requires transactions"
+                )
+            client.transact_write_items(
+                TransactItems=[
+                    {
+                        "Delete": {
+                            "TableName": self._table_name,
+                            "Key": self._serialize_dynamo_map(
+                                {
+                                    "PK": (
+                                        tenant_project_partition_key(
+                                            tenant_id
+                                        )
+                                    ),
+                                    "SK": (
+                                        self._tenant_datasource_sort_key(
+                                            project_id,
+                                            datasource_id,
+                                        )
+                                    ),
+                                }
+                            ),
+                            "ConditionExpression": (
+                                "attribute_exists(PK) AND "
+                                "attribute_exists(SK) AND "
+                                "#entity_type = :entity_type AND "
+                                "#revision = :expected"
+                            ),
+                            "ExpressionAttributeNames": {
+                                "#entity_type": "entity_type",
+                                "#revision": "revision",
+                            },
+                            "ExpressionAttributeValues": (
+                                self._serialize_dynamo_map(
+                                    {
+                                        ":entity_type": (
+                                            "athena_datasource"
+                                        ),
+                                        ":expected": expected_revision,
+                                    }
+                                )
+                            ),
+                        }
+                    },
+                    {
+                        "Update": {
+                            "TableName": self._table_name,
+                            "Key": self._serialize_dynamo_map(
+                                self._tenant_datasource_quota_key(
+                                    tenant_id
+                                )
+                            ),
+                            "UpdateExpression": (
+                                "ADD datasource_count :minus_one"
+                            ),
+                            "ConditionExpression": (
+                                "entity_type = :entity_type AND "
+                                "tenant_id = :tenant_id AND "
+                                "datasource_count > :zero"
+                            ),
+                            "ExpressionAttributeValues": (
+                                self._serialize_dynamo_map(
+                                    {
+                                        ":minus_one": -1,
+                                        ":zero": 0,
+                                        ":entity_type": (
+                                            "athena_datasource_quota"
+                                        ),
+                                        ":tenant_id": tenant_id,
+                                    }
+                                )
+                            ),
+                        }
+                    },
+                ],
+                ClientRequestToken=self._api_key_transaction_token(
+                    "datasource-delete"
+                ),
+            )
+
+        try:
+            await asyncio.to_thread(_delete)
+        except Exception as exc:
+            if any(
+                self._api_key_condition_failed(exc, index)
+                for index in (0, 1)
+            ):
+                raise PersistenceConflictError(
+                    "datasource changed concurrently or no longer exists"
+                ) from exc
+            self._record_write_failure(
+                "Athena datasource delete",
+                f"{tenant_id}/{project_id}/{datasource_id}",
+            )
+            raise RuntimeError("datasource delete failed") from exc
 
     async def _save_user_config_revision(
         self,
@@ -2429,6 +3056,653 @@ class DynamoPersistence:
             reset_at=reset_at,
             retry_after_seconds=retry_after,
         )
+
+    # --- Fleet-wide Athena query admission and lifecycle ---
+
+    @staticmethod
+    def _query_lifecycle_key(
+        tenant_id: str,
+        project_id: str,
+        request_id: str,
+    ) -> dict[str, str]:
+        import hashlib
+
+        digest = hashlib.sha256(request_id.encode("utf-8")).hexdigest()
+        return {
+            "PK": tenant_project_partition_key(tenant_id),
+            "SK": f"QUERY#{project_id}#{digest}",
+        }
+
+    @staticmethod
+    def _query_admission_scope_key(
+        tenant_id: str,
+        scope: str,
+        ident: str,
+    ) -> str:
+        import hashlib
+
+        material = json.dumps(
+            [tenant_id, scope, ident],
+            separators=(",", ":"),
+        )
+        return (
+            "QUERY_ADMISSION#"
+            + hashlib.sha256(material.encode("utf-8")).hexdigest()
+        )
+
+    @classmethod
+    def _query_slot_key(
+        cls,
+        tenant_id: str,
+        scope: str,
+        ident: str,
+        slot: int,
+    ) -> dict[str, str]:
+        return {
+            "PK": cls._query_admission_scope_key(
+                tenant_id,
+                scope,
+                ident,
+            ),
+            "SK": f"SLOT#{slot:04d}",
+        }
+
+    @classmethod
+    def _query_scan_counter_key(
+        cls,
+        tenant_id: str,
+        scope: str,
+        ident: str,
+        window_start: int,
+    ) -> dict[str, str]:
+        return {
+            "PK": cls._query_admission_scope_key(
+                tenant_id,
+                scope,
+                ident,
+            ),
+            "SK": f"WINDOW#{window_start}",
+        }
+
+    async def reserve_query_capacity(
+        self,
+        *,
+        tenant_id: str,
+        project_id: str,
+        principal_id: str,
+        request_id: str,
+        datasource_id: str,
+        query_sha256: str,
+        reserved_scan_bytes: int,
+        project_concurrency: int,
+        principal_concurrency: int,
+        project_scan_limit: int,
+        principal_scan_limit: int,
+        window_seconds: int,
+        lease_seconds: int,
+        now: datetime,
+    ) -> dict | None:
+        """Atomically reserve query slots, scan budgets, and lifecycle state."""
+        tenant_id = _require_tenant_id(tenant_id)
+        strings = {
+            "project_id": project_id,
+            "principal_id": principal_id,
+            "request_id": request_id,
+            "datasource_id": datasource_id,
+            "query_sha256": query_sha256,
+        }
+        if any(
+            not isinstance(value, str) or not value
+            for value in strings.values()
+        ):
+            raise ValueError("query admission identities must be non-empty")
+        integers = {
+            "reserved_scan_bytes": reserved_scan_bytes,
+            "project_concurrency": project_concurrency,
+            "principal_concurrency": principal_concurrency,
+            "project_scan_limit": project_scan_limit,
+            "principal_scan_limit": principal_scan_limit,
+            "window_seconds": window_seconds,
+            "lease_seconds": lease_seconds,
+        }
+        if any(
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or value < 1
+            for value in integers.values()
+        ):
+            raise ValueError("query admission limits must be positive integers")
+        if (
+            reserved_scan_bytes > project_scan_limit
+            or reserved_scan_bytes > principal_scan_limit
+            or principal_concurrency > project_concurrency
+            or now.tzinfo is None
+        ):
+            raise ValueError("query admission limits are inconsistent")
+        if not self._enabled:
+            return None
+
+        now_epoch = int(now.timestamp())
+        window_start = (
+            now_epoch // window_seconds * window_seconds
+        )
+        lease_expires_at = now_epoch + lease_seconds
+        counter_expires_at = (
+            window_start + (2 * window_seconds) + lease_seconds
+        )
+        lifecycle_expires_at = now_epoch + (90 * 24 * 60 * 60)
+        import uuid
+
+        lease_token = uuid.uuid4().hex
+        lifecycle_key = self._query_lifecycle_key(
+            tenant_id,
+            project_id,
+            request_id,
+        )
+        lifecycle_item = {
+            **lifecycle_key,
+            "entity_type": "query_lifecycle",
+            "tenant_id": tenant_id,
+            "project_id": project_id,
+            "principal_id": principal_id,
+            "request_id": request_id,
+            "datasource_id": datasource_id,
+            "query_sha256": query_sha256,
+            "status": "accepted",
+            "lease_token": lease_token,
+            "reserved_scan_bytes": reserved_scan_bytes,
+            "window_start": window_start,
+            "created_at": now.isoformat(),
+            "updated_at": now.isoformat(),
+            "expires_at": lifecycle_expires_at,
+        }
+        project_remaining = project_scan_limit - reserved_scan_bytes
+        principal_remaining = principal_scan_limit - reserved_scan_bytes
+        seed = int(lease_token[:16], 16)
+        project_slots = [
+            (seed + offset) % project_concurrency
+            for offset in range(project_concurrency)
+        ]
+        principal_slots = [
+            (seed + offset) % principal_concurrency
+            for offset in range(principal_concurrency)
+        ]
+
+        def _slot_operation(
+            scope: str,
+            ident: str,
+            slot: int,
+        ) -> dict:
+            item = {
+                **self._query_slot_key(
+                    tenant_id,
+                    scope,
+                    ident,
+                    slot,
+                ),
+                "entity_type": "query_admission_slot",
+                "tenant_id": tenant_id,
+                "scope": scope,
+                "scope_id": ident,
+                "slot": slot,
+                "request_id": request_id,
+                "lease_token": lease_token,
+                "lease_expires_at": lease_expires_at,
+                "expires_at": lease_expires_at,
+            }
+            return {
+                "Put": {
+                    "TableName": self._table_name,
+                    "Item": self._serialize_dynamo_map(item),
+                    "ConditionExpression": (
+                        "attribute_not_exists(PK) OR "
+                        "lease_expires_at < :now"
+                    ),
+                    "ExpressionAttributeValues": (
+                        self._serialize_dynamo_map({":now": now_epoch})
+                    ),
+                }
+            }
+
+        def _counter_operation(
+            scope: str,
+            ident: str,
+            remaining: int,
+        ) -> dict:
+            return {
+                "Update": {
+                    "TableName": self._table_name,
+                    "Key": self._serialize_dynamo_map(
+                        self._query_scan_counter_key(
+                            tenant_id,
+                            scope,
+                            ident,
+                            window_start,
+                        )
+                    ),
+                    "UpdateExpression": (
+                        "SET entity_type = :entity_type, "
+                        "tenant_id = :tenant_id, "
+                        "#scope = :scope, "
+                        "scope_id = :scope_id, "
+                        "window_start = :window_start, "
+                        "expires_at = :expires_at "
+                        "ADD reserved_scan_bytes :reserved"
+                    ),
+                    "ConditionExpression": (
+                        "attribute_not_exists(reserved_scan_bytes) OR "
+                        "reserved_scan_bytes <= :remaining"
+                    ),
+                    "ExpressionAttributeNames": {"#scope": "scope"},
+                    "ExpressionAttributeValues": (
+                        self._serialize_dynamo_map(
+                            {
+                                ":entity_type": "query_scan_counter",
+                                ":tenant_id": tenant_id,
+                                ":scope": scope,
+                                ":scope_id": ident,
+                                ":window_start": window_start,
+                                ":expires_at": counter_expires_at,
+                                ":reserved": reserved_scan_bytes,
+                                ":remaining": remaining,
+                            }
+                        )
+                    ),
+                }
+            }
+
+        def _reserve() -> dict:
+            table = self._get_table()
+            client = getattr(getattr(table, "meta", None), "client", None)
+            if client is None:
+                raise RuntimeError(
+                    "atomic query admission requires transactions"
+                )
+            last_slot_failure = "project_concurrency"
+            for project_slot in project_slots:
+                for principal_slot in principal_slots:
+                    operations = [
+                        {
+                            "Put": {
+                                "TableName": self._table_name,
+                                "Item": self._serialize_dynamo_map(
+                                    lifecycle_item
+                                ),
+                                "ConditionExpression": (
+                                    "attribute_not_exists(PK) AND "
+                                    "attribute_not_exists(SK)"
+                                ),
+                            }
+                        },
+                        _slot_operation(
+                            "project",
+                            project_id,
+                            project_slot,
+                        ),
+                        _slot_operation(
+                            "principal",
+                            principal_id,
+                            principal_slot,
+                        ),
+                        _counter_operation(
+                            "project",
+                            project_id,
+                            project_remaining,
+                        ),
+                        _counter_operation(
+                            "principal",
+                            principal_id,
+                            principal_remaining,
+                        ),
+                    ]
+                    try:
+                        client.transact_write_items(
+                            TransactItems=operations,
+                            ClientRequestToken=(
+                                self._api_key_transaction_token(
+                                    "query-admission"
+                                )
+                            ),
+                        )
+                        return {
+                            "allowed": True,
+                            "lease_token": lease_token,
+                            "window_start": window_start,
+                            "lease_expires_at": lease_expires_at,
+                            "project_slot": project_slot,
+                            "principal_slot": principal_slot,
+                        }
+                    except Exception as exc:
+                        if self._api_key_condition_failed(exc, 0):
+                            return {
+                                "allowed": False,
+                                "reason": "duplicate_request",
+                            }
+                        if self._api_key_condition_failed(exc, 3):
+                            return {
+                                "allowed": False,
+                                "reason": "project_scan_budget",
+                                "retry_after_seconds": max(
+                                    1,
+                                    window_start
+                                    + window_seconds
+                                    - now_epoch,
+                                ),
+                            }
+                        if self._api_key_condition_failed(exc, 4):
+                            return {
+                                "allowed": False,
+                                "reason": "principal_scan_budget",
+                                "retry_after_seconds": max(
+                                    1,
+                                    window_start
+                                    + window_seconds
+                                    - now_epoch,
+                                ),
+                            }
+                        project_busy = self._api_key_condition_failed(
+                            exc,
+                            1,
+                        )
+                        principal_busy = self._api_key_condition_failed(
+                            exc,
+                            2,
+                        )
+                        if not project_busy and not principal_busy:
+                            raise
+                        last_slot_failure = (
+                            "project_concurrency"
+                            if project_busy
+                            else "principal_concurrency"
+                        )
+            return {
+                "allowed": False,
+                "reason": last_slot_failure,
+                "retry_after_seconds": lease_seconds,
+            }
+
+        try:
+            return await asyncio.to_thread(_reserve)
+        except Exception:
+            logger.exception("Query admission transaction failed")
+            return None
+
+    async def mark_query_started(
+        self,
+        *,
+        tenant_id: str,
+        project_id: str,
+        request_id: str,
+        lease_token: str,
+        execution_id: str,
+        now: datetime,
+    ) -> bool:
+        """Persist the Athena execution ID before polling for completion."""
+        tenant_id = _require_tenant_id(tenant_id)
+        if any(
+            not isinstance(value, str) or not value
+            for value in (
+                project_id,
+                request_id,
+                lease_token,
+                execution_id,
+            )
+        ) or now.tzinfo is None:
+            raise ValueError("query lifecycle update is invalid")
+        if not self._enabled:
+            return False
+
+        def _update() -> None:
+            self._get_table().update_item(
+                Key=self._query_lifecycle_key(
+                    tenant_id,
+                    project_id,
+                    request_id,
+                ),
+                UpdateExpression=(
+                    "SET #status = :running, "
+                    "execution_id = :execution_id, "
+                    "updated_at = :updated_at"
+                ),
+                ConditionExpression=(
+                    "lease_token = :lease_token AND "
+                    "(#status = :accepted OR "
+                    "(#status = :running AND "
+                    "execution_id = :execution_id))"
+                ),
+                ExpressionAttributeNames={"#status": "status"},
+                ExpressionAttributeValues={
+                    ":running": "running",
+                    ":accepted": "accepted",
+                    ":execution_id": execution_id,
+                    ":lease_token": lease_token,
+                    ":updated_at": now.isoformat(),
+                },
+            )
+
+        try:
+            await asyncio.to_thread(_update)
+            return True
+        except Exception:
+            logger.exception("Query lifecycle start update failed")
+            return False
+
+    async def finalize_query_capacity(
+        self,
+        *,
+        tenant_id: str,
+        project_id: str,
+        principal_id: str,
+        request_id: str,
+        lease_token: str,
+        window_start: int,
+        project_slot: int,
+        principal_slot: int,
+        reserved_scan_bytes: int,
+        actual_scan_bytes: int,
+        status: str,
+        execution_id: str | None,
+        failure_code: str | None,
+        now: datetime,
+    ) -> bool:
+        """Finalize lifecycle and reconcile worst-case scan reservations."""
+        tenant_id = _require_tenant_id(tenant_id)
+        if status not in {"succeeded", "failed", "cancelled"}:
+            raise ValueError("query terminal status is invalid")
+        if (
+            not all(
+                isinstance(value, str) and value
+                for value in (
+                    project_id,
+                    principal_id,
+                    request_id,
+                    lease_token,
+                )
+            )
+            or isinstance(reserved_scan_bytes, bool)
+            or not isinstance(reserved_scan_bytes, int)
+            or reserved_scan_bytes < 1
+            or isinstance(actual_scan_bytes, bool)
+            or not isinstance(actual_scan_bytes, int)
+            or not 0 <= actual_scan_bytes <= reserved_scan_bytes
+            or isinstance(window_start, bool)
+            or not isinstance(window_start, int)
+            or window_start < 0
+            or isinstance(project_slot, bool)
+            or not isinstance(project_slot, int)
+            or project_slot < 0
+            or isinstance(principal_slot, bool)
+            or not isinstance(principal_slot, int)
+            or principal_slot < 0
+            or now.tzinfo is None
+        ):
+            raise ValueError("query finalization is invalid")
+        if execution_id is not None and (
+            not isinstance(execution_id, str) or not execution_id
+        ):
+            raise ValueError("execution_id must be None or non-empty")
+        if failure_code is not None and (
+            not isinstance(failure_code, str) or not failure_code
+        ):
+            raise ValueError("failure_code must be None or non-empty")
+        if not self._enabled:
+            return False
+        refund = reserved_scan_bytes - actual_scan_bytes
+        lifecycle_key = self._query_lifecycle_key(
+            tenant_id,
+            project_id,
+            request_id,
+        )
+
+        def _finalize() -> bool:
+            table = self._get_table()
+            client = getattr(getattr(table, "meta", None), "client", None)
+            if client is None:
+                raise RuntimeError(
+                    "atomic query finalization requires transactions"
+                )
+            update_expression = (
+                "SET #status = :terminal_status, "
+                "actual_scan_bytes = :actual_scan_bytes, "
+                "terminal_at = :terminal_at, "
+                "updated_at = :updated_at"
+            )
+            values: dict[str, object] = {
+                ":terminal_status": status,
+                ":actual_scan_bytes": actual_scan_bytes,
+                ":terminal_at": now.isoformat(),
+                ":updated_at": now.isoformat(),
+                ":lease_token": lease_token,
+                ":accepted": "accepted",
+                ":running": "running",
+            }
+            if execution_id is not None:
+                update_expression += ", execution_id = :execution_id"
+                values[":execution_id"] = execution_id
+            if failure_code is not None:
+                update_expression += ", failure_code = :failure_code"
+                values[":failure_code"] = failure_code
+            operations: list[dict] = [
+                {
+                    "Update": {
+                        "TableName": self._table_name,
+                        "Key": self._serialize_dynamo_map(
+                            lifecycle_key
+                        ),
+                        "UpdateExpression": update_expression,
+                        "ConditionExpression": (
+                            "lease_token = :lease_token AND "
+                            "(#status = :accepted OR #status = :running)"
+                        ),
+                        "ExpressionAttributeNames": {
+                            "#status": "status"
+                        },
+                        "ExpressionAttributeValues": (
+                            self._serialize_dynamo_map(values)
+                        ),
+                    }
+                }
+            ]
+            if refund:
+                for scope, ident in (
+                    ("project", project_id),
+                    ("principal", principal_id),
+                ):
+                    operations.append(
+                        {
+                            "Update": {
+                                "TableName": self._table_name,
+                                "Key": self._serialize_dynamo_map(
+                                    self._query_scan_counter_key(
+                                        tenant_id,
+                                        scope,
+                                        ident,
+                                        window_start,
+                                    )
+                                ),
+                                "UpdateExpression": (
+                                    "ADD reserved_scan_bytes :refund"
+                                ),
+                                "ConditionExpression": (
+                                    "reserved_scan_bytes >= :absolute_refund"
+                                ),
+                                "ExpressionAttributeValues": (
+                                    self._serialize_dynamo_map(
+                                        {
+                                            ":refund": -refund,
+                                            ":absolute_refund": refund,
+                                        }
+                                    )
+                                ),
+                            }
+                        }
+                    )
+            try:
+                client.transact_write_items(
+                    TransactItems=operations,
+                    ClientRequestToken=self._api_key_transaction_token(
+                        "query-finalize"
+                    ),
+                )
+            except Exception as exc:
+                if not any(
+                    self._api_key_condition_failed(exc, index)
+                    for index in range(len(operations))
+                ):
+                    raise
+                response = table.get_item(
+                    Key=lifecycle_key,
+                    ConsistentRead=True,
+                )
+                item = response.get("Item")
+                if not isinstance(item, dict):
+                    return False
+                return (
+                    item.get("lease_token") == lease_token
+                    and item.get("status") == status
+                    and int(item.get("actual_scan_bytes", -1))
+                    == actual_scan_bytes
+                    and item.get("execution_id") == execution_id
+                    and item.get("failure_code") == failure_code
+                )
+
+            for scope, ident, slot in (
+                ("project", project_id, project_slot),
+                ("principal", principal_id, principal_slot),
+            ):
+                try:
+                    table.delete_item(
+                        Key=self._query_slot_key(
+                            tenant_id,
+                            scope,
+                            ident,
+                            slot,
+                        ),
+                        ConditionExpression=(
+                            "lease_token = :lease_token AND "
+                            "request_id = :request_id"
+                        ),
+                        ExpressionAttributeValues={
+                            ":lease_token": lease_token,
+                            ":request_id": request_id,
+                        },
+                    )
+                except Exception:
+                    logger.warning(
+                        "Query admission slot release failed "
+                        "tenant=%s project=%s scope=%s",
+                        tenant_id,
+                        project_id,
+                        scope,
+                        exc_info=True,
+                    )
+            return True
+
+        try:
+            return await asyncio.to_thread(_finalize)
+        except Exception:
+            logger.exception("Query lifecycle finalization failed")
+            return False
 
     # --- Fleet-wide spend counters ---
     #

@@ -15,11 +15,17 @@ from src.gateway.auth.authorization import (
 from src.gateway.auth.project_repository import ProjectStoreUnavailable
 from src.gateway.config_sync import RegionTopologyUnavailable
 from src.gateway.models import Project
+from src.gateway.query.service import QueryServiceError
 
 from .errors import AgentCoreAdapterError
 from .identity import InvocationIdentity, resolve_invocation_identity
 from .runtime import RuntimeReadiness, RuntimeServices
-from .schemas import InvocationAction, parse_invocation_payload
+from .schemas import (
+    InvocationAction,
+    QueryInvocationResponse,
+    QueryResponseValidationError,
+    parse_invocation_payload,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -134,11 +140,12 @@ class AgentCoreAdapter:
                 "Resource not found.",
             )
 
-        action = (
-            Action.MODEL_LIST
-            if parsed.action is InvocationAction.LIST_MODELS
-            else Action.INFERENCE_INVOKE
-        )
+        if parsed.action is InvocationAction.LIST_MODELS:
+            action = Action.MODEL_LIST
+        elif parsed.action is InvocationAction.QUERY:
+            action = Action.QUERY_SELECT
+        else:
+            action = Action.INFERENCE_INVOKE
         resource = ResourceRef(
             resource_type="project",
             resource_id=identity.project_id,
@@ -166,11 +173,15 @@ class AgentCoreAdapter:
                         exc_info=True,
                     )
 
-            policy_action, policy_resource = (
-                ("get", "/v1/models")
-                if parsed.action is InvocationAction.LIST_MODELS
-                else ("post", "/v1/chat/completions")
-            )
+            if parsed.action is InvocationAction.LIST_MODELS:
+                policy_action, policy_resource = ("get", "/v1/models")
+            elif parsed.action is InvocationAction.QUERY:
+                policy_action, policy_resource = ("post", "/v1/query")
+            else:
+                policy_action, policy_resource = (
+                    "post",
+                    "/v1/chat/completions",
+                )
             try:
                 policy_decision = await runtime.policy_service.evaluate(
                     identity.request_context,
@@ -204,6 +215,55 @@ class AgentCoreAdapter:
                 tenant_id=identity.tenant_id,
                 authorized_project=project,
             )
+
+        if parsed.action is InvocationAction.QUERY:
+            request = parsed.query_request
+            if request is None:
+                raise AgentCoreAdapterError(
+                    400,
+                    "invalid_payload",
+                    "Query payload is required.",
+                )
+            if runtime.query_service is None:
+                raise AgentCoreAdapterError(
+                    503,
+                    "query_service_unavailable",
+                    "Query service is temporarily unavailable.",
+                )
+            try:
+                result = await runtime.query_service.execute(
+                    principal=identity.principal,
+                    tenant_id=identity.tenant_id,
+                    project_id=identity.project_id,
+                    datasource_id=request.datasource_id,
+                    sql=request.sql,
+                    max_rows=request.max_rows,
+                    request_id=request.request_id,
+                )
+            except QueryServiceError as exc:
+                raise AgentCoreAdapterError(
+                    exc.status_code,
+                    exc.code,
+                    exc.message,
+                ) from exc
+            try:
+                response = QueryInvocationResponse.from_mapping(
+                    result,
+                    expected_datasource_id=request.datasource_id,
+                    expected_project_id=identity.project_id,
+                    expected_request_id=request.request_id,
+                )
+            except QueryResponseValidationError as exc:
+                logger.error(
+                    "AgentCore query service returned an invalid response",
+                    exc_info=True,
+                )
+                raise AgentCoreAdapterError(
+                    502,
+                    "invalid_query_response",
+                    "Query service returned an invalid response.",
+                ) from exc
+            return response.to_dict()
 
         if parsed.request_data is None:
             raise AgentCoreAdapterError(

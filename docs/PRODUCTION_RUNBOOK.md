@@ -14,6 +14,12 @@ schema-v3 with distinct Fargate and AgentCore targets. Controlled publication
 copies both signed OCI archives into retained immutable private ECR
 repositories, and deployment verification selects and verifies either target.
 
+The repository also contains the newer shared HTTP/AgentCore Athena query
+service, credential-free datasource administration, and managed-Cognito
+shared-state control-plane stack. These changes postdate `v0.2.4`; they do not
+yet have tagged release evidence, a deployed Athena canary, or a deployed
+control-plane canary.
+
 `v0.2.4` is the first completed KMS-backed release. Release evidence
 [run 31434900128](https://github.com/AxonLLM/axonllm/actions/runs/31434900128)
 and publication
@@ -55,14 +61,17 @@ current state table has PITR but lacks deletion protection, customer-managed
 encryption, TTL, an AWS Backup vault, and recovery points. The legacy provider
 secret lacks customer-managed encryption and rotation.
 
-The hardened AgentCore, retained identity, and state stacks are absent, so
-there is no deployed AxonLLM AgentCore target on which to run release canaries,
-identity validation, recovery validation, or rollback checks.
+The hardened AgentCore, retained identity, shared control plane, and state
+stacks are absent, so there is no deployed AxonLLM AgentCore target on which to
+run release canaries, identity validation, datasource/query validation,
+recovery validation, or rollback checks.
 
-The account also lacks the production DNS zone, ACM certificates, approved
-HTTPS prefix list, dedicated OIDC configuration, and confirmed alarm/event
-subscribers. The protected GitHub `production` environment lacks both target
-data-key variables because the hardened stacks have not produced those keys.
+The account also lacks the production DNS zone, regional control-plane ACM
+certificate, approved control-plane ingress and HTTPS egress prefix lists,
+AgentCore HTTPS prefix list, dedicated OIDC configuration, and confirmed
+alarm/event subscribers. The protected GitHub `production` environment lacks
+both target data-key variables because the hardened stacks have not produced
+those keys.
 Until those prerequisites are supplied and a reviewed deployment is complete,
 restore/cutover, authenticated RBAC, load, security-event, and multi-replica
 canaries remain blocked.
@@ -131,9 +140,11 @@ subject.
 
 For AgentCore, `deploy-agentcore.sh` performs this same canonical bootstrap
 after deploying the runtime. With `managed-cognito`, it first deploys retained
-identity and invites the administrator; with `external-oidc`, it requires the
-already-provisioned immutable subject. The manual command remains the recovery
-path.
+identity and invites the administrator, then deploys the shared-state web
+control plane after bootstrap. With `external-oidc`, it requires the
+already-provisioned immutable subject and deploys AgentCore/bootstrap only; it
+does not deploy the Cognito-authenticated web control plane. The manual command
+remains the recovery path.
 
 Create canonical service credentials with the tenant-qualified key path:
 
@@ -178,10 +189,10 @@ There is no role literally named `viewer`. Use `tenant_member` or
 
 | Role | Tenant control plane | Project data plane |
 |---|---|---|
-| `tenant_admin` | Read/write tenant-owned configuration; no write access to platform-global resources | Explicit project grant required for model listing, inference, and reserved `query.select` |
-| `tenant_member` | Read only | Explicit project grant required |
-| `tenant_auditor` | Read only | Explicit project grant required |
-| `service` | No canonical admin access; legacy admin scopes are ignored and canonical key issuance rejects them | Explicit project grant plus server-held action scope required |
+| `tenant_admin` | Read/write tenant-owned configuration and datasource metadata; no write access to platform-global resources | Explicit project grant required for model listing, inference, and `query.select` |
+| `tenant_member` | Read only, including datasource metadata with the role ARN concealed | Explicit project grant required |
+| `tenant_auditor` | Read only, including datasource metadata with the role ARN concealed | Explicit project grant required |
+| `service` | No canonical admin or datasource access; legacy admin scopes are ignored and canonical key issuance rejects them | Explicit project grant plus server-held action scope required |
 | `platform_admin` | Platform resources; tenant control-plane access requires `X-Axon-Break-Glass-Reason` | No ordinary project data-plane access is exposed |
 
 Platform-global resources include models, health, architecture, catalogue and
@@ -192,9 +203,65 @@ roles/scopes to mutate, and canonical services cannot use them to enter the
 control plane. Legacy `admin` roles and `admin:*` scopes remain compatibility
 only for noncanonical migration mode.
 
-`query.select` is authorization vocabulary only. AxonLLM ships no SQL parser,
-datasource adapter, HTTP route, AgentCore action, or backend query contract.
-`query.mutate` always denies.
+`query.select` gates both normal-Starlette `POST /v1/query` and the AgentCore
+`query` action. Both use the same canonical `QueryService`. `query.mutate`
+always denies.
+
+## Query And Shared Control Plane
+
+Datasource administration is exposed at `/admin/datasources`. Records contain
+tenant/project ownership, display metadata, exact IAM role ARN, region,
+catalog, database, workgroup, enabled state, timestamps, and a CAS revision.
+They contain no credentials. Create/update/delete require `tenant_admin`; member
+and auditor reads conceal the role ARN; `service` is denied. Lists accept
+`limit` 1-100 and an opaque continuation cursor. Creates transactionally enforce
+the tenant datasource cap. Mutations append durable redacted request/result
+audit records; role changes are represented by hashes rather than raw ARNs.
+
+Query execution requires all of these gates:
+
+1. Canonical `query.select` authority and an explicit project grant.
+2. A tenant/project-owned, enabled datasource.
+3. An exact deployment binding for `(tenant_id, project_id, role_arn)`.
+4. One Athena `SELECT` AST accepted by `sqlglot`; multiple statements, DDL,
+   DML, commands, `SELECT INTO`, table functions, and out-of-datasource
+   catalog/database references are rejected.
+5. An enabled workgroup that enforces configuration, publishes CloudWatch
+   metrics, uses an enforced KMS-encrypted S3 result location, and has a
+   positive scan cutoff no greater than AxonLLM's configured ceiling.
+6. Fleet-wide principal/project RPM, expiring concurrency slots, and aggregate
+   scan-byte reservation capacity in the canonical DynamoDB table.
+
+Defaults are 30 seconds, 1,000 rows, a 1 MiB compact serialized
+columns-and-rows result set including JSON structure/nulls, and 1 GiB scanned.
+Admission defaults are 30 project RPM, 10 principal RPM, five project slots,
+two principal slots, 5 GiB project scan reservation per minute, and 2 GiB per
+principal. `request_id` is unique within the tenant/project. Accepted state,
+Athena execution id, terminal status, and actual scan bytes are durable. Query
+request, result, and rejection audit records store a query hash, not SQL
+literals. Workgroups are validated immediately before execution; AgentCore
+`/ready` does not enumerate datasource roles or validate workgroups.
+
+The AgentCore runtime role and private STS endpoint permit
+`sts:AssumeRole`, `sts:TagSession`, and `sts:SetSourceIdentity` only for exact
+configured datasource role ARNs. The datasource role trust must name the exact
+AgentCore runtime execution role and permit all three actions. Its Athena
+permissions should be restricted to the intended workgroup, catalog/database,
+tables, result bucket, and KMS key.
+
+The execution role is deterministically named
+`axonllm-agentcore-runtime-<region>`. Operators can preconfigure trust to the
+exact account/region ARN before deployment, then verify it against the
+`RuntimeExecutionRoleArn` stack output printed by the first-adopter deployer.
+
+Managed Cognito also deploys `AxonLLMControlPlaneStack`, a verified AMD64 image
+on private Fargate tasks behind a Cognito-authenticated HTTPS ALB and stable
+Route 53 alias. It imports AgentCore's table, data key, outbox, SNS topic, and
+CloudWatch event log. `AXON_CONTROL_PLANE_ONLY=true` suppresses chat, model,
+OpenAI-compatible, and query execution routes. The task receives binding
+metadata for datasource validation but has no Athena or STS authority.
+
+See [Features And Flows](FEATURES_AND_FLOWS.md) for request sequences.
 
 ## Release Foundation
 
@@ -414,21 +481,28 @@ AgentCore has two production identity choices and no unauthenticated mode:
 
 | Identity mode | Operator responsibility | Automated work |
 |---|---|---|
-| `managed-cognito` | Choose a unique domain, HTTPS PKCE callback, tenant/project, administrator email, approved egress, Bedrock ARNs, and verified ARM64 digest | Deploy retained/deletion-protected Cognito, invite the user, deploy AgentCore, and bootstrap canonical authority |
-| `external-oidc` | Provision the IdP user/client and supply exact issuer, discovery URL, client, audience, immutable subject, and tenant/project claim names | Deploy AgentCore and bootstrap canonical authority |
+| `managed-cognito` | Choose a hosted-UI prefix and callback, stable control-plane domain, regional ACM certificate, Route 53 public zone, verified ARM64 AgentCore and AMD64 control-plane digests, AgentCore/control-plane egress prefix lists, control-plane ingress prefix list, tenant/project/admin, Bedrock ARNs, and optional exact Athena roles | Deploy retained/deletion-protected Cognito, invite the user, deploy AgentCore, bootstrap canonical authority, and deploy the shared-state web control plane |
+| `external-oidc` | Provision the IdP user/client and supply exact issuer, discovery URL, client, audience, immutable subject, tenant/project claim names, runtime egress, Bedrock ARNs, and optional exact Athena roles | Deploy AgentCore and bootstrap canonical authority; no Cognito-authenticated web control plane |
 
-Generate the strict setup file with `uv run axon setup agentcore`, validate it
-with `./deploy-agentcore.sh --config FILE --validate-only`, then deploy it. Use
-`--bootstrap-cdk` only for the first deployment in an account/region and add
-`--yes` only in reviewed noninteractive automation. The setup rejects mutable
-image tags, wildcard Bedrock ARNs, non-HTTPS identity metadata, client secrets,
-and missing claim mappings.
+Generate the strict schema-v2 setup file with `uv run axon setup agentcore`,
+validate it with `./deploy-agentcore.sh --config FILE --validate-only`, then
+deploy it. Managed-Cognito schema v2 requires the `control_plane` object;
+regenerate or migrate schema-v1 files. Use `--bootstrap-cdk` only for the first
+deployment in an account/region and add `--yes` only in reviewed
+noninteractive automation. The setup rejects mutable image tags, wildcard
+Bedrock ARNs, non-HTTPS identity metadata, client secrets, and missing claim
+mappings.
 
-Managed Cognito is authorization-code only and has no client secret. The
-adopting application must use S256 PKCE and submit the Cognito **ID token** to
-AgentCore because that token carries `custom:tenant_id` and
+The managed AgentCore client is authorization-code only and has no client
+secret. The adopting application must use S256 PKCE and submit the Cognito
+**ID token** to AgentCore because that token carries `custom:tenant_id` and
 `custom:project_id`. The custom attributes select resources but grant no role;
 canonical DynamoDB principals remain authoritative.
+
+The public AgentCore client is secretless; the separate ALB client used by the
+web control plane is confidential. The control-plane DNS name must remain
+stable, the ACM certificate must be in the deployment region, and the supplied
+public hosted zone must contain the name.
 
 The complete commands, external-IdP example, manual CDK fallback, and invitation
 behavior are in the
@@ -595,14 +669,21 @@ Before shifting traffic:
 4. Run authenticated model-list and completion canaries.
 5. Run negative canaries for missing credentials, inactive membership,
    ungranted and cross-tenant project claims, and viewer writes.
-6. For managed Cognito, verify S256 PKCE, required TOTP enrollment, the exact
+6. When query is configured, run HTTP and AgentCore `SELECT` canaries plus
+   mutation, cross-project, missing-scope, unbound-role, unsafe-workgroup,
+   row/result/scan-limit, and audit-record checks.
+7. For managed Cognito, verify S256 PKCE, required TOTP enrollment, the exact
    ID-token issuer/audience/tenant/project claims, and access-token rejection.
-7. Verify alarms, a confirmed SNS subscription, logs, tenant audit-chain
+8. Verify the shared control-plane hostname, Cognito ALB login, datasource RBAC,
+   shared state, suppressed execution routes, and lack of Athena/STS task
+   authority. Skip this only for external OIDC, which does not deploy it.
+9. Verify alarms, a confirmed SNS subscription, logs, tenant audit-chain
    verification, and rollback.
 
-The production validation tool evaluates `query.mutate` against the checked-out
-authorization policy only. There is no remote query route on which to run that
-canary.
+AgentCore `/ready` does not enumerate datasource roles or validate Athena
+workgroups. Workgroup validation occurs immediately before each execution, so
+an authenticated query canary is required. The production validation tool's
+`query.mutate` policy check alone is not a remote query canary.
 
 Neither stack creates an SNS subscription. Add and confirm alarm and
 security-event receivers before launch.

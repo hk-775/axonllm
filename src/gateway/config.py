@@ -6,7 +6,11 @@ Modules import from this file instead of hardcoding values.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
+
+
+_MAX_ATHENA_QUERY_BINDINGS_CHARACTERS = 2_048
 
 
 # ---------------------------------------------------------------------------
@@ -172,6 +176,28 @@ class AppConfig:
     # None means "use semantic_cache.DEFAULT_SIMILARITY_THRESHOLD". Not 0.0,
     # which would make every comparison a hit.
     semantic_cache_threshold: float | None = None
+    # Athena query-plane settings. Query execution and datasource routes are
+    # absent unless explicitly enabled.
+    athena_query_enabled: bool = False
+    athena_query_bindings: str = ""
+    athena_query_timeout_seconds: float = 30.0
+    athena_query_max_rows: int = 1000
+    athena_query_max_result_bytes: int = 1024 * 1024
+    athena_query_max_bytes_scanned: int = 1024 * 1024 * 1024
+    athena_query_poll_interval_seconds: float = 0.25
+    athena_query_project_rpm: int = 30
+    athena_query_principal_rpm: int = 10
+    athena_query_project_concurrency: int = 5
+    athena_query_principal_concurrency: int = 2
+    athena_query_project_scan_bytes_per_minute: int = (
+        5 * 1024 * 1024 * 1024
+    )
+    athena_query_principal_scan_bytes_per_minute: int = (
+        2 * 1024 * 1024 * 1024
+    )
+    athena_query_max_datasources_per_tenant: int = 500
+    # A dedicated control-plane process serves health and administration only.
+    control_plane_only: bool = False
 
     def __post_init__(self) -> None:
         for field_name, claim_name in (
@@ -200,6 +226,140 @@ class AppConfig:
         if self.deployment_profile not in {"development", "production"}:
             raise ValueError(
                 "deployment_profile must be 'development' or 'production'"
+            )
+        if not isinstance(self.athena_query_bindings, str):
+            raise ValueError("athena_query_bindings must be JSON text")
+        if (
+            len(self.athena_query_bindings)
+            > _MAX_ATHENA_QUERY_BINDINGS_CHARACTERS
+        ):
+            raise ValueError(
+                "athena_query_bindings must not exceed the AgentCore "
+                "2,048-character environment value limit"
+            )
+        if (
+            isinstance(self.athena_query_timeout_seconds, bool)
+            or not isinstance(
+                self.athena_query_timeout_seconds,
+                (int, float),
+            )
+            or not math.isfinite(self.athena_query_timeout_seconds)
+            or not 0 < self.athena_query_timeout_seconds <= 300
+        ):
+            raise ValueError(
+                "athena_query_timeout_seconds must be between 0 and 300"
+            )
+        if (
+            isinstance(self.athena_query_max_rows, bool)
+            or not isinstance(self.athena_query_max_rows, int)
+            or not 1 <= self.athena_query_max_rows <= 10_000
+        ):
+            raise ValueError(
+                "athena_query_max_rows must be between 1 and 10000"
+            )
+        if (
+            isinstance(self.athena_query_max_result_bytes, bool)
+            or not isinstance(self.athena_query_max_result_bytes, int)
+            or not 1024
+            <= self.athena_query_max_result_bytes
+            <= 16 * 1024 * 1024
+        ):
+            raise ValueError(
+                "athena_query_max_result_bytes must be between 1 KiB "
+                "and 16 MiB"
+            )
+        if (
+            isinstance(self.athena_query_max_bytes_scanned, bool)
+            or not isinstance(self.athena_query_max_bytes_scanned, int)
+            or self.athena_query_max_bytes_scanned <= 0
+        ):
+            raise ValueError(
+                "athena_query_max_bytes_scanned must be positive"
+            )
+        if (
+            isinstance(
+                self.athena_query_poll_interval_seconds,
+                bool,
+            )
+            or not isinstance(
+                self.athena_query_poll_interval_seconds,
+                (int, float),
+            )
+            or not math.isfinite(
+                self.athena_query_poll_interval_seconds
+            )
+            or not 0.05
+            <= self.athena_query_poll_interval_seconds
+            <= 5
+        ):
+            raise ValueError(
+                "athena_query_poll_interval_seconds must be between "
+                "0.05 and 5"
+            )
+        admission_limits = (
+            "athena_query_project_rpm",
+            "athena_query_principal_rpm",
+            "athena_query_project_concurrency",
+            "athena_query_principal_concurrency",
+            "athena_query_project_scan_bytes_per_minute",
+            "athena_query_principal_scan_bytes_per_minute",
+            "athena_query_max_datasources_per_tenant",
+        )
+        for field_name in admission_limits:
+            value = getattr(self, field_name)
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or value < 1
+            ):
+                raise ValueError(
+                    f"{field_name} must be a positive integer"
+                )
+        if self.athena_query_max_datasources_per_tenant > 10_000:
+            raise ValueError(
+                "athena_query_max_datasources_per_tenant must not exceed "
+                "10000"
+            )
+        if (
+            self.athena_query_principal_rpm
+            > self.athena_query_project_rpm
+        ):
+            raise ValueError(
+                "athena_query_principal_rpm must not exceed "
+                "athena_query_project_rpm"
+            )
+        if (
+            self.athena_query_principal_concurrency
+            > self.athena_query_project_concurrency
+        ):
+            raise ValueError(
+                "athena_query_principal_concurrency must not exceed "
+                "athena_query_project_concurrency"
+            )
+        if (
+            self.athena_query_principal_scan_bytes_per_minute
+            > self.athena_query_project_scan_bytes_per_minute
+        ):
+            raise ValueError(
+                "principal query scan budget must not exceed the project "
+                "query scan budget"
+            )
+        if (
+            self.athena_query_max_bytes_scanned
+            > self.athena_query_principal_scan_bytes_per_minute
+        ):
+            raise ValueError(
+                "athena_query_max_bytes_scanned must fit within the "
+                "principal aggregate scan budget"
+            )
+        if self.athena_query_enabled and (
+            self.auth_mode != "ENFORCE"
+            or not self.canonical_identity_required
+            or not self.durable_persistence_enabled
+        ):
+            raise RuntimeError(
+                "Athena queries require enforced canonical identity and "
+                "durable DynamoDB persistence"
             )
         if self.deployment_profile != "production":
             return

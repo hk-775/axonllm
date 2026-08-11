@@ -19,6 +19,16 @@ from src.gateway.auth.oidc_service import (
     OIDCConfig,
     OIDCService,
 )
+from src.gateway.auth.principal import (
+    CanonicalPrincipalResolver,
+    InMemoryPrincipalRepository,
+)
+from src.gateway.models import (
+    AuthMethod,
+    MembershipStatus,
+    Principal,
+    TenantRole,
+)
 
 REGION = "us-east-1"
 SIGNER_ARN = "arn:aws:elasticloadbalancing:us-east-1:123456789012:loadbalancer/app/axon-prod/50dc6c495c0c9188"
@@ -141,9 +151,40 @@ class TestALBJWTVerification:
         assert context is not None
         assert context.user_id == SUBJECT
         assert context.subject == SUBJECT
-        assert context.issuer == ALB_ISSUER
+        assert context.issuer == "https://idp.example.test"
         assert context.tenant_id == "tenant-1"
         assert calls == [(KEY_ID, ALB_ISSUER)]
+
+    @pytest.mark.asyncio
+    async def test_alb_identity_resolves_upstream_canonical_membership(
+        self,
+        alb_config,
+        alb_signing_material,
+        monkeypatch,
+    ):
+        private_pem, public_pem = alb_signing_material
+        service = OIDCService(alb_config)
+        _install_key_fetch(service, monkeypatch, public_pem)
+        context = await service.validate_alb_jwt(
+            _alb_token(private_pem),
+            expected_subject=SUBJECT,
+        )
+        assert context is not None
+        principal = Principal(
+            principal_id="principal-1",
+            tenant_id="tenant-1",
+            subject=SUBJECT,
+            issuer="https://idp.example.test",
+            roles=frozenset({TenantRole.TENANT_ADMIN}),
+            auth_method=AuthMethod.OIDC_JWT,
+            membership_status=MembershipStatus.ACTIVE,
+            project_ids=frozenset({"project-1"}),
+        )
+        resolver = CanonicalPrincipalResolver(
+            InMemoryPrincipalRepository([principal])
+        )
+
+        assert await resolver.resolve(context) == principal
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -317,6 +358,41 @@ class TestALBJWTVerification:
             raise AssertionError("invalid trust config must not fetch a key")
 
         monkeypatch.setattr(service, "_fetch_alb_public_key", unexpected_fetch)
+
+        assert (
+            await service.validate_alb_jwt(
+                _alb_token(private_pem),
+                expected_subject=SUBJECT,
+            )
+            is None
+        )
+
+    @pytest.mark.asyncio
+    async def test_missing_upstream_identity_issuer_fails_before_key_fetch(
+        self,
+        alb_signing_material,
+        monkeypatch,
+    ):
+        private_pem, _ = alb_signing_material
+        service = OIDCService(
+            OIDCConfig(
+                alb_region=REGION,
+                alb_signer_arn=SIGNER_ARN,
+                alb_client_id=CLIENT_ID,
+                alb_issuer=ALB_ISSUER,
+            )
+        )
+
+        async def unexpected_fetch(*_args):
+            raise AssertionError(
+                "missing upstream issuer must not fetch a key"
+            )
+
+        monkeypatch.setattr(
+            service,
+            "_fetch_alb_public_key",
+            unexpected_fetch,
+        )
 
         assert (
             await service.validate_alb_jwt(

@@ -1048,6 +1048,10 @@ six==1.17.0 \
     # via
     #   ecdsa
     #   python-dateutil
+sqlglot==30.16.0 \
+    --hash=sha256:26abd1ef583fbecde24931eb56a5df4a086ba50ba0b36738233da9da16ffea13 \
+    --hash=sha256:f14f119e87bb1397316ab2b3c1f12dddd3b098921185dc69935952111be91788
+    # via axon-llm
 starlette==1.3.1 \
     --hash=sha256:05d0213193f2fbaae60e2ecb593b4add4262ad4e46536b54abe36f11a71724e0 \
     --hash=sha256:c7372aae11c3c3f26a42df7bd626cec2f47d03483d261d369516a615a53714c6

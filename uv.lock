@@ -181,6 +181,7 @@ dependencies = [
     { name = "aiohttp" },
     { name = "boto3" },
     { name = "pyyaml" },
+    { name = "sqlglot" },
     { name = "starlette" },
     { name = "tiktoken" },
     { name = "uvicorn", extra = ["standard"] },
@@ -235,6 +236,7 @@ requires-dist = [
     { name = "ruff", marker = "extra == 'dev'", specifier = "==0.16.2" },
     { name = "signxml", marker = "extra == 'dev'", specifier = ">=3.2" },
     { name = "signxml", marker = "extra == 'saml'", specifier = ">=3.2" },
+    { name = "sqlglot", specifier = ">=27.0.0" },
     { name = "starlette", specifier = ">=0.37.0" },
     { name = "tiktoken", specifier = ">=0.7.0" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.27.0" },
@@ -2029,6 +2031,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/e8/c4/ba2f8066cceb6f23394729afe52f3bf7adec04bf9ed2c820b39e19299111/sortedcontainers-2.4.0.tar.gz", hash = "sha256:25caa5a06cc30b6b83d11423433f65d1f9d76c4c6a0c90e3379eaa43b9bfdb88", size = 30594, upload-time = "2021-05-16T22:03:42.897Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/32/46/9cb0e58b2deb7f82b84065f37f3bffeb12413f947f9388e4cac22c4621ce/sortedcontainers-2.4.0-py2.py3-none-any.whl", hash = "sha256:a163dcaede0f1c021485e957a39245190e74249897e2ae4b2aa38595db237ee0", size = 29575, upload-time = "2021-05-16T22:03:41.177Z" },
+]
+
+[[package]]
+name = "sqlglot"
+version = "30.16.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/b5/42/97ae59ab9479f345f97db948792b41bdaf51c38589f994ab97014ffae2b9/sqlglot-30.16.0.tar.gz", hash = "sha256:26abd1ef583fbecde24931eb56a5df4a086ba50ba0b36738233da9da16ffea13", size = 5984853, upload-time = "2026-08-10T15:43:47.176Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c8/bc/c92985806306174ae08ca84576a62659e8a406d7f670d2b2bc1a96340f87/sqlglot-30.16.0-py3-none-any.whl", hash = "sha256:f14f119e87bb1397316ab2b3c1f12dddd3b098921185dc69935952111be91788", size = 737757, upload-time = "2026-08-10T15:43:45.331Z" },
 ]
 
 [[package]]

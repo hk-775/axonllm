@@ -10,11 +10,14 @@ import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from src.gateway.auth.principal import PrincipalResolver
 from src.gateway.auth.project_repository import ProjectResolver
 from src.gateway.models import RequestContext
+
+if TYPE_CHECKING:
+    from src.gateway.query.service import QueryService
 
 logger = logging.getLogger(__name__)
 
@@ -124,6 +127,7 @@ class RuntimeServices:
     token_verifier: OIDCTokenVerifier
     principal_resolver: PrincipalResolver
     project_resolver: ProjectResolver
+    query_service: QueryService | None = None
     policy_service: PolicyService | None = None
     config_sync: ConfigSync | None = None
     readiness_checks: tuple[RuntimeDependency, ...] = field(default_factory=tuple)
@@ -342,11 +346,14 @@ def build_runtime_services() -> RuntimeServices:
         if callable(shutdown):
             await asyncio.to_thread(shutdown)
 
+    # Bootstrap owns the canonical query repository, executor, and audit trail.
+    query_service = getattr(components, "query_service", None)
     return RuntimeServices(
         gateway=components.gateway_agent,
         token_verifier=components.oidc_service,
         principal_resolver=components.principal_resolver,
         project_resolver=components.project_resolver,
+        query_service=query_service,
         policy_service=CedarPolicyService(
             components.policies,
             persistence=components.persistence,

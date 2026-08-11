@@ -35,6 +35,8 @@ from src.gateway.agentcore_setup import (
 
 IDENTITY_STACK = "AxonLLMIdentityStack"
 AGENTCORE_STACK = "AxonLLMAgentCoreStack"
+CONTROL_PLANE_STACK = "AxonLLMControlPlaneStack"
+_MAX_AGENTCORE_ENVIRONMENT_VALUE_CHARACTERS = 2_048
 CommandRunner = Callable[[list[str], Path], None]
 
 
@@ -73,8 +75,11 @@ def identity_deploy_command(
     if config.identity_mode != MANAGED_COGNITO:
         raise AgentCoreDeploymentError("the identity stack is only used for managed-cognito")
     managed = config.managed_cognito
-    if managed is None:
-        raise AgentCoreDeploymentError("managed Cognito settings are missing")
+    control_plane = config.control_plane
+    if managed is None or control_plane is None:
+        raise AgentCoreDeploymentError(
+            "managed Cognito or control-plane settings are missing"
+        )
     command = [
         "npx",
         "cdk",
@@ -100,6 +105,13 @@ def identity_deploy_command(
         )
     )
     command.extend(
+        _parameter(
+            "ControlPlaneDomainName",
+            control_plane.domain_name,
+            stack=IDENTITY_STACK,
+        )
+    )
+    command.extend(
         [
             "--require-approval",
             "never" if assume_yes else "broadening",
@@ -108,6 +120,71 @@ def identity_deploy_command(
         ]
     )
     return command
+
+
+def _athena_contexts(
+    config: AgentCoreSetupConfig,
+) -> dict[str, str]:
+    athena = config.runtime.athena_query
+    if athena is None:
+        return {}
+    bindings = [
+        {
+            "tenant_id": config.tenant.tenant_id,
+            "project_id": config.tenant.project_id,
+            "role_arn": role_arn,
+        }
+        for role_arn in athena.role_arns
+    ]
+    bindings_json = json.dumps(
+        bindings,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    if len(bindings_json) > _MAX_AGENTCORE_ENVIRONMENT_VALUE_CHARACTERS:
+        raise AgentCoreDeploymentError(
+            "athena_query_bindings exceeds the AgentCore "
+            "2,048-character environment value limit"
+        )
+    return {
+        "athena_query_bindings": bindings_json,
+        "athena_query_timeout_seconds": f"{athena.timeout_seconds:g}",
+        "athena_query_max_rows": str(athena.max_rows),
+        "athena_query_max_result_bytes": str(
+            athena.max_result_bytes
+        ),
+        "athena_query_max_bytes_scanned": str(
+            athena.max_bytes_scanned
+        ),
+        "athena_query_poll_interval_seconds": (
+            f"{athena.poll_interval_seconds:g}"
+        ),
+        "athena_query_project_rpm": str(athena.project_rpm),
+        "athena_query_principal_rpm": str(athena.principal_rpm),
+        "athena_query_project_concurrency": str(
+            athena.project_concurrency
+        ),
+        "athena_query_principal_concurrency": str(
+            athena.principal_concurrency
+        ),
+        "athena_query_project_scan_bytes_per_minute": str(
+            athena.project_scan_bytes_per_minute
+        ),
+        "athena_query_principal_scan_bytes_per_minute": str(
+            athena.principal_scan_bytes_per_minute
+        ),
+        "athena_query_max_datasources_per_tenant": str(
+            athena.max_datasources_per_tenant
+        ),
+    }
+
+
+def _append_athena_contexts(
+    command: list[str],
+    config: AgentCoreSetupConfig,
+) -> None:
+    for name, value in _athena_contexts(config).items():
+        command.extend(["-c", f"{name}={value}"])
 
 
 def agentcore_deploy_command(
@@ -140,6 +217,65 @@ def agentcore_deploy_command(
     }
     for name, value in parameters.items():
         command.extend(_parameter(name, value, stack=AGENTCORE_STACK))
+    _append_athena_contexts(command, config)
+    command.extend(
+        [
+            "--require-approval",
+            "never" if assume_yes else "broadening",
+            "--outputs-file",
+            str(outputs_file),
+        ]
+    )
+    return command
+
+
+def control_plane_deploy_command(
+    config: AgentCoreSetupConfig,
+    *,
+    outputs_file: Path,
+    assume_yes: bool,
+) -> list[str]:
+    if config.identity_mode != MANAGED_COGNITO:
+        raise AgentCoreDeploymentError(
+            "the web control plane currently requires managed-cognito"
+        )
+    control_plane = config.control_plane
+    if control_plane is None:
+        raise AgentCoreDeploymentError(
+            "control-plane settings are missing"
+        )
+    command = [
+        "npx",
+        "cdk",
+        "deploy",
+        CONTROL_PLANE_STACK,
+        "-c",
+        "deployment_target=control-plane",
+        "-c",
+        f"region={config.aws_region}",
+    ]
+    parameters = {
+        "AgentCoreStackName": AGENTCORE_STACK,
+        "IdentityStackName": IDENTITY_STACK,
+        "ControlPlaneVerifiedImageUri": (
+            control_plane.verified_image_uri
+        ),
+        "CertificateArn": control_plane.certificate_arn,
+        "PublicHostedZoneId": (
+            control_plane.public_hosted_zone_id
+        ),
+        "ApprovedIngressPrefixListId": (
+            control_plane.approved_ingress_prefix_list_id
+        ),
+        "ApprovedHttpsPrefixListId": (
+            control_plane.approved_https_prefix_list_id
+        ),
+    }
+    for name, value in parameters.items():
+        command.extend(
+            _parameter(name, value, stack=CONTROL_PLANE_STACK)
+        )
+    _append_athena_contexts(command, config)
     command.extend(
         [
             "--require-approval",
@@ -509,9 +645,43 @@ def deploy(
         subject=subject,
     )
     print(f"Canonical administrator verified: {result['principal_id']} on {result['project_id']}.")
+    control_outputs: dict[str, str] | None = None
+    if config.identity_mode == MANAGED_COGNITO:
+        control_output_path = outputs_dir / "control-plane-outputs.json"
+        control_output_path.unlink(missing_ok=True)
+        print("Deploying the authenticated shared-state web control plane...")
+        runner(
+            control_plane_deploy_command(
+                config,
+                outputs_file=control_output_path,
+                assume_yes=assume_yes,
+            ),
+            INFRA_ROOT,
+        )
+        control_outputs = _stack_outputs(
+            control_output_path,
+            CONTROL_PLANE_STACK,
+        )
     if identity.hosted_ui_domain:
         print(f"Managed login: {identity.hosted_ui_domain}")
         print(f"OIDC client ID: {identity.client_id}")
+    if control_outputs is not None:
+        if config.control_plane is None:
+            raise AgentCoreDeploymentError(
+                "control-plane settings disappeared after validation"
+            )
+        print(
+            f"Control plane: https://{config.control_plane.domain_name}"
+        )
+    else:
+        print(
+            "Web control plane: not deployed; external OIDC is currently "
+            "supported on the AgentCore invocation surface only."
+        )
+    print(
+        "Runtime execution role: "
+        f"{_required_output(runtime_outputs, 'RuntimeExecutionRoleArn')}"
+    )
     print(f"Runtime ARN: {_required_output(runtime_outputs, 'RuntimeArn')}")
     print(f"Deployment outputs: {outputs_dir}")
 

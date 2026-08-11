@@ -15,6 +15,7 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from src.gateway.adapters.openai_adapter import OpenAIAdapter
+from src.gateway.adapters.openai_style import _is_openai_reasoning_model
 from src.gateway.adapters.anthropic_adapter import AnthropicAdapter
 from src.gateway.adapters.bedrock_adapter import BedrockAdapter
 from src.gateway.adapters.azure_adapter import AzureOpenAIAdapter
@@ -99,22 +100,28 @@ ALL_ADAPTERS = [
 
 def _verify_openai_family(payload: dict, request: ChatCompletionRequest) -> None:
     """Verify OpenAI / Azure OpenAI translated payload preserves parameters."""
+    is_reasoning = _is_openai_reasoning_model(request.model)
+
     # System message should be prepended as first message with role "system"
     if request.system:
         assert payload["messages"][0]["role"] == "system"
         assert payload["messages"][0]["content"] == request.system
 
-    if request.temperature is not None:
+    if request.temperature is not None and not is_reasoning:
         assert payload["temperature"] == request.temperature
     else:
         assert "temperature" not in payload
 
     if request.max_tokens is not None:
-        assert payload["max_tokens"] == request.max_tokens
+        parameter = (
+            "max_completion_tokens" if is_reasoning else "max_tokens"
+        )
+        assert payload[parameter] == request.max_tokens
     else:
         assert "max_tokens" not in payload
+        assert "max_completion_tokens" not in payload
 
-    if request.top_p is not None:
+    if request.top_p is not None and not is_reasoning:
         assert payload["top_p"] == request.top_p
     else:
         assert "top_p" not in payload

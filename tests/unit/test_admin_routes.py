@@ -2268,7 +2268,7 @@ class TestLandingPageStatBand:
 
 
 class TestAdminApiReferenceIsReal:
-    """Every path in the README's Admin API Reference must actually route.
+    """Every path in the README's Admin API Reference must be registered.
 
     The table drifted badly before this test existed, and in the direction that
     costs the most: the documented path 404s, so someone integrating against the
@@ -2291,13 +2291,18 @@ class TestAdminApiReferenceIsReal:
     def routed(cls):
         """Path templates the real app serves, mapped to their methods.
 
-        The whole app rather than ``create_admin_routes`` alone: admin endpoints
-        come from eight different factories composed in bootstrap, and the README
-        documents them as one surface. Building anything less would let a row
-        pass by matching a route that is never mounted.
+        The whole default app rather than ``create_admin_routes`` alone: admin
+        endpoints come from different factories composed in bootstrap, and the
+        README documents them as one surface. Feature-gated datasource routes
+        are added from their real route factory; a separate integration test
+        verifies that bootstrap omits them when Athena queries are disabled.
         """
         import re
+        from types import SimpleNamespace
 
+        from src.gateway.admin.datasource_routes import (
+            create_datasource_routes,
+        )
         from src.gateway.bootstrap import build_starlette_app
         from src.gateway.config import AppConfig
 
@@ -2309,9 +2314,23 @@ class TestAdminApiReferenceIsReal:
             catalog_config_path="config/catalog.yaml",
             load_demo_data=True,
         ))
+        async def gated_endpoint(_request):
+            raise AssertionError("route-shape fixture must not invoke endpoints")
+
+        datasource_api = SimpleNamespace(
+            list_datasources=gated_endpoint,
+            create_datasource=gated_endpoint,
+            get_datasource=gated_endpoint,
+            update_datasource=gated_endpoint,
+            delete_datasource=gated_endpoint,
+        )
+        routes = [
+            *app.routes,
+            *create_datasource_routes(datasource_api),
+        ]
 
         routed: dict[str, set[str]] = {}
-        for route in app.routes:
+        for route in routes:
             if not hasattr(route, "path"):
                 continue
             # Parameter *names* are free to differ between the docs and the

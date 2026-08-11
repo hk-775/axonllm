@@ -55,6 +55,34 @@ class AxonLLMIdentityStack(Stack):
                 "Comma-separated OAuth authorization-code callback URLs"
             ),
         )
+        control_plane_domain_name = CfnParameter(
+            self,
+            "ControlPlaneDomainInput",
+            type="String",
+            min_length=1,
+            max_length=253,
+            allowed_pattern=(
+                r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}"
+                r"[a-z0-9])?\.)+[a-z]{2,63}$"
+            ),
+            constraint_description=(
+                "must be a lowercase fully qualified DNS hostname"
+            ),
+            description=(
+                "Stable control-plane hostname used for the ALB OAuth callback"
+            ),
+        )
+        control_plane_domain_name.override_logical_id(
+            "ControlPlaneDomainName"
+        )
+        control_plane_callback_url = Fn.join(
+            "",
+            [
+                "https://",
+                control_plane_domain_name.value_as_string,
+                "/oauth2/idpresponse",
+            ],
+        )
 
         user_pool = cognito.UserPool(
             self,
@@ -152,6 +180,38 @@ class AxonLLMIdentityStack(Stack):
             ),
         )
         app_client.apply_removal_policy(RemovalPolicy.RETAIN)
+        alb_client = user_pool.add_client(
+            "ConfidentialAlbClient",
+            user_pool_client_name="axonllm-control-plane-alb",
+            generate_secret=True,
+            prevent_user_existence_errors=True,
+            enable_token_revocation=True,
+            # ALB performs the authorization-code exchange server-side. Direct
+            # password, SRP, implicit, and client-credentials flows stay off.
+            auth_flows=cognito.AuthFlow(),
+            access_token_validity=Duration.minutes(15),
+            id_token_validity=Duration.minutes(15),
+            refresh_token_validity=Duration.hours(8),
+            refresh_token_rotation_grace_period=Duration.seconds(0),
+            read_attributes=readable_attributes,
+            supported_identity_providers=[
+                cognito.UserPoolClientIdentityProvider.COGNITO
+            ],
+            o_auth=cognito.OAuthSettings(
+                callback_urls=[control_plane_callback_url],
+                flows=cognito.OAuthFlows(
+                    authorization_code_grant=True,
+                    implicit_code_grant=False,
+                    client_credentials=False,
+                ),
+                scopes=[
+                    cognito.OAuthScope.OPENID,
+                    cognito.OAuthScope.EMAIL,
+                    cognito.OAuthScope.PROFILE,
+                ],
+            ),
+        )
+        alb_client.apply_removal_policy(RemovalPolicy.RETAIN)
 
         hosted_ui_domain = user_pool.add_domain(
             "HostedUiDomain",
@@ -188,9 +248,23 @@ class AxonLLMIdentityStack(Stack):
         )
         CfnOutput(
             self,
+            "UserPoolArn",
+            value=user_pool.user_pool_arn,
+            description="Cognito user pool imported by the control plane",
+            export_name=Fn.join(
+                ":",
+                [self.stack_name, "UserPoolArn"],
+            ),
+        )
+        CfnOutput(
+            self,
             "OidcIssuer",
             value=issuer,
             description="Exact OIDC issuer accepted by AxonLLM",
+            export_name=Fn.join(
+                ":",
+                [self.stack_name, "OidcIssuer"],
+            ),
         )
         CfnOutput(
             self,
@@ -212,17 +286,60 @@ class AxonLLMIdentityStack(Stack):
         )
         CfnOutput(
             self,
+            "AlbClientId",
+            value=alb_client.user_pool_client_id,
+            description=(
+                "Confidential authorization-code client used by the "
+                "control-plane ALB"
+            ),
+            export_name=Fn.join(
+                ":",
+                [self.stack_name, "AlbClientId"],
+            ),
+        )
+        CfnOutput(
+            self,
+            "ControlPlaneDomainName",
+            value=control_plane_domain_name.value_as_string,
+            description=(
+                "Stable hostname configured on the confidential ALB client"
+            ),
+            export_name=Fn.join(
+                ":",
+                [self.stack_name, "ControlPlaneDomainName"],
+            ),
+        )
+        CfnOutput(
+            self,
             "HostedUiDomain",
             value=hosted_ui_domain.base_url(),
             description="Cognito hosted UI base URL",
         )
         CfnOutput(
             self,
+            "HostedUiDomainName",
+            value=hosted_ui_domain.domain_name,
+            description="Cognito domain imported by the control-plane ALB",
+            export_name=Fn.join(
+                ":",
+                [self.stack_name, "HostedUiDomainName"],
+            ),
+        )
+        CfnOutput(
+            self,
             "TenantClaimName",
             value=TENANT_CLAIM_NAME,
+            export_name=Fn.join(
+                ":",
+                [self.stack_name, "TenantClaimName"],
+            ),
         )
         CfnOutput(
             self,
             "ProjectClaimName",
             value=PROJECT_CLAIM_NAME,
+            export_name=Fn.join(
+                ":",
+                [self.stack_name, "ProjectClaimName"],
+            ),
         )

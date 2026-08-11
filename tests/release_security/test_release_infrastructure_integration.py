@@ -83,6 +83,14 @@ def test_synthesis_requires_zero_cdk_docker_assets() -> None:
         in script
     )
     assert (
+        'verify_target "identity" "AxonLLMIdentityStack"'
+        in script
+    )
+    assert (
+        'verify_target "control-plane" "AxonLLMControlPlaneStack"'
+        in script
+    )
+    assert (
         'verify_target "release-foundation" '
         '"AxonLLMReleaseFoundationStack"'
     ) in script

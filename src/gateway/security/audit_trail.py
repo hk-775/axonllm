@@ -87,6 +87,11 @@ class AuditEventType(Enum):
     KEY_REVOKED = "key_revoked"
     KEY_ROTATED = "key_rotated"
     BREAK_GLASS_ACCESS = "break_glass_access"
+    QUERY_REQUEST = "query_request"
+    QUERY_RESULT = "query_result"
+    QUERY_REJECTED = "query_rejected"
+    DATASOURCE_MUTATION_REQUEST = "datasource_mutation_request"
+    DATASOURCE_MUTATION_RESULT = "datasource_mutation_result"
 
 
 def _normalize_tenant_id(tenant_id: str) -> str:

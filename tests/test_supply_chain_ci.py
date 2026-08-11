@@ -98,7 +98,10 @@ def test_trivy_exception_is_narrow_and_expires() -> None:
             },
             {
                 "id": "AWS-0132",
-                "paths": ["AxonLLMStack.template.json"],
+                "paths": [
+                    "AxonLLMStack.template.json",
+                    "AxonLLMControlPlaneStack.template.json",
+                ],
                 "statement": (
                     "ALB and CloudFront access-log delivery require SSE-S3; "
                     "the bucket cannot use a customer-managed KMS key."
@@ -107,13 +110,26 @@ def test_trivy_exception_is_narrow_and_expires() -> None:
             },
             {
                 "id": "AWS-0035",
-                "paths": ["AxonLLMStack.template.json"],
+                "paths": [
+                    "AxonLLMStack.template.json",
+                    "AxonLLMControlPlaneStack.template.json",
+                ],
                 "statement": (
                     "The task volume is ephemeral Fargate scratch storage "
                     "mounted at /tmp; no EFSVolumeConfiguration exists, so "
                     "EFS transit encryption does not apply."
                 ),
                 "expired_at": "2027-08-07T00:00:00Z",
+            },
+            {
+                "id": "AWS-0053",
+                "paths": ["AxonLLMControlPlaneStack.template.json"],
+                "statement": (
+                    "The public control-plane ALB accepts HTTPS only from an "
+                    "approved managed prefix list and requires Cognito "
+                    "authentication."
+                ),
+                "expired_at": "2027-08-11T00:00:00Z",
             },
         ]
     }
