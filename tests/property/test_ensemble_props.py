@@ -22,7 +22,6 @@ made.
 """
 
 import asyncio
-import time
 import types
 
 from hypothesis import assume, given, settings
@@ -191,38 +190,48 @@ def _distinct_models(draw, min_panel=2, max_panel=5):
 # ===========================================================================
 
 
-@given(
-    member_latencies=st.lists(
-        st.floats(min_value=0.015, max_value=0.05), min_size=2, max_size=4
-    ),
-    judge_latency=st.floats(min_value=0.015, max_value=0.04),
-)
+@given(panel_size=st.integers(min_value=2, max_value=5))
 @settings(max_examples=100, deadline=None)
-def test_latency_bounded_by_slowest_member_plus_judge(member_latencies, judge_latency):
-    """Property 1: total wall-clock ~ max(panel) + judge, never the sum.
+def test_latency_bounded_by_slowest_member_plus_judge(panel_size):
+    """Property 1: panel calls overlap, followed by the judge.
 
-    The panel is dispatched in a single ``asyncio.gather`` so the panel phase
-    completes at ``max(member_latencies)``, not their sum. Asserting that the
-    total elapsed time stays strictly below ``sum(member_latencies) +
-    judge_latency`` proves the members ran concurrently rather than serially.
+    Every panel coroutine yields once after recording its start. When it
+    resumes, all other panel coroutines must already have started. This proves
+    concurrent dispatch without relying on wall-clock thresholds that become
+    flaky under CI runner contention. The judge must not start until every
+    panel coroutine has completed.
 
     **Validates: Requirements 1.1, 1.4**
     """
-    n = len(member_latencies)
-    panel = [f"m{i}" for i in range(n)]
+    panel = [f"m{i}" for i in range(panel_size)]
+    panel_models = set(panel)
     preset = _make_preset(panel=panel, judge="judge", quorum=1)
 
-    latencies = {f"m{i}": member_latencies[i] for i in range(n)}
-    latencies["judge"] = judge_latency
     responses = {m: _make_response(m, f"resp {m}") for m in panel}
     responses["judge"] = _make_response("judge", "synthesized")
+    started: set[str] = set()
+    completed: set[str] = set()
+
+    async def _concurrency_probe(
+        request, provider_fn, allowed_models=None, **kwargs
+    ):
+        model = request.model
+        if model == "judge":
+            assert started == panel_models
+            assert completed == panel_models
+            return responses[model]
+
+        started.add(model)
+        await asyncio.sleep(0)
+        assert started == panel_models, (
+            f"{model} resumed before all panel calls started: {started}"
+        )
+        completed.add(model)
+        return responses[model]
 
     router = _make_router(cost_tracker=_make_cost_tracker())
-    router.execute_with_fallback = AsyncMock(
-        side_effect=_exec_side_effect(responses, latencies=latencies)
-    )
+    router.execute_with_fallback = AsyncMock(side_effect=_concurrency_probe)
 
-    start = time.monotonic()
     response, decision = _run(
         router.ensemble_route(
             _make_request(),
@@ -232,18 +241,9 @@ def test_latency_bounded_by_slowest_member_plus_judge(member_latencies, judge_la
             allowed_models=None,
         )
     )
-    elapsed = time.monotonic() - start
 
     assert decision.judge_invoked is True
     assert response.model == "judge"
-
-    serial_lower_bound = sum(member_latencies) + judge_latency
-    # Concurrent dispatch must beat the serial sum. Add 100ms tolerance for
-    # CI runner scheduling overhead (asyncio event loop jitter on slow VMs).
-    assert elapsed < serial_lower_bound + 0.1, (
-        f"elapsed={elapsed:.4f}s not below serial bound "
-        f"{serial_lower_bound:.4f}s +0.1s tolerance (members={member_latencies}, judge={judge_latency})"
-    )
 
 
 # ===========================================================================
