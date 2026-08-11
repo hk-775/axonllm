@@ -1443,8 +1443,9 @@ call. With no URL and no registered sink, the forwarder is inert.
       and shared control-plane implementation
 - [ ] Execute and retain the first real AWS restore exercise and application
       recovery rehearsal
-- [ ] Process-level containment or an async/cancellable replacement for a
-      synchronous AgentCore bootstrap worker that can outlive its timeout
+- [x] Process-level containment for a synchronous AgentCore bootstrap worker:
+      event-loop-independent lifecycle watchdogs exit the container with status
+      124 when initialization or shutdown ownership outlives its deadline
 - [ ] Active tenant-isolated AgentCore Memory integration; `SessionManager`
       exists but is not wired into the runtime
 - [ ] Azure OpenAI, Vertex AI, Cohere adapters fully validated with live providers

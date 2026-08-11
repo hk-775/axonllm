@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import os
 import threading
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -25,6 +26,83 @@ DEFAULT_INITIALIZATION_TIMEOUT_SECONDS = 60.0
 DEFAULT_READINESS_TIMEOUT_SECONDS = 5.0
 DEFAULT_READINESS_CACHE_SECONDS = 5.0
 DEFAULT_SHUTDOWN_TIMEOUT_SECONDS = 10.0
+INITIALIZATION_TIMEOUT_EXIT_CODE = 124
+
+
+def _terminate_process_on_initialization_timeout(_: float) -> None:
+    os._exit(INITIALIZATION_TIMEOUT_EXIT_CODE)
+
+
+def _terminate_process_on_shutdown_timeout(_: float) -> None:
+    os._exit(INITIALIZATION_TIMEOUT_EXIT_CODE)
+
+
+class _ProcessDeadline:
+    """Enforce lifecycle containment independently from the asyncio event loop."""
+
+    def __init__(
+        self,
+        timeout_seconds: float,
+        on_expired: Callable[[float], None],
+    ) -> None:
+        self._timeout_seconds = timeout_seconds
+        self._on_expired = on_expired
+        self._expires_at = time.monotonic() + timeout_seconds
+        self._lock = threading.Lock()
+        self._resolved = False
+        self._expired = False
+        self._must_expire = False
+        self._timer = threading.Timer(timeout_seconds, self.expire)
+        self._timer.daemon = True
+
+    @property
+    def remaining(self) -> float:
+        return max(0.0, self._expires_at - time.monotonic())
+
+    @property
+    def expired(self) -> bool:
+        with self._lock:
+            return self._expired
+
+    def start(self) -> None:
+        self._timer.start()
+
+    def require_expiration(self) -> None:
+        with self._lock:
+            if not self._resolved:
+                self._must_expire = True
+
+    def _invoke_expiration_handler(self) -> None:
+        self._on_expired(self._timeout_seconds)
+        logger.critical(
+            "AgentCore lifecycle timeout handler returned without "
+            "terminating the process"
+        )
+
+    def expire(self) -> bool:
+        with self._lock:
+            if self._resolved:
+                return False
+            self._resolved = True
+            self._expired = True
+        self._invoke_expiration_handler()
+        return True
+
+    def disarm(self) -> bool:
+        with self._lock:
+            if self._resolved or self._must_expire:
+                return False
+            if time.monotonic() >= self._expires_at:
+                self._resolved = True
+                self._expired = True
+                invoke_expiration = True
+            else:
+                self._resolved = True
+                self._timer.cancel()
+                return True
+        if invoke_expiration:
+            self._invoke_expiration_handler()
+        return False
 
 
 def _consume_background_task(task: asyncio.Task[Any]) -> None:
@@ -201,10 +279,10 @@ class RuntimeServices:
         """Probe shared dependencies on the authenticated-handler service loop."""
         return await self._check_readiness(timeout_seconds, startup=False)
 
-    async def close(self, timeout_seconds: float) -> None:
+    async def close(self, timeout_seconds: float) -> bool:
         """Run all registered cleanup hooks within one shared deadline."""
         if not self.close_hooks:
-            return
+            return True
 
         async def _run(hook: RuntimeCloseHook) -> None:
             try:
@@ -233,6 +311,8 @@ class RuntimeServices:
                 len(pending),
             )
             _cancel_detached_tasks(list(pending))
+            return False
+        return True
 
 
 class RuntimeState(str, Enum):
@@ -256,6 +336,31 @@ class _DependenciesUnavailable(RuntimeError):
     def __init__(self, readiness: RuntimeReadiness) -> None:
         super().__init__("required AgentCore dependencies are unavailable")
         self.readiness = readiness
+        self.cleanup_incomplete = False
+
+
+class _InitializationCleanupIncomplete(RuntimeError):
+    """Initialization failed while runtime cleanup still owned native work."""
+
+
+def _retain_deadline_for_initialization_failure(
+    deadline: _ProcessDeadline | None,
+    error: BaseException,
+) -> None:
+    if (
+        deadline is not None
+        and (
+            (
+                isinstance(error, _DependenciesUnavailable)
+                and (
+                    "timeout" in error.readiness.dependencies.values()
+                    or error.cleanup_incomplete
+                )
+            )
+            or isinstance(error, _InitializationCleanupIncomplete)
+        )
+    ):
+        deadline.require_expiration()
 
 
 def _validate_duration(value: float, name: str, *, allow_zero: bool = False) -> float:
@@ -402,6 +507,8 @@ class RuntimeProvider:
         readiness_timeout_seconds: float = DEFAULT_READINESS_TIMEOUT_SECONDS,
         readiness_cache_seconds: float = DEFAULT_READINESS_CACHE_SECONDS,
         shutdown_timeout_seconds: float = DEFAULT_SHUTDOWN_TIMEOUT_SECONDS,
+        _initialization_timeout_handler: Callable[[float], None] | None = None,
+        _shutdown_timeout_handler: Callable[[float], None] | None = None,
     ) -> None:
         self._factory = factory
         self._initialization_timeout = _validate_duration(
@@ -421,8 +528,26 @@ class RuntimeProvider:
             shutdown_timeout_seconds,
             "shutdown_timeout_seconds",
         )
+        if _initialization_timeout_handler is not None and not callable(
+            _initialization_timeout_handler
+        ):
+            raise TypeError("_initialization_timeout_handler must be callable")
+        if _shutdown_timeout_handler is not None and not callable(
+            _shutdown_timeout_handler
+        ):
+            raise TypeError("_shutdown_timeout_handler must be callable")
+        self._initialization_timeout_handler = (
+            _initialization_timeout_handler
+            or _terminate_process_on_initialization_timeout
+        )
+        self._shutdown_timeout_handler = (
+            _shutdown_timeout_handler
+            or _terminate_process_on_shutdown_timeout
+        )
         self._runtime: RuntimeServices | None = None
         self._initialization: asyncio.Task[tuple[RuntimeServices, RuntimeReadiness]] | None = None
+        self._initialization_deadline: _ProcessDeadline | None = None
+        self._closing: asyncio.Task[None] | None = None
         self._state = RuntimeState.NOT_INITIALIZED
         self._last_readiness = RuntimeReadiness(
             False,
@@ -458,8 +583,15 @@ class RuntimeProvider:
             if not readiness.ready:
                 raise _DependenciesUnavailable(readiness)
             return runtime, readiness
-        except BaseException:
-            await runtime.close(self._shutdown_timeout)
+        except BaseException as exc:
+            cleanup_complete = await runtime.close(self._shutdown_timeout)
+            if not cleanup_complete:
+                if isinstance(exc, _DependenciesUnavailable):
+                    exc.cleanup_incomplete = True
+                else:
+                    raise _InitializationCleanupIncomplete(
+                        "AgentCore initialization cleanup timed out"
+                    ) from exc
             raise
 
     async def initialize(self) -> RuntimeServices:
@@ -472,15 +604,32 @@ class RuntimeProvider:
                     raise RuntimeInitializationError("AgentCore runtime is closed")
                 if self._initialization is None:
                     self._initialization = asyncio.create_task(self._build_and_check())
+                    self._initialization_deadline = _ProcessDeadline(
+                        self._initialization_timeout,
+                        self._initialization_timeout_handler,
+                    )
+                    self._initialization_deadline.start()
                 initialization = self._initialization
+                deadline = self._initialization_deadline
                 self._state = RuntimeState.INITIALIZING
 
-        try:
-            runtime, readiness = await asyncio.wait_for(
-                asyncio.shield(initialization),
-                timeout=self._initialization_timeout,
+        if deadline is None:
+            raise RuntimeInitializationError(
+                "AgentCore runtime initialization deadline is unavailable"
             )
-        except TimeoutError as exc:
+
+        try:
+            done, _ = await asyncio.wait(
+                (initialization,),
+                timeout=deadline.remaining,
+            )
+        except asyncio.CancelledError:
+            # The bootstrap task and its watchdog retain ownership. A caller
+            # cancellation must not strand a synchronous worker.
+            raise
+
+        if initialization not in done or deadline.expired:
+            deadline.expire()
             failure = RuntimeReadiness(
                 False,
                 RuntimeState.FAILED.value,
@@ -488,10 +637,19 @@ class RuntimeProvider:
             )
             await self._record_initialization_failure(
                 initialization,
+                deadline,
                 failure,
             )
-            raise RuntimeInitializationError("AgentCore runtime initialization timed out") from exc
+            raise RuntimeInitializationError(
+                "AgentCore runtime initialization timed out"
+            )
+
+        try:
+            runtime, readiness = initialization.result()
         except _DependenciesUnavailable as exc:
+            # A timed-out async wrapper can still own a native SDK worker.
+            # Keep the process watchdog armed until the outer deadline.
+            _retain_deadline_for_initialization_failure(deadline, exc)
             failure = RuntimeReadiness(
                 False,
                 RuntimeState.FAILED.value,
@@ -499,10 +657,12 @@ class RuntimeProvider:
             )
             await self._record_initialization_failure(
                 initialization,
+                deadline,
                 failure,
             )
             raise RuntimeInitializationError("AgentCore runtime dependencies are unavailable") from exc
         except Exception as exc:
+            _retain_deadline_for_initialization_failure(deadline, exc)
             failure = RuntimeReadiness(
                 False,
                 RuntimeState.FAILED.value,
@@ -510,26 +670,51 @@ class RuntimeProvider:
             )
             await self._record_initialization_failure(
                 initialization,
+                deadline,
                 failure,
             )
             raise RuntimeInitializationError("AgentCore runtime initialization failed") from exc
 
+        deadline_expired = False
         async with self._lifecycle_lock:
             with self._state_lock:
                 if self._state in {RuntimeState.CLOSING, RuntimeState.CLOSED}:
                     raise RuntimeInitializationError("AgentCore runtime is closed")
-                self._runtime = runtime
-                self._initialization = None
-                self._state = RuntimeState.READY
-                self._last_readiness = readiness
-                self._last_readiness_at = time.monotonic()
-                self._last_service_readiness_at = 0.0
-                self._service_loop_initialized = False
-                return runtime
+                if self._state is RuntimeState.READY and self._runtime is runtime:
+                    return runtime
+                if not deadline.disarm():
+                    deadline_expired = True
+                else:
+                    self._runtime = runtime
+                    self._initialization = None
+                    self._initialization_deadline = None
+                    self._state = RuntimeState.READY
+                    self._last_readiness = readiness
+                    self._last_readiness_at = time.monotonic()
+                    self._last_service_readiness_at = 0.0
+                    self._service_loop_initialized = False
+
+        if deadline_expired:
+            await runtime.close(self._shutdown_timeout)
+            failure = RuntimeReadiness(
+                False,
+                RuntimeState.FAILED.value,
+                {"runtime": "initialization_timeout"},
+            )
+            await self._record_initialization_failure(
+                initialization,
+                deadline,
+                failure,
+            )
+            raise RuntimeInitializationError(
+                "AgentCore runtime initialization timed out"
+            )
+        return runtime
 
     async def _record_initialization_failure(
         self,
         initialization: asyncio.Task[tuple[RuntimeServices, RuntimeReadiness]],
+        deadline: _ProcessDeadline,
         readiness: RuntimeReadiness,
     ) -> None:
         async with self._lifecycle_lock:
@@ -540,8 +725,14 @@ class RuntimeProvider:
                     self._state = RuntimeState.FAILED
                     self._last_readiness = readiness
                     self._last_readiness_at = time.monotonic()
-                if initialization.done():
+                if initialization.done() and not initialization.cancelled():
+                    deadline_disarmed = deadline.disarm()
                     self._initialization = None
+                    if (
+                        deadline_disarmed
+                        and self._initialization_deadline is deadline
+                    ):
+                        self._initialization_deadline = None
 
     async def get(self) -> RuntimeServices:
         """Return only services that completed explicit startup initialization."""
@@ -735,104 +926,195 @@ class RuntimeProvider:
         self,
         runtime: RuntimeServices,
         lock: asyncio.Lock,
-    ) -> None:
+    ) -> bool:
         try:
             async with asyncio.timeout(self._shutdown_timeout):
                 async with lock:
-                    await runtime.close(self._shutdown_timeout)
+                    return await runtime.close(self._shutdown_timeout)
         except TimeoutError:
             logger.warning("AgentCore runtime cleanup did not finish before shutdown")
+            return False
 
-    async def _close_runtime(self, runtime: RuntimeServices) -> None:
+    async def _close_runtime(self, runtime: RuntimeServices) -> bool:
         with self._service_loop_lock:
             service_loop = self._service_loop
 
         current_loop = asyncio.get_running_loop()
         if service_loop is None:
-            await self._close_runtime_with_lock(
+            return await self._close_runtime_with_lock(
                 runtime,
                 self._startup_readiness_lock,
             )
-            return
         if service_loop is current_loop:
-            await self._close_runtime_with_lock(
+            return await self._close_runtime_with_lock(
                 runtime,
                 self._readiness_lock,
             )
-            return
         if not service_loop.is_running():
-            await runtime.close(self._shutdown_timeout)
-            return
+            return await runtime.close(self._shutdown_timeout)
 
         close_future = asyncio.run_coroutine_threadsafe(
             self._close_runtime_with_lock(runtime, self._readiness_lock),
             service_loop,
         )
         try:
-            await asyncio.wait_for(
+            return await asyncio.wait_for(
                 asyncio.wrap_future(close_future),
                 timeout=self._shutdown_timeout + 0.1,
             )
         except TimeoutError:
             close_future.cancel()
             logger.warning("AgentCore runtime cleanup did not finish on the request loop")
+            return False
 
     def _close_late_initialization(
         self,
         initialization: asyncio.Task[tuple[RuntimeServices, RuntimeReadiness]],
+        deadline: _ProcessDeadline | None,
     ) -> None:
         """Close a factory result that arrived after shutdown's deadline."""
 
         def _schedule_close(
             completed: asyncio.Task[tuple[RuntimeServices, RuntimeReadiness]],
         ) -> None:
+            if completed.cancelled():
+                return
             try:
                 runtime, _ = completed.result()
-            except BaseException:
+            except BaseException as exc:
+                _retain_deadline_for_initialization_failure(deadline, exc)
+                if deadline is not None:
+                    deadline.disarm()
                 return
             loop = completed.get_loop()
             if loop.is_running():
-                loop.create_task(runtime.close(self._shutdown_timeout))
+                async def _close_and_disarm() -> None:
+                    cleanup_complete = await runtime.close(self._shutdown_timeout)
+                    if cleanup_complete and deadline is not None:
+                        deadline.disarm()
+                    elif deadline is not None:
+                        deadline.require_expiration()
+
+                loop.create_task(_close_and_disarm())
             else:
                 logger.warning("Late AgentCore initialization completed after its loop stopped")
 
         initialization.add_done_callback(_schedule_close)
 
+    async def _close_owned_resources(
+        self,
+        runtime: RuntimeServices | None,
+        initialization: asyncio.Task[
+            tuple[RuntimeServices, RuntimeReadiness]
+        ] | None,
+        initialization_deadline: _ProcessDeadline | None,
+    ) -> bool:
+        if runtime is None and initialization is not None:
+            try:
+                done, _ = await asyncio.wait(
+                    (initialization,),
+                    timeout=self._shutdown_timeout,
+                )
+            except asyncio.CancelledError:
+                self._close_late_initialization(
+                    initialization,
+                    initialization_deadline,
+                )
+                raise
+            if initialization not in done:
+                self._close_late_initialization(
+                    initialization,
+                    initialization_deadline,
+                )
+                logger.warning("AgentCore initialization was still running at shutdown")
+                initialization_deadline = None
+                return False
+            elif initialization.cancelled():
+                initialization_deadline = None
+                return False
+            else:
+                try:
+                    runtime, _ = initialization.result()
+                except Exception as exc:
+                    _retain_deadline_for_initialization_failure(
+                        initialization_deadline,
+                        exc,
+                    )
+                    if initialization_deadline is not None:
+                        initialization_deadline.disarm()
+                    initialization_deadline = None
+
+        if runtime is not None:
+            cleanup_complete = await self._close_runtime(runtime)
+            if cleanup_complete and initialization_deadline is not None:
+                initialization_deadline.disarm()
+            elif initialization_deadline is not None:
+                initialization_deadline.require_expiration()
+            return cleanup_complete
+        return True
+
+    async def _finish_close(
+        self,
+        runtime: RuntimeServices | None,
+        initialization: asyncio.Task[
+            tuple[RuntimeServices, RuntimeReadiness]
+        ] | None,
+        initialization_deadline: _ProcessDeadline | None,
+        shutdown_deadline: _ProcessDeadline,
+    ) -> None:
+        cleanup_complete = False
+        try:
+            cleanup_complete = await self._close_owned_resources(
+                runtime,
+                initialization,
+                initialization_deadline,
+            )
+        finally:
+            if cleanup_complete:
+                shutdown_deadline.disarm()
+            else:
+                shutdown_deadline.require_expiration()
+            async with self._lifecycle_lock:
+                with self._state_lock:
+                    self._state = RuntimeState.CLOSED
+                    self._last_readiness = RuntimeReadiness(
+                        False,
+                        self._state.value,
+                        {"runtime": self._state.value},
+                    )
+                    self._last_readiness_at = time.monotonic()
+                    if self._closing is asyncio.current_task():
+                        self._closing = None
+
     async def close(self) -> None:
-        """Stop accepting services and close resources within a deadline."""
+        """Stop accepting services and retain cleanup ownership if cancelled."""
         async with self._lifecycle_lock:
             with self._state_lock:
                 if self._state is RuntimeState.CLOSED:
                     return
-                self._state = RuntimeState.CLOSING
-                self._lifecycle_epoch += 1
-                runtime = self._runtime
-                initialization = self._initialization
-                self._runtime = None
-                self._initialization = None
-                self._service_loop_initialized = False
+                if self._closing is None:
+                    self._state = RuntimeState.CLOSING
+                    self._lifecycle_epoch += 1
+                    runtime = self._runtime
+                    initialization = self._initialization
+                    initialization_deadline = self._initialization_deadline
+                    self._runtime = None
+                    self._initialization = None
+                    self._initialization_deadline = None
+                    self._service_loop_initialized = False
+                    shutdown_deadline = _ProcessDeadline(
+                        self._shutdown_timeout,
+                        self._shutdown_timeout_handler,
+                    )
+                    shutdown_deadline.start()
+                    self._closing = asyncio.create_task(
+                        self._finish_close(
+                            runtime,
+                            initialization,
+                            initialization_deadline,
+                            shutdown_deadline,
+                        )
+                    )
+                closing = self._closing
 
-        if runtime is None and initialization is not None:
-            try:
-                runtime, _ = await asyncio.wait_for(
-                    asyncio.shield(initialization),
-                    timeout=self._shutdown_timeout,
-                )
-            except TimeoutError:
-                self._close_late_initialization(initialization)
-                logger.warning("AgentCore initialization was still running at shutdown")
-            except Exception:
-                pass
-
-        if runtime is not None:
-            await self._close_runtime(runtime)
-
-        async with self._lifecycle_lock:
-            with self._state_lock:
-                self._state = RuntimeState.CLOSED
-                self._last_readiness = RuntimeReadiness(
-                    False,
-                    self._state.value,
-                    {"runtime": self._state.value},
-                )
-                self._last_readiness_at = time.monotonic()
+        await asyncio.shield(closing)

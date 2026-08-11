@@ -4,15 +4,21 @@ from __future__ import annotations
 
 import asyncio
 import json
+import subprocess
+import sys
 import threading
+import textwrap
 import time
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 import agentcore_agent
+import src.gateway.agentcore.runtime as runtime_module
 from src.gateway.agentcore.runtime import (
+    INITIALIZATION_TIMEOUT_EXIT_CODE,
     RuntimeCloseHook,
     RuntimeDependency,
     RuntimeInitializationError,
@@ -39,6 +45,9 @@ def _services(
         readiness_checks=checks,
         close_hooks=close_hooks,
     )
+
+
+_REPO = Path(__file__).resolve().parents[2]
 
 
 @pytest.mark.asyncio
@@ -133,6 +142,7 @@ async def test_failed_dependency_probe_fails_startup_and_closes_runtime() -> Non
 @pytest.mark.asyncio
 async def test_initialization_timeout_is_bounded_and_remains_fail_closed() -> None:
     release_factory = threading.Event()
+    timeout_fired = threading.Event()
     close_calls = 0
 
     async def close_runtime() -> None:
@@ -147,6 +157,7 @@ async def test_initialization_timeout_is_bounded_and_remains_fail_closed() -> No
         factory,
         initialization_timeout_seconds=0.02,
         shutdown_timeout_seconds=0.2,
+        _initialization_timeout_handler=lambda _: timeout_fired.set(),
     )
     started = time.monotonic()
 
@@ -157,6 +168,7 @@ async def test_initialization_timeout_is_bounded_and_remains_fail_closed() -> No
         await provider.initialize()
 
     assert time.monotonic() - started < 0.15
+    assert timeout_fired.wait(timeout=0.1)
     assert provider.state is RuntimeState.FAILED
     with pytest.raises(RuntimeUnavailableError):
         await provider.get()
@@ -165,6 +177,387 @@ async def test_initialization_timeout_is_bounded_and_remains_fail_closed() -> No
     await provider.close()
     assert provider.state is RuntimeState.CLOSED
     assert close_calls == 1
+
+
+def test_initialization_watchdog_terminates_cancellation_resistant_process() -> None:
+    script = textwrap.dedent(
+        """
+        import asyncio
+        import threading
+
+        from src.gateway.agentcore.runtime import RuntimeProvider
+
+        blocker = threading.Event()
+
+        def factory():
+            blocker.wait()
+
+        async def main():
+            provider = RuntimeProvider(
+                factory,
+                initialization_timeout_seconds=0.05,
+            )
+            initialization = asyncio.create_task(provider.initialize())
+            await asyncio.sleep(0.01)
+            initialization.cancel()
+            try:
+                await initialization
+            except asyncio.CancelledError:
+                pass
+            await asyncio.sleep(10)
+
+        asyncio.run(main())
+        """
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=_REPO,
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=3,
+    )
+
+    assert completed.returncode == INITIALIZATION_TIMEOUT_EXIT_CODE
+
+
+def test_dependency_timeout_keeps_process_watchdog_armed() -> None:
+    script = textwrap.dedent(
+        """
+        import asyncio
+        import threading
+
+        from src.gateway.agentcore.runtime import (
+            RuntimeDependency,
+            RuntimeInitializationError,
+            RuntimeProvider,
+            RuntimeServices,
+        )
+
+        blocker = threading.Event()
+
+        async def blocked_dependency():
+            return await asyncio.to_thread(blocker.wait)
+
+        def factory():
+            return RuntimeServices(
+                gateway=object(),
+                token_verifier=object(),
+                principal_resolver=object(),
+                project_resolver=object(),
+                readiness_checks=(
+                    RuntimeDependency(
+                        "principal_store",
+                        blocked_dependency,
+                        blocked_dependency,
+                    ),
+                ),
+            )
+
+        async def main():
+            provider = RuntimeProvider(
+                factory,
+                initialization_timeout_seconds=0.1,
+                readiness_timeout_seconds=0.02,
+            )
+            try:
+                await provider.initialize()
+            except RuntimeInitializationError:
+                pass
+            await asyncio.sleep(10)
+
+        asyncio.run(main())
+        """
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=_REPO,
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=3,
+    )
+
+    assert completed.returncode == INITIALIZATION_TIMEOUT_EXIT_CODE
+
+
+def test_cancelled_waiter_and_shutdown_cannot_disarm_dependency_timeout() -> None:
+    script = textwrap.dedent(
+        """
+        import asyncio
+        import threading
+
+        from src.gateway.agentcore.runtime import (
+            RuntimeDependency,
+            RuntimeProvider,
+            RuntimeServices,
+        )
+
+        blocker = threading.Event()
+        dependency_started = threading.Event()
+
+        async def blocked_dependency():
+            dependency_started.set()
+            return await asyncio.to_thread(blocker.wait)
+
+        def factory():
+            return RuntimeServices(
+                gateway=object(),
+                token_verifier=object(),
+                principal_resolver=object(),
+                project_resolver=object(),
+                readiness_checks=(
+                    RuntimeDependency(
+                        "principal_store",
+                        blocked_dependency,
+                        blocked_dependency,
+                    ),
+                ),
+            )
+
+        async def main():
+            provider = RuntimeProvider(
+                factory,
+                initialization_timeout_seconds=0.15,
+                readiness_timeout_seconds=0.02,
+            )
+            initialization = asyncio.create_task(provider.initialize())
+            await asyncio.to_thread(dependency_started.wait)
+            initialization.cancel()
+            try:
+                await initialization
+            except asyncio.CancelledError:
+                pass
+            await asyncio.sleep(0.04)
+            await provider.close()
+            await asyncio.sleep(10)
+
+        asyncio.run(main())
+        """
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=_REPO,
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=3,
+    )
+
+    assert completed.returncode == INITIALIZATION_TIMEOUT_EXIT_CODE
+
+
+@pytest.mark.asyncio
+async def test_successful_initialization_disarms_process_watchdog() -> None:
+    timeout_fired = threading.Event()
+    provider = RuntimeProvider(
+        _services,
+        initialization_timeout_seconds=0.02,
+        _initialization_timeout_handler=lambda _: timeout_fired.set(),
+    )
+
+    await provider.initialize()
+    await asyncio.sleep(0.05)
+
+    assert timeout_fired.is_set() is False
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_runtime_cannot_publish_ready_after_initialization_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    factory_started = threading.Event()
+    release_factory = threading.Event()
+    timeout_fired = threading.Event()
+
+    class DormantTimer:
+        daemon = False
+
+        def __init__(self, _timeout: float, _callback: Any) -> None:
+            pass
+
+        def start(self) -> None:
+            pass
+
+        def cancel(self) -> None:
+            pass
+
+    def factory() -> RuntimeServices:
+        factory_started.set()
+        release_factory.wait()
+        return _services()
+
+    monkeypatch.setattr(runtime_module.threading, "Timer", DormantTimer)
+    provider = RuntimeProvider(
+        factory,
+        initialization_timeout_seconds=0.05,
+        _initialization_timeout_handler=lambda _: timeout_fired.set(),
+    )
+    initialization = asyncio.create_task(provider.initialize())
+    assert await asyncio.to_thread(factory_started.wait, 0.1)
+
+    await provider._lifecycle_lock.acquire()
+    try:
+        release_factory.set()
+        await asyncio.sleep(0.06)
+        assert timeout_fired.is_set() is False
+    finally:
+        provider._lifecycle_lock.release()
+
+    with pytest.raises(
+        RuntimeInitializationError,
+        match="initialization timed out",
+    ):
+        await initialization
+
+    assert timeout_fired.is_set()
+    assert provider.state is RuntimeState.FAILED
+    with pytest.raises(RuntimeUnavailableError):
+        await provider.get()
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_shutdown_retains_late_initialization_cleanup() -> None:
+    factory_started = threading.Event()
+    release_factory = threading.Event()
+    runtime_closed = asyncio.Event()
+    timeout_fired = threading.Event()
+
+    async def close_runtime() -> None:
+        runtime_closed.set()
+
+    def factory() -> RuntimeServices:
+        factory_started.set()
+        release_factory.wait()
+        return _services(
+            close_hooks=(RuntimeCloseHook("runtime", close_runtime),),
+        )
+
+    provider = RuntimeProvider(
+        factory,
+        initialization_timeout_seconds=0.2,
+        shutdown_timeout_seconds=1,
+        _initialization_timeout_handler=lambda _: timeout_fired.set(),
+    )
+    initialization = asyncio.create_task(provider.initialize())
+    assert await asyncio.to_thread(factory_started.wait, 0.1)
+
+    shutdown = asyncio.create_task(provider.close())
+    for _ in range(20):
+        if provider.state is RuntimeState.CLOSING:
+            break
+        await asyncio.sleep(0.005)
+    assert provider.state is RuntimeState.CLOSING
+    shutdown.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await shutdown
+
+    release_factory.set()
+    await asyncio.wait_for(runtime_closed.wait(), timeout=0.1)
+    result = await asyncio.gather(initialization, return_exceptions=True)
+    assert isinstance(result[0], RuntimeInitializationError)
+    await asyncio.sleep(0.25)
+
+    assert timeout_fired.is_set() is False
+
+
+@pytest.mark.asyncio
+async def test_cancelled_shutdown_retains_ready_runtime_cleanup() -> None:
+    close_started = asyncio.Event()
+    release_close = asyncio.Event()
+    close_calls = 0
+
+    async def close_runtime() -> None:
+        nonlocal close_calls
+        close_calls += 1
+        close_started.set()
+        await release_close.wait()
+
+    provider = RuntimeProvider(
+        lambda: _services(
+            close_hooks=(RuntimeCloseHook("runtime", close_runtime),),
+        ),
+        shutdown_timeout_seconds=1,
+    )
+    await provider.initialize()
+
+    shutdown = asyncio.create_task(provider.close())
+    await asyncio.wait_for(close_started.wait(), timeout=0.1)
+    shutdown.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await shutdown
+
+    assert provider.state is RuntimeState.CLOSING
+    release_close.set()
+    for _ in range(20):
+        if provider.state is RuntimeState.CLOSED:
+            break
+        await asyncio.sleep(0.005)
+
+    assert provider.state is RuntimeState.CLOSED
+    assert close_calls == 1
+    await provider.close()
+    assert close_calls == 1
+
+
+def test_shutdown_watchdog_terminates_stuck_cleanup_worker() -> None:
+    script = textwrap.dedent(
+        """
+        import asyncio
+        import threading
+
+        from src.gateway.agentcore.runtime import (
+            RuntimeCloseHook,
+            RuntimeProvider,
+            RuntimeServices,
+        )
+
+        blocker = threading.Event()
+
+        async def blocked_close():
+            await asyncio.to_thread(blocker.wait)
+
+        def factory():
+            return RuntimeServices(
+                gateway=object(),
+                token_verifier=object(),
+                principal_resolver=object(),
+                project_resolver=object(),
+                close_hooks=(RuntimeCloseHook("blocked", blocked_close),),
+            )
+
+        async def main():
+            provider = RuntimeProvider(
+                factory,
+                shutdown_timeout_seconds=0.05,
+            )
+            await provider.initialize()
+            await provider.close()
+            await asyncio.sleep(10)
+
+        asyncio.run(main())
+        """
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=_REPO,
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=3,
+    )
+
+    assert completed.returncode == INITIALIZATION_TIMEOUT_EXIT_CODE
 
 
 @pytest.mark.asyncio
