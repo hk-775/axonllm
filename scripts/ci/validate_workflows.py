@@ -18,6 +18,18 @@ PINNED_ACTION = re.compile(
 )
 VALID_PERMISSION = {"read", "write", "none"}
 ALLOWED_WRITE_PERMISSIONS = {"id-token", "security-events"}
+APPROVED_ACTION_PINS = {
+    "actions/checkout": "fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09",
+    "actions/download-artifact": "37930b1c2abaa49bbe596cd826c3c89aef350131",
+    "actions/setup-node": "a0853c24544627f65ddf259abe73b1d18a591444",
+    "actions/setup-python": "ece7cb06caefa5fff74198d8649806c4678c61a1",
+    "actions/upload-artifact": "b7c566a772e6b6bfb58ed0dc250532a479d7789f",
+    "aws-actions/configure-aws-credentials": (
+        "e6de054238d6b7531b4efff3b6587d9aade6a06c"
+    ),
+    "docker/setup-buildx-action": "bb05f3f5519dd87d3ba754cc423b652a5edd6d2c",
+    "docker/setup-qemu-action": "96fe6ef7f33517b61c61be40b68a1882f3264fb8",
+}
 
 
 class WorkflowPolicyError(RuntimeError):
@@ -61,6 +73,16 @@ def _action(action: Any, location: str, settings: Any = None) -> None:
     if not PINNED_ACTION.fullmatch(action):
         raise WorkflowPolicyError(
             f"{location}: external action is not pinned to a full commit SHA: {action}"
+        )
+    action_name, commit = action.rsplit("@", maxsplit=1)
+    approved_commit = APPROVED_ACTION_PINS.get(action_name)
+    if approved_commit is None:
+        raise WorkflowPolicyError(
+            f"{location}: external action is not approved: {action_name}"
+        )
+    if commit != approved_commit:
+        raise WorkflowPolicyError(
+            f"{location}: external action pin is not approved: {action}"
         )
     if action.startswith("actions/checkout@") and (
         not isinstance(settings, dict)
