@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.5] - 2026-08-11
+
 ### Added
 
 - **AgentCore first-adopter identity and deployment workflow.** `axon setup
@@ -20,6 +22,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   verifies the first administrator, deploys the runtime, and idempotently
   verifies canonical tenant authority. Anonymous seeded use is separately
   labeled and requires `axon setup local-demo --acknowledge-non-production`.
+- **Bounded Athena query and shared control plane.** The Starlette
+  gateway and AgentCore runtime now share a credential-free, tenant-scoped
+  `SELECT` service with SQL validation, admission limits, canonical project
+  authorization, and durable audit records. Admin-only datasource management
+  is exposed through HTTP, and `AxonLLMControlPlaneStack` provides the separate
+  authenticated administration surface that the AgentCore runtime
+  intentionally does not mount.
+
+### Security
+
+- **Deployment verification now scans the exact signed target platform.**
+  Multi-architecture ECR references are resolved to the platform recorded in
+  release evidence before Trivy rescans the deployment image.
+
+### Fixed
+
+- **A recovery cutover left the primary state table writable.** The Fargate task
+  role always retained its stack-managed table grant while a second conditional
+  policy added the restored table. State access now resolves through the same
+  CloudFormation condition as `AXON_DYNAMODB_TABLE`, so the role can reach only
+  the selected table and its indexes.
+- **The ensemble concurrency property depended on CI wall-clock timing.** It now
+  verifies panel and judge coroutine ordering directly, preserving the
+  concurrency regression check without runner-contention failures.
+
+### Documentation
+
+- Added the AgentCore query and control-plane flows to the feature catalog,
+  deployment runbooks, hardening assessment, PRD, and PRFAQ, and corrected
+  production-validation status to distinguish retained release evidence from
+  resources that are actually deployed.
+
+## [0.2.4] - 2026-08-10
 
 ### Documentation
 
@@ -44,11 +79,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **A recovery cutover left the primary state table writable.** The Fargate task
-  role always retained its stack-managed table grant while a second conditional
-  policy added the restored table. State access now resolves through the same
-  CloudFormation condition as `AXON_DYNAMODB_TABLE`, so the role can reach only
-  the selected table and its indexes.
 - **A project or per-user config written through the API gated only the task that
   served the write.** `self.projects` and `self._user_configs` are hydrated once at
   startup and thereafter mutated only by the instance that took the write. Both
