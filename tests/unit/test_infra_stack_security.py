@@ -1083,7 +1083,7 @@ def test_task_role_has_item_permissions_for_atomic_state_transactions(
         for policy in policies
         for statement in policy["Properties"]["PolicyDocument"]["Statement"]
     ]
-    state_access = next(
+    state_access_statements = [
         statement
         for statement in statements
         if "dynamodb:ConditionCheckItem"
@@ -1092,44 +1092,10 @@ def test_task_role_has_item_permissions_for_atomic_state_transactions(
             if isinstance(statement["Action"], list)
             else [statement["Action"]]
         )
-    )
-    assert {
-        "dynamodb:ConditionCheckItem",
-        "dynamodb:DeleteItem",
-        "dynamodb:GetItem",
-        "dynamodb:PutItem",
-        "dynamodb:UpdateItem",
-    } <= set(state_access["Action"])
-    assert state_access["Resource"][0]["Fn::GetAtt"][0].startswith(
-        "StateTable"
-    )
-    assert state_access["Resource"][0]["Fn::GetAtt"][1] == "Arn"
-    all_actions = {
-        action
-        for statement in statements
-        for action in (
-            statement["Action"]
-            if isinstance(statement["Action"], list)
-            else [statement["Action"]]
-        )
-    }
-    assert "dynamodb:TransactGetItems" not in all_actions
-    assert "dynamodb:TransactWriteItems" not in all_actions
-
-    recovered_state_policy = next(
-        policy
-        for policy in policies
-        if any(
-            statement.get("Sid") == "UseSelectedRecoveryTable"
-            for statement in policy["Properties"][
-                "PolicyDocument"
-            ]["Statement"]
-        )
-    )
-    assert recovered_state_policy["Condition"] == "UseRecoveredState"
-    recovered_state_access = recovered_state_policy["Properties"][
-        "PolicyDocument"
-    ]["Statement"][0]
+    ]
+    assert len(state_access_statements) == 1
+    state_access = state_access_statements[0]
+    assert state_access["Sid"] == "UseSelectedStateTable"
     assert {
         "dynamodb:BatchGetItem",
         "dynamodb:BatchWriteItem",
@@ -1141,12 +1107,34 @@ def test_task_role_has_item_permissions_for_atomic_state_transactions(
         "dynamodb:Query",
         "dynamodb:Scan",
         "dynamodb:UpdateItem",
-    } == set(recovered_state_access["Action"])
-    resource_parts = recovered_state_access["Resource"]["Fn::Join"][1]
-    assert resource_parts[-2:] == [
-        ":table/",
+    } == set(state_access["Action"])
+    selected_table_conditions = _values_for_key(
+        state_access["Resource"],
+        "Fn::If",
+    )
+    assert len(selected_table_conditions) == 2
+    assert selected_table_conditions[0] == selected_table_conditions[1]
+    selected_table = selected_table_conditions[0]
+    assert selected_table[:2] == [
+        "UseRecoveredState",
         {"Ref": "RuntimeStateTableName"},
     ]
+    primary_table_id = selected_table[2]["Ref"]
+    assert synthesized_template["Resources"][primary_table_id]["Type"] == (
+        "AWS::DynamoDB::Table"
+    )
+    assert state_access["Resource"][1]["Fn::Join"][1][-1] == "/index/*"
+    all_actions = {
+        action
+        for statement in statements
+        for action in (
+            statement["Action"]
+            if isinstance(statement["Action"], list)
+            else [statement["Action"]]
+        )
+    }
+    assert "dynamodb:TransactGetItems" not in all_actions
+    assert "dynamodb:TransactWriteItems" not in all_actions
 
     publish = next(
         statement

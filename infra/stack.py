@@ -1340,46 +1340,33 @@ class AxonLLMStack(Stack):
             )
         )
 
-        # DynamoDB — single state table (matches AXON_DYNAMODB_TABLE)
-        state_table.grant_read_write_data(task_role)
-        recovered_state_policy = iam.Policy(
-            self,
-            "RecoveredStateAccessPolicy",
-            statements=[
-                iam.PolicyStatement(
-                    sid="UseSelectedRecoveryTable",
-                    actions=[
-                        "dynamodb:BatchGetItem",
-                        "dynamodb:BatchWriteItem",
-                        "dynamodb:ConditionCheckItem",
-                        "dynamodb:DeleteItem",
-                        "dynamodb:DescribeTable",
-                        "dynamodb:GetItem",
-                        "dynamodb:PutItem",
-                        "dynamodb:Query",
-                        "dynamodb:Scan",
-                        "dynamodb:UpdateItem",
-                    ],
-                    resources=[
-                        self.format_arn(
-                            service="dynamodb",
-                            resource="table",
-                            resource_name=(
-                                runtime_state_table_name.value_as_string
-                            ),
-                        )
-                    ],
-                )
-            ],
+        # Resolve IAM through the same condition as AXON_DYNAMODB_TABLE so a
+        # recovery cutover never leaves both state tables writable.
+        selected_state_table_arn = self.format_arn(
+            service="dynamodb",
+            resource="table",
+            resource_name=selected_state_table_name,
         )
-        recovered_state_policy.attach_to_role(task_role)
-        recovered_state_policy_resource = (
-            recovered_state_policy.node.default_child
-        )
-        if not isinstance(recovered_state_policy_resource, iam.CfnPolicy):
-            raise TypeError("recovered-state policy did not create CfnPolicy")
-        recovered_state_policy_resource.cfn_options.condition = (
-            use_recovered_state
+        task_role.add_to_policy(
+            iam.PolicyStatement(
+                sid="UseSelectedStateTable",
+                actions=[
+                    "dynamodb:BatchGetItem",
+                    "dynamodb:BatchWriteItem",
+                    "dynamodb:ConditionCheckItem",
+                    "dynamodb:DeleteItem",
+                    "dynamodb:DescribeTable",
+                    "dynamodb:GetItem",
+                    "dynamodb:PutItem",
+                    "dynamodb:Query",
+                    "dynamodb:Scan",
+                    "dynamodb:UpdateItem",
+                ],
+                resources=[
+                    selected_state_table_arn,
+                    f"{selected_state_table_arn}/index/*",
+                ],
+            )
         )
 
         # Durable security-event delivery and retry processing.
