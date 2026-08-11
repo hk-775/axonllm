@@ -37,6 +37,8 @@ multi-tenant deployment:
 - Fargate and AgentCore CDK stacks with private networking, encryption,
   retained backups, alarms, immutable image parameters, and production runtime
   profiles;
+- event-loop-independent AgentCore lifecycle containment that exits the process
+  when bootstrap or cleanup work outlives its deadline;
 - a separate retained/deletion-protected Cognito identity stack plus a strict
   schema-v2 first-adopter workflow for managed Cognito or existing OIDC, with
   restartable first-admin canonical bootstrap and no unauthenticated AgentCore

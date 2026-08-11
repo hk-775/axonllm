@@ -37,8 +37,13 @@ has been retained for them.
 | `GET /ready` | Bounded runtime, OIDC/JWKS, canonical principal-store, and security-event outbox readiness |
 
 Default lifecycle bounds are 60 seconds for initialization, 5 seconds for
-readiness, a 5-second readiness cache, and 10 seconds for shutdown. The CDK
-runtime uses a 10-minute idle session timeout and 4-hour maximum lifetime.
+readiness, a 5-second readiness cache, and 10 seconds for shutdown. A watchdog
+thread owns the initialization deadline independently of the asyncio loop. If
+bootstrap ownership is not safely resolved by that deadline, the process exits
+with status `124`; AgentCore must replace the failed container. The CDK runtime
+uses a 10-minute idle session timeout and 4-hour maximum lifetime. Shutdown is
+single-flight, retains cleanup ownership when its caller is cancelled, and has
+the same fail-stop process boundary when cleanup outlives 10 seconds.
 
 AgentCore does not mount the Starlette admin console or HTTP API. Its `query`
 action uses the same datasource repository, SQL policy, Athena executor,
@@ -196,8 +201,14 @@ It points at another local checkout and uses public networking without the CDK
 stack's JWT/header/private-network controls.
 
 Gateway construction runs in `asyncio.to_thread`. Python cannot forcibly stop
-that synchronous worker if it outlives the initialization timeout. Retain an
-external process/runtime startup deadline.
+that synchronous worker, so the runtime watchdog terminates the complete
+process if bootstrap outlives its initialization deadline. Do not catch or
+override exit status `124`; investigate the blocked dependency and let
+AgentCore replace the failed container. The watchdog also remains armed when a
+startup dependency probe times out because cancellation cannot stop its native
+SDK worker. Python watchdog threads still depend on interpreter scheduling, so
+the AgentCore platform startup/termination deadline remains required for a
+native call that holds the GIL.
 
 ### Shared-State Control Plane
 
@@ -482,7 +493,9 @@ Before traffic:
 9. Verify failures for missing/invalid tokens, payload identity fields, inactive
    membership, missing grants, cross-tenant projects, and missing service scopes.
 10. Exercise streaming and any response control that requires buffering.
-11. Enforce the external startup/termination deadline.
+11. Verify an initialization timeout exits the container with status `124` and
+    AgentCore replaces it; retain the platform startup deadline as defense in
+    depth.
 12. Deliver one security event through each enabled destination, verify the
    outbox drains, and test the DLQ alarm and controlled redrive procedure.
 
