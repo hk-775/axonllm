@@ -83,6 +83,39 @@ class AxonLLMIdentityStack(Stack):
                 "/oauth2/idpresponse",
             ],
         )
+        ses_from_email = CfnParameter(
+            self,
+            "SesFromEmail",
+            type="String",
+            min_length=6,
+            max_length=320,
+            allowed_pattern=(
+                r"^[^@\s]+@(?:[a-z0-9](?:[a-z0-9-]{0,61}"
+                r"[a-z0-9])?\.)+[a-z]{2,63}$"
+            ),
+            constraint_description=(
+                "must be a verified SES email address with a lowercase "
+                "fully qualified domain"
+            ),
+            description=(
+                "Verified SES sender used for Cognito invitations and recovery"
+            ),
+        )
+        ses_verified_domain = CfnParameter(
+            self,
+            "SesVerifiedDomain",
+            type="String",
+            min_length=4,
+            max_length=253,
+            allowed_pattern=(
+                r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}"
+                r"[a-z0-9])?\.)+[a-z]{2,63}$"
+            ),
+            constraint_description=(
+                "must be the lowercase SES-verified domain of SesFromEmail"
+            ),
+            description="SES-verified domain used by the Cognito user pool",
+        )
 
         user_pool = cognito.UserPool(
             self,
@@ -111,6 +144,10 @@ class AxonLLMIdentityStack(Stack):
                 ),
             },
             account_recovery=cognito.AccountRecovery.EMAIL_ONLY,
+            email=cognito.UserPoolEmail.with_ses(
+                from_email=ses_from_email.value_as_string,
+                from_name="AxonLLM",
+            ),
             password_policy=cognito.PasswordPolicy(
                 min_length=14,
                 require_lowercase=True,
@@ -125,7 +162,7 @@ class AxonLLMIdentityStack(Stack):
                 otp=True,
             ),
             user_invitation=cognito.UserInvitationConfig(
-                email_subject="Your AxonLLM administrator invitation",
+                email_subject="Your AxonLLM invitation",
                 email_body=(
                     "Your AxonLLM username is {username} and your temporary "
                     "password is {####}. Sign in and enroll TOTP MFA before "
@@ -134,6 +171,14 @@ class AxonLLMIdentityStack(Stack):
             ),
             deletion_protection=True,
             removal_policy=RemovalPolicy.RETAIN,
+        )
+        user_pool.node.default_child.add_property_override(
+            "EmailConfiguration.SourceArn",
+            self.format_arn(
+                service="ses",
+                resource="identity",
+                resource_name=ses_verified_domain.value_as_string,
+            ),
         )
 
         readable_attributes = (

@@ -76,11 +76,19 @@ def test_identity_inputs_are_explicit_https_values(identity_template):
     assert "Default" not in parameters["HostedUiDomainPrefix"]
     assert "Default" not in parameters["OAuthCallbackUrls"]
     assert "Default" not in parameters["ControlPlaneDomainName"]
+    assert "Default" not in parameters["SesFromEmail"]
+    assert "Default" not in parameters["SesVerifiedDomain"]
     assert parameters["HostedUiDomainPrefix"]["MinLength"] == 3
     assert parameters["HostedUiDomainPrefix"]["MaxLength"] == 63
     assert parameters["OAuthCallbackUrls"]["Type"] == "CommaDelimitedList"
     assert parameters["OAuthCallbackUrls"]["AllowedPattern"].startswith("^https://")
     assert parameters["ControlPlaneDomainName"]["AllowedPattern"].endswith(
+        r"[a-z]{2,63}$"
+    )
+    assert parameters["SesFromEmail"]["AllowedPattern"].startswith(
+        r"^[^@\s]+@"
+    )
+    assert parameters["SesVerifiedDomain"]["AllowedPattern"].endswith(
         r"[a-z]{2,63}$"
     )
 
@@ -98,6 +106,19 @@ def test_user_pool_is_retained_and_operator_enrolled(identity_template):
     assert properties["UsernameAttributes"] == ["email"]
     assert properties["UsernameConfiguration"]["CaseSensitive"] is False
     assert properties["AccountRecoverySetting"]["RecoveryMechanisms"] == [{"Name": "verified_email", "Priority": 1}]
+    email = properties["EmailConfiguration"]
+    assert email["EmailSendingAccount"] == "DEVELOPER"
+    assert email["From"]["Fn::Join"][1] == [
+        "AxonLLM <",
+        {"Ref": "SesFromEmail"},
+        ">",
+    ]
+    source_parts = email["SourceArn"]["Fn::Join"][1]
+    assert source_parts[-2:] == [
+        ":identity/",
+        {"Ref": "SesVerifiedDomain"},
+    ]
+    assert {"Ref": "AWS::AccountId"} in source_parts
 
 
 def test_password_and_totp_policy_fail_closed(identity_template):

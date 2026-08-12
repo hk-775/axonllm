@@ -339,6 +339,8 @@ export AXON_CONTROL_PLANE_CERTIFICATE_ARN='arn:aws:acm:us-east-1:123456789012:ce
 export AXON_CONTROL_PLANE_PUBLIC_HOSTED_ZONE_ID='Z0123456789EXAMPLE'
 export AXON_CONTROL_PLANE_APPROVED_INGRESS_PREFIX_LIST_ID='pl-0123456789abcdef1'
 export AXON_CONTROL_PLANE_APPROVED_HTTPS_PREFIX_LIST_ID='pl-0123456789abcdef2'
+export AXON_COGNITO_SES_FROM_EMAIL='no-reply@example.com'
+export AXON_COGNITO_SES_VERIFIED_DOMAIN='example.com'
 # Optional SCIM credential map and managed-SAML landing path:
 export AXON_CONTROL_PLANE_SCIM_TENANTS_SECRET_ARN='arn:aws:secretsmanager:us-east-1:123456789012:secret:axonllm/scim-AbCd12'
 export AXON_CONTROL_PLANE_SAML_LOGIN_PATH='/admin/dashboard'
@@ -368,6 +370,12 @@ client must generate a verifier and send
 application. Invoke AgentCore with the returned **ID token**, which carries
 `custom:tenant_id` and `custom:project_id`. Do not substitute the Cognito access
 token, which does not contain those user attributes by default.
+
+The SES sender and its exact lowercase domain must be verified in the deployment
+region before the identity stack is deployed. If they are omitted, the
+first-adopter command uses the administrator email and its domain as explicit
+SES inputs; that identity must then be verified. Cognito is configured with the
+SES developer account, not the account-limited Cognito default sender.
 
 Omit the optional SCIM secret ARN when SCIM is disabled. Its complete
 `SecretString` is the tenant map accepted by `AXON_SCIM_TENANTS`; the
@@ -406,6 +414,69 @@ The deployer sends the initial invitation through Cognito, never handles a
 temporary password, and refuses to reassign an existing user to another tenant
 or project. A rerun verifies the same Cognito `sub` and then idempotently
 verifies canonical authority.
+
+### Managed user lifecycle
+
+Use the operations command after the identity and AgentCore stacks exist. Every
+command requires the exact `UserPoolId`, `OidcIssuer`, and runtime
+`StateTableName` stack outputs:
+
+```bash
+COMMON_IDENTITY_ARGS=(
+  --region us-east-1
+  --user-pool-id us-east-1_EXAMPLE
+  --table-name axonllm-agentcore-state
+  --issuer https://cognito-idp.us-east-1.amazonaws.com/us-east-1_EXAMPLE
+)
+
+uv run python scripts/operations/manage_managed_identity.py \
+  "${COMMON_IDENTITY_ARGS[@]}" invite-user \
+  --user-name member@example.com \
+  --email member@example.com \
+  --display-name "Tenant Member" \
+  --tenant tenant-a \
+  --role tenant_member \
+  --project project-a \
+  --default-project project-a
+
+uv run python scripts/operations/manage_managed_identity.py \
+  "${COMMON_IDENTITY_ARGS[@]}" update-user \
+  --user-name member@example.com \
+  --email member@example.com \
+  --display-name "Tenant Auditor" \
+  --tenant tenant-a \
+  --role tenant_auditor \
+  --project project-a \
+  --default-project project-a
+
+uv run python scripts/operations/manage_managed_identity.py \
+  "${COMMON_IDENTITY_ARGS[@]}" disable-user \
+  --user-name member@example.com \
+  --tenant tenant-a
+```
+
+Invite is create-or-verify and can finish a partial canonical provision. Update
+can change only an active user's profile, tenant role, project grants, and
+default project hint; it cannot move the immutable Cognito subject to another
+tenant. Disable first blocks Cognito and revokes sessions, then marks the
+canonical principal deprovisioned and removes every project grant. All three
+operations are restartable. Tenant roles are limited to `tenant_admin`,
+`tenant_member`, and `tenant_auditor`; tenant SCIM still rejects
+`platform_admin` and `service`.
+
+Create a platform operator through the separate, explicit path:
+
+```bash
+uv run python scripts/operations/manage_managed_identity.py \
+  "${COMMON_IDENTITY_ARGS[@]}" bootstrap-operator \
+  --user-name operator@example.com \
+  --email operator@example.com
+```
+
+This command creates a dedicated Cognito identity whose canonical
+`platform_admin` principal is written directly outside the SCIM directory. Its
+synthetic project claim grants no project access. Platform-only surfaces work
+normally; tenant access still requires the audited break-glass headers.
 
 ### Existing OIDC
 
