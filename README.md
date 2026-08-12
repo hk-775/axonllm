@@ -50,7 +50,7 @@ install paths — local or AWS, seeded or clean — and which flag decides.
 ## Features
 
 ### Routing & Providers
-- **Multi-provider routing** — 13 provider adapters: Bedrock, Bedrock Mantle, Anthropic, OpenAI, Azure, Vertex AI, Google AI, Cohere, AI21, Fireworks, Groq, Together, xAI. The shipped registry configures 51 logical models across 56 provider mappings; 46 models are production-price-ready with the shipped pricing. AgentCore enables 12 providers by default; direct `ai21` is opt-in, while AI21 Jamba 1.5 remains available through the default `bedrock` provider.
+- **Multi-provider routing** — 13 provider adapters: Bedrock, Bedrock Mantle, Anthropic, OpenAI, Azure, Vertex AI, Google AI, Cohere, AI21, Fireworks, Groq, Together, xAI. The shipped registry configures 51 logical models across 55 provider mappings; 46 models are production-price-ready with the shipped pricing. AgentCore enables 12 providers by default; direct `ai21` is opt-in, while AI21 Jamba 1.5 remains available through the default `bedrock` provider.
 - **Adaptive provider route pools** — balance multiple credentials and endpoints per provider using route-level health, token-adjusted latency, capacity, priority, and recovery probes; reuse TCP/TLS pools by transport identity
 - **Tool calling (function calling)** — send OpenAI-shaped `tools`/`tool_choice`; each adapter translates into its provider's own dialect (Anthropic `input_schema`, Bedrock `toolSpec`, Gemini `functionDeclarations`, Cohere `parameter_definitions`) and translates the call back. One tool definition works across every provider.
 - **5 routing strategies** — round-robin, weighted, least-latency, cost-optimized, smart (intent-aware)
@@ -493,6 +493,9 @@ monitoring and DLQ recovery.
 
 `BedrockInvokeResourceArns` is required and accepts only a comma-separated list
 of concrete Bedrock model or inference-profile ARNs; wildcards are rejected.
+For a cross-region inference profile, supply the profile ARN and every
+foundation-model destination ARN returned by `GetInferenceProfile`; Bedrock
+evaluates authorization against both resources.
 `deploy-fargate.sh` requires the same value as
 `AXON_BEDROCK_INVOKE_RESOURCE_ARNS` and maps it to that CloudFormation
 parameter. The script also supplies `AXON_VERIFIED_IMAGE_URI`, but leaves
@@ -1730,6 +1733,10 @@ resp = client.chat.completions.create(model="claude-sonnet", messages=messages, 
 
 Notes that matter in practice:
 
+- **Treat tool-call IDs as opaque and echo them unchanged.** Gemini 3 requires
+  signed continuation state; AxonLLM carries it inside the standard OpenAI
+  tool-call ID so clients need no provider-specific field. Regenerating or
+  truncating the ID breaks the next tool-loop turn.
 - **`arguments` is a JSON string** in OpenAI's shape (and an object in every other
   dialect). AxonLLM re-encodes at each boundary; a model that emits malformed JSON
   yields `{}` rather than failing the request, so your tool reports the bad call.

@@ -36,7 +36,7 @@ EXPECTED_CERTIFICATION_MODELS = {
     "bedrock-mantle": "gpt-oss-120b-mantle",
     "cohere": "cohere-command-r",
     "fireworks": "fireworks-deepseek-v4",
-    "google_ai": "gemini-2.5-pro",
+    "google_ai": "gemini-3.5-flash",
     "groq": "groq-llama-3.3-70b",
     "openai": "gpt-4.1",
     "together": "together-llama-3.3-70b",

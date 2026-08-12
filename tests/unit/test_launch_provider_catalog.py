@@ -6,6 +6,7 @@ from pathlib import Path
 
 import yaml
 
+from src.gateway.adapters.google_ai_adapter import GoogleAIAdapter
 from src.gateway.admin.pricing_drift import audit_pricing
 from src.gateway.config_loader import load_pricing_config
 from src.gateway.model_registry import ModelRegistry
@@ -210,6 +211,26 @@ def test_launch_provider_mappings_are_described_in_the_catalog() -> None:
     }
 
     assert LAUNCH_MAPPINGS <= described
+
+
+def test_new_adopters_do_not_route_gemini_2_5_pro_through_google_ai() -> None:
+    routed = set(_routed_mappings())
+
+    assert ("google_ai", "gemini-2.5-pro") not in routed
+    assert ("vertex_ai", "gemini-2.5-pro") in routed
+
+
+def test_google_ai_adapter_models_match_launch_catalog() -> None:
+    adapter_models = {
+        model.model_id
+        for model in GoogleAIAdapter._MODELS
+    }
+    catalog_models = {
+        model["model_id"]
+        for model in _catalog()["google_ai"]["models"]
+    }
+
+    assert adapter_models == catalog_models
 
 
 def test_deprecated_cohere_aliases_are_not_routed() -> None:

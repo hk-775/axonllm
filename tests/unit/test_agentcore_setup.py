@@ -40,6 +40,14 @@ _DIGEST = "e368b7b4522f4838f3ebb4dcc04967682c73cb73e7e40ce16421a6a1ffda6147"
 _IMAGE = f"123456789012.dkr.ecr.us-east-1.amazonaws.com/axonllm/agentcore@sha256:{_DIGEST}"
 _CONTROL_IMAGE = f"123456789012.dkr.ecr.us-east-1.amazonaws.com/axonllm/control-plane@sha256:{_DIGEST}"
 _BEDROCK_ARN = "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-5-sonnet-20241022-v2:0"
+_BEDROCK_PROFILE_ARN = (
+    "arn:aws:bedrock:us-east-1:123456789012:"
+    "inference-profile/us.anthropic.claude-sonnet-4-6"
+)
+_BEDROCK_PROFILE_DESTINATION_ARN = (
+    "arn:aws:bedrock:us-west-2::"
+    "foundation-model/anthropic.claude-sonnet-4-6"
+)
 _ATHENA_ROLE_ARN = "arn:aws:iam::123456789012:role/axon-athena-project-a"
 _CERTIFICATE_ARN = "arn:aws:acm:us-east-1:123456789012:certificate/11111111-2222-3333-4444-555555555555"
 _SCIM_SECRET_ARN = "arn:aws:secretsmanager:us-east-1:123456789012:secret:axonllm/scim-AbCd12"
@@ -348,6 +356,39 @@ def test_setup_rejects_mutable_images_wildcards_and_client_secrets():
         match="unsupported fields: client_secret",
     ):
         AgentCoreSetupConfig.from_mapping(secret)
+
+
+def test_setup_accepts_cross_region_foundation_model_destinations():
+    value = _base()
+    value["runtime"]["bedrock_invoke_resource_arns"] = [
+        _BEDROCK_PROFILE_ARN,
+        _BEDROCK_ARN,
+        _BEDROCK_PROFILE_DESTINATION_ARN,
+    ]
+
+    config = AgentCoreSetupConfig.from_mapping(value)
+
+    assert config.runtime.bedrock_invoke_resource_arns == (
+        _BEDROCK_PROFILE_ARN,
+        _BEDROCK_ARN,
+        _BEDROCK_PROFILE_DESTINATION_ARN,
+    )
+
+
+def test_setup_rejects_cross_region_inference_profiles():
+    value = _base()
+    value["runtime"]["bedrock_invoke_resource_arns"] = [
+        (
+            "arn:aws:bedrock:us-west-2:123456789012:"
+            "inference-profile/us.anthropic.claude-sonnet-4-6"
+        )
+    ]
+
+    with pytest.raises(
+        AgentCoreSetupError,
+        match="inference profiles and account-scoped resources must be in us-east-1",
+    ):
+        AgentCoreSetupConfig.from_mapping(value)
 
 
 def test_optional_athena_query_setup_is_exact_and_bounded():

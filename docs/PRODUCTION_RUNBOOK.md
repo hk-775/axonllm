@@ -513,7 +513,10 @@ open-egress fallback.
 `AXON_BEDROCK_INVOKE_RESOURCE_ARNS` must be a comma-separated list of concrete
 Bedrock model or inference-profile ARNs. The CloudFormation parameter rejects
 wildcards and the resulting list scopes the task role's Bedrock invoke
-permissions.
+permissions. A cross-region inference profile requires its own ARN plus every
+regional foundation-model ARN in `GetInferenceProfile.models`; omitting a
+destination can produce an intermittent `AccessDenied` when Bedrock routes
+there.
 
 The stack gives its retained provider secret a CloudFormation-generated physical
 name. Consumers must resolve the `ProviderSecretArn` stack output rather than
