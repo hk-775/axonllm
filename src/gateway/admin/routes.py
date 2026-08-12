@@ -294,6 +294,8 @@ PROVIDER_MODEL_CATALOG = {
             {"model_id": "us.amazon.nova-lite-v1:0", "name": "Amazon Nova Lite", "capabilities": ["chat"]},
             {"model_id": "us.amazon.nova-micro-v1:0", "name": "Amazon Nova Micro", "capabilities": ["chat"]},
             {"model_id": "us.deepseek.r1-v1:0", "name": "DeepSeek R1", "capabilities": ["chat", "reasoning"]},
+            {"model_id": "ai21.jamba-1-5-large-v1:0", "name": "AI21 Jamba 1.5 Large", "capabilities": ["chat"]},
+            {"model_id": "ai21.jamba-1-5-mini-v1:0", "name": "AI21 Jamba 1.5 Mini", "capabilities": ["chat"]},
         ],
     },
     "azure_openai": {
@@ -3222,7 +3224,12 @@ class AdminAPI:
         report = audit_pricing(self.model_registry, self.cost_tracker.pricing_config)
         return HTMLResponse(
             render_drift_page(
-                report, self._pricing_path, embed=_is_embedded(request)
+                report,
+                self._pricing_path,
+                embed=_is_embedded(request),
+                unpriced_mappings_blocked=(
+                    self._app_config.deployment_profile == "production"
+                ),
             )
         )
 
@@ -3261,10 +3268,11 @@ class AdminAPI:
     async def production_checklist(self, request: Request) -> HTMLResponse:
         """Report whether this deployment is ready to carry real traffic.
 
-        Every check behind this page covers something that fails silently — an
-        unpriced model billing $0.00, LOG_ONLY auth admitting every request, a
-        retired model id — so the state is only visible if something asks. Run
-        fresh per request from the live config, so a fix shows on reload.
+        Every check behind this page covers something that fails quietly — an
+        unpriced mapping being unavailable in production, LOG_ONLY auth
+        admitting every request, or a retired model id — so the state is only
+        visible if something asks. Run fresh per request from the live config,
+        so a fix shows on reload.
 
         Hidden in demo mode: ``run_checklist`` returns a did-not-run report and
         the page explains why, rather than listing failures that are correct for

@@ -309,6 +309,33 @@ class TestEnsembleRoutingIntegration:
         assert meta["fallback_used"] is False
 
     @pytest.mark.asyncio
+    async def test_unavailable_member_rejects_before_any_panel_call(
+        self,
+        mock_rate_limiter,
+        cost_tracker,
+    ):
+        preset = _make_preset()
+        router = _make_router(
+            _make_ensemble_config(preset=preset)
+        )
+        router.is_model_available.side_effect = (
+            lambda model: model != "judge-model"
+        )
+        agent = _make_agent(router, cost_tracker, mock_rate_limiter)
+
+        result = await agent.handle_chat_completion(
+            {
+                "messages": [{"role": "user", "content": "review"}],
+                "model": "ensemble",
+            },
+            _base_context(),
+        )
+
+        assert result["status_code"] == 503
+        assert result["error"]["code"] == "model_unavailable"
+        router.ensemble_route.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_unknown_preset_returns_404(self, mock_rate_limiter, cost_tracker):
         """Unknown named preset → 404 ensemble_preset_not_found (Req 7.6)."""
         cfg = _make_ensemble_config(get_preset_map={"budget": _make_preset()})
@@ -361,14 +388,18 @@ class TestEnsembleRoutingIntegration:
 
     @pytest.mark.asyncio
     async def test_single_model_access_check_skipped_for_ensemble(self, mock_rate_limiter, cost_tracker):
-        """Per-model access checks are skipped for ensemble requests (Req 11.1)."""
+        """The ensemble alias is skipped while every underlying model is allowed."""
         preset = _make_preset()
         cfg = _make_ensemble_config(default=preset, preset=preset)
         router = _make_router(cfg)
         router.ensemble_route = AsyncMock(return_value=(_make_response(), _make_decision()))
 
-        # Project restricts models, but "ensemble" itself is not in the list.
-        project = Project(project_id="proj-1", name="Test", allowed_models=["gpt-4"])
+        # The alias is not grantable; authority applies to the actual calls.
+        project = Project(
+            project_id="proj-1",
+            name="Test",
+            allowed_models=["model-a", "model-b", "judge-model"],
+        )
         agent = _make_agent(router, cost_tracker, mock_rate_limiter, projects={"proj-1": project})
 
         request_data = {

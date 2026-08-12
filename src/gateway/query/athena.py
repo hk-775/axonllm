@@ -8,7 +8,7 @@ import json
 import logging
 import math
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Protocol
 from urllib.parse import urlsplit
 
@@ -36,10 +36,47 @@ AWS_CLIENT_CONFIG = Config(
 class AthenaExecutionError(RuntimeError):
     """Sanitized Athena execution failure."""
 
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        query_execution_id: str | None = None,
+        athena_state: str | None = None,
+        data_scanned_bytes: int | None = None,
+        engine_execution_ms: int | None = None,
+        cancellation_requested: bool = False,
+        execution_may_have_started: bool = False,
+    ) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
+        self.query_execution_id = query_execution_id
+        self.athena_state = athena_state
+        self.data_scanned_bytes = data_scanned_bytes
+        self.engine_execution_ms = engine_execution_ms
+        self.cancellation_requested = cancellation_requested
+        self.execution_may_have_started = execution_may_have_started
+
+    def attach_termination(
+        self,
+        termination: AthenaQueryTermination,
+    ) -> AthenaExecutionError:
+        """Preserve billable terminal metadata while retaining a safe error."""
+        if self.query_execution_id is None:
+            self.query_execution_id = termination.query_execution_id
+        if self.athena_state is None:
+            self.athena_state = termination.state
+        if self.data_scanned_bytes is None:
+            self.data_scanned_bytes = termination.data_scanned_bytes
+        if self.engine_execution_ms is None:
+            self.engine_execution_ms = termination.engine_execution_ms
+        self.cancellation_requested = (
+            self.cancellation_requested
+            or termination.cancellation_requested
+        )
+        self.execution_may_have_started = True
+        return self
 
 
 @dataclass(frozen=True)
@@ -114,6 +151,48 @@ class AthenaQueryResult:
                 "result_bytes": self.result_bytes,
             },
         }
+
+
+@dataclass(frozen=True)
+class AthenaQueryTermination:
+    """Observed Athena state used for durable terminal accounting."""
+
+    query_execution_id: str
+    state: str
+    terminal: bool
+    data_scanned_bytes: int | None
+    engine_execution_ms: int | None
+    cancellation_requested: bool = False
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.query_execution_id, str)
+            or not self.query_execution_id
+        ):
+            raise ValueError("Athena query execution ID is invalid")
+        if self.state not in _TERMINAL_STATES | _ACTIVE_STATES:
+            raise ValueError("Athena query state is invalid")
+        if self.terminal is not (self.state in _TERMINAL_STATES):
+            raise ValueError("Athena query terminal flag does not match state")
+        for name, value in (
+            ("data_scanned_bytes", self.data_scanned_bytes),
+            ("engine_execution_ms", self.engine_execution_ms),
+        ):
+            if value is not None and (
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or value < 0
+            ):
+                raise ValueError(f"{name} must be None or non-negative")
+        if not isinstance(self.cancellation_requested, bool):
+            raise ValueError("cancellation_requested must be boolean")
+
+
+@dataclass
+class _ExecutionTracker:
+    query_execution_id: str | None = None
+    cancellation_requested: bool = False
+    start_attempted: bool = False
 
 
 class AthenaClientFactory(Protocol):
@@ -215,6 +294,82 @@ def _non_negative_statistic(value: object, name: str) -> int:
             f"Athena returned an invalid {name}.",
         )
     return value
+
+
+def _termination_from_execution(
+    execution: object,
+    execution_id: str,
+    *,
+    cancellation_requested: bool = False,
+) -> AthenaQueryTermination:
+    if not isinstance(execution, dict):
+        raise AthenaExecutionError(
+            "athena_status_failed",
+            "Athena returned an invalid query status.",
+            query_execution_id=execution_id,
+            cancellation_requested=cancellation_requested,
+        )
+    status = execution.get("Status")
+    if not isinstance(status, dict):
+        raise AthenaExecutionError(
+            "athena_status_failed",
+            "Athena returned an invalid query status.",
+            query_execution_id=execution_id,
+            cancellation_requested=cancellation_requested,
+        )
+    state = status.get("State")
+    if (
+        not isinstance(state, str)
+        or state not in _TERMINAL_STATES | _ACTIVE_STATES
+    ):
+        raise AthenaExecutionError(
+            "athena_status_failed",
+            "Athena returned an invalid query status.",
+            query_execution_id=execution_id,
+            cancellation_requested=cancellation_requested,
+        )
+
+    scanned: int | None = None
+    engine_execution_ms: int | None = None
+    statistics = execution.get("Statistics")
+    if statistics is not None:
+        if not isinstance(statistics, dict):
+            raise AthenaExecutionError(
+                "athena_status_failed",
+                "Athena returned invalid query statistics.",
+                query_execution_id=execution_id,
+                athena_state=state,
+                cancellation_requested=cancellation_requested,
+            )
+        try:
+            scanned = _non_negative_statistic(
+                statistics.get("DataScannedInBytes", 0),
+                "scan statistic",
+            )
+        except AthenaExecutionError as exc:
+            exc.query_execution_id = execution_id
+            exc.athena_state = state
+            exc.cancellation_requested = cancellation_requested
+            raise
+        try:
+            engine_execution_ms = _non_negative_statistic(
+                statistics.get("EngineExecutionTimeInMillis", 0),
+                "execution time statistic",
+            )
+        except AthenaExecutionError as exc:
+            exc.query_execution_id = execution_id
+            exc.athena_state = state
+            exc.data_scanned_bytes = scanned
+            exc.cancellation_requested = cancellation_requested
+            raise
+    return AthenaQueryTermination(
+        query_execution_id=execution_id,
+        state=state,
+        terminal=state in _TERMINAL_STATES,
+        data_scanned_bytes=scanned,
+        engine_execution_ms=engine_execution_ms,
+        cancellation_requested=cancellation_requested,
+    )
 
 
 class BotoAthenaClientFactory:
@@ -401,6 +556,7 @@ class AthenaExecutor:
         max_rows: int | None = None,
         on_started: Callable[[str], Awaitable[None]] | None = None,
     ) -> AthenaQueryResult:
+        tracker = _ExecutionTracker()
         try:
             return await asyncio.wait_for(
                 self._execute_bounded(
@@ -412,6 +568,7 @@ class AthenaExecutor:
                     request_id=request_id,
                     max_rows=max_rows,
                     on_started=on_started,
+                    tracker=tracker,
                 ),
                 timeout=self.limits.timeout_seconds,
             )
@@ -419,7 +576,97 @@ class AthenaExecutor:
             raise AthenaExecutionError(
                 "athena_query_timeout",
                 "Athena query exceeded its execution deadline.",
+                query_execution_id=tracker.query_execution_id,
+                cancellation_requested=tracker.cancellation_requested,
+                execution_may_have_started=tracker.start_attempted,
             ) from exc
+
+    async def cancel(
+        self,
+        datasource: AthenaDatasource,
+        *,
+        tenant_id: str,
+        project_id: str,
+        principal_id: str,
+        request_id: str,
+        execution_id: str,
+    ) -> AthenaQueryTermination:
+        """Idempotently request cancellation and observe billable final state."""
+        if (
+            datasource.tenant_id != tenant_id
+            or datasource.project_id != project_id
+        ):
+            raise AthenaExecutionError(
+                "datasource_identity_mismatch",
+                "Datasource ownership could not be verified.",
+                query_execution_id=execution_id,
+            )
+        if not isinstance(execution_id, str) or not execution_id:
+            raise AthenaExecutionError(
+                "athena_status_failed",
+                "Athena query execution identifier is invalid.",
+            )
+        try:
+            client = await asyncio.to_thread(
+                self._client_factory,
+                datasource,
+                tenant_id=tenant_id,
+                project_id=project_id,
+                principal_id=principal_id,
+                request_id=request_id,
+            )
+        except Exception as exc:
+            raise AthenaExecutionError(
+                "athena_role_unavailable",
+                "The project query role could not be assumed.",
+                query_execution_id=execution_id,
+            ) from exc
+
+        execution = await self._get_query_execution(client, execution_id)
+        termination = _termination_from_execution(execution, execution_id)
+        if termination.terminal:
+            return termination
+
+        cancellation_requested = False
+        try:
+            await asyncio.wait_for(
+                asyncio.to_thread(
+                    client.stop_query_execution,
+                    QueryExecutionId=execution_id,
+                ),
+                timeout=_CANCELLATION_TIMEOUT_SECONDS,
+            )
+            cancellation_requested = True
+        except Exception:
+            logger.warning(
+                "Could not stop Athena query %s",
+                execution_id,
+                exc_info=True,
+            )
+
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + _CANCELLATION_TIMEOUT_SECONDS
+        termination = replace(
+            termination,
+            cancellation_requested=cancellation_requested,
+        )
+        while not termination.terminal:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return termination
+            await self._sleep(
+                min(self.limits.poll_interval_seconds, remaining)
+            )
+            execution = await self._get_query_execution(
+                client,
+                execution_id,
+            )
+            termination = _termination_from_execution(
+                execution,
+                execution_id,
+                cancellation_requested=cancellation_requested,
+            )
+        return termination
 
     async def _execute_bounded(
         self,
@@ -432,6 +679,7 @@ class AthenaExecutor:
         request_id: str,
         max_rows: int | None = None,
         on_started: Callable[[str], Awaitable[None]] | None = None,
+        tracker: _ExecutionTracker | None = None,
     ) -> AthenaQueryResult:
         if (
             datasource.tenant_id != tenant_id
@@ -471,6 +719,8 @@ class AthenaExecutor:
         terminal = False
         try:
             try:
+                if tracker is not None:
+                    tracker.start_attempted = True
                 started = await asyncio.to_thread(
                     client.start_query_execution,
                     QueryString=query.sql,
@@ -492,6 +742,7 @@ class AthenaExecutor:
                 raise AthenaExecutionError(
                     "athena_start_failed",
                     "Athena rejected the query execution request.",
+                    execution_may_have_started=True,
                 ) from exc
             execution_id = (
                 started.get("QueryExecutionId")
@@ -502,61 +753,64 @@ class AthenaExecutor:
                 raise AthenaExecutionError(
                     "athena_start_failed",
                     "Athena returned no query execution identifier.",
+                    execution_may_have_started=True,
                 )
+            if tracker is not None:
+                tracker.query_execution_id = execution_id
             if on_started is not None:
                 await on_started(execution_id)
 
             execution = await self._wait_for_query(client, execution_id)
             terminal = True
-            status = execution.get("Status")
-            if not isinstance(status, dict):
-                raise AthenaExecutionError(
-                    "athena_status_failed",
-                    "Athena returned an invalid query status.",
-                )
-            state = status.get("State")
-            if state != "SUCCEEDED":
-                logger.warning(
-                    "Athena query ended state=%s execution_id=%s",
-                    state,
-                    execution_id,
-                )
-                raise AthenaExecutionError(
-                    "athena_query_failed",
-                    "Athena did not complete the query successfully.",
-                )
-            statistics = execution.get("Statistics")
-            if not isinstance(statistics, dict):
+            termination = _termination_from_execution(
+                execution,
+                execution_id,
+            )
+            if termination.data_scanned_bytes is None:
                 raise AthenaExecutionError(
                     "athena_status_failed",
                     "Athena returned invalid query statistics.",
+                ).attach_termination(termination)
+            if termination.engine_execution_ms is None:
+                raise AthenaExecutionError(
+                    "athena_status_failed",
+                    "Athena returned invalid query statistics.",
+                ).attach_termination(termination)
+            if termination.state != "SUCCEEDED":
+                logger.warning(
+                    "Athena query ended state=%s execution_id=%s",
+                    termination.state,
+                    execution_id,
                 )
-            scanned = _non_negative_statistic(
-                statistics.get("DataScannedInBytes", 0),
-                "scan statistic",
-            )
-            engine_execution_ms = _non_negative_statistic(
-                statistics.get(
-                    "EngineExecutionTimeInMillis",
-                    0,
-                ),
-                "execution time statistic",
-            )
+                code = (
+                    "athena_query_cancelled"
+                    if termination.state == "CANCELLED"
+                    else "athena_query_failed"
+                )
+                raise AthenaExecutionError(
+                    code,
+                    "Athena did not complete the query successfully.",
+                ).attach_termination(termination)
+            scanned = termination.data_scanned_bytes
+            engine_execution_ms = termination.engine_execution_ms
             if scanned > self.limits.max_bytes_scanned:
                 raise AthenaExecutionError(
                     "athena_scan_limit_exceeded",
                     "Athena query exceeded the configured scan limit.",
+                ).attach_termination(termination)
+            try:
+                (
+                    columns,
+                    rows,
+                    truncated,
+                    result_bytes,
+                ) = await self._read_results(
+                    client,
+                    execution_id,
+                    max_rows=row_limit,
                 )
-            (
-                columns,
-                rows,
-                truncated,
-                result_bytes,
-            ) = await self._read_results(
-                client,
-                execution_id,
-                max_rows=row_limit,
-            )
+            except AthenaExecutionError as exc:
+                raise exc.attach_termination(termination)
             return AthenaQueryResult(
                 query_execution_id=execution_id,
                 columns=columns,
@@ -579,12 +833,43 @@ class AthenaExecutor:
                         ),
                         timeout=_CANCELLATION_TIMEOUT_SECONDS,
                     )
+                    if tracker is not None:
+                        tracker.cancellation_requested = True
                 except Exception:
                     logger.warning(
                         "Could not stop Athena query %s",
                         execution_id,
                         exc_info=True,
                     )
+
+    async def _get_query_execution(
+        self,
+        client: Any,
+        execution_id: str,
+    ) -> dict:
+        try:
+            response = await asyncio.to_thread(
+                client.get_query_execution,
+                QueryExecutionId=execution_id,
+            )
+        except Exception as exc:
+            raise AthenaExecutionError(
+                "athena_status_failed",
+                "Athena query status is unavailable.",
+                query_execution_id=execution_id,
+            ) from exc
+        execution = (
+            response.get("QueryExecution")
+            if isinstance(response, dict)
+            else None
+        )
+        if not isinstance(execution, dict):
+            raise AthenaExecutionError(
+                "athena_status_failed",
+                "Athena returned an invalid query status.",
+                query_execution_id=execution_id,
+            )
+        return execution
 
     async def _wait_for_query(
         self,
@@ -594,45 +879,16 @@ class AthenaExecutor:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self.limits.timeout_seconds
         while True:
-            try:
-                response = await asyncio.to_thread(
-                    client.get_query_execution,
-                    QueryExecutionId=execution_id,
-                )
-            except Exception as exc:
-                raise AthenaExecutionError(
-                    "athena_status_failed",
-                    "Athena query status is unavailable.",
-                ) from exc
-            execution = (
-                response.get("QueryExecution")
-                if isinstance(response, dict)
-                else None
+            execution = await self._get_query_execution(
+                client,
+                execution_id,
             )
-            if not isinstance(execution, dict):
-                raise AthenaExecutionError(
-                    "athena_status_failed",
-                    "Athena returned an invalid query status.",
-                )
-            status = execution.get("Status")
-            if not isinstance(status, dict):
-                raise AthenaExecutionError(
-                    "athena_status_failed",
-                    "Athena returned an invalid query status.",
-                )
-            state = status.get("State")
-            if not isinstance(state, str) or not state:
-                raise AthenaExecutionError(
-                    "athena_status_failed",
-                    "Athena returned an invalid query status.",
-                )
-            if state in _TERMINAL_STATES:
+            termination = _termination_from_execution(
+                execution,
+                execution_id,
+            )
+            if termination.terminal:
                 return execution
-            if state not in _ACTIVE_STATES:
-                raise AthenaExecutionError(
-                    "athena_status_failed",
-                    "Athena returned an invalid query status.",
-                )
             remaining = deadline - loop.time()
             if remaining <= 0:
                 raise AthenaExecutionError(

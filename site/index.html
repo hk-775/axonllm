@@ -1094,7 +1094,7 @@
                 <div class="stat-label">Provider adapters</div>
             </div>
             <div class="stat">
-                <div class="stat-num">46</div>
+                <div class="stat-num">48</div>
                 <div class="stat-label">Models routed</div>
             </div>
             <div class="stat">
@@ -1202,7 +1202,7 @@
             <div class="feature-card">
                 <div class="feature-icon">&#128100;</div>
                 <h3>Enterprise Identity</h3>
-                <p>ALB OIDC, bearer tokens, and scoped API keys. SAML 2.0 SSO with pure-Python assertion verification — no <code>xmlsec1</code> to install. SCIM 2.0 for IdP-driven joiner/mover/leaver.</p>
+                <p>ALB OIDC, bearer tokens, and scoped API keys. Cognito validates enterprise SAML and the gateway resolves its OIDC result through canonical tenant authority. SCIM 2.0 handles joiner/mover/leaver provisioning.</p>
             </div>
             <div class="feature-card">
                 <div class="feature-icon">&#128202;</div>
@@ -1267,7 +1267,7 @@ resp = client.chat.completions.create(
             <div class="tier-card single">
                 <div class="tier-mode">model: "claude-sonnet"</div>
                 <div class="tier-name">Direct</div>
-                <p class="tier-desc">You name the model; AxonLLM picks the provider and falls back down the chain on failure. Round-robin, weighted, least-latency or cost-optimized distribution across the providers that serve it — 49 provider mappings across 46 models.</p>
+                <p class="tier-desc">You name the model; AxonLLM picks the provider and falls back down the chain on failure. Round-robin, weighted, least-latency or cost-optimized distribution across the providers that serve it — 51 provider mappings across 48 models.</p>
                 <div class="tier-cost"><strong>1&times;</strong> the cost of one call</div>
             </div>
             <div class="tier-card smart">

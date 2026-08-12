@@ -3,9 +3,9 @@
 #
 # Keyed by provider name, then by the *provider-side* model_id from
 # models.yaml — the id sent to the provider, not the gateway's friendly name.
-# That is the key CostTracker.calculate_cost looks up, and a miss returns 0.00
-# rather than raising, so a key that does not match exactly bills nothing and
-# says nothing. /admin/pricing-drift reports which mappings are in that state.
+# That is the key CostTracker.calculate_cost looks up, and a miss returns 0.00.
+# Development reports those gaps; production routing excludes the affected
+# mappings until this table contains a finite, non-zero usable rate.
 #
 # Sources, all fetched 2026-07-30:
 #   openai          developers.openai.com/api/docs/pricing
@@ -164,6 +164,15 @@ providers:
     qwen.qwen3-vl-235b-a22b:
       prompt_token_cost: 0.00053
       completion_token_cost: 0.00266
+    # AI21 Jamba 1.5 on-demand rates in us-east-1. These are separate from the
+    # direct AI21 Jamba 1.6 keys below because billing uses the exact provider
+    # and provider-side model id.
+    ai21.jamba-1-5-mini-v1:0:
+      prompt_token_cost: 0.0002
+      completion_token_cost: 0.0004
+    ai21.jamba-1-5-large-v1:0:
+      prompt_token_cost: 0.002
+      completion_token_cost: 0.008
 
   # Mantle SKUs are published separately in the Price List
   # (…-mantle-input-tokens-standard) but priced identically to the corresponding
@@ -199,8 +208,9 @@ providers:
     # openai.gpt-5.4, -5.6-luna and -5.6-terra appear in the Price List only in
     # us-gov-east-1 / us-gov-west-1, at rates carrying the GovCloud premium.
     # openai.gpt-5.5 and openai.gpt-5.6-sol are absent in every region. Left
-    # unpriced rather than filled from GovCloud or inferred from a sibling:
-    # /admin/pricing-drift keeps them visible, and a wrong rate would not be.
+    # unpriced rather than filled from GovCloud or inferred from a sibling.
+    # Production routing excludes them until an operator supplies verified or
+    # contracted rates through AXON_PRICING_CONFIG.
 
   vertex_ai:
     gemini-pro:
@@ -225,13 +235,10 @@ providers:
     gemini-3.1-pro-preview:
       prompt_token_cost: 0.002
       completion_token_cost: 0.012
-    # gemini-3-pro-preview is off the price list but *not* retired: it is still
-    # served, and still listed by GET /v1beta/models with generateContent
-    # support. So it is a working model Google no longer publishes a rate for,
-    # which is the one case nothing can fix — the id is right, and there is no
-    # number to put here. Left unpriced rather than filled from 3.1 Pro Preview:
-    # a preview model's rate is not inheritable from its successor, and this is
-    # exactly the case the drift report should keep raising.
+    # Standard <=200k-token tier; larger contexts use Google's higher tier.
+    gemini-2.5-pro:
+      prompt_token_cost: 0.00125
+      completion_token_cost: 0.01
 
   groq:
     llama-3.1-8b-instant:

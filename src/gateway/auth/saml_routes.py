@@ -1,4 +1,4 @@
-"""SAML 2.0 SSO endpoints: login redirect, ACS, and SP metadata."""
+"""Managed Cognito SAML handoff and direct-SP tombstone endpoints."""
 
 from __future__ import annotations
 
@@ -11,66 +11,107 @@ from starlette.routing import Route
 if TYPE_CHECKING:
     from src.gateway.auth.saml_service import SamlService
 
+_NO_STORE_HEADERS = {
+    "Cache-Control": "no-store",
+    "Pragma": "no-cache",
+}
+_MANAGED_MESSAGE = (
+    "SAML authentication is managed by Cognito and the control-plane ALB. "
+    "AxonLLM does not accept SAML assertions directly."
+)
+
+
+def _error(
+    status_code: int,
+    *,
+    error_type: str,
+    code: str,
+    message: str,
+) -> JSONResponse:
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "error": {
+                "type": error_type,
+                "code": code,
+                "message": message,
+            }
+        },
+        headers=_NO_STORE_HEADERS,
+    )
+
 
 class SamlAPI:
-    """HTTP surface for SP-initiated SAML SSO."""
+    """HTTP contract for ALB/Cognito-managed enterprise SAML login."""
 
     def __init__(self, service: SamlService) -> None:
         self.service = service
 
     def _disabled(self) -> JSONResponse | None:
-        if not self.service.enabled:
-            return JSONResponse(
-                status_code=503,
-                content={"error": {"type": "sso_not_configured",
-                                   "message": "SAML SSO is not configured."}})
-        return None
+        if self.service.enabled:
+            return None
+        return _error(
+            503,
+            error_type="sso_not_configured",
+            code="managed_cognito_federation_required",
+            message=_MANAGED_MESSAGE,
+        )
 
     async def login(self, request: Request) -> Response:
-        """GET /saml/login[?relay_state=] → 302 redirect to the IdP."""
-        if (d := self._disabled()) is not None:
-            return d
-        relay = request.query_params.get("relay_state", "")
-        return RedirectResponse(self.service.build_authn_request(relay), status_code=302)
+        """Redirect to a protected local path so the ALB starts Cognito auth."""
+        if (disabled := self._disabled()) is not None:
+            return disabled
 
-    async def acs(self, request: Request) -> Response:
-        """POST /saml/acs — Assertion Consumer Service (IdP POST binding)."""
-        if (d := self._disabled()) is not None:
-            return d
         from src.gateway.auth.saml_service import SamlError
 
-        form = await request.form()
-        saml_response = form.get("SAMLResponse")
-        relay_state = form.get("RelayState", "")
-        if not saml_response:
-            return JSONResponse(
-                status_code=400,
-                content={"error": {"type": "invalid_request",
-                                   "message": "Missing SAMLResponse"}})
+        keys = set(request.query_params)
+        return_values = request.query_params.getlist("return_to")
+        if keys.difference({"return_to"}) or len(return_values) > 1:
+            return _error(
+                400,
+                error_type="invalid_request",
+                code="invalid_login_parameters",
+                message=(
+                    "Only one same-origin return_to parameter is supported. "
+                    "Cognito owns SAML RelayState."
+                ),
+            )
         try:
-            context = self.service.handle_acs(str(saml_response))
-        except SamlError as e:
-            return JSONResponse(
-                status_code=401,
-                content={"error": {"type": "authentication_error", "message": str(e)}})
+            target = self.service.login_target(
+                return_values[0] if return_values else None
+            )
+        except SamlError:
+            return _error(
+                400,
+                error_type="invalid_request",
+                code="invalid_return_to",
+                message="return_to must identify a protected same-origin path.",
+            )
 
-        # Successful assertion → surface the resolved identity. A production SP
-        # would mint a session here; we return the mapped context so the caller
-        # (and tests) can confirm the mapping.
-        return JSONResponse({
-            "authenticated": True,
-            "user_id": context.user_id,
-            "email": context.email,
-            "roles": context.roles,
-            "project_id": context.project_id,
-            "relay_state": relay_state,
-        })
+        response = RedirectResponse(target, status_code=302)
+        response.headers.update(_NO_STORE_HEADERS)
+        return response
+
+    async def acs(self, request: Request) -> Response:
+        """Reject every direct SAML assertion without parsing the request body."""
+        return _error(
+            410,
+            error_type="direct_saml_disabled",
+            code="managed_cognito_federation_required",
+            message=_MANAGED_MESSAGE,
+        )
 
     async def metadata(self, request: Request) -> Response:
-        """GET /saml/metadata — SP metadata XML for IdP configuration."""
-        if (d := self._disabled()) is not None:
-            return d
-        return Response(self.service.sp_metadata(), media_type="application/xml")
+        """Reject app SP metadata; Cognito is the configured service provider."""
+        return _error(
+            410,
+            error_type="direct_saml_disabled",
+            code="use_cognito_sp_metadata",
+            message=(
+                "AxonLLM is not a SAML service provider. Configure the identity "
+                "provider with the Cognito user pool's SP metadata."
+            ),
+        )
 
 
 def create_saml_routes(api: SamlAPI) -> list[Route]:

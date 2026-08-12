@@ -42,7 +42,7 @@ projects:
       - qwen3-235b
       - gemini-3.5-flash
       - gemini-3.1-pro
-      - gemini-3-pro
+      - gemini-2.5-pro
       - grok-4.3
       - grok-4.5
       - groq-llama-3.3-70b
@@ -53,6 +53,8 @@ projects:
       - together-gpt-oss-120b
       - fireworks-deepseek-v4
       - fireworks-gpt-oss-120b
+      - jamba-1.5-large-bedrock
+      - jamba-1.5-mini-bedrock
       - jamba-large
       - jamba-mini
       - gpt-5.6-sol
@@ -107,7 +109,7 @@ usage_seeds:
   - project_id: proj-alpha
     user_id: user-bob
     provider: google_ai
-    model: gemini-3-pro
+    model: gemini-2.5-pro
     prompt_tokens: 1370
     completion_tokens: 1130
     cost: 0.007363
@@ -190,7 +192,7 @@ usage_seeds:
   - project_id: proj-beta
     user_id: user-carol
     provider: google_ai
-    model: gemini-3-pro
+    model: gemini-2.5-pro
     prompt_tokens: 880
     completion_tokens: 850
     cost: 0.00535
@@ -199,7 +201,7 @@ usage_seeds:
   - project_id: proj-beta
     user_id: user-carol
     provider: google_ai
-    model: gemini-3-pro
+    model: gemini-2.5-pro
     prompt_tokens: 1220
     completion_tokens: 350
     cost: 0.003275
@@ -324,7 +326,7 @@ usage_seeds:
   - project_id: proj-alpha
     user_id: user-alice
     provider: google_ai
-    model: gemini-3-pro
+    model: gemini-2.5-pro
     prompt_tokens: 2010
     completion_tokens: 830
     cost: 0.006663
@@ -427,7 +429,7 @@ usage_seeds:
   - project_id: proj-alpha
     user_id: user-alice
     provider: google_ai
-    model: gemini-3-pro
+    model: gemini-2.5-pro
     prompt_tokens: 2140
     completion_tokens: 860
     cost: 0.006975
@@ -445,7 +447,7 @@ usage_seeds:
   - project_id: proj-beta
     user_id: user-carol
     provider: google_ai
-    model: gemini-3-pro
+    model: gemini-2.5-pro
     prompt_tokens: 1210
     completion_tokens: 540
     cost: 0.004213
@@ -740,7 +742,7 @@ policies:
 #    project the chat playground posts to (bootstrap picks the first seeded
 #    project as its default), so its effective rate and budget stay at least
 #    what a demo session needs, and its allowed_models stays a superset of the
-#    46 models the project itself lists. The tighter values live on proj-beta
+#    48 models the project itself lists. The tighter values live on proj-beta
 #    and on the environment nodes, which no demo traffic touches.
 policy_nodes:
   - node_id: org:acme
@@ -822,7 +824,7 @@ policy_nodes:
       pii_ner_types:
         - name
 
-  # No allowed_models here: proj-alpha carries the demo's 46-model list on the
+  # No allowed_models here: proj-alpha carries the demo's 48-model list on the
   # project record itself, and an intersection at this level would silently
   # shrink what the Models page offers. Budget matches the project's own 500.0
   # so the Quotas page agrees with the Projects page.

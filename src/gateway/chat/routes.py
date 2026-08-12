@@ -16,7 +16,13 @@ import traceback
 from typing import TYPE_CHECKING, Any
 
 from starlette.requests import Request
-from starlette.responses import HTMLResponse, JSONResponse, StreamingResponse
+from starlette.responses import (
+    HTMLResponse,
+    JSONResponse,
+    PlainTextResponse,
+    Response,
+    StreamingResponse,
+)
 from starlette.routing import Route
 
 from src.gateway.chat.request_body import (
@@ -30,6 +36,31 @@ if TYPE_CHECKING:
     from src.gateway.chat.client_agent import ClientAgent
 
 _STATIC_DIR = pathlib.Path(__file__).resolve().parent / "static"
+_PUBLIC_STATIC_ASSETS = frozenset(
+    {
+        "chat.js",
+        "playground.js",
+        "routing.js",
+        "vendor/react.production.min.js",
+        "vendor/react-dom.production.min.js",
+    }
+)
+
+
+async def chat_static_asset(request: Request) -> Response:
+    """Serve only the immutable browser assets required by the chat UIs."""
+    relative_path = request.path_params.get("path", "")
+    if relative_path not in _PUBLIC_STATIC_ASSETS:
+        return PlainTextResponse("Not found", status_code=404)
+
+    target = _STATIC_DIR / relative_path
+    if not target.is_file():
+        return PlainTextResponse("Not found", status_code=404)
+    return Response(
+        target.read_bytes(),
+        media_type="application/javascript",
+        headers={"Cache-Control": "public, max-age=31536000, immutable"},
+    )
 
 
 def _identity_from_context(
@@ -401,4 +432,9 @@ def create_chat_routes(chat_api: ChatAPI) -> list[Route]:
         Route("/chat", chat_api.chat_page, methods=["GET"]),
         Route("/playground", chat_api.playground_page, methods=["GET"]),
         Route("/routing", chat_api.routing_page, methods=["GET"]),
+        Route(
+            "/chat/static/{path:path}",
+            chat_static_asset,
+            methods=["GET"],
+        ),
     ]

@@ -12,6 +12,7 @@ Requirements: 13.1, 13.2, 13.3, 13.5
 
 import asyncio
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import pytest
 from starlette.applications import Starlette
@@ -115,6 +116,17 @@ def admin_api(cost_tracker, health_tracker, model_registry):
 def client(admin_api):
     app = _make_app(admin_api)
     return TestClient(app, raise_server_exceptions=False)
+
+
+@pytest.fixture
+def dashboard_source():
+    return (
+        Path(__file__).resolve().parents[2]
+        / "src"
+        / "gateway"
+        / "admin"
+        / "dashboard.jsx"
+    ).read_text(encoding="utf-8")
 
 
 # ── Smoke / import tests ────────────────────────────────────────────
@@ -775,7 +787,7 @@ class TestDashboard:
         assert "react" in body.lower()
         assert '<div id="root">' in body
 
-    def test_the_ribbon_links_to_the_architecture_page(self, client):
+    def test_the_ribbon_links_to_the_architecture_page(self, dashboard_source):
         """The pill in the top ribbon, shown on Overview and every other view.
 
         The href must be absolute. The dashboard is served from
@@ -783,10 +795,9 @@ class TestDashboard:
         /admin/architecture.html — which is not a route, and the pill would
         404 while looking perfectly fine in the markup.
         """
-        body = client.get("/admin/dashboard").text
-        assert 'className="topbar-pill"' in body
-        assert 'href="/architecture.html"' in body
-        assert 'href="architecture.html"' not in body
+        assert 'className="topbar-pill"' in dashboard_source
+        assert 'href="/architecture.html"' in dashboard_source
+        assert 'href="architecture.html"' not in dashboard_source
 
     def test_the_ribbon_pill_target_is_actually_served(self, site_client_for_dashboard):
         """The pair, not just the href — same reason as the landing page's."""
@@ -1003,6 +1014,20 @@ class TestStaticAssets:
         r = client.get("/admin/static/vendor/react.production.min.js")
         assert r.status_code == 200
         assert "javascript" in r.headers["content-type"]
+
+    def test_serves_the_precompiled_dashboard(self, client):
+        import re
+
+        html = client.get("/admin/dashboard").text
+        match = re.search(
+            r'<script src="(/admin/static/dashboard\.js\?v=[a-f0-9]{64})">',
+            html,
+        )
+        assert match is not None
+        r = client.get(match.group(1))
+        assert r.status_code == 200
+        assert "javascript" in r.headers["content-type"]
+        assert "ReactDOM.createRoot" in r.text
 
     def test_missing_asset_404(self, client):
         assert client.get("/admin/static/vendor/nope.js").status_code == 404
@@ -1352,7 +1377,11 @@ class TestGuidedTour:
         assert part.headers["content-range"] == f"bytes 10-109/{len(full.content)}"
         assert part.content == full.content[10:110]
 
-    def test_every_scene_names_a_view_the_shell_can_render(self, client, tour):
+    def test_every_scene_names_a_view_the_shell_can_render(
+        self,
+        dashboard_source,
+        tour,
+    ):
         """The coupling that makes this tour maintainable, asserted.
 
         Each scene's ``view`` is passed to the shell's navigate(), which is a
@@ -1362,8 +1391,9 @@ class TestGuidedTour:
         """
         import re
 
-        html = client.get("/admin/dashboard").text
-        views = set(re.findall(r"case '([a-z-]+)': content =", html))
+        views = set(
+            re.findall(r"case '([a-z-]+)': content =", dashboard_source)
+        )
         assert views, "could not find the view switch — this test needs updating"
         for track in tour["tracks"]:
             assert track["view"] in views, (
@@ -1386,16 +1416,18 @@ class TestGuidedTour:
             assert "<" not in track["text"], f"{track['id']} caption contains markup"
             assert track["ssml"].startswith("<speak>")
 
-    def test_the_dashboard_offers_the_tour(self, client):
-        r = client.get("/admin/dashboard")
-        assert "Guided Demo" in r.text
-        assert "function GuidedTour" in r.text
+    def test_the_dashboard_offers_the_tour(self, dashboard_source):
+        assert "Guided Demo" in dashboard_source
+        assert "function GuidedTour" in dashboard_source
 
-    def test_the_player_fetches_the_script_at_the_served_path(self, client):
+    def test_the_player_fetches_the_script_at_the_served_path(
+        self,
+        client,
+        dashboard_source,
+    ):
         """The fetch URL is a string in the SPA and the route is in Python; only
         an assertion over both keeps them together."""
-        html = client.get("/admin/dashboard").text
-        assert "/admin/static/tour/tour-narration.json" in html
+        assert "/admin/static/tour/tour-narration.json" in dashboard_source
         assert client.get("/admin/static/tour/tour-narration.json").status_code == 200
 
     def test_tour_assets_are_still_confined_to_the_static_dir(self, client):
@@ -1411,25 +1443,36 @@ class TestGuidedTour:
     # wired into the view switch, and then linked from nowhere, so the only way
     # to reach it was to set the view by hand.
 
-    def test_every_rendered_view_is_reachable_without_editing_the_source(self, client):
+    def test_every_rendered_view_is_reachable_without_editing_the_source(
+        self,
+        dashboard_source,
+    ):
         """A view in the switch that nothing navigates to is dead code wearing a
         working page's clothes: it renders perfectly and no user can ever see it.
         """
         import re
 
-        html = client.get("/admin/dashboard").text
-        views = set(re.findall(r"case '([a-z-]+)': content =", html))
+        views = set(
+            re.findall(r"case '([a-z-]+)': content =", dashboard_source)
+        )
         assert views, "could not find the view switch — this test needs updating"
 
         # Anything that puts a view key in reach: a sidebar item, an activeViews
         # entry for a subview, a navigate()/setView() call, or a tour scene.
         reachable = set()
-        reachable.update(re.findall(r"\{ key: '([a-z-]+)'", html))
-        reachable.update(re.findall(r"activeViews: \[([^\]]*)\]", html) and
+        reachable.update(re.findall(r"\{ key: '([a-z-]+)'", dashboard_source))
+        reachable.update(re.findall(r"activeViews: \[([^\]]*)\]", dashboard_source) and
                          re.findall(r"'([a-z-]+)'", " ".join(
-                             re.findall(r"activeViews: \[([^\]]*)\]", html))))
-        reachable.update(re.findall(r"(?:navigate|setView)\('([a-z-]+)'\)", html))
-        reachable.update(re.findall(r'"view": "([a-z-]+)"', html))
+                             re.findall(r"activeViews: \[([^\]]*)\]", dashboard_source))))
+        reachable.update(
+            re.findall(
+                r"(?:navigate|setView)\('([a-z-]+)'\)",
+                dashboard_source,
+            )
+        )
+        reachable.update(
+            re.findall(r'"view": "([a-z-]+)"', dashboard_source)
+        )
 
         orphans = views - reachable
         assert orphans == set(), (
@@ -1437,22 +1480,23 @@ class TestGuidedTour:
             f"or delete them"
         )
 
-    def test_the_policy_hierarchy_page_is_in_the_sidebar(self, client):
+    def test_the_policy_hierarchy_page_is_in_the_sidebar(
+        self,
+        dashboard_source,
+    ):
         """Named explicitly, because this is the page that was orphaned. The
         generic test above would also catch it, but only as one id in a list."""
-        html = client.get("/admin/dashboard").text
-        assert "case 'policy-hierarchy': content =" in html
-        assert "{ key: 'policy-hierarchy'" in html
+        assert "case 'policy-hierarchy': content =" in dashboard_source
+        assert "{ key: 'policy-hierarchy'" in dashboard_source
 
-    def test_the_hierarchy_page_indents_by_depth(self, client):
+    def test_the_hierarchy_page_indents_by_depth(self, dashboard_source):
         """The page's whole claim is that a child's limits are narrowed by its
         parent's. It reads the flat /admin/policies/hierarchy list, so without
         the depth-first ordering the rows arrive in dict order and the nesting is
         invisible -- which is the state the page shipped in."""
-        html = client.get("/admin/dashboard").text
-        assert "const flatten = (all) =>" in html
-        assert "const rows = flatten(nodes);" in html
-        assert "depth * 1.25" in html
+        assert "const flatten = (all) =>" in dashboard_source
+        assert "const rows = flatten(nodes);" in dashboard_source
+        assert "depth * 1.25" in dashboard_source
 
 
 class TestArchitecturePage:

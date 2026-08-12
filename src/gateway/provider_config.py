@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Protocol
 
 from src.gateway.adapters.openai_responses import is_responses_only_model
 from src.gateway.models import ProviderModelMapping
@@ -11,6 +12,13 @@ from src.gateway.router import ProviderError
 SUPPORTED_AUTH_TYPES: frozenset[str] = frozenset(
     {"api_key", "aws_credentials", "azure_key", "gcp_service_account"}
 )
+
+
+class AccessTokenProvider(Protocol):
+    """Return a cached short-lived provider access token."""
+
+    def get_token(self) -> str:
+        """Return a currently valid token without request-path network I/O."""
 
 
 @dataclass
@@ -25,6 +33,11 @@ class ProviderConfig:
     read_timeout: float = 120.0
     extra_headers: dict[str, str] = field(default_factory=dict)
     extra_params: dict[str, str] = field(default_factory=dict)
+    credential_provider: AccessTokenProvider | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
 
     def __post_init__(self) -> None:
         if self.auth_type not in SUPPORTED_AUTH_TYPES:
@@ -57,14 +70,14 @@ def _require_credential(config: ProviderConfig, key: str) -> str:
 def _api_key_headers(config: ProviderConfig) -> dict[str, str]:
     """Produce auth headers for the ``api_key`` auth type.
 
-    Anthropic uses ``x-api-key``; Google AI uses query param (no header needed);
-    all other providers use ``Authorization: Bearer``.
+    Anthropic uses ``x-api-key``; Google AI uses ``x-goog-api-key``; all other
+    providers use ``Authorization: Bearer``.
     """
     api_key = _require_credential(config, "api_key")
     if config.provider_name == "anthropic":
         return {"x-api-key": api_key}
     if config.provider_name == "google_ai":
-        return {}
+        return {"x-goog-api-key": api_key}
     return {"Authorization": f"Bearer {api_key}"}
 
 
@@ -96,7 +109,30 @@ def _aws_sig_v4_headers(config: ProviderConfig) -> dict[str, str]:
 
 def _gcp_bearer_headers(config: ProviderConfig) -> dict[str, str]:
     """Produce auth headers for the ``gcp_service_account`` auth type."""
-    access_token = _require_credential(config, "access_token")
+    provider = config.credential_provider
+    if provider is None:
+        raise ProviderError(
+            status_code=401,
+            provider=config.provider_name,
+            message=(
+                "Vertex AI requires refreshable Google ADC, service-account, "
+                "or workload-identity credentials"
+            ),
+        )
+    try:
+        access_token = provider.get_token()
+    except Exception as exc:
+        raise ProviderError(
+            status_code=502,
+            provider=config.provider_name,
+            message="Unable to refresh Vertex AI credentials",
+        ) from exc
+    if not access_token:
+        raise ProviderError(
+            status_code=502,
+            provider=config.provider_name,
+            message="Vertex AI credential refresh returned no access token",
+        )
     return {"Authorization": f"Bearer {access_token}"}
 
 
@@ -174,18 +210,13 @@ def _cohere_url(config: ProviderConfig, mapping: ProviderModelMapping) -> str:
 
 
 def _google_ai_url(config: ProviderConfig, mapping: ProviderModelMapping) -> str:
-    api_key = config.credentials.get("api_key", "")
-    return (
-        f"{config.base_url}/v1beta/models/{mapping.model_id}:generateContent"
-        f"?key={api_key}"
-    )
+    return f"{config.base_url}/v1beta/models/{mapping.model_id}:generateContent"
 
 
 def _google_ai_stream_url(config: ProviderConfig, mapping: ProviderModelMapping) -> str:
-    api_key = config.credentials.get("api_key", "")
     return (
         f"{config.base_url}/v1beta/models/{mapping.model_id}:streamGenerateContent"
-        f"?alt=sse&key={api_key}"
+        "?alt=sse"
     )
 
 

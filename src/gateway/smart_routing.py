@@ -298,9 +298,14 @@ class SmartRoutingStrategy(RoutingStrategyBase):
         the same lookup CostTracker performs when billing the request, so the
         cost used for routing and the cost actually charged cannot disagree.
         """
-        if mapping.pricing is not None:
+        if mapping.pricing is not None and mapping.pricing.is_billable:
             return mapping.pricing
-        return self.pricing_config.get(mapping.provider, {}).get(mapping.model_id)
+        pricing = self.pricing_config.get(mapping.provider, {}).get(
+            mapping.model_id
+        )
+        if pricing is None or not pricing.is_billable:
+            return None
+        return pricing
 
     def _get_model_cost(self, model_config) -> float | None:
         """Average cost per token across a model's providers.

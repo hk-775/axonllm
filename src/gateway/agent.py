@@ -63,6 +63,7 @@ logger = logging.getLogger("gateway.agent")
 # Complete-output inspection must be bounded. The normal request validator caps
 # requested output tokens, but providers can ignore that cap or omit usage.
 _MAX_POLICY_BUFFER_BYTES = 8 * 1024 * 1024
+_PROVIDER_FAILURE_MESSAGE = "The provider request failed."
 
 
 # ---------------------------------------------------------------------------
@@ -125,6 +126,13 @@ def _error_response(status_code: int, error_type: str, message: str, code: str |
     if code:
         d["error"]["code"] = code
     return d
+
+
+def _public_ensemble_failure_reason(reason: object) -> str:
+    """Return a bounded failure reason that cannot contain an upstream body."""
+    if reason in {"timeout", "timeout (60s)"}:
+        return "timeout"
+    return _PROVIDER_FAILURE_MESSAGE
 
 
 def extract_last_user_prompt(messages: list[dict] | None) -> str:
@@ -293,7 +301,6 @@ class GatewayAgent:
                     return _error_response(
                         400, "invalid_request", first_error.message, code="invalid_message_format"
                     )
-
         # 2.7. Policy-hierarchy quota enforcement
         resolved_policy = None
         if self._quota_enforcer is not None and self._policy_resolver is not None:
@@ -322,6 +329,17 @@ class GatewayAgent:
             # provider credentials.
             request.max_tokens = self._quota_enforcer.cap_max_tokens(
                 request.max_tokens, resolved_policy
+            )
+
+        if (
+            not skip_model_checks
+            and not self._router_model_is_available(request.model)
+        ):
+            return _error_response(
+                503,
+                "service_unavailable",
+                f"Model '{request.model}' is not available in this deployment.",
+                code="model_unavailable",
             )
 
         # 2.8. Prompt injection detection
@@ -687,9 +705,50 @@ class GatewayAgent:
                         resp["_rate_limit_headers"] = _rate_limit_headers
                         return resp
 
-                # Validate all panel access and the preset ceiling before
-                # reserving budget. The router repeats these checks as a
+                # Validate access and runtime availability before any panel
+                # call can incur cost. The router repeats the access check as a
                 # defense-in-depth boundary.
+                preset_models = [*preset.panel, preset.judge]
+                if effective_allowed is not None:
+                    denied_model = next(
+                        (
+                            model
+                            for model in preset_models
+                            if model not in effective_allowed
+                        ),
+                        None,
+                    )
+                    if denied_model is not None:
+                        resp = _error_response(
+                            403,
+                            "forbidden",
+                            f"Model '{denied_model}' is not allowed",
+                            code="model_not_allowed",
+                        )
+                        resp["_rate_limit_headers"] = _rate_limit_headers
+                        return resp
+                unavailable_model = next(
+                    (
+                        model
+                        for model in preset_models
+                        if not self._router_model_is_available(model)
+                    ),
+                    None,
+                )
+                if unavailable_model is not None:
+                    resp = _error_response(
+                        503,
+                        "service_unavailable",
+                        (
+                            f"Model '{unavailable_model}' is not available "
+                            "in this deployment."
+                        ),
+                        code="model_unavailable",
+                    )
+                    resp["_rate_limit_headers"] = _rate_limit_headers
+                    return resp
+
+                # Validate the preset ceiling before reserving budget.
                 per_call = self._estimate_per_call_cost(request, preset)
                 ceiling_estimate = (len(preset.panel) + 1) * per_call
                 if (
@@ -777,8 +836,21 @@ class GatewayAgent:
                 # the first token flows immediately. Non-streaming keeps the
                 # execute-then-return path.
                 if request.stream and self._can_stream_true():
+                    runtime_models = {
+                        model.name
+                        for model in self.router.model_registry.list_models()
+                        if self._router_model_is_available(model.name)
+                    }
+                    routing_allowed = (
+                        runtime_models
+                        if effective_allowed is None
+                        else runtime_models.intersection(effective_allowed)
+                    )
                     smart_decision = await self.router._smart_strategy.select_model(
-                        prompt, effective_allowed, req_ctx.project_id, req_ctx.user_id,
+                        prompt,
+                        routing_allowed,
+                        req_ctx.project_id,
+                        req_ctx.user_id,
                         tenant_id=req_ctx.tenant_id,
                     )
                     request.model = smart_decision.selected_model
@@ -818,7 +890,7 @@ class GatewayAgent:
                             _rate_limit_headers, resolved_policy, pii_mapping,
                             request_id, _request_start,
                             preferred_provider=None,
-                            effective_allowed=effective_allowed,
+                            effective_allowed=routing_allowed,
                             smart_routing_decision=smart_decision,
                             spoke=target_spoke,
                             budget_reservation=budget_reservation,
@@ -943,7 +1015,7 @@ class GatewayAgent:
                 )
             resp = _error_response(
                 502, "provider_error",
-                str(exc),
+                _PROVIDER_FAILURE_MESSAGE,
                 code="ensemble_no_survivors",
             )
             resp["ensemble"] = self._ensemble_metadata(exc.decision)
@@ -963,7 +1035,7 @@ class GatewayAgent:
                 )
             resp = _error_response(
                 502, "provider_error",
-                str(exc),
+                _PROVIDER_FAILURE_MESSAGE,
                 code="ensemble_quorum_not_met",
             )
             resp["ensemble"] = self._ensemble_metadata(exc.decision)
@@ -983,13 +1055,13 @@ class GatewayAgent:
                 )
             resp = _error_response(
                 502, "provider_error",
-                str(exc),
+                _PROVIDER_FAILURE_MESSAGE,
                 code="ensemble_synthesis_failed",
             )
             resp["ensemble"] = self._ensemble_metadata(exc.decision)
             resp["_rate_limit_headers"] = _rate_limit_headers
             return resp
-        except AllProvidersExhaustedError as exc:
+        except AllProvidersExhaustedError:
             await self._release_request_budget(
                 budget_reservation,
                 req_ctx=req_ctx,
@@ -997,7 +1069,7 @@ class GatewayAgent:
             resp = _error_response(
                 502,
                 "provider_error",
-                str(exc),
+                _PROVIDER_FAILURE_MESSAGE,
                 code="all_providers_exhausted",
             )
             resp["_rate_limit_headers"] = _rate_limit_headers
@@ -1032,7 +1104,7 @@ class GatewayAgent:
         if ensemble_decision is None:
             cost = self.cost_tracker.calculate_cost(
                 response.provider,
-                response.model,
+                self._response_billing_model(response),
                 response.usage.prompt_tokens,
                 response.usage.completion_tokens,
                 cached_tokens=response.usage.cached_tokens,
@@ -1772,7 +1844,14 @@ class GatewayAgent:
                 stream, chosen, first_chunk = candidate, mapping, None
                 break
             except Exception as exc:  # noqa: BLE001 — try the next provider
-                open_errors.append({"provider": mapping.provider, "message": str(exc)})
+                diagnostic: dict[str, object] = {
+                    "provider": mapping.provider,
+                    "error_type": type(exc).__name__,
+                }
+                status_code = getattr(exc, "status_code", None)
+                if isinstance(status_code, int):
+                    diagnostic["status_code"] = status_code
+                open_errors.append(diagnostic)
                 self.router.health_tracker.mark_unhealthy(
                     mapping.provider, getattr(self.router, "cooldown_seconds", 60))
                 continue
@@ -1843,7 +1922,7 @@ class GatewayAgent:
                     pii_mapping=pii_mapping,
                     provider=response.provider,
                     model=request.model,
-                    response_model=response.model,
+                    response_model=self._response_billing_model(response),
                     text=raw_text,
                     usage=response.usage,
                     status="error",
@@ -1896,7 +1975,7 @@ class GatewayAgent:
                     pii_mapping=pii_mapping,
                     provider=response.provider,
                     model=request.model,
-                    response_model=response.model,
+                    response_model=self._response_billing_model(response),
                     text=raw_text,
                     usage=response.usage,
                     status=stream_status,
@@ -1933,11 +2012,9 @@ class GatewayAgent:
         finalization_ok = True
 
         def _consume(chunk: StreamChunk) -> dict | None:
-            nonlocal final_usage, response_model, buffered_bytes
+            nonlocal final_usage, buffered_bytes
             if chunk.usage is not None:
                 final_usage = self._merge_stream_usage(final_usage, chunk.usage)
-            if chunk.model:
-                response_model = chunk.model
             for ch in chunk.choices:
                 delta = ch.get("delta", {})
                 c = delta.get("content", "")
@@ -1956,6 +2033,7 @@ class GatewayAgent:
             if not chunk.choices:
                 return None
             chunk_dict = self._chunk_to_dict(chunk)
+            chunk_dict["model"] = request.model
             if pii_mapping and pii_mapping.redacted_count > 0:
                 chunk_dict = self._reinject_chunk_pii(chunk_dict, pii_mapping, pii_buffer)
             return {"data": chunk_dict}
@@ -1985,6 +2063,8 @@ class GatewayAgent:
                     fallback_model=response_model,
                     usage=final_usage,
                 )
+                buffered_response.provider_model = response_model
+                buffered_response.model = request.model
                 (
                     buffered_response,
                     _response_blocked,
@@ -2131,7 +2211,7 @@ class GatewayAgent:
         usage_record = UsageRecord(
             request_id=request_id, project_id=req_ctx.project_id, user_id=req_ctx.user_id,
             tenant_id=req_ctx.tenant_id,
-            provider=provider, model=response_model,
+            provider=provider, model=model,
             prompt_tokens=usage.prompt_tokens, completion_tokens=usage.completion_tokens,
             total_tokens=usage.total_tokens, cost=cost,
             timestamp=datetime.now(timezone.utc),
@@ -2191,7 +2271,7 @@ class GatewayAgent:
                 user_id=req_ctx.user_id,
                 project_id=req_ctx.project_id,
                 request_id=request_id,
-                model=response_model,
+                model=model,
                 provider=provider,
                 message_count=len(request.messages or []),
                 pii_redacted_count=(
@@ -2634,7 +2714,15 @@ class GatewayAgent:
             "panel": decision.panel_members,
             "judge": decision.judge_model,
             "succeeded": decision.succeeded,
-            "failed": decision.failed,
+            "failed": [
+                {
+                    "model": failure.get("model"),
+                    "reason": _public_ensemble_failure_reason(
+                        failure.get("reason")
+                    ),
+                }
+                for failure in decision.failed
+            ],
             "quorum_met": decision.quorum_met,
             "succeeded_count": decision.succeeded_count,
             "quorum_threshold": decision.quorum_threshold,
@@ -3059,6 +3147,25 @@ class GatewayAgent:
             raise NotImplementedError("provider_fn must be supplied by caller")
         return _noop
 
+    def _router_model_is_available(self, model: str) -> bool:
+        """Use runtime availability when supported by the injected router.
+
+        Older embedding integrations and lightweight custom routers predate the
+        availability API. They remain compatible, while the production Router
+        still enforces provider and pricing gates.
+        """
+        checker = getattr(self.router, "is_model_available", None)
+        if not callable(checker):
+            return True
+        try:
+            return bool(checker(model))
+        except KeyError:
+            return False
+
+    @staticmethod
+    def _response_billing_model(response: ChatCompletionResponse) -> str:
+        return response.provider_model or response.model
+
     def _response_to_dict(
         self, response: ChatCompletionResponse, is_cached: bool = False
     ) -> dict:
@@ -3154,18 +3261,8 @@ class GatewayAgent:
         only those models are returned. If user_id is provided and the
         user has allowed_models, further filter to the intersection.
         """
-        runtime_providers = getattr(self.router, "available_providers", None)
-        if not isinstance(runtime_providers, (set, frozenset)):
-            runtime_providers = None
-
         def available_mappings(model):
-            if runtime_providers is None:
-                return list(model.providers)
-            return [
-                mapping
-                for mapping in model.providers
-                if mapping.provider in runtime_providers
-            ]
+            return self.router.available_mappings(model.name)
 
         models = [
             model
@@ -3219,18 +3316,11 @@ class GatewayAgent:
 
     async def handle_health_check(self) -> dict:
         """Return service status and per-provider health."""
-        runtime_providers = getattr(self.router, "available_providers", None)
-        if not isinstance(runtime_providers, (set, frozenset)):
-            runtime_providers = None
         models = self.router.model_registry.list_models()
         providers: set[str] = set()
         for m in models:
-            for mapping in m.providers:
-                if (
-                    runtime_providers is None
-                    or mapping.provider in runtime_providers
-                ):
-                    providers.add(mapping.provider)
+            for mapping in self.router.available_mappings(m.name):
+                providers.add(mapping.provider)
 
         provider_health: dict[str, str] = {}
         for provider in sorted(providers):

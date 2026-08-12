@@ -12,7 +12,10 @@ from starlette.testclient import TestClient
 
 from src.gateway.config import AppConfig
 from src.gateway.config_loader import load_app_config
-from src.gateway.bootstrap import build_starlette_app
+from src.gateway.bootstrap import (
+    build_gateway_components,
+    build_starlette_app,
+)
 from src.gateway.models import (
     AuthMethod,
     MembershipStatus,
@@ -317,6 +320,60 @@ def test_control_plane_only_omits_all_data_plane_routes() -> None:
     assert "/admin/projects" in paths
     assert "/health" in paths
     assert "/ready" in paths
+
+
+@pytest.mark.parametrize(
+    ("control_plane_only", "expected"),
+    [
+        (False, ["start", "stop"]),
+        (True, []),
+    ],
+)
+def test_query_reconciler_lifecycle_is_data_plane_only(
+    monkeypatch: pytest.MonkeyPatch,
+    control_plane_only: bool,
+    expected: list[str],
+) -> None:
+    calls: list[str] = []
+
+    class Worker:
+        async def start(self) -> None:
+            calls.append("start")
+
+        async def stop(self) -> None:
+            calls.append("stop")
+
+    components = build_gateway_components(
+        AppConfig(
+            deployment_profile="development",
+            auth_mode="LOG_ONLY",
+        )
+    )
+    components.datasource_repository = _QueryService()
+    components.query_service = _QueryService()
+    components.query_reconciliation_worker = Worker()
+    monkeypatch.setattr(
+        "src.gateway.bootstrap.build_gateway_components",
+        lambda *_args, **_kwargs: components,
+    )
+    app = build_starlette_app(
+        AppConfig(
+            deployment_profile="development",
+            auth_mode="ENFORCE",
+            canonical_identity_required=True,
+            durable_persistence_enabled=True,
+            athena_query_enabled=True,
+            control_plane_only=control_plane_only,
+        )
+    )
+
+    with TestClient(app):
+        if control_plane_only:
+            assert calls == []
+        else:
+            assert calls == ["start"]
+
+    assert calls == expected
 
 
 def test_query_settings_are_loaded_strictly(

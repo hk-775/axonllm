@@ -3124,6 +3124,304 @@ class DynamoPersistence:
             "SK": f"WINDOW#{window_start}",
         }
 
+    @staticmethod
+    def _encode_query_reconciliation_cursor(
+        key: dict[str, object] | None,
+    ) -> str | None:
+        if key is None:
+            return None
+        import base64
+
+        if (
+            set(key) != {"PK", "SK"}
+            or any(
+                not isinstance(key.get(name), str)
+                or not key[name]
+                or len(key[name]) > 2048
+                for name in ("PK", "SK")
+            )
+        ):
+            raise ValueError(
+                "query reconciliation continuation key is invalid"
+            )
+        payload = json.dumps(
+            {"v": 1, "key": {"PK": key["PK"], "SK": key["SK"]}},
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        return base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+
+    @staticmethod
+    def _decode_query_reconciliation_cursor(
+        cursor: str | None,
+    ) -> dict[str, str] | None:
+        if cursor is None:
+            return None
+        import base64
+
+        if (
+            not isinstance(cursor, str)
+            or not cursor
+            or len(cursor) > 4096
+            or any(character.isspace() for character in cursor)
+        ):
+            raise ValueError("query reconciliation cursor is invalid")
+        try:
+            padding = "=" * (-len(cursor) % 4)
+            payload = json.loads(
+                base64.b64decode(
+                    cursor + padding,
+                    altchars=b"-_",
+                    validate=True,
+                )
+            )
+        except (UnicodeDecodeError, ValueError, json.JSONDecodeError) as exc:
+            raise ValueError(
+                "query reconciliation cursor is invalid"
+            ) from exc
+        if (
+            not isinstance(payload, dict)
+            or set(payload) != {"v", "key"}
+            or payload.get("v") != 1
+            or not isinstance(payload.get("key"), dict)
+        ):
+            raise ValueError("query reconciliation cursor is invalid")
+        key = payload["key"]
+        if (
+            set(key) != {"PK", "SK"}
+            or any(
+                not isinstance(key.get(name), str)
+                or not key[name]
+                or len(key[name]) > 2048
+                for name in ("PK", "SK")
+            )
+        ):
+            raise ValueError("query reconciliation cursor is invalid")
+        return {"PK": key["PK"], "SK": key["SK"]}
+
+    @staticmethod
+    def _query_reconciliation_integer(
+        value: object,
+        *,
+        name: str,
+        minimum: int = 0,
+    ) -> int:
+        if isinstance(value, bool) or not isinstance(value, (int, Decimal)):
+            raise ValueError(f"{name} must be an integer")
+        normalized = int(value)
+        if value != normalized or normalized < minimum:
+            raise ValueError(f"{name} must be an integer")
+        return normalized
+
+    @staticmethod
+    def _query_terminal_audit_document(terminal_audit: object) -> dict:
+        from src.gateway.query.reconciliation import QueryTerminalAudit
+
+        if not isinstance(terminal_audit, QueryTerminalAudit):
+            raise ValueError("query terminal audit is invalid")
+        return {
+            "status": terminal_audit.status,
+            "failure_code": terminal_audit.failure_code,
+            "execution_id": terminal_audit.execution_id,
+            "athena_state": terminal_audit.athena_state,
+            "observed_scan_bytes": terminal_audit.observed_scan_bytes,
+            "accounted_scan_bytes": terminal_audit.accounted_scan_bytes,
+            "engine_execution_ms": terminal_audit.engine_execution_ms,
+            "cancellation_requested": (
+                terminal_audit.cancellation_requested
+            ),
+            "scan_accounting": terminal_audit.scan_accounting,
+            "row_count": terminal_audit.row_count,
+            "truncated": terminal_audit.truncated,
+            "result_bytes": terminal_audit.result_bytes,
+        }
+
+    @classmethod
+    def _query_reconciliation_claim_from_item(
+        cls,
+        item: object,
+        *,
+        claim_token: str,
+    ):
+        from src.gateway.query.admission import QueryAdmissionLease
+        from src.gateway.query.reconciliation import (
+            QueryLifecycleClaim,
+            QueryTerminalAudit,
+        )
+
+        if not isinstance(item, dict):
+            raise ValueError("query lifecycle item is invalid")
+
+        def _required_string(name: str) -> str:
+            value = item.get(name)
+            if (
+                not isinstance(value, str)
+                or not value
+                or len(value) > 2048
+            ):
+                raise ValueError(f"query lifecycle {name} is invalid")
+            return value
+
+        tenant_id = _required_string("tenant_id")
+        project_id = _required_string("project_id")
+        request_id = _required_string("request_id")
+        if item.get("entity_type") != "query_lifecycle":
+            raise ValueError("query lifecycle entity type is invalid")
+        expected_key = cls._query_lifecycle_key(
+            tenant_id,
+            project_id,
+            request_id,
+        )
+        if any(item.get(name) != value for name, value in expected_key.items()):
+            raise ValueError("query lifecycle ownership key is invalid")
+
+        lease = QueryAdmissionLease(
+            tenant_id=tenant_id,
+            project_id=project_id,
+            principal_id=_required_string("principal_id"),
+            request_id=request_id,
+            datasource_id=_required_string("datasource_id"),
+            query_sha256=_required_string("query_sha256"),
+            lease_token=_required_string("lease_token"),
+            window_start=cls._query_reconciliation_integer(
+                item.get("window_start"),
+                name="window_start",
+            ),
+            lease_expires_at=cls._query_reconciliation_integer(
+                item.get("lease_expires_at"),
+                name="lease_expires_at",
+                minimum=1,
+            ),
+            project_slot=cls._query_reconciliation_integer(
+                item.get("project_slot"),
+                name="project_slot",
+            ),
+            principal_slot=cls._query_reconciliation_integer(
+                item.get("principal_slot"),
+                name="principal_slot",
+            ),
+            reserved_scan_bytes=cls._query_reconciliation_integer(
+                item.get("reserved_scan_bytes"),
+                name="reserved_scan_bytes",
+                minimum=1,
+            ),
+        )
+        status = item.get("status")
+        execution_id = item.get("execution_id")
+        if execution_id is not None and (
+            not isinstance(execution_id, str) or not execution_id
+        ):
+            raise ValueError("query lifecycle execution ID is invalid")
+
+        terminal_audit = None
+        if status in {"succeeded", "failed", "cancelled"}:
+            if item.get("audit_pending") is not True:
+                raise ValueError(
+                    "terminal query lifecycle audit is not pending"
+                )
+            document = item.get("terminal_audit")
+            if not isinstance(document, dict):
+                raise ValueError("query terminal audit document is invalid")
+            expected_fields = {
+                "status",
+                "failure_code",
+                "execution_id",
+                "athena_state",
+                "observed_scan_bytes",
+                "accounted_scan_bytes",
+                "engine_execution_ms",
+                "cancellation_requested",
+                "scan_accounting",
+                "row_count",
+                "truncated",
+                "result_bytes",
+            }
+            if set(document) != expected_fields:
+                raise ValueError("query terminal audit document is invalid")
+
+            def _optional_integer(name: str) -> int | None:
+                value = document.get(name)
+                if value is None:
+                    return None
+                return cls._query_reconciliation_integer(
+                    value,
+                    name=name,
+                )
+
+            terminal_audit = QueryTerminalAudit(
+                status=document.get("status"),
+                failure_code=document.get("failure_code"),
+                execution_id=document.get("execution_id"),
+                athena_state=document.get("athena_state"),
+                observed_scan_bytes=_optional_integer(
+                    "observed_scan_bytes"
+                ),
+                accounted_scan_bytes=(
+                    cls._query_reconciliation_integer(
+                        document.get("accounted_scan_bytes"),
+                        name="accounted_scan_bytes",
+                    )
+                ),
+                engine_execution_ms=_optional_integer(
+                    "engine_execution_ms"
+                ),
+                cancellation_requested=document.get(
+                    "cancellation_requested"
+                ),
+                scan_accounting=document.get("scan_accounting"),
+                row_count=_optional_integer("row_count"),
+                truncated=document.get("truncated"),
+                result_bytes=_optional_integer("result_bytes"),
+            )
+        return QueryLifecycleClaim(
+            lease=lease,
+            claim_token=claim_token,
+            status=status,
+            execution_id=execution_id,
+            terminal_audit=terminal_audit,
+        )
+
+    @classmethod
+    def _query_reconciliation_terminal_matches(
+        cls,
+        item: object,
+        *,
+        claim: object,
+        terminal_audit: object,
+    ) -> bool:
+        from src.gateway.query.reconciliation import QueryLifecycleClaim
+
+        if not isinstance(item, dict) or not isinstance(
+            claim,
+            QueryLifecycleClaim,
+        ):
+            return False
+        try:
+            stored = item.get("terminal_audit")
+            if not isinstance(stored, dict):
+                return False
+            normalized = cls._query_terminal_audit_document(
+                terminal_audit
+            )
+            return (
+                item.get("lease_token") == claim.lease.lease_token
+                and (
+                    item.get("reconciliation_token")
+                    == claim.claim_token
+                    or item.get("audit_acknowledged_claim_token")
+                    == claim.claim_token
+                )
+                and item.get("status") == normalized["status"]
+                and cls._query_reconciliation_integer(
+                    item.get("actual_scan_bytes"),
+                    name="actual_scan_bytes",
+                )
+                == normalized["accounted_scan_bytes"]
+                and stored == normalized
+            )
+        except (TypeError, ValueError):
+            return False
+
     async def reserve_query_capacity(
         self,
         *,
@@ -3210,6 +3508,7 @@ class DynamoPersistence:
             "query_sha256": query_sha256,
             "status": "accepted",
             "lease_token": lease_token,
+            "lease_expires_at": lease_expires_at,
             "reserved_scan_bytes": reserved_scan_bytes,
             "window_start": window_start,
             "created_at": now.isoformat(),
@@ -3326,7 +3625,11 @@ class DynamoPersistence:
                             "Put": {
                                 "TableName": self._table_name,
                                 "Item": self._serialize_dynamo_map(
-                                    lifecycle_item
+                                    {
+                                        **lifecycle_item,
+                                        "project_slot": project_slot,
+                                        "principal_slot": principal_slot,
+                                    }
                                 ),
                                 "ConditionExpression": (
                                     "attribute_not_exists(PK) AND "
@@ -3503,9 +3806,14 @@ class DynamoPersistence:
         status: str,
         execution_id: str | None,
         failure_code: str | None,
+        terminal_audit: object,
+        audit_claim_token: str,
         now: datetime,
+        audit_claim_seconds: int = 60,
     ) -> bool:
         """Finalize lifecycle and reconcile worst-case scan reservations."""
+        from src.gateway.query.reconciliation import QueryTerminalAudit
+
         tenant_id = _require_tenant_id(tenant_id)
         if status not in {"succeeded", "failed", "cancelled"}:
             raise ValueError("query terminal status is invalid")
@@ -3545,6 +3853,21 @@ class DynamoPersistence:
             not isinstance(failure_code, str) or not failure_code
         ):
             raise ValueError("failure_code must be None or non-empty")
+        if (
+            not isinstance(terminal_audit, QueryTerminalAudit)
+            or terminal_audit.status != status
+            or terminal_audit.execution_id != execution_id
+            or terminal_audit.failure_code != failure_code
+            or terminal_audit.accounted_scan_bytes != actual_scan_bytes
+            or not isinstance(audit_claim_token, str)
+            or not audit_claim_token
+            or audit_claim_token != audit_claim_token.strip()
+            or len(audit_claim_token) > 256
+            or isinstance(audit_claim_seconds, bool)
+            or not isinstance(audit_claim_seconds, int)
+            or not 15 <= audit_claim_seconds <= 900
+        ):
+            raise ValueError("query terminal audit claim is invalid")
         if not self._enabled:
             return False
         refund = reserved_scan_bytes - actual_scan_bytes
@@ -3552,6 +3875,9 @@ class DynamoPersistence:
             tenant_id,
             project_id,
             request_id,
+        )
+        terminal_document = (
+            self._query_terminal_audit_document(terminal_audit)
         )
 
         def _finalize() -> bool:
@@ -3582,6 +3908,26 @@ class DynamoPersistence:
             if failure_code is not None:
                 update_expression += ", failure_code = :failure_code"
                 values[":failure_code"] = failure_code
+            update_expression += (
+                ", audit_pending = :audit_pending, "
+                "terminal_audit = :terminal_audit, "
+                "reconciliation_token = :audit_claim_token, "
+                "reconciliation_owner = :reconciliation_owner, "
+                "reconciliation_expires_at = :claim_expires_at, "
+                "reconciliation_claimed_at = :claimed_at"
+            )
+            values.update(
+                {
+                    ":audit_pending": True,
+                    ":terminal_audit": terminal_document,
+                    ":audit_claim_token": audit_claim_token,
+                    ":reconciliation_owner": "query-service",
+                    ":claim_expires_at": (
+                        int(now.timestamp()) + audit_claim_seconds
+                    ),
+                    ":claimed_at": now.isoformat(),
+                }
+            )
             operations: list[dict] = [
                 {
                     "Update": {
@@ -3637,6 +3983,45 @@ class DynamoPersistence:
                             }
                         }
                     )
+            for scope, ident, slot in (
+                ("project", project_id, project_slot),
+                ("principal", principal_id, principal_slot),
+            ):
+                slot_key = self._query_slot_key(
+                    tenant_id,
+                    scope,
+                    ident,
+                    slot,
+                )
+                current = table.get_item(
+                    Key=slot_key,
+                    ConsistentRead=True,
+                ).get("Item")
+                if not isinstance(current, dict) or (
+                    current.get("lease_token") != lease_token
+                    or current.get("request_id") != request_id
+                ):
+                    continue
+                operations.append(
+                    {
+                        "Delete": {
+                            "TableName": self._table_name,
+                            "Key": self._serialize_dynamo_map(slot_key),
+                            "ConditionExpression": (
+                                "lease_token = :lease_token AND "
+                                "request_id = :request_id"
+                            ),
+                            "ExpressionAttributeValues": (
+                                self._serialize_dynamo_map(
+                                    {
+                                        ":lease_token": lease_token,
+                                        ":request_id": request_id,
+                                    }
+                                )
+                            ),
+                        }
+                    }
+                )
             try:
                 client.transact_write_items(
                     TransactItems=operations,
@@ -3645,19 +4030,12 @@ class DynamoPersistence:
                     ),
                 )
             except Exception as exc:
-                if not any(
-                    self._api_key_condition_failed(exc, index)
-                    for index in range(len(operations))
-                ):
-                    raise
                 response = table.get_item(
                     Key=lifecycle_key,
                     ConsistentRead=True,
                 )
                 item = response.get("Item")
-                if not isinstance(item, dict):
-                    return False
-                return (
+                terminal_matches = isinstance(item, dict) and (
                     item.get("lease_token") == lease_token
                     and item.get("status") == status
                     and int(item.get("actual_scan_bytes", -1))
@@ -3665,43 +4043,650 @@ class DynamoPersistence:
                     and item.get("execution_id") == execution_id
                     and item.get("failure_code") == failure_code
                 )
-
-            for scope, ident, slot in (
-                ("project", project_id, project_slot),
-                ("principal", principal_id, principal_slot),
-            ):
-                try:
-                    table.delete_item(
-                        Key=self._query_slot_key(
-                            tenant_id,
-                            scope,
-                            ident,
-                            slot,
-                        ),
-                        ConditionExpression=(
-                            "lease_token = :lease_token AND "
-                            "request_id = :request_id"
-                        ),
-                        ExpressionAttributeValues={
-                            ":lease_token": lease_token,
-                            ":request_id": request_id,
-                        },
+                if terminal_matches:
+                    terminal_matches = (
+                        item.get("terminal_audit") == terminal_document
+                        and (
+                            item.get("reconciliation_token")
+                            == audit_claim_token
+                            or item.get(
+                                "audit_acknowledged_claim_token"
+                            )
+                            == audit_claim_token
+                        )
                     )
-                except Exception:
-                    logger.warning(
-                        "Query admission slot release failed "
-                        "tenant=%s project=%s scope=%s",
-                        tenant_id,
-                        project_id,
-                        scope,
-                        exc_info=True,
-                    )
+                if terminal_matches:
+                    return True
+                if any(
+                    self._api_key_condition_failed(exc, index)
+                    for index in range(len(operations))
+                ):
+                    return False
+                raise
             return True
 
         try:
             return await asyncio.to_thread(_finalize)
         except Exception:
             logger.exception("Query lifecycle finalization failed")
+            return False
+
+    async def claim_query_reconciliation_page(
+        self,
+        *,
+        owner_token: str,
+        now: datetime,
+        claim_seconds: int,
+        limit: int,
+        cursor: str | None,
+    ):
+        """Claim one bounded scan page of expired or audit-pending queries."""
+        from src.gateway.query.reconciliation import QueryLifecyclePage
+
+        if (
+            not isinstance(owner_token, str)
+            or not owner_token
+            or owner_token != owner_token.strip()
+            or len(owner_token) > 256
+            or now.tzinfo is None
+            or isinstance(claim_seconds, bool)
+            or not isinstance(claim_seconds, int)
+            or not 15 <= claim_seconds <= 900
+            or isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or not 1 <= limit <= 100
+        ):
+            raise ValueError("query reconciliation claim request is invalid")
+        start_key = self._decode_query_reconciliation_cursor(cursor)
+        if not self._enabled:
+            return QueryLifecyclePage(claims=())
+
+        now_epoch = int(now.timestamp())
+        claim_expires_at = now_epoch + claim_seconds
+
+        def _claim():
+            import uuid
+
+            table = self._get_table()
+            scan_values = {
+                ":entity_type": "query_lifecycle",
+                ":accepted": "accepted",
+                ":running": "running",
+                ":succeeded": "succeeded",
+                ":failed": "failed",
+                ":cancelled": "cancelled",
+                ":now": now_epoch,
+                ":pending": True,
+            }
+            scan_request: dict[str, object] = {
+                "FilterExpression": (
+                    "entity_type = :entity_type AND "
+                    "((lease_expires_at <= :now AND "
+                    "(#status = :accepted OR #status = :running)) OR "
+                    "(audit_pending = :pending AND "
+                    "(#status = :succeeded OR #status = :failed OR "
+                    "#status = :cancelled))) AND "
+                    "(attribute_not_exists(reconciliation_expires_at) OR "
+                    "reconciliation_expires_at <= :now)"
+                ),
+                "ExpressionAttributeNames": {"#status": "status"},
+                "ExpressionAttributeValues": scan_values,
+                # DynamoDB applies Limit before FilterExpression. Read a
+                # bounded sparse-table batch while still claiming at most the
+                # caller's limit.
+                "Limit": min(1000, max(limit, limit * 20)),
+            }
+            if start_key is not None:
+                scan_request["ExclusiveStartKey"] = start_key
+            response = table.scan(**scan_request)
+            items = response.get("Items", ())
+            if not isinstance(items, (list, tuple)):
+                raise RuntimeError(
+                    "query reconciliation scan returned invalid items"
+                )
+
+            claims = []
+            stopped_before_page_end = False
+            last_examined_key: dict[str, str] | None = None
+            for index, candidate in enumerate(items):
+                if not isinstance(candidate, dict):
+                    logger.error(
+                        "Ignoring malformed query lifecycle during "
+                        "reconciliation"
+                    )
+                    continue
+                candidate_key = {
+                    "PK": candidate.get("PK"),
+                    "SK": candidate.get("SK"),
+                }
+                try:
+                    self._encode_query_reconciliation_cursor(candidate_key)
+                except ValueError:
+                    logger.error(
+                        "Ignoring query lifecycle with malformed key during "
+                        "reconciliation"
+                    )
+                    continue
+                last_examined_key = candidate_key
+                claim_token = uuid.uuid4().hex
+                try:
+                    candidate_claim = (
+                        self._query_reconciliation_claim_from_item(
+                            candidate,
+                            claim_token=claim_token,
+                        )
+                    )
+                except (TypeError, ValueError):
+                    logger.error(
+                        "Ignoring malformed query lifecycle during "
+                        "reconciliation",
+                        exc_info=True,
+                    )
+                    continue
+
+                values = {
+                    ":entity_type": "query_lifecycle",
+                    ":lease_token": candidate_claim.lease.lease_token,
+                    ":status": candidate_claim.status,
+                    ":now": now_epoch,
+                    ":pending": True,
+                    ":claim_token": claim_token,
+                    ":owner_token": owner_token,
+                    ":claim_expires_at": claim_expires_at,
+                    ":claimed_at": now.isoformat(),
+                    ":updated_at": now.isoformat(),
+                }
+                eligibility = (
+                    "lease_expires_at <= :now"
+                    if candidate_claim.status in {"accepted", "running"}
+                    else "audit_pending = :pending"
+                )
+                try:
+                    updated = table.update_item(
+                        Key={
+                            "PK": candidate["PK"],
+                            "SK": candidate["SK"],
+                        },
+                        UpdateExpression=(
+                            "SET reconciliation_token = :claim_token, "
+                            "reconciliation_owner = :owner_token, "
+                            "reconciliation_expires_at = "
+                            ":claim_expires_at, "
+                            "reconciliation_claimed_at = :claimed_at, "
+                            "updated_at = :updated_at"
+                        ),
+                        ConditionExpression=(
+                            "entity_type = :entity_type AND "
+                            "lease_token = :lease_token AND "
+                            "#status = :status AND "
+                            f"{eligibility} AND "
+                            "(attribute_not_exists("
+                            "reconciliation_expires_at) OR "
+                            "reconciliation_expires_at <= :now)"
+                        ),
+                        ExpressionAttributeNames={"#status": "status"},
+                        ExpressionAttributeValues=values,
+                        ReturnValues="ALL_NEW",
+                    )
+                except Exception as exc:
+                    if self._api_key_condition_failed(exc, 0):
+                        continue
+                    raise
+                attributes = updated.get("Attributes")
+                claimed_item = (
+                    attributes
+                    if isinstance(attributes, dict)
+                    else candidate
+                )
+                claims.append(
+                    self._query_reconciliation_claim_from_item(
+                        claimed_item,
+                        claim_token=claim_token,
+                    )
+                )
+                if len(claims) >= limit:
+                    stopped_before_page_end = index < len(items) - 1
+                    break
+
+            continuation = (
+                last_examined_key
+                if stopped_before_page_end
+                else response.get("LastEvaluatedKey")
+            )
+            if continuation is not None and not isinstance(
+                continuation,
+                dict,
+            ):
+                raise RuntimeError(
+                    "query reconciliation scan returned an invalid cursor"
+                )
+            return QueryLifecyclePage(
+                claims=tuple(claims),
+                next_cursor=self._encode_query_reconciliation_cursor(
+                    continuation
+                ),
+            )
+
+        try:
+            return await asyncio.to_thread(_claim)
+        except (TypeError, ValueError):
+            raise
+        except Exception:
+            logger.exception("Query reconciliation claim scan failed")
+            raise
+
+    async def finalize_query_reconciliation(
+        self,
+        *,
+        claim: object,
+        terminal_audit: object,
+        now: datetime,
+    ) -> bool:
+        """Atomically terminalize one claimed query and retain its audit."""
+        from src.gateway.query.reconciliation import (
+            QueryLifecycleClaim,
+            QueryTerminalAudit,
+        )
+
+        if (
+            not isinstance(claim, QueryLifecycleClaim)
+            or claim.status not in {"accepted", "running"}
+            or not isinstance(terminal_audit, QueryTerminalAudit)
+            or terminal_audit.execution_id != claim.execution_id
+            or (
+                terminal_audit.accounted_scan_bytes
+                > claim.lease.reserved_scan_bytes
+            )
+            or now.tzinfo is None
+        ):
+            raise ValueError(
+                "query reconciliation finalization is invalid"
+            )
+        if not self._enabled:
+            return False
+
+        lease = claim.lease
+        terminal_document = self._query_terminal_audit_document(
+            terminal_audit
+        )
+        lifecycle_key = self._query_lifecycle_key(
+            lease.tenant_id,
+            lease.project_id,
+            lease.request_id,
+        )
+        refund = (
+            lease.reserved_scan_bytes
+            - terminal_audit.accounted_scan_bytes
+        )
+
+        def _finalize() -> bool:
+            table = self._get_table()
+            client = getattr(getattr(table, "meta", None), "client", None)
+            if client is None:
+                raise RuntimeError(
+                    "atomic query reconciliation requires transactions"
+                )
+
+            values: dict[str, object] = {
+                ":terminal_status": terminal_audit.status,
+                ":actual_scan_bytes": (
+                    terminal_audit.accounted_scan_bytes
+                ),
+                ":terminal_at": now.isoformat(),
+                ":updated_at": now.isoformat(),
+                ":audit_pending": True,
+                ":terminal_audit": terminal_document,
+                ":lease_token": lease.lease_token,
+                ":claim_token": claim.claim_token,
+                ":claim_status": claim.status,
+            }
+            update_expression = (
+                "SET #status = :terminal_status, "
+                "actual_scan_bytes = :actual_scan_bytes, "
+                "terminal_at = :terminal_at, "
+                "updated_at = :updated_at, "
+                "audit_pending = :audit_pending, "
+                "terminal_audit = :terminal_audit"
+            )
+            removals: list[str] = []
+            if terminal_audit.execution_id is None:
+                removals.append("execution_id")
+            else:
+                update_expression += ", execution_id = :execution_id"
+                values[":execution_id"] = terminal_audit.execution_id
+            if terminal_audit.failure_code is None:
+                removals.append("failure_code")
+            else:
+                update_expression += ", failure_code = :failure_code"
+                values[":failure_code"] = terminal_audit.failure_code
+            if removals:
+                update_expression += " REMOVE " + ", ".join(removals)
+
+            operations: list[dict] = [
+                {
+                    "Update": {
+                        "TableName": self._table_name,
+                        "Key": self._serialize_dynamo_map(
+                            lifecycle_key
+                        ),
+                        "UpdateExpression": update_expression,
+                        "ConditionExpression": (
+                            "lease_token = :lease_token AND "
+                            "reconciliation_token = :claim_token AND "
+                            "#status = :claim_status"
+                        ),
+                        "ExpressionAttributeNames": {
+                            "#status": "status"
+                        },
+                        "ExpressionAttributeValues": (
+                            self._serialize_dynamo_map(values)
+                        ),
+                    }
+                }
+            ]
+
+            if refund:
+                for scope, ident in (
+                    ("project", lease.project_id),
+                    ("principal", lease.principal_id),
+                ):
+                    counter_key = self._query_scan_counter_key(
+                        lease.tenant_id,
+                        scope,
+                        ident,
+                        lease.window_start,
+                    )
+                    counter = table.get_item(
+                        Key=counter_key,
+                        ConsistentRead=True,
+                    ).get("Item")
+                    if counter is None:
+                        continue
+                    if not isinstance(counter, dict):
+                        raise RuntimeError(
+                            "query scan counter is malformed"
+                        )
+                    operations.append(
+                        {
+                            "Update": {
+                                "TableName": self._table_name,
+                                "Key": self._serialize_dynamo_map(
+                                    counter_key
+                                ),
+                                "UpdateExpression": (
+                                    "ADD reserved_scan_bytes :refund"
+                                ),
+                                "ConditionExpression": (
+                                    "entity_type = :entity_type AND "
+                                    "tenant_id = :tenant_id AND "
+                                    "#scope = :scope AND "
+                                    "scope_id = :scope_id AND "
+                                    "reserved_scan_bytes >= "
+                                    ":absolute_refund"
+                                ),
+                                "ExpressionAttributeNames": {
+                                    "#scope": "scope"
+                                },
+                                "ExpressionAttributeValues": (
+                                    self._serialize_dynamo_map(
+                                        {
+                                            ":entity_type": (
+                                                "query_scan_counter"
+                                            ),
+                                            ":tenant_id": lease.tenant_id,
+                                            ":scope": scope,
+                                            ":scope_id": ident,
+                                            ":refund": -refund,
+                                            ":absolute_refund": refund,
+                                        }
+                                    )
+                                ),
+                            }
+                        }
+                    )
+
+            for scope, ident, slot in (
+                ("project", lease.project_id, lease.project_slot),
+                (
+                    "principal",
+                    lease.principal_id,
+                    lease.principal_slot,
+                ),
+            ):
+                slot_key = self._query_slot_key(
+                    lease.tenant_id,
+                    scope,
+                    ident,
+                    slot,
+                )
+                current = table.get_item(
+                    Key=slot_key,
+                    ConsistentRead=True,
+                ).get("Item")
+                if not isinstance(current, dict) or (
+                    current.get("lease_token") != lease.lease_token
+                    or current.get("request_id") != lease.request_id
+                ):
+                    continue
+                operations.append(
+                    {
+                        "Delete": {
+                            "TableName": self._table_name,
+                            "Key": self._serialize_dynamo_map(slot_key),
+                            "ConditionExpression": (
+                                "lease_token = :lease_token AND "
+                                "request_id = :request_id"
+                            ),
+                            "ExpressionAttributeValues": (
+                                self._serialize_dynamo_map(
+                                    {
+                                        ":lease_token": lease.lease_token,
+                                        ":request_id": lease.request_id,
+                                    }
+                                )
+                            ),
+                        }
+                    }
+                )
+
+            try:
+                client.transact_write_items(
+                    TransactItems=operations,
+                    ClientRequestToken=self._api_key_transaction_token(
+                        "query-reconcile-finalize"
+                    ),
+                )
+                return True
+            except Exception as exc:
+                response = table.get_item(
+                    Key=lifecycle_key,
+                    ConsistentRead=True,
+                )
+                if self._query_reconciliation_terminal_matches(
+                    response.get("Item"),
+                    claim=claim,
+                    terminal_audit=terminal_audit,
+                ):
+                    return True
+                if any(
+                    self._api_key_condition_failed(exc, index)
+                    for index in range(len(operations))
+                ):
+                    return False
+                raise
+
+        try:
+            return await asyncio.to_thread(_finalize)
+        except Exception:
+            logger.exception("Query reconciliation finalization failed")
+            return False
+
+    async def defer_query_reconciliation(
+        self,
+        *,
+        claim: object,
+        now: datetime,
+    ) -> bool:
+        """Release only the matching active reconciliation claim."""
+        from src.gateway.query.reconciliation import QueryLifecycleClaim
+
+        if (
+            not isinstance(claim, QueryLifecycleClaim)
+            or claim.status not in {"accepted", "running"}
+            or now.tzinfo is None
+        ):
+            raise ValueError("query reconciliation defer request is invalid")
+        if not self._enabled:
+            return False
+        lease = claim.lease
+        lifecycle_key = self._query_lifecycle_key(
+            lease.tenant_id,
+            lease.project_id,
+            lease.request_id,
+        )
+
+        def _defer() -> bool:
+            table = self._get_table()
+            try:
+                table.update_item(
+                    Key=lifecycle_key,
+                    UpdateExpression=(
+                        "SET reconciliation_deferred_token = :claim_token, "
+                        "reconciliation_deferred_at = :deferred_at, "
+                        "updated_at = :updated_at "
+                        "REMOVE reconciliation_token, "
+                        "reconciliation_owner, "
+                        "reconciliation_expires_at, "
+                        "reconciliation_claimed_at"
+                    ),
+                    ConditionExpression=(
+                        "lease_token = :lease_token AND "
+                        "reconciliation_token = :claim_token AND "
+                        "#status = :claim_status"
+                    ),
+                    ExpressionAttributeNames={"#status": "status"},
+                    ExpressionAttributeValues={
+                        ":lease_token": lease.lease_token,
+                        ":claim_token": claim.claim_token,
+                        ":claim_status": claim.status,
+                        ":deferred_at": now.isoformat(),
+                        ":updated_at": now.isoformat(),
+                    },
+                )
+                return True
+            except Exception as exc:
+                response = table.get_item(
+                    Key=lifecycle_key,
+                    ConsistentRead=True,
+                )
+                item = response.get("Item")
+                if (
+                    isinstance(item, dict)
+                    and item.get("lease_token") == lease.lease_token
+                    and item.get("status") == claim.status
+                    and item.get("reconciliation_deferred_token")
+                    == claim.claim_token
+                ):
+                    return True
+                if self._api_key_condition_failed(exc, 0):
+                    return False
+                raise
+
+        try:
+            return await asyncio.to_thread(_defer)
+        except Exception:
+            logger.exception("Query reconciliation defer failed")
+            return False
+
+    async def ack_query_reconciliation_audit(
+        self,
+        *,
+        claim: object,
+        now: datetime,
+    ) -> bool:
+        """Acknowledge only the exact terminal audit held by this claim."""
+        from src.gateway.query.reconciliation import QueryLifecycleClaim
+
+        if (
+            not isinstance(claim, QueryLifecycleClaim)
+            or claim.status not in {"succeeded", "failed", "cancelled"}
+            or claim.terminal_audit is None
+            or now.tzinfo is None
+        ):
+            raise ValueError(
+                "query reconciliation audit acknowledgement is invalid"
+            )
+        if not self._enabled:
+            return False
+        lease = claim.lease
+        lifecycle_key = self._query_lifecycle_key(
+            lease.tenant_id,
+            lease.project_id,
+            lease.request_id,
+        )
+        terminal_document = self._query_terminal_audit_document(
+            claim.terminal_audit
+        )
+
+        def _acknowledge() -> bool:
+            table = self._get_table()
+            try:
+                table.update_item(
+                    Key=lifecycle_key,
+                    UpdateExpression=(
+                        "SET audit_acknowledged_at = :acknowledged_at, "
+                        "audit_acknowledged_claim_token = :claim_token, "
+                        "updated_at = :updated_at "
+                        "REMOVE audit_pending, reconciliation_token, "
+                        "reconciliation_owner, "
+                        "reconciliation_expires_at, "
+                        "reconciliation_claimed_at"
+                    ),
+                    ConditionExpression=(
+                        "lease_token = :lease_token AND "
+                        "reconciliation_token = :claim_token AND "
+                        "#status = :terminal_status AND "
+                        "audit_pending = :pending AND "
+                        "terminal_audit = :terminal_audit"
+                    ),
+                    ExpressionAttributeNames={"#status": "status"},
+                    ExpressionAttributeValues={
+                        ":lease_token": lease.lease_token,
+                        ":claim_token": claim.claim_token,
+                        ":terminal_status": claim.status,
+                        ":pending": True,
+                        ":terminal_audit": terminal_document,
+                        ":acknowledged_at": now.isoformat(),
+                        ":updated_at": now.isoformat(),
+                    },
+                )
+                return True
+            except Exception as exc:
+                response = table.get_item(
+                    Key=lifecycle_key,
+                    ConsistentRead=True,
+                )
+                item = response.get("Item")
+                if (
+                    isinstance(item, dict)
+                    and item.get("lease_token") == lease.lease_token
+                    and item.get("status") == claim.status
+                    and item.get("terminal_audit") == terminal_document
+                    and item.get("audit_pending") is not True
+                    and item.get("audit_acknowledged_claim_token")
+                    == claim.claim_token
+                ):
+                    return True
+                if self._api_key_condition_failed(exc, 0):
+                    return False
+                raise
+
+        try:
+            return await asyncio.to_thread(_acknowledge)
+        except Exception:
+            logger.exception(
+                "Query reconciliation audit acknowledgement failed"
+            )
             return False
 
     # --- Fleet-wide spend counters ---

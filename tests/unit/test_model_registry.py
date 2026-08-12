@@ -108,6 +108,26 @@ class TestLoad:
         reg.load(str(config_file))
         assert "test-model" in reg.models
 
+    def test_shipped_ai21_bedrock_mappings_preserve_model_versions(self):
+        reg = ModelRegistry()
+        reg.load("config/models.yaml")
+
+        large = reg.resolve("jamba-1.5-large-bedrock")
+        mini = reg.resolve("jamba-1.5-mini-bedrock")
+        assert [(item.provider, item.model_id) for item in large] == [
+            ("bedrock", "ai21.jamba-1-5-large-v1:0")
+        ]
+        assert [(item.provider, item.model_id) for item in mini] == [
+            ("bedrock", "ai21.jamba-1-5-mini-v1:0")
+        ]
+
+        assert [(item.provider, item.model_id) for item in reg.resolve(
+            "jamba-large"
+        )] == [("ai21", "jamba-1.6-large")]
+        assert [(item.provider, item.model_id) for item in reg.resolve(
+            "jamba-mini"
+        )] == [("ai21", "jamba-1.6-mini")]
+
 
 # --- resolve ---
 

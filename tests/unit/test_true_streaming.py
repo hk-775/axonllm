@@ -8,6 +8,7 @@ estimates otherwise, and falls back across providers only before the first byte.
 
 from __future__ import annotations
 
+import logging
 import time
 from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock
@@ -449,14 +450,19 @@ class TestPreFirstByteFallback:
         assert "".join(t for t in texts if t) == "ok"       # served by anthropic
         router.health_tracker.mark_unhealthy.assert_called()  # openai marked down
 
-    async def test_all_providers_fail_to_open(self):
+    async def test_all_providers_fail_to_open(self, caplog):
         chain = [ProviderModelMapping(provider="openai", model_id="gpt-4")]
-        http = FakeHttpClient({"openai": ConnectionError("refused")})
+        provider_secret = "provider-echoed-bearer-secret"
+        http = FakeHttpClient({"openai": ConnectionError(provider_secret)})
         agent = _agent(_router(chain), FakeFactory(["openai"], http))
 
-        out = await _drain(agent.handle_chat_completion(_req(), _ctx()))
+        with caplog.at_level(logging.DEBUG, logger="gateway.agent"):
+            out = await _drain(agent.handle_chat_completion(_req(), _ctx()))
+
         err = next(c for c in out if isinstance(c.get("data"), dict) and "error" in c["data"])
         assert err["data"]["error"]["code"] == "all_providers_exhausted"
+        assert provider_secret not in str(out)
+        assert provider_secret not in caplog.text
 
 
 class TestPiiReinjectOverStream:

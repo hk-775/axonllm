@@ -484,12 +484,10 @@ class TestGuards:
         assert await cache.get(_req("what is the refund policy", model="gpt-4o"), "p1") is None
 
     async def test_the_model_guard_compares_requested_models_not_provider_ids(self):
-        """Regression: the guard first compared ``request.model`` against
-        ``response.model``, which are different namespaces — the caller names a
-        gateway alias (``claude-sonnet``) and the response carries the
-        provider-side id (``us.anthropic.claude-sonnet-4-6``). They are never
-        equal, so every candidate was rejected and the cache could not hit at
-        all. A silent 0% hit rate, not an error.
+        """Legacy/custom responses may still carry a provider-side model id.
+
+        The cache guard uses the requested gateway alias captured at insertion,
+        so response identity cannot silently force a 0% hit rate.
         """
         emb = FakeEmbedder()
         cache = SemanticCache(emb)

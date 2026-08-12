@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 from typing import Any
 
@@ -11,6 +12,7 @@ from src.gateway.models import AuthMethod, Principal, TenantRole
 from src.gateway.query.athena import (
     AthenaExecutionError,
     AthenaQueryResult,
+    AthenaQueryTermination,
 )
 from src.gateway.query.admission import (
     QueryAdmissionError,
@@ -20,6 +22,10 @@ from src.gateway.query.models import (
     AthenaDatasource,
     AthenaRoleBinding,
     AthenaRoleBindings,
+)
+from src.gateway.query.reconciliation import (
+    QueryLifecycleClaim,
+    QueryTerminalAudit,
 )
 from src.gateway.query.service import QueryService, QueryServiceError
 from src.gateway.security.audit_trail import AuditEventType
@@ -176,6 +182,7 @@ class _Admission:
         self.acquire_error = acquire_error
         self.finalize_error = finalize_error
         self.calls: list[tuple[str, dict[str, Any]]] = []
+        self.ack_calls: list[QueryLifecycleClaim] = []
         self.lease = QueryAdmissionLease(
             tenant_id="tenant-a",
             project_id="project-a",
@@ -213,10 +220,23 @@ class _Admission:
         self,
         lease: QueryAdmissionLease,
         **kwargs: Any,
-    ) -> None:
+    ) -> QueryLifecycleClaim | None:
         self.calls.append(("finalize", {"lease": lease, **kwargs}))
         if self.finalize_error is not None:
             raise self.finalize_error
+        terminal = kwargs.get("terminal_audit")
+        if not isinstance(terminal, QueryTerminalAudit):
+            return None
+        return QueryLifecycleClaim(
+            lease=lease,
+            claim_token="query-service-test",
+            status=terminal.status,
+            execution_id=terminal.execution_id,
+            terminal_audit=terminal,
+        )
+
+    async def ack_audit(self, claim: QueryLifecycleClaim) -> None:
+        self.ack_calls.append(claim)
 
 
 def _service(
@@ -273,6 +293,45 @@ async def test_durable_admission_tracks_started_and_terminal_state() -> None:
     ]
     assert admission.calls[2][1]["status"] == "succeeded"
     assert admission.calls[2][1]["actual_scan_bytes"] == 2048
+    terminal = admission.calls[2][1]["terminal_audit"]
+    assert terminal.row_count == 1
+    assert terminal.result_bytes == 12
+    assert len(admission.ack_calls) == 1
+    assert admission.ack_calls[0].terminal_audit == terminal
+
+
+async def test_terminal_audit_failure_leaves_replayable_evidence_pending() -> None:
+    class _FailTerminalAudit(_AuditTrail):
+        async def record(self, **kwargs: Any) -> object:
+            if len(self.records) == 1:
+                raise RuntimeError("audit unavailable")
+            return await super().record(**kwargs)
+
+    admission = _Admission()
+    audit = _FailTerminalAudit()
+    service, _, _, _ = _service(
+        admission=admission,
+        audit=audit,
+        require_durable_admission=True,
+    )
+
+    with pytest.raises(QueryServiceError) as raised:
+        await service.execute(
+            principal=_principal(),
+            tenant_id="tenant-a",
+            project_id="project-a",
+            datasource_id="warehouse",
+            sql="SELECT * FROM orders",
+            request_id="request-123",
+        )
+
+    assert raised.value.code == "query_audit_unavailable"
+    finalization = admission.calls[-1][1]
+    assert isinstance(
+        finalization["terminal_audit"],
+        QueryTerminalAudit,
+    )
+    assert admission.ack_calls == []
 
 
 async def test_required_admission_fails_closed_before_execution() -> None:
@@ -357,6 +416,221 @@ async def test_execution_failure_releases_reserved_capacity() -> None:
     ]
     assert admission.calls[-1][1]["status"] == "failed"
     assert admission.calls[-1][1]["actual_scan_bytes"] == 0
+
+
+async def test_terminal_failure_charges_reported_scan_and_audits_accounting() -> None:
+    admission = _Admission()
+    executor = _Executor(
+        error=AthenaExecutionError(
+            "athena_query_failed",
+            "Athena failed.",
+            query_execution_id="execution-123",
+            athena_state="FAILED",
+            data_scanned_bytes=1536,
+            engine_execution_ms=31,
+        )
+    )
+    service, _, _, audit = _service(
+        executor=executor,
+        admission=admission,
+    )
+
+    with pytest.raises(QueryServiceError):
+        await service.execute(
+            principal=_principal(),
+            tenant_id="tenant-a",
+            project_id="project-a",
+            datasource_id="warehouse",
+            sql="SELECT * FROM orders",
+            request_id="request-123",
+        )
+
+    finalization = admission.calls[-1][1]
+    assert finalization["status"] == "failed"
+    assert finalization["actual_scan_bytes"] == 1536
+    assert finalization["execution_id"] == "execution-123"
+    terminal_audit = audit.records[-1]["data"]
+    assert terminal_audit["status"] == "failed"
+    assert terminal_audit["query_execution_id"] == "execution-123"
+    assert terminal_audit["athena_state"] == "FAILED"
+    assert terminal_audit["data_scanned_bytes"] == 1536
+    assert terminal_audit["accounted_scan_bytes"] == 1536
+    assert terminal_audit["engine_execution_ms"] == 31
+    assert terminal_audit["scan_accounting"] == "actual"
+    assert terminal_audit["lifecycle_finalized"] is True
+
+
+async def test_terminal_failure_without_statistics_keeps_full_reservation() -> None:
+    admission = _Admission()
+    executor = _Executor(
+        error=AthenaExecutionError(
+            "athena_status_failed",
+            "Athena statistics were unavailable.",
+            query_execution_id="execution-123",
+            athena_state="FAILED",
+        )
+    )
+    service, _, _, audit = _service(
+        executor=executor,
+        admission=admission,
+    )
+
+    with pytest.raises(QueryServiceError):
+        await service.execute(
+            principal=_principal(),
+            tenant_id="tenant-a",
+            project_id="project-a",
+            datasource_id="warehouse",
+            sql="SELECT * FROM orders",
+            request_id="request-123",
+        )
+
+    finalization = admission.calls[-1][1]
+    assert finalization["actual_scan_bytes"] == 4096
+    assert audit.records[-1]["data"]["data_scanned_bytes"] is None
+    assert audit.records[-1]["data"]["accounted_scan_bytes"] == 4096
+    assert audit.records[-1]["data"]["scan_accounting"] == (
+        "reserved_fallback"
+    )
+
+
+async def test_ambiguous_start_failure_keeps_full_reservation() -> None:
+    admission = _Admission()
+    executor = _Executor(
+        error=AthenaExecutionError(
+            "athena_start_failed",
+            "Athena start response was unavailable.",
+            execution_may_have_started=True,
+        )
+    )
+    service, _, _, audit = _service(
+        executor=executor,
+        admission=admission,
+    )
+
+    with pytest.raises(QueryServiceError):
+        await service.execute(
+            principal=_principal(),
+            tenant_id="tenant-a",
+            project_id="project-a",
+            datasource_id="warehouse",
+            sql="SELECT * FROM orders",
+            request_id="request-123",
+        )
+
+    finalization = admission.calls[-1][1]
+    assert finalization["execution_id"] is None
+    assert finalization["actual_scan_bytes"] == 4096
+    assert audit.records[-1]["data"]["execution_may_have_started"] is True
+    assert audit.records[-1]["data"]["scan_accounting"] == (
+        "reserved_fallback"
+    )
+
+
+async def test_unknown_started_failure_holds_reservation_for_reconciliation() -> None:
+    admission = _Admission()
+    executor = _Executor(
+        error=AthenaExecutionError(
+            "athena_status_failed",
+            "Athena status failed.",
+            query_execution_id="execution-123",
+        )
+    )
+    service, _, _, audit = _service(
+        executor=executor,
+        admission=admission,
+    )
+
+    with pytest.raises(QueryServiceError):
+        await service.execute(
+            principal=_principal(),
+            tenant_id="tenant-a",
+            project_id="project-a",
+            datasource_id="warehouse",
+            sql="SELECT * FROM orders",
+            request_id="request-123",
+        )
+
+    assert [name for name, _ in admission.calls] == ["acquire"]
+    terminal_audit = audit.records[-1]["data"]
+    assert terminal_audit["status"] == "reconciliation_pending"
+    assert terminal_audit["accounted_scan_bytes"] == 4096
+    assert terminal_audit["scan_accounting"] == "reservation_held"
+    assert terminal_audit["lifecycle_finalized"] is False
+
+
+async def test_request_cancellation_is_accounted_and_completely_audited() -> None:
+    class _CancelledExecutor(_Executor):
+        def __init__(self) -> None:
+            super().__init__()
+            self.cancel_calls: list[dict[str, Any]] = []
+
+        async def execute(
+            self,
+            query: Any,
+            datasource: AthenaDatasource,
+            **kwargs: Any,
+        ) -> AthenaQueryResult:
+            self.calls.append((query, datasource, kwargs))
+            await kwargs["on_started"]("execution-123")
+            raise asyncio.CancelledError
+
+        async def cancel(
+            self,
+            _datasource: AthenaDatasource,
+            **kwargs: Any,
+        ) -> AthenaQueryTermination:
+            self.cancel_calls.append(kwargs)
+            return AthenaQueryTermination(
+                query_execution_id="execution-123",
+                state="CANCELLED",
+                terminal=True,
+                data_scanned_bytes=768,
+                engine_execution_ms=17,
+                cancellation_requested=True,
+            )
+
+    admission = _Admission()
+    executor = _CancelledExecutor()
+    service, _, _, audit = _service(
+        executor=executor,
+        admission=admission,
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await service.execute(
+            principal=_principal(),
+            tenant_id="tenant-a",
+            project_id="project-a",
+            datasource_id="warehouse",
+            sql="SELECT * FROM orders",
+            request_id="request-123",
+        )
+
+    assert len(executor.cancel_calls) == 1
+    finalization = admission.calls[-1][1]
+    assert finalization["status"] == "cancelled"
+    assert finalization["actual_scan_bytes"] == 768
+    assert finalization["failure_code"] == "query_cancelled"
+    terminal_audit = audit.records[-1]["data"]
+    assert terminal_audit == {
+        "datasource_id": "warehouse",
+        "query_sha256": hashlib.sha256(
+            b"SELECT * FROM orders"
+        ).hexdigest(),
+        "status": "cancelled",
+        "failure_code": "query_cancelled",
+        "query_execution_id": "execution-123",
+        "athena_state": "CANCELLED",
+        "data_scanned_bytes": 768,
+        "accounted_scan_bytes": 768,
+        "engine_execution_ms": 17,
+        "cancellation_requested": True,
+        "execution_may_have_started": True,
+        "scan_accounting": "actual",
+        "lifecycle_finalized": True,
+        "reconciled": False,
+    }
 
 
 async def test_success_authorizes_audits_and_forwards_canonical_query() -> None:

@@ -17,6 +17,10 @@ from src.gateway.query.admission import (
     QueryAdmissionError,
     QueryAdmissionLimits,
 )
+from src.gateway.query.reconciliation import (
+    QueryLifecycleClaim,
+    QueryTerminalAudit,
+)
 
 
 class _Backend:
@@ -36,6 +40,7 @@ class _Backend:
         self.reserve_calls: list[dict[str, Any]] = []
         self.started_calls: list[dict[str, Any]] = []
         self.finalize_calls: list[dict[str, Any]] = []
+        self.ack_calls: list[dict[str, Any]] = []
 
     async def consume_rate_limit_window(
         self,
@@ -63,6 +68,13 @@ class _Backend:
 
     async def finalize_query_capacity(self, **kwargs: Any) -> bool:
         self.finalize_calls.append(kwargs)
+        return True
+
+    async def ack_query_reconciliation_audit(
+        self,
+        **kwargs: Any,
+    ) -> bool:
+        self.ack_calls.append(kwargs)
         return True
 
 
@@ -100,12 +112,29 @@ async def test_controller_reserves_starts_and_finalizes_lifecycle() -> None:
         query_sha256="a" * 64,
     )
     await controller.mark_started(lease, "execution-123")
-    await controller.finalize(
+    terminal = QueryTerminalAudit(
+        status="succeeded",
+        failure_code=None,
+        execution_id="execution-123",
+        athena_state="SUCCEEDED",
+        observed_scan_bytes=400,
+        accounted_scan_bytes=400,
+        engine_execution_ms=25,
+        cancellation_requested=False,
+        scan_accounting="actual",
+        row_count=1,
+        truncated=False,
+        result_bytes=12,
+    )
+    claim = await controller.finalize(
         lease,
         status="succeeded",
         actual_scan_bytes=400,
         execution_id="execution-123",
+        terminal_audit=terminal,
     )
+    assert isinstance(claim, QueryLifecycleClaim)
+    await controller.ack_audit(claim)
 
     assert backend.rate_calls[0]["namespace"] == "athena-query"
     assert backend.rate_calls[0]["user_limit"] == 5
@@ -115,6 +144,11 @@ async def test_controller_reserves_starts_and_finalizes_lifecycle() -> None:
     assert backend.started_calls[0]["execution_id"] == "execution-123"
     assert backend.finalize_calls[0]["actual_scan_bytes"] == 400
     assert backend.finalize_calls[0]["status"] == "succeeded"
+    assert backend.finalize_calls[0]["terminal_audit"] == terminal
+    assert backend.finalize_calls[0]["audit_claim_token"].startswith(
+        "query-service-"
+    )
+    assert backend.ack_calls[0]["claim"] == claim
 
 
 async def test_controller_denies_rate_limit_before_capacity() -> None:
@@ -303,6 +337,11 @@ async def test_dynamo_reservation_is_one_five_item_transaction() -> None:
     assert lifecycle["entity_type"] == "query_lifecycle"
     assert lifecycle["status"] == "accepted"
     assert lifecycle["request_id"] == "request-123"
+    assert lifecycle["lease_expires_at"] > int(
+        datetime(2026, 8, 10, tzinfo=timezone.utc).timestamp()
+    )
+    assert lifecycle["project_slot"] == decision["project_slot"]
+    assert lifecycle["principal_slot"] == decision["principal_slot"]
     assert "attribute_not_exists(PK)" in (
         operations[0]["Put"]["ConditionExpression"]
     )
@@ -352,6 +391,24 @@ async def test_dynamo_reservation_exhausts_all_project_slots() -> None:
 async def test_dynamo_started_and_terminal_updates_are_conditional() -> None:
     store, client, table = _store()
     now = datetime(2026, 8, 10, tzinfo=timezone.utc)
+    table.item = {
+        "lease_token": "lease-token",
+        "request_id": "request-123",
+    }
+    terminal = QueryTerminalAudit(
+        status="succeeded",
+        failure_code=None,
+        execution_id="execution-123",
+        athena_state="SUCCEEDED",
+        observed_scan_bytes=400,
+        accounted_scan_bytes=400,
+        engine_execution_ms=25,
+        cancellation_requested=False,
+        scan_accounting="actual",
+        row_count=1,
+        truncated=False,
+        result_bytes=12,
+    )
 
     started = await store.mark_query_started(
         tenant_id="tenant-a",
@@ -376,6 +433,8 @@ async def test_dynamo_started_and_terminal_updates_are_conditional() -> None:
         execution_id="execution-123",
         failure_code=None,
         now=now,
+        terminal_audit=terminal,
+        audit_claim_token="query-service-test",
     )
 
     assert started is True
@@ -384,17 +443,29 @@ async def test_dynamo_started_and_terminal_updates_are_conditional() -> None:
     )
     assert finalized is True
     operations = client.transactions[0]["TransactItems"]
-    assert len(operations) == 3
+    assert len(operations) == 5
     lifecycle_values = _decode(
         operations[0]["Update"]["ExpressionAttributeValues"]
     )
     assert lifecycle_values[":terminal_status"] == "succeeded"
-    for operation in operations[1:]:
+    assert lifecycle_values[":audit_pending"] is True
+    assert lifecycle_values[":audit_claim_token"] == "query-service-test"
+    assert lifecycle_values[":terminal_audit"]["row_count"] == 1
+    assert lifecycle_values[":terminal_audit"]["result_bytes"] == 12
+    for operation in operations[1:3]:
         values = _decode(
             operation["Update"]["ExpressionAttributeValues"]
         )
         assert values[":refund"] == -600
-    assert len(table.deletes) == 2
+    for operation in operations[3:]:
+        delete = operation["Delete"]
+        assert "lease_token = :lease_token" in delete[
+            "ConditionExpression"
+        ]
+        values = _decode(delete["ExpressionAttributeValues"])
+        assert values[":lease_token"] == "lease-token"
+        assert values[":request_id"] == "request-123"
+    assert table.deletes == []
     assert all(
         "lease_token = :lease_token" in item["ConditionExpression"]
         for item in table.deletes

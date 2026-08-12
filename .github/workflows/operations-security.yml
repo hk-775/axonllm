@@ -21,6 +21,11 @@ on:
         required: false
         default: false
         type: boolean
+      retain_agentcore_restore:
+        description: Retain and protect the AgentCore restore for a controlled cutover
+        required: false
+        default: false
+        type: boolean
       require_automatic_rotation:
         description: Fail unless Secrets Manager automatic rotation is enabled
         required: false
@@ -167,8 +172,10 @@ jobs:
           REQUIRE_VAULT_LOCK: ${{ github.event_name == 'schedule' || inputs.require_vault_lock }}
           RETAIN_RESTORE: >-
             ${{ github.event_name == 'workflow_dispatch' &&
-                inputs.retain_fargate_restore &&
-                matrix.target == 'fargate' }}
+                ((inputs.retain_fargate_restore &&
+                  matrix.target == 'fargate') ||
+                 (inputs.retain_agentcore_restore &&
+                  matrix.target == 'agentcore')) }}
           RESULT_FILE: ${{ runner.temp }}/recovery-${{ matrix.target }}.json
         run: |
           set -euo pipefail

@@ -16,6 +16,7 @@ from src.gateway.models import (
     BudgetStatus,
     ChatCompletionRequest,
     ChatCompletionResponse,
+    EnsembleDecision,
     GuardrailResult,
     GuardrailRule,
     Project,
@@ -143,6 +144,44 @@ async def test_successful_non_streaming_request(agent, mock_router):
     assert result["usage"]["completion_tokens"] == 5
     assert result["choices"][0]["message"]["content"] == "Hello!"
     mock_router.execute_with_fallback.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_provider_model_prices_logical_public_response(
+    mock_router,
+    mock_rate_limiter,
+    guardrail_engine,
+    cache_manager,
+):
+    response = _make_response(model="gpt-4")
+    response.provider_model = "gpt-4-turbo"
+    mock_router.execute_with_fallback = AsyncMock(return_value=response)
+    tracker = CostTracker(
+        pricing_config={
+            "openai": {
+                "gpt-4-turbo": TokenPricing(
+                    prompt_token_cost=0.01,
+                    completion_token_cost=0.03,
+                )
+            }
+        }
+    )
+    agent = GatewayAgent(
+        router=mock_router,
+        rate_limiter=mock_rate_limiter,
+        guardrail_engine=guardrail_engine,
+        cache_manager=cache_manager,
+        cost_tracker=tracker,
+    )
+
+    result = await agent.handle_chat_completion(
+        _base_request_data(),
+        _base_context(),
+    )
+
+    assert result["model"] == "gpt-4"
+    assert tracker._records[0].model == "gpt-4"
+    assert tracker._records[0].cost == pytest.approx(0.00025)
 
 
 @pytest.mark.asyncio
@@ -298,9 +337,10 @@ async def test_response_guardrail_replaces_content(mock_router, mock_rate_limite
 @pytest.mark.asyncio
 async def test_all_providers_exhausted(mock_router, mock_rate_limiter, guardrail_engine, cache_manager, cost_tracker):
     """When all providers fail, a 502 error is returned."""
+    provider_secret = "provider-echoed-bearer-secret"
     mock_router.execute_with_fallback = AsyncMock(
         side_effect=AllProvidersExhaustedError(
-            [{"provider": "openai", "status_code": 500, "message": "Internal error"}]
+            [{"provider": "openai", "status_code": 500, "message": provider_secret}]
         )
     )
     agent = GatewayAgent(
@@ -315,6 +355,31 @@ async def test_all_providers_exhausted(mock_router, mock_rate_limiter, guardrail
 
     assert result["status_code"] == 502
     assert result["error"]["type"] == "provider_error"
+    assert result["error"]["message"] == "The provider request failed."
+    assert provider_secret not in str(result)
+
+
+def test_ensemble_metadata_sanitizes_provider_failure_details():
+    provider_secret = "provider-echoed-bearer-secret"
+    decision = EnsembleDecision(
+        preset_name="review",
+        panel_members=["model-a"],
+        judge_model="model-b",
+        succeeded=[],
+        failed=[{"model": "model-a", "reason": provider_secret}],
+        quorum_met=False,
+        succeeded_count=0,
+        quorum_threshold=1,
+        total_cost=0.0,
+        cost_multiplier=2.0,
+    )
+
+    metadata = GatewayAgent._ensemble_metadata(decision)
+
+    assert metadata["failed"] == [
+        {"model": "model-a", "reason": "The provider request failed."}
+    ]
+    assert provider_secret not in str(metadata)
 
 
 @pytest.mark.asyncio
@@ -425,6 +490,7 @@ async def test_handle_list_models_returns_all_models(mock_rate_limiter, cache_ma
     router = MagicMock(spec=Router)
     router.model_registry = registry
     router.health_tracker = health_tracker
+    router.available_mappings.side_effect = registry.resolve
 
     agent = GatewayAgent(
         router=router,
@@ -463,6 +529,7 @@ async def test_handle_list_models_empty_registry(mock_rate_limiter, cache_manage
     router = MagicMock(spec=Router)
     router.model_registry = registry
     router.health_tracker = health_tracker
+    router.available_mappings.side_effect = registry.resolve
 
     agent = GatewayAgent(
         router=router,
@@ -515,6 +582,69 @@ async def test_handle_list_models_hides_unavailable_provider_only_models(
 
 
 @pytest.mark.asyncio
+async def test_production_model_list_hides_unpriced_models(
+    mock_rate_limiter,
+    cache_manager,
+):
+    registry = _build_registry_with_models()
+    tracker = CostTracker(
+        {
+            "openai": {
+                "gpt-4-turbo": TokenPricing(0.01, 0.03),
+            }
+        }
+    )
+    router = Router(
+        registry,
+        ProviderHealthTracker(),
+        cost_tracker=tracker,
+        require_priced_mappings=True,
+    )
+    agent = GatewayAgent(
+        router=router,
+        rate_limiter=mock_rate_limiter,
+        guardrail_engine=GuardrailEngine(),
+        cache_manager=cache_manager,
+        cost_tracker=tracker,
+    )
+
+    result = await agent.handle_list_models()
+
+    assert [model["name"] for model in result["models"]] == ["gpt-4"]
+    assert result["models"][0]["providers"] == ["openai"]
+
+
+@pytest.mark.asyncio
+async def test_direct_request_to_unpriced_model_fails_before_dispatch(
+    mock_rate_limiter,
+    cache_manager,
+):
+    registry = _build_registry_with_models()
+    tracker = CostTracker(pricing_config={})
+    router = Router(
+        registry,
+        ProviderHealthTracker(),
+        cost_tracker=tracker,
+        require_priced_mappings=True,
+    )
+    agent = GatewayAgent(
+        router=router,
+        rate_limiter=mock_rate_limiter,
+        guardrail_engine=GuardrailEngine(),
+        cache_manager=cache_manager,
+        cost_tracker=tracker,
+    )
+
+    result = await agent.handle_chat_completion(
+        _base_request_data(),
+        _base_context(),
+    )
+
+    assert result["status_code"] == 503
+    assert result["error"]["code"] == "model_unavailable"
+
+
+@pytest.mark.asyncio
 async def test_handle_health_check_all_healthy(mock_rate_limiter, cache_manager, cost_tracker):
     """health_check returns 'healthy' for all providers when none are in cooldown."""
     registry = _build_registry_with_models()
@@ -523,6 +653,7 @@ async def test_handle_health_check_all_healthy(mock_rate_limiter, cache_manager,
     router = MagicMock(spec=Router)
     router.model_registry = registry
     router.health_tracker = health_tracker
+    router.available_mappings.side_effect = registry.resolve
 
     agent = GatewayAgent(
         router=router,
@@ -550,6 +681,7 @@ async def test_handle_health_check_with_unhealthy_provider(mock_rate_limiter, ca
     router = MagicMock(spec=Router)
     router.model_registry = registry
     router.health_tracker = health_tracker
+    router.available_mappings.side_effect = registry.resolve
 
     agent = GatewayAgent(
         router=router,

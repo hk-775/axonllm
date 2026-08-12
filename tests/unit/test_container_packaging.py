@@ -159,7 +159,7 @@ class TestTheProductionRuntimeIsHardened:
         ]
         assert sync_steps, "Dockerfile does not install dependencies with uv sync"
 
-        required_extras = {"oidc", "saml", "otel"}
+        required_extras = {"oidc", "otel"}
         for sync_step in sync_steps:
             assert "--frozen" in sync_step, "container dependencies must use uv.lock"
             installed_extras = set(

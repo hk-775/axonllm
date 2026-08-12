@@ -95,9 +95,10 @@ if __name__ == "__main__":
     notice = format_startup_notice(drift, drift_url)
     if notice:
         print(notice + "\n")
-        # Open the page rather than only printing about it — an unpriced model
-        # bills at $0.00 silently, and a line in the startup scroll is exactly
-        # the kind of warning that gets missed.
+        # Open the page rather than only printing about it. An unpriced model is
+        # unavailable in production and under-accounted in development, and a
+        # line in the startup scroll is exactly the kind of warning that gets
+        # missed.
         #
         # Two guards, because this same file is the Dockerfile CMD: an explicit
         # AXON_NO_BROWSER, and a tty check. A container or CI runner has no

@@ -19,6 +19,7 @@ dependencies = [
     "starlette>=0.37.0",
     "aiohttp>=3.9.0",
     "boto3>=1.28.0",
+    "google-auth[requests]>=2.40.0,<3",
     "uvicorn[standard]>=0.27.0",
 ]
 
@@ -34,15 +35,10 @@ Documentation = "https://github.com/AxonLLM/axonllm#readme"
 otel = [
     "opentelemetry-exporter-otlp-proto-http>=1.20",
 ]
-# Enterprise identity: SAML SSO assertion verification. Pure-Python — signxml +
-# lxml install from wheels (no libxml2/xmlsec1 system build). XXE/entity-expansion
-# is blocked via lxml parser controls (no defusedxml needed).
-saml = [
-    "signxml>=3.2",
-]
 # OIDC JWT signature verification. Without it OIDCService logs an error and
 # declines to verify rather than trusting an unverified token — safe, but it
-# means SSO does not work, so this is required for any OIDC deployment.
+# means SSO does not work, so this is required for OIDC and Cognito-federated
+# SAML deployments.
 oidc = [
     "httpx>=0.25.0",
     "python-jose[cryptography]>=3.3",
@@ -61,8 +57,6 @@ dev = [
     "pytest-mock>=3.12.0",
     # so CI exercises the OTLP span-mapping path
     "opentelemetry-exporter-otlp-proto-http>=1.20",
-    # so CI exercises SAML signature verification
-    "signxml>=3.2",
     # so CI exercises OIDC JWT signature verification
     "python-jose[cryptography]>=3.3",
     # CI tooling is resolved through uv.lock rather than downloaded by uvx.

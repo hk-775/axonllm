@@ -1,5 +1,6 @@
 """Core data models and types for the LLM-Router service."""
 
+import math
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -84,6 +85,10 @@ class ChatCompletionResponse:
     model: str
     provider: str
     warnings: list[str] = field(default_factory=list)
+    # Internal provider-side identifier used for pricing and reconciliation.
+    # Public responses continue to expose the logical gateway model in
+    # ``model``.
+    provider_model: str | None = None
 
 
 @dataclass
@@ -124,6 +129,36 @@ class TokenPricing:
     image_token_cost: float | None = None
     reasoning_token_cost: float | None = None
     per_request_cost: float = 0.0
+
+    @property
+    def is_billable(self) -> bool:
+        """Whether this entry can produce a finite, non-negative charge.
+
+        A pair of ``0.0`` placeholder rates is not pricing. Treating it as one
+        would make production routing and the coverage audit say a model is
+        safe while every request still records a zero cost.
+        """
+        rates = [
+            self.prompt_token_cost,
+            self.completion_token_cost,
+            self.cached_token_cost,
+            self.cache_creation_token_cost,
+            self.image_token_cost,
+            self.reasoning_token_cost,
+            self.per_request_cost,
+        ]
+        configured = [rate for rate in rates if rate is not None]
+        return (
+            bool(configured)
+            and all(
+                not isinstance(rate, bool)
+                and isinstance(rate, (int, float))
+                and math.isfinite(rate)
+                and rate >= 0
+                for rate in configured
+            )
+            and any(rate > 0 for rate in configured)
+        )
 
 
 @dataclass

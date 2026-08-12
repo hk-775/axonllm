@@ -6,6 +6,8 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
+import types
 
 import pytest
 
@@ -30,6 +32,25 @@ _BEDROCK_ACTIONS = {
     "bedrock:InvokeModel",
     "bedrock:InvokeModelWithResponseStream",
 }
+_MANTLE_ACTIONS = {
+    "bedrock-mantle:CreateInference",
+    "bedrock-mantle:ListModels",
+}
+_ENABLED_PROVIDERS = {
+    "ai21",
+    "anthropic",
+    "azure_openai",
+    "bedrock",
+    "bedrock-mantle",
+    "cohere",
+    "fireworks",
+    "google_ai",
+    "groq",
+    "openai",
+    "together",
+    "vertex_ai",
+    "xai",
+}
 _SQS_ACTIONS = {
     "sqs:ChangeMessageVisibility",
     "sqs:DeleteMessage",
@@ -47,7 +68,11 @@ _DYNAMODB_ACTIONS = {
     "dynamodb:PutItem",
     "dynamodb:Query",
     "dynamodb:Scan",
+    "dynamodb:TransactWriteItems",
     "dynamodb:UpdateItem",
+}
+_DYNAMODB_STANDARD_ACTIONS = _DYNAMODB_ACTIONS - {
+    "dynamodb:TransactWriteItems"
 }
 
 
@@ -172,6 +197,9 @@ def test_deployment_inputs_are_required_and_bedrock_arns_are_concrete(
     assert parameters["ApprovedHttpsPrefixListId"]["AllowedPattern"] == (
         "^pl-[0-9a-fA-F]+$"
     )
+    assert "Bedrock Mantle" in parameters["ApprovedHttpsPrefixListId"][
+        "Description"
+    ]
     assert parameters["VerifiedImageUri"]["AllowedPattern"].endswith(
         r"@sha256:[0-9a-f]{64}$"
     )
@@ -180,6 +208,44 @@ def test_deployment_inputs_are_required_and_bedrock_arns_are_concrete(
     assert "foundation-model" in bedrock["AllowedPattern"]
     assert "inference-profile" in bedrock["AllowedPattern"]
     assert "without wildcards" in bedrock["ConstraintDescription"]
+
+
+def test_recovery_parameters_are_scoped_and_phase_gated(
+    synthesized_template,
+):
+    parameters = synthesized_template["Parameters"]
+    recovery_table = parameters["RuntimeStateTableName"]
+    assert recovery_table["Default"] == ""
+    assert recovery_table["AllowedPattern"].startswith(
+        r"^$|^axonllm\-agentcore\-state-restore-validation-"
+    )
+    assert parameters["RecoveryCutoverMode"] == {
+        "Type": "String",
+        "Default": "normal",
+        "AllowedValues": [
+            "normal",
+            "quiesced",
+            "selected",
+            "validation",
+        ],
+        "Description": (
+            "AgentCore recovery phase; table changes are accepted only "
+            "from quiesced to selected"
+        ),
+    }
+    approval = parameters["RecoveryApprovalId"]
+    assert approval["Default"] == ""
+    assert approval["MaxLength"] == 128
+    assert "change/incident ID" in approval["ConstraintDescription"]
+
+    conditions = synthesized_template["Conditions"]
+    assert conditions["UseRecoveredState"]["Fn::Not"]
+    assert conditions["RecoveryAccessBlocked"] == {
+        "Fn::Or": [
+            {"Condition": "RecoveryQuiesced"},
+            {"Condition": "RecoverySelected"},
+        ]
+    }
 
 
 def test_runtime_uses_two_private_azs_and_explicit_security_groups(
@@ -287,7 +353,7 @@ def test_service_endpoints_are_private_and_resource_scoped(
     synthesized_template,
 ):
     endpoints = _resources(synthesized_template, "AWS::EC2::VPCEndpoint")
-    assert len(endpoints) == 5
+    assert len(endpoints) == 6
     gateway = next(
         endpoint
         for endpoint in endpoints
@@ -320,6 +386,13 @@ def test_service_endpoints_are_private_and_resource_scoped(
         for endpoint in interfaces
         if endpoint["Properties"]["ServiceName"].endswith(".logs")
     )
+    secrets_interface = next(
+        endpoint["Properties"]
+        for endpoint in interfaces
+        if endpoint["Properties"]["ServiceName"].endswith(
+            ".secretsmanager"
+        )
+    )
 
     assert len(gateway["RouteTableIds"]) == 2
     assert all(
@@ -328,14 +401,20 @@ def test_service_endpoints_are_private_and_resource_scoped(
     )
     dynamodb_statement = gateway["PolicyDocument"]["Statement"][0]
     assert _actions(dynamodb_statement) == _DYNAMODB_ACTIONS
-    assert dynamodb_statement["Resource"][0]["Fn::GetAtt"][1] == "Arn"
+    assert "UseRecoveredState" in json.dumps(
+        dynamodb_statement["Resource"]
+    )
+    assert "RuntimeStateTableName" in json.dumps(
+        dynamodb_statement["Resource"]
+    )
 
-    assert len(interfaces) == 4
+    assert len(interfaces) == 5
     for interface in (
         bedrock_interface,
         sqs_interface,
         sns_interface,
         logs_interface,
+        secrets_interface,
     ):
         assert interface["PrivateDnsEnabled"] is True
         assert len(interface["SubnetIds"]) == 2
@@ -366,6 +445,14 @@ def test_service_endpoints_are_private_and_resource_scoped(
     assert logs_statement["Resource"][0]["Fn::GetAtt"][0].startswith(
         "SecurityEventLogGroup"
     )
+    secrets_statement = secrets_interface["PolicyDocument"]["Statement"][0]
+    assert _actions(secrets_statement) == {
+        "secretsmanager:DescribeSecret",
+        "secretsmanager:GetSecretValue",
+    }
+    assert secrets_statement["Resource"]["Ref"].startswith(
+        "ProviderCredentials"
+    )
     assert "SecurityEventLogGroup" in json.dumps(
         logs_statement["Resource"][1]
     )
@@ -378,12 +465,21 @@ def test_runtime_enforces_jwt_identity_and_bounded_lifecycle(
         synthesized_template,
         "AWS::BedrockAgentCore::Runtime",
     )["Properties"]
-    assert runtime["AuthorizerConfiguration"] == {
-        "CustomJWTAuthorizer": {
-            "AllowedAudience": [{"Ref": "OidcAudience"}],
-            "AllowedClients": [{"Ref": "OidcClientId"}],
-            "DiscoveryUrl": {"Ref": "OidcDiscoveryUrl"},
-        }
+    authorizer = runtime["AuthorizerConfiguration"][
+        "CustomJWTAuthorizer"
+    ]
+    assert authorizer["DiscoveryUrl"] == {"Ref": "OidcDiscoveryUrl"}
+    assert authorizer["AllowedAudience"][0]["Fn::If"][0] == (
+        "RecoveryAccessBlocked"
+    )
+    assert authorizer["AllowedAudience"][0]["Fn::If"][2] == {
+        "Ref": "OidcAudience"
+    }
+    assert authorizer["AllowedClients"][0]["Fn::If"][0] == (
+        "RecoveryAccessBlocked"
+    )
+    assert authorizer["AllowedClients"][0]["Fn::If"][2] == {
+        "Ref": "OidcClientId"
     }
     assert runtime["RequestHeaderConfiguration"] == {
         "RequestHeaderAllowlist": ["Authorization"]
@@ -407,8 +503,17 @@ def test_runtime_enforces_jwt_identity_and_bounded_lifecycle(
         "Ref": "OidcProjectClaim"
     }
     assert environment["AXON_REQUIRE_CANONICAL_IDENTITY"] == "true"
-    assert environment["AXON_ENABLED_PROVIDERS"] == "bedrock"
+    assert set(environment["AXON_ENABLED_PROVIDERS"].split(",")) == (
+        _ENABLED_PROVIDERS
+    )
+    assert environment["AXON_PROVIDER_SECRET_ARN"]["Ref"].startswith(
+        "ProviderCredentials"
+    )
     assert environment["LLM_ROUTER_DYNAMODB_ENABLED"] == "true"
+    assert environment["AXON_DYNAMODB_TABLE"]["Fn::If"][:2] == [
+        "UseRecoveredState",
+        {"Ref": "RuntimeStateTableName"},
+    ]
     assert environment["AXON_AWS_ACCOUNT_ID"] == {
         "Ref": "AWS::AccountId"
     }
@@ -422,13 +527,27 @@ def test_runtime_enforces_jwt_identity_and_bounded_lifecycle(
         "Fn::GetAtt"
     ][0].startswith("SecurityEventLogGroup")
 
-    endpoint = _one_resource(
+    endpoints = _resources(
         synthesized_template,
         "AWS::BedrockAgentCore::RuntimeEndpoint",
-    )["Properties"]
-    assert endpoint["Name"] == "production"
-    assert endpoint["AgentRuntimeVersion"]["Fn::GetAtt"][1] == (
-        "AgentRuntimeVersion"
+    )
+    assert len(endpoints) == 2
+    by_name = {
+        endpoint["Properties"]["Name"]: endpoint for endpoint in endpoints
+    }
+    assert by_name["production"]["Condition"] == "RecoveryNormal"
+    assert by_name["recovery"]["Condition"] == "RecoveryValidation"
+    assert all(
+        endpoint["Properties"]["AgentRuntimeVersion"]["Fn::GetAtt"][1]
+        == "AgentRuntimeVersion"
+        for endpoint in endpoints
+    )
+    assert all(
+        any(
+            dependency.startswith("RecoveryGuard")
+            for dependency in endpoint["DependsOn"]
+        )
+        for endpoint in endpoints
     )
 
 
@@ -449,6 +568,27 @@ def test_runtime_role_is_scoped_and_supports_state_transactions(
     assert _actions(bedrock) == _BEDROCK_ACTIONS
     assert bedrock["Resource"] == {"Ref": "BedrockInvokeResourceArns"}
 
+    mantle = next(
+        statement
+        for statement in statements
+        if "bedrock-mantle:CreateInference" in _actions(statement)
+    )
+    assert _actions(mantle) == _MANTLE_ACTIONS
+    assert mantle["Resource"] == "*"
+
+    secret_read = next(
+        statement
+        for statement in statements
+        if "secretsmanager:GetSecretValue" in _actions(statement)
+    )
+    assert _actions(secret_read) == {
+        "secretsmanager:DescribeSecret",
+        "secretsmanager:GetSecretValue",
+    }
+    assert secret_read["Resource"]["Ref"].startswith(
+        "ProviderCredentials"
+    )
+
     state_access = next(
         statement
         for statement in statements
@@ -461,10 +601,10 @@ def test_runtime_role_is_scoped_and_supports_state_transactions(
         "dynamodb:PutItem",
         "dynamodb:UpdateItem",
     } <= _actions(state_access)
-    assert state_access["Resource"][0]["Fn::GetAtt"][0].startswith(
-        "StateTable"
-    )
-    assert state_access["Resource"][0]["Fn::GetAtt"][1] == "Arn"
+    assert "dynamodb:TransactWriteItems" not in _actions(state_access)
+    assert state_access["Sid"] == "UseSelectedStateTable"
+    assert "UseRecoveredState" in json.dumps(state_access["Resource"])
+    assert "RuntimeStateTableName" in json.dumps(state_access["Resource"])
     all_actions = {
         action
         for statement in statements
@@ -472,6 +612,27 @@ def test_runtime_role_is_scoped_and_supports_state_transactions(
     }
     assert "dynamodb:TransactGetItems" not in all_actions
     assert "dynamodb:TransactWriteItems" not in all_actions
+
+    transaction_policy = next(
+        resource
+        for logical_id, resource in synthesized_template["Resources"].items()
+        if logical_id.startswith("RuntimeDynamoTransactionPolicy")
+    )
+    assert transaction_policy["Metadata"] == {
+        "cfn-lint": {"config": {"ignore_checks": ["W3037"]}}
+    }
+    transaction_statement = transaction_policy["Properties"][
+        "PolicyDocument"
+    ]["Statement"][0]
+    assert _actions(transaction_statement) == {
+        "dynamodb:TransactWriteItems"
+    }
+    assert transaction_statement["Sid"] == (
+        "TransactWithSelectedStateTable"
+    )
+    assert "UseRecoveredState" in json.dumps(
+        transaction_statement["Resource"]
+    )
 
     queue_statements = [
         statement
@@ -545,6 +706,261 @@ def test_runtime_role_is_scoped_and_supports_state_transactions(
     assert "aws:SourceArn" in trust["Condition"]["ArnLike"]
 
 
+def test_recovery_guard_blocks_access_and_checks_runtime_and_control_plane(
+    synthesized_template,
+):
+    resources = synthesized_template["Resources"]
+    deny_id, deny = next(
+        (logical_id, resource)
+        for logical_id, resource in resources.items()
+        if logical_id.startswith("RecoveryStateAccessDeny")
+    )
+    statement = deny["Properties"]["PolicyDocument"]["Statement"][0]
+    assert statement["Effect"] == "Deny"
+    assert _actions(statement) == _DYNAMODB_STANDARD_ACTIONS
+    deny_target = statement["Resource"]["Fn::If"]
+    assert deny_target[0] == "RecoveryAccessBlocked"
+    assert deny_target[1] == "*"
+    assert "recovery_access_not_blocked" in json.dumps(deny_target[2])
+
+    transaction_deny_id, transaction_deny = next(
+        (logical_id, resource)
+        for logical_id, resource in resources.items()
+        if logical_id.startswith("RecoveryStateTransactionAccessDeny")
+    )
+    assert transaction_deny["Metadata"] == {
+        "cfn-lint": {"config": {"ignore_checks": ["W3037"]}}
+    }
+    transaction_statement = transaction_deny["Properties"][
+        "PolicyDocument"
+    ]["Statement"][0]
+    assert transaction_statement["Effect"] == "Deny"
+    assert _actions(transaction_statement) == {
+        "dynamodb:TransactWriteItems"
+    }
+    assert transaction_statement["Resource"] == statement["Resource"]
+
+    guard = resources["RecoveryGuard"]
+    assert deny_id in guard["DependsOn"]
+    assert transaction_deny_id in guard["DependsOn"]
+    assert guard["Properties"]["MinimumQuiescenceSeconds"] == "14700"
+    assert guard["Properties"]["Mode"] == {
+        "Ref": "RecoveryCutoverMode"
+    }
+    assert guard["Properties"]["PrimaryTable"]["Ref"].startswith(
+        "StateTable"
+    )
+    assert guard["Properties"]["SelectedTable"]["Fn::If"][:2] == [
+        "UseRecoveredState",
+        {"Ref": "RuntimeStateTableName"},
+    ]
+    runtime = _one_resource(
+        synthesized_template,
+        "AWS::BedrockAgentCore::Runtime",
+    )
+    assert "RecoveryGuard" in runtime["DependsOn"]
+
+    handler = next(
+        resource
+        for logical_id, resource in resources.items()
+        if logical_id.startswith("RecoveryGuardHandler")
+        and resource["Type"] == "AWS::Lambda::Function"
+    )
+    code = handler["Properties"]["Code"]["ZipFile"]
+    assert '("quiesced", "selected")' in code
+    assert "_assert_no_runtime_endpoints" in code
+    assert "_assert_control_plane_quiesced" in code
+    assert "MinimumQuiescenceSeconds" in code
+
+    guard_role_policy = next(
+        resource
+        for logical_id, resource in resources.items()
+        if logical_id.startswith(
+            "RecoveryGuardHandlerServiceRoleDefaultPolicy"
+        )
+    )
+    guard_actions = {
+        action
+        for policy_statement in guard_role_policy["Properties"][
+            "PolicyDocument"
+        ]["Statement"]
+        for action in _actions(policy_statement)
+    }
+    assert guard_actions == {
+        "application-autoscaling:DescribeScalableTargets",
+        "bedrock-agentcore:ListAgentRuntimeEndpoints",
+        "bedrock-agentcore:ListAgentRuntimes",
+        "cloudformation:DescribeStacks",
+        "ecs:DescribeServices",
+    }
+
+    outputs = synthesized_template["Outputs"]
+    assert outputs["RuntimeEndpointArn"]["Condition"] == "RecoveryNormal"
+    assert outputs["RecoveryRuntimeEndpointArn"]["Condition"] == (
+        "RecoveryValidation"
+    )
+    selected = outputs["SelectedRuntimeStateTableName"]["Value"]["Fn::If"]
+    assert selected[:2] == [
+        "UseRecoveredState",
+        {"Ref": "RuntimeStateTableName"},
+    ]
+    assert outputs["RecoveryCutoverMode"]["Value"] == {
+        "Ref": "RecoveryCutoverMode"
+    }
+    assert outputs["RecoveryMinimumQuiescenceSeconds"]["Value"] == "14700"
+
+
+def test_recovery_guard_allows_only_quiesced_reviewed_table_switches(
+    synthesized_template,
+    monkeypatch,
+):
+    handler = next(
+        resource
+        for logical_id, resource in synthesized_template[
+            "Resources"
+        ].items()
+        if logical_id.startswith("RecoveryGuardHandler")
+        and resource["Type"] == "AWS::Lambda::Function"
+    )
+
+    class _ClientError(Exception):
+        def __init__(self):
+            self.response = {
+                "Error": {
+                    "Code": "ValidationError",
+                    "Message": (
+                        "Stack with id AxonLLMControlPlaneStack "
+                        "does not exist"
+                    ),
+                }
+            }
+
+    class _Control:
+        def list_agent_runtimes(self, **_kwargs):
+            return {
+                "agentRuntimes": [
+                    {
+                        "agentRuntimeName": "axonllm",
+                        "agentRuntimeId": "axonllm-abcdefghij",
+                    }
+                ]
+            }
+
+        def list_agent_runtime_endpoints(self, **_kwargs):
+            return {"runtimeEndpoints": []}
+
+    class _CloudFormation:
+        def describe_stacks(self, **_kwargs):
+            raise _ClientError()
+
+    clients = {
+        "bedrock-agentcore-control": _Control(),
+        "cloudformation": _CloudFormation(),
+        "ecs": object(),
+        "application-autoscaling": object(),
+    }
+    monkeypatch.setitem(
+        sys.modules,
+        "boto3",
+        types.SimpleNamespace(client=lambda name: clients[name]),
+    )
+    botocore = types.ModuleType("botocore")
+    exceptions = types.ModuleType("botocore.exceptions")
+    exceptions.ClientError = _ClientError
+    botocore.exceptions = exceptions
+    monkeypatch.setitem(sys.modules, "botocore", botocore)
+    monkeypatch.setitem(sys.modules, "botocore.exceptions", exceptions)
+
+    namespace: dict[str, object] = {}
+    exec(
+        compile(
+            handler["Properties"]["Code"]["ZipFile"],
+            "agentcore_recovery_guard.py",
+            "exec",
+        ),
+        namespace,
+    )
+    clock = types.SimpleNamespace(now=100)
+    monkeypatch.setattr(namespace["time"], "time", lambda: clock.now)
+    base = {
+        "AgentCoreStackName": "AxonLLMAgentCoreStack",
+        "ApprovalId": "",
+        "ControlPlaneStackName": "AxonLLMControlPlaneStack",
+        "MinimumQuiescenceSeconds": "14700",
+        "Mode": "normal",
+        "PrimaryTable": "axonllm-agentcore-state",
+        "RuntimeName": "axonllm",
+        "SelectedTable": "axonllm-agentcore-state",
+    }
+    created = namespace["handler"](
+        {"RequestType": "Create", "ResourceProperties": base},
+        None,
+    )
+    assert created["PhysicalResourceId"] == (
+        "AxonLLMAgentCoreRecoveryGuard"
+    )
+
+    quiesced = {
+        **base,
+        "ApprovalId": "INC-2026-001",
+        "Mode": "quiesced",
+    }
+    entered = namespace["handler"](
+        {
+            "RequestType": "Update",
+            "PhysicalResourceId": created["PhysicalResourceId"],
+            "OldResourceProperties": base,
+            "ResourceProperties": quiesced,
+        },
+        None,
+    )
+    assert entered["PhysicalResourceId"].endswith(":100")
+
+    selected = {
+        **quiesced,
+        "Mode": "selected",
+        "SelectedTable": (
+            "axonllm-agentcore-state-restore-validation-safe"
+        ),
+    }
+    clock.now = 14799
+    with pytest.raises(RuntimeError, match="too recent"):
+        namespace["handler"](
+            {
+                "RequestType": "Update",
+                "PhysicalResourceId": entered["PhysicalResourceId"],
+                "OldResourceProperties": quiesced,
+                "ResourceProperties": selected,
+            },
+            None,
+        )
+    clock.now = 14800
+    allowed = namespace["handler"](
+        {
+            "RequestType": "Update",
+            "PhysicalResourceId": entered["PhysicalResourceId"],
+            "OldResourceProperties": quiesced,
+            "ResourceProperties": selected,
+        },
+        None,
+    )
+    assert allowed["Data"]["QuiescedAt"].startswith("1970-01-01")
+
+    with pytest.raises(RuntimeError, match="require a blocked"):
+        namespace["handler"](
+            {
+                "RequestType": "Update",
+                "PhysicalResourceId": created["PhysicalResourceId"],
+                "OldResourceProperties": base,
+                "ResourceProperties": {
+                    **base,
+                    "SelectedTable": selected["SelectedTable"],
+                },
+            },
+            None,
+        )
+
+
 def test_state_and_backups_are_encrypted_retained_and_recoverable(
     synthesized_template,
 ):
@@ -592,13 +1008,27 @@ def test_state_and_backups_are_encrypted_retained_and_recoverable(
         "DeleteAfterDays": 365,
         "MoveToColdStorageAfterDays": 30,
     }
-    selection = _one_resource(
+    selections = _resources(
         synthesized_template,
         "AWS::Backup::BackupSelection",
     )
-    assert selection["Properties"]["BackupSelection"]["Resources"][0][
+    assert len(selections) == 2
+    primary = next(
+        selection
+        for selection in selections
+        if "Condition" not in selection
+    )
+    recovered = next(
+        selection
+        for selection in selections
+        if selection.get("Condition") == "UseRecoveredState"
+    )
+    assert primary["Properties"]["BackupSelection"]["Resources"][0][
         "Fn::GetAtt"
     ][1] == "Arn"
+    assert "RuntimeStateTableName" in json.dumps(
+        recovered["Properties"]["BackupSelection"]["Resources"]
+    )
 
 
 def test_security_event_outbox_is_fifo_encrypted_and_redriven(
@@ -681,6 +1111,34 @@ def test_security_event_outbox_is_fifo_encrypted_and_redriven(
     assert outputs["DataKeyArn"]["Value"]["Fn::GetAtt"][0].startswith(
         "DataKey"
     )
+    assert outputs["ProviderSecretArn"]["Value"]["Ref"].startswith(
+        "ProviderCredentials"
+    )
+
+    provider_secret = _one_resource(
+        synthesized_template,
+        "AWS::SecretsManager::Secret",
+    )
+    assert provider_secret["DeletionPolicy"] == "Retain"
+    assert provider_secret["UpdateReplacePolicy"] == "Retain"
+    assert "Name" not in provider_secret["Properties"]
+    template = json.loads(
+        provider_secret["Properties"]["GenerateSecretString"][
+            "SecretStringTemplate"
+        ]
+    )
+    assert {
+        "ANTHROPIC_API_KEY",
+        "GCP_CREDENTIALS_JSON",
+        "OPENAI_API_KEY",
+        "GOOGLE_AI_API_KEY",
+        "XAI_API_KEY",
+        "GROQ_API_KEY",
+        "TOGETHER_API_KEY",
+        "FIREWORKS_API_KEY",
+        "AI21_API_KEY",
+    } <= set(template)
+    assert "GCP_ACCESS_TOKEN" not in template
 
 
 def test_encrypted_logs_and_alarm_delivery_have_service_permissions(
@@ -694,7 +1152,7 @@ def test_encrypted_logs_and_alarm_delivery_have_service_permissions(
         )
         if log_group["DeletionPolicy"] == "Retain"
     ]
-    assert len(retained_logs) == 3
+    assert len(retained_logs) == 5
     assert all(
         log_group["Properties"]["RetentionInDays"] == 365
         for log_group in retained_logs
