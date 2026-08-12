@@ -94,9 +94,25 @@ def _converse_message(role: str, msg: dict, content) -> dict:
 
 def create_bedrock_provider_fn(
     region: str = "us-east-1",
+    *,
+    endpoint_url: str = "",
+    credentials: dict[str, str] | None = None,
 ) -> Callable[[ChatCompletionRequest], Callable[[ProviderModelMapping], Awaitable[ChatCompletionResponse]]]:
     """Return a factory that creates provider_fn callables for Bedrock."""
-    client = boto3.client("bedrock-runtime", region_name=region)
+    credentials = credentials or {}
+    client_kwargs: dict = {"region_name": region}
+    if endpoint_url:
+        client_kwargs["endpoint_url"] = endpoint_url
+    if credentials.get("access_key") and credentials.get("secret_key"):
+        client_kwargs.update(
+            {
+                "aws_access_key_id": credentials["access_key"],
+                "aws_secret_access_key": credentials["secret_key"],
+            }
+        )
+        if credentials.get("session_token"):
+            client_kwargs["aws_session_token"] = credentials["session_token"]
+    client = boto3.client("bedrock-runtime", **client_kwargs)
     anthropic_adapter = BedrockAdapter()
 
     def create(request: ChatCompletionRequest, prompt_caching_enabled: bool = False) -> Callable[[ProviderModelMapping], Awaitable[ChatCompletionResponse]]:

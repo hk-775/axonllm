@@ -105,7 +105,7 @@ from src.gateway.models import PolicyNode, Project, RateLimitConfig, UsageRecord
 from src.gateway.multi_provider_factory import MultiProviderFactory
 from src.gateway.persistence import DynamoPersistence
 from src.gateway.provider_config import ProviderConfig
-from src.gateway.provider_loader import load_provider_configs
+from src.gateway.provider_loader import load_provider_routes
 from src.gateway.rate_limiter import SlidingWindowRateLimiter
 from src.gateway.query.admission import (
     QueryAdmissionController,
@@ -593,11 +593,15 @@ def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComp
     )
 
     # --- Multi-provider factory ---
-    provider_configs = load_provider_configs(app_config.providers_config_path)
+    provider_routes = load_provider_routes(app_config.providers_config_path)
+    provider_configs: dict[str, ProviderConfig] = {}
+    for route in provider_routes:
+        provider_configs.setdefault(route.provider, route.to_provider_config())
     multi_factory = MultiProviderFactory(
         provider_configs=provider_configs,
         bedrock_region=app_config.bedrock_region,
         enabled_providers=app_config.enabled_providers,
+        provider_routes=provider_routes,
     )
     router.available_providers = multi_factory.available_providers
 

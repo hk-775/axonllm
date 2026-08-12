@@ -19,7 +19,7 @@ from src.gateway.provider_config import (
     build_provider_url,
     get_auth_headers,
 )
-from src.gateway.provider_loader import load_provider_configs
+from src.gateway.provider_loader import load_provider_configs, load_provider_routes
 
 
 def test_secret_free_example_enables_environment_credentials(
@@ -408,3 +408,41 @@ providers:
     )
 
     assert "vertex_ai" not in load_provider_configs(str(config))
+
+
+def test_loads_multiple_routes_with_independent_credentials(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    config = tmp_path / "providers.yaml"
+    config.write_text(
+        """
+providers:
+  openai:
+    base_url: https://api.openai.example
+    auth_type: api_key
+    max_connections: 50
+    routes:
+      - route_id: openai:primary
+        api_key_env: OPENAI_PRIMARY_API_KEY
+        weight: 3
+      - route_id: openai:backup
+        api_key_env: OPENAI_BACKUP_API_KEY
+        endpoint: https://backup.openai.example
+        weight: 1
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("OPENAI_PRIMARY_API_KEY", "primary-secret")
+    monkeypatch.setenv("OPENAI_BACKUP_API_KEY", "backup-secret")
+
+    routes = load_provider_routes(str(config))
+
+    assert [route.route_id for route in routes] == [
+        "openai:primary",
+        "openai:backup",
+    ]
+    assert routes[0].credentials == {"api_key": "primary-secret"}
+    assert routes[0].max_connections == 50
+    assert routes[1].credentials == {"api_key": "backup-secret"}
+    assert routes[1].endpoint == "https://backup.openai.example"

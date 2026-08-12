@@ -45,10 +45,22 @@ logger = logging.getLogger(__name__)
 class ProviderError(Exception):
     """Error raised by a provider call, carrying HTTP-style status code."""
 
-    def __init__(self, status_code: int, provider: str, message: str) -> None:
+    def __init__(
+        self,
+        status_code: int,
+        provider: str,
+        message: str,
+        *,
+        route_id: str | None = None,
+        retryable: bool | None = None,
+        provider_unavailable: bool | None = None,
+    ) -> None:
         self.status_code = status_code
         self.provider = provider
         self.message = message
+        self.route_id = route_id
+        self.retryable = retryable
+        self.provider_unavailable = provider_unavailable
         super().__init__(f"[{provider}] {status_code}: {message}")
 
 
@@ -695,38 +707,47 @@ class Router:
             except ProviderError as exc:
                 last_error = exc
 
-                if exc.status_code in self._non_retryable:
+                should_retry = (
+                    exc.retryable
+                    if exc.retryable is not None
+                    else exc.status_code in self._retryable
+                )
+
+                if not should_retry:
                     attempts.append(
                         {
                             "provider": mapping.provider,
                             "status_code": exc.status_code,
                             "message": exc.message,
+                            **({"route_id": exc.route_id} if exc.route_id else {}),
                         }
                     )
                     return None
 
-                if exc.status_code in self._retryable:
+                if should_retry:
                     if attempt < self.max_retries:
+                        # Credential failures can rotate immediately to another
+                        # route. Throttles and transport/server failures retain the
+                        # configured exponential backoff.
+                        if exc.status_code in {401, 402, 403, 404} and exc.route_id:
+                            continue
                         await asyncio.sleep(self._backoff_delay(attempt))
-                else:
-                    attempts.append(
-                        {
-                            "provider": mapping.provider,
-                            "status_code": exc.status_code,
-                            "message": exc.message,
-                        }
-                    )
-                    return None
         else:
             if last_error is not None:
-                self.health_tracker.mark_unhealthy(
-                    mapping.provider, self.cooldown_seconds
-                )
+                if last_error.provider_unavailable is not False:
+                    self.health_tracker.mark_unhealthy(
+                        mapping.provider, self.cooldown_seconds
+                    )
                 attempts.append(
                     {
                         "provider": mapping.provider,
                         "status_code": last_error.status_code,
                         "message": last_error.message,
+                        **(
+                            {"route_id": last_error.route_id}
+                            if last_error.route_id
+                            else {}
+                        ),
                     }
                 )
 

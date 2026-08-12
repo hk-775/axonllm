@@ -209,11 +209,24 @@ def _responses_output_to_tool_calls(output: list[dict]) -> list[dict]:
 
 def create_mantle_provider_fn(
     region: str = "us-east-1",
+    *,
+    endpoint_url: str = "",
+    credentials_config: dict[str, str] | None = None,
 ) -> Callable[[ChatCompletionRequest], Callable[[ProviderModelMapping], Awaitable[ChatCompletionResponse]]]:
     """Return a factory that creates provider_fn callables for Bedrock Mantle."""
-    session = boto3.Session()
+    credentials_config = credentials_config or {}
+    session_kwargs: dict = {}
+    if credentials_config.get("access_key") and credentials_config.get("secret_key"):
+        session_kwargs.update(
+            {
+                "aws_access_key_id": credentials_config["access_key"],
+                "aws_secret_access_key": credentials_config["secret_key"],
+                "aws_session_token": credentials_config.get("session_token") or None,
+            }
+        )
+    session = boto3.Session(**session_kwargs) if session_kwargs else boto3.Session()
     credentials = session.get_credentials()
-    endpoint = f"https://bedrock-mantle.{region}.api.aws"
+    endpoint = endpoint_url.rstrip("/") or f"https://bedrock-mantle.{region}.api.aws"
 
     def create(
         request: ChatCompletionRequest, prompt_caching_enabled: bool = False
