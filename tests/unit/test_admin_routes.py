@@ -834,8 +834,14 @@ class TestVirtualModelCRUD:
         assert data["status"] == "created"
         assert "new-model" in admin_api.model_registry.models
 
-    def test_create_model_persists_to_yaml(self, client, admin_api, tmp_path):
+    def test_create_model_does_not_mutate_bootstrap_yaml(
+        self,
+        client,
+        admin_api,
+        tmp_path,
+    ):
         config_path = tmp_path / "models.yaml"
+        config_path.write_text("bootstrap defaults\n", encoding="utf-8")
         admin_api._config_path = str(config_path)
         client.post("/admin/models", json={
             "name": "persisted-model",
@@ -845,9 +851,9 @@ class TestVirtualModelCRUD:
                 {"provider": "anthropic", "model_id": "claude-3", "weight": 1.0, "fallback_order": 0}
             ],
         })
-        assert config_path.exists()
-        content = config_path.read_text()
-        assert "persisted-model" in content
+        assert config_path.read_text(encoding="utf-8") == (
+            "bootstrap defaults\n"
+        )
 
     def test_create_model_without_name_returns_400(self, client, admin_api, tmp_path):
         admin_api._config_path = str(tmp_path / "models.yaml")
@@ -931,13 +937,19 @@ class TestVirtualModelCRUD:
         assert data["status"] == "deleted"
         assert "gpt-4" not in admin_api.model_registry.models
 
-    def test_delete_model_persists(self, client, admin_api, tmp_path):
+    def test_delete_model_does_not_mutate_bootstrap_yaml(
+        self,
+        client,
+        admin_api,
+        tmp_path,
+    ):
         config_path = tmp_path / "models.yaml"
+        config_path.write_text("bootstrap defaults\n", encoding="utf-8")
         admin_api._config_path = str(config_path)
         client.delete("/admin/models/gpt-4")
-        assert config_path.exists()
-        content = config_path.read_text()
-        assert "gpt-4" not in content
+        assert config_path.read_text(encoding="utf-8") == (
+            "bootstrap defaults\n"
+        )
 
     def test_delete_model_not_found_returns_404(self, client):
         resp = client.delete("/admin/models/nonexistent")

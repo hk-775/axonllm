@@ -390,6 +390,7 @@ def build_runtime_services() -> RuntimeServices:
         user_configs=components.user_configs,
         cost_tracker=components.cost_tracker,
         persistence=components.persistence,
+        model_registry=getattr(components, "registry", None),
         policy_resolver=components.policy_resolver,
         region_config=components.region_router.config,
         health_monitor=components.health_monitor,

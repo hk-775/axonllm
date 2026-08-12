@@ -248,6 +248,8 @@ def test_runtime_builder_reuses_bootstrap_query_service(
     from src.gateway import config_sync
 
     query_service = _QueryService()
+    registry = object()
+    sync_kwargs: dict = {}
 
     async def _stop() -> None:
         return None
@@ -258,6 +260,7 @@ def test_runtime_builder_reuses_bootstrap_query_service(
         principal_resolver=SimpleNamespace(),
         project_resolver=SimpleNamespace(),
         query_service=query_service,
+        registry=registry,
         projects={},
         user_configs={},
         cost_tracker=SimpleNamespace(),
@@ -274,10 +277,14 @@ def test_runtime_builder_reuses_bootstrap_query_service(
         "build_gateway_components",
         lambda: components,
     )
+    def _config_sync(**kwargs):
+        sync_kwargs.update(kwargs)
+        return SimpleNamespace()
+
     monkeypatch.setattr(
         config_sync,
         "ConfigSyncService",
-        lambda **_kwargs: SimpleNamespace(),
+        _config_sync,
     )
     monkeypatch.setattr(
         cedar_policy,
@@ -293,6 +300,7 @@ def test_runtime_builder_reuses_bootstrap_query_service(
     runtime = build_runtime_services()
 
     assert runtime.query_service is query_service
+    assert sync_kwargs["model_registry"] is registry
 
 
 def test_query_payload_schema_accepts_only_service_inputs() -> None:
