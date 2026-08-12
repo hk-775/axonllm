@@ -160,8 +160,8 @@ jobs:
           fargate_prefix="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/axonllm/fargate@sha256:"
           [[ "${AGENTCORE_IMAGE}" == "${agentcore_prefix}"* ]]
           [[ "${CONTROL_PLANE_IMAGE}" == "${fargate_prefix}"* ]]
-          [[ "${AGENTCORE_IMAGE#${agentcore_prefix}}" =~ ^[0-9a-f]{64}$ ]]
-          [[ "${CONTROL_PLANE_IMAGE#${fargate_prefix}}" =~ ^[0-9a-f]{64}$ ]]
+          [[ "${AGENTCORE_IMAGE#"${agentcore_prefix}"}" =~ ^[0-9a-f]{64}$ ]]
+          [[ "${CONTROL_PLANE_IMAGE#"${fargate_prefix}"}" =~ ^[0-9a-f]{64}$ ]]
 
           [[ "${EVIDENCE_BUCKET}" =~ ^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$ ]]
           [[ "${EVIDENCE_BUCKET}" != *..* ]]

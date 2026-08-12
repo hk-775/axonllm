@@ -142,7 +142,6 @@ jobs:
         run: |
           set -euo pipefail
           [[ "${GITHUB_REF}" == "refs/heads/main" ]]
-          called_workflow_ref="${GITHUB_REPOSITORY}/.github/workflows/agentcore-launch-rehearsal-evidence.yml@refs/heads/main"
           parent_workflow_ref="${GITHUB_REPOSITORY}/.github/workflows/launch-agentcore-production.yml@refs/heads/main"
           [[ "${GITHUB_WORKFLOW_REF}" == "${parent_workflow_ref}" ]]
           [[ "${RUNNER_ENVIRONMENT}" == "self-hosted" ]]
@@ -361,7 +360,7 @@ jobs:
             local uri="$1"
             local expected="s3://${EVIDENCE_BUCKET}/"
             [[ "${uri}" == "${expected}"* ]]
-            printf '%s' "${uri#${expected}}"
+            printf '%s' "${uri#"${expected}"}"
           }
 
           upload_locked() {
@@ -487,15 +486,15 @@ jobs:
           } >>"${GITHUB_OUTPUT}"
           {
             printf '## AgentCore launch-rehearsal evidence\n\n'
-            printf -- '- Release: `%s`\n' "${{ inputs.release_commit_sha }}"
-            printf -- '- Compatibility report: `%s` version `%s`\n' \
+            printf -- '- Release: \x60%s\x60\n' "${{ inputs.release_commit_sha }}"
+            printf -- '- Compatibility report: \x60%s\x60 version \x60%s\x60\n' \
               "${REPORT_URI}" "${REPORT_VERSION}"
-            printf -- '- Compatibility SHA-256: `%s`\n' "${REPORT_SHA256}"
-            printf -- '- Signature version: `%s`\n' "${SIGNATURE_VERSION}"
-            printf -- '- Detailed report: `%s` version `%s`\n' \
+            printf -- '- Compatibility SHA-256: \x60%s\x60\n' "${REPORT_SHA256}"
+            printf -- '- Signature version: \x60%s\x60\n' "${SIGNATURE_VERSION}"
+            printf -- '- Detailed report: \x60%s\x60 version \x60%s\x60\n' \
               "${DETAILED_REPORT_URI}" "${DETAILED_REPORT_VERSION}"
-            printf -- '- Detailed signature version: `%s`\n' \
+            printf -- '- Detailed signature version: \x60%s\x60\n' \
               "${DETAILED_SIGNATURE_VERSION}"
-            printf -- '- Retained in COMPLIANCE mode until: `%s`\n' \
+            printf -- '- Retained in COMPLIANCE mode until: \x60%s\x60\n' \
               "${retain_until}"
           } >>"${GITHUB_STEP_SUMMARY}"

@@ -2480,14 +2480,14 @@ jobs:
           evidence_key="${EVIDENCE_BASE_KEY}/agentcore-deployment.json"
           {
             printf '### Production deployment evidence\n\n'
-            printf -- '- S3 key: `%s`\n' "${evidence_key}"
-            printf -- '- Retained in COMPLIANCE mode until: `%s`\n' \
+            printf -- '- S3 key: \x60%s\x60\n' "${evidence_key}"
+            printf -- '- Retained in COMPLIANCE mode until: \x60%s\x60\n' \
               "${EVIDENCE_RETAIN_UNTIL}"
-            printf -- '- Runtime version: `%s`\n' \
+            printf -- '- Runtime version: \x60%s\x60\n' \
               "$(jq -er '.stacks.runtime.RuntimeVersion' "${evidence}")"
-            printf -- '- Endpoint: `%s`\n' \
+            printf -- '- Endpoint: \x60%s\x60\n' \
               "$(jq -er '.stacks.runtime.RuntimeEndpointName' "${evidence}")"
-            printf -- '- Certification: `%s`\n' \
+            printf -- '- Certification: \x60%s\x60\n' \
               "$(jq -er '.certification.overallStatus' "${evidence}")"
           } >>"${GITHUB_STEP_SUMMARY}"
 

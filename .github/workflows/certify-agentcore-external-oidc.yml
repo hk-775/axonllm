@@ -337,8 +337,8 @@ jobs:
           kms_prefix="arn:aws:kms:${AWS_REGION}:${AWS_ACCOUNT_ID}:key/"
           [[ "${SIGNING_KEY_ARN}" == "${kms_prefix}"* ]]
           [[ "${STORAGE_KEY_ARN}" == "${kms_prefix}"* ]]
-          [[ "${SIGNING_KEY_ARN#${kms_prefix}}" =~ ^[A-Za-z0-9-]{1,128}$ ]]
-          [[ "${STORAGE_KEY_ARN#${kms_prefix}}" =~ ^[A-Za-z0-9-]{1,128}$ ]]
+          [[ "${SIGNING_KEY_ARN#"${kms_prefix}"}" =~ ^[A-Za-z0-9-]{1,128}$ ]]
+          [[ "${STORAGE_KEY_ARN#"${kms_prefix}"}" =~ ^[A-Za-z0-9-]{1,128}$ ]]
           [[ "${SIGNING_KEY_ARN}" != "${STORAGE_KEY_ARN}" ]]
           versioning=$(aws s3api get-bucket-versioning \
             --bucket "${EVIDENCE_BUCKET}")
@@ -644,18 +644,16 @@ jobs:
             --runtime-stack-name "${EXTERNAL_RUNTIME_STACK}" \
             --report "${remote}/report.json"
 
-          printf 'report_s3_uri=s3://%s/%s\n' \
-            "${EVIDENCE_BUCKET}" "${report_key}" >>"${GITHUB_OUTPUT}"
-          printf 'report_s3_version_id=%s\n' \
-            "${report_version}" >>"${GITHUB_OUTPUT}"
-          printf 'report_sha256=%s\n' \
-            "${{ steps.report.outputs.sha256 }}" >>"${GITHUB_OUTPUT}"
-          printf 'signature_s3_uri=s3://%s/%s\n' \
-            "${EVIDENCE_BUCKET}" "${signature_key}" >>"${GITHUB_OUTPUT}"
-          printf 'signature_s3_version_id=%s\n' \
-            "${signature_version}" >>"${GITHUB_OUTPUT}"
-          printf 'signature_sha256=%s\n' \
-            "${signature_sha256}" >>"${GITHUB_OUTPUT}"
+          {
+            printf 'report_s3_uri=s3://%s/%s\n' \
+              "${EVIDENCE_BUCKET}" "${report_key}"
+            printf 'report_s3_version_id=%s\n' "${report_version}"
+            printf 'report_sha256=%s\n' "${{ steps.report.outputs.sha256 }}"
+            printf 'signature_s3_uri=s3://%s/%s\n' \
+              "${EVIDENCE_BUCKET}" "${signature_key}"
+            printf 'signature_s3_version_id=%s\n' "${signature_version}"
+            printf 'signature_sha256=%s\n' "${signature_sha256}"
+          } >>"${GITHUB_OUTPUT}"
 
       - name: Remove local external qualification credentials
         if: ${{ always() }}

@@ -214,8 +214,8 @@ jobs:
           control_prefix="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/axonllm/fargate@sha256:"
           [[ "${AGENTCORE_IMAGE}" == "${agentcore_prefix}"* ]]
           [[ "${CONTROL_PLANE_IMAGE}" == "${control_prefix}"* ]]
-          [[ "${AGENTCORE_IMAGE#${agentcore_prefix}}" =~ ^[0-9a-f]{64}$ ]]
-          [[ "${CONTROL_PLANE_IMAGE#${control_prefix}}" =~ ^[0-9a-f]{64}$ ]]
+          [[ "${AGENTCORE_IMAGE#"${agentcore_prefix}"}" =~ ^[0-9a-f]{64}$ ]]
+          [[ "${CONTROL_PLANE_IMAGE#"${control_prefix}"}" =~ ^[0-9a-f]{64}$ ]]
           [[ "${QUALIFICATION_ROLE_ARN}" =~ ^arn:aws:iam::${AWS_ACCOUNT_ID}:role/[A-Za-z0-9+=,.@_/-]+$ ]]
           [[ "${PROVIDER_SOURCE_SECRET_ARN}" =~ ^arn:aws:secretsmanager:${AWS_REGION}:${AWS_ACCOUNT_ID}:secret:.+ ]]
           for uri in \
@@ -288,7 +288,8 @@ jobs:
         run: |
           set -euo pipefail
           session_name="AxonLLMQualification-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          role_name=${QUALIFICATION_ROLE_ARN#arn:aws:iam::${AWS_ACCOUNT_ID}:role/}
+          role_prefix="arn:aws:iam::${AWS_ACCOUNT_ID}:role/"
+          role_name=${QUALIFICATION_ROLE_ARN#"${role_prefix}"}
           caller=$(aws sts get-caller-identity --output json --no-cli-pager)
           jq -e \
             --arg account "${AWS_ACCOUNT_ID}" \
@@ -2089,18 +2090,16 @@ jobs:
             --artifact "${remote}/receipt.json" \
             --bundle "${remote}/signature.json" \
             --key-arn "${SIGNING_KEY_ARN}"
-          printf 'receipt_uri=s3://%s/%s\n' \
-            "${EVIDENCE_BUCKET}" "${receipt_key}" >>"${GITHUB_OUTPUT}"
-          printf 'receipt_version_id=%s\n' \
-            "${receipt_version}" >>"${GITHUB_OUTPUT}"
-          printf 'receipt_sha256=%s\n' \
-            "${receipt_sha256}" >>"${GITHUB_OUTPUT}"
-          printf 'signature_uri=s3://%s/%s\n' \
-            "${EVIDENCE_BUCKET}" "${signature_key}" >>"${GITHUB_OUTPUT}"
-          printf 'signature_version_id=%s\n' \
-            "${signature_version}" >>"${GITHUB_OUTPUT}"
-          printf 'signature_sha256=%s\n' \
-            "${signature_sha256}" >>"${GITHUB_OUTPUT}"
+          {
+            printf 'receipt_uri=s3://%s/%s\n' \
+              "${EVIDENCE_BUCKET}" "${receipt_key}"
+            printf 'receipt_version_id=%s\n' "${receipt_version}"
+            printf 'receipt_sha256=%s\n' "${receipt_sha256}"
+            printf 'signature_uri=s3://%s/%s\n' \
+              "${EVIDENCE_BUCKET}" "${signature_key}"
+            printf 'signature_version_id=%s\n' "${signature_version}"
+            printf 'signature_sha256=%s\n' "${signature_sha256}"
+          } >>"${GITHUB_OUTPUT}"
 
   production:
     name: Deploy production after successful teardown
