@@ -46,15 +46,16 @@ from src.gateway.agentcore_setup import (
     redact_sensitive,
 )
 from src.gateway.deployment.bootstrap_policy import (
+    EXECUTION_POLICY_PART_COUNT,
     bootstrap_boundary_arn as bootstrap_role_boundary_arn,
     bootstrap_boundary_document as bootstrap_role_boundary_document,
     bootstrap_boundary_name as bootstrap_role_boundary_name,
     boundary_arn as service_boundary_arn,
     boundary_document as service_boundary_document,
     boundary_name as service_boundary_name,
-    policy_arn as bootstrap_policy_arn,
-    policy_document as bootstrap_policy_document,
-    policy_name as bootstrap_policy_name,
+    policy_documents as bootstrap_policy_documents,
+    policy_part_arn as bootstrap_policy_part_arn,
+    policy_part_name as bootstrap_policy_part_name,
     qualifier_for_namespace as bootstrap_qualifier_for_namespace,
     toolkit_stack_name as bootstrap_toolkit_stack_name,
 )
@@ -690,7 +691,7 @@ def _require_bootstrap_execution_policy(
     *,
     config: AgentCoreSetupConfig,
     create_if_missing: bool,
-) -> tuple[AwsIdentity, str]:
+) -> tuple[AwsIdentity, tuple[str, ...]]:
     identity = _aws_identity(
         boto3_session,
         region=config.aws_region,
@@ -720,17 +721,21 @@ def _require_bootstrap_execution_policy(
         region=config.aws_region,
         qualifier=qualifier,
     )
-    expected_document = bootstrap_policy_document(
+    expected_documents = bootstrap_policy_documents(
         partition=identity.partition,
         account_id=identity.account_id,
         region=config.aws_region,
         qualifier=qualifier,
     )
-    expected_arn = bootstrap_policy_arn(
-        partition=identity.partition,
-        account_id=identity.account_id,
-        region=config.aws_region,
-        qualifier=qualifier,
+    expected_arns = tuple(
+        bootstrap_policy_part_arn(
+            partition=identity.partition,
+            account_id=identity.account_id,
+            region=config.aws_region,
+            qualifier=qualifier,
+            part=part,
+        )
+        for part in range(1, EXECUTION_POLICY_PART_COUNT + 1)
     )
     iam_client = boto3_session.client(
         "iam",
@@ -773,23 +778,34 @@ def _require_bootstrap_execution_policy(
         create_if_missing=create_if_missing,
         purpose="CDK bootstrap-role boundary",
     )
-    _require_exact_managed_policy(
-        iam_client,
-        policy_arn=expected_arn,
-        policy_name=bootstrap_policy_name(
-            config.aws_region,
-            qualifier=qualifier,
-        ),
-        description="Bounded CloudFormation execution for AxonLLM AgentCore",
-        document=expected_document,
-        tags=[
-            *common_tags,
-            {"Key": "Purpose", "Value": "CloudFormationExecution"},
-        ],
-        create_if_missing=create_if_missing,
-        purpose="bootstrap execution policy",
-    )
-    return identity, expected_arn
+    for part, (expected_arn, expected_document) in enumerate(
+        zip(expected_arns, expected_documents, strict=True),
+        start=1,
+    ):
+        _require_exact_managed_policy(
+            iam_client,
+            policy_arn=expected_arn,
+            policy_name=bootstrap_policy_part_name(
+                config.aws_region,
+                qualifier=qualifier,
+                part=part,
+            ),
+            description=(
+                "Bounded CloudFormation execution for AxonLLM AgentCore "
+                f"(part {part} of {EXECUTION_POLICY_PART_COUNT})"
+            ),
+            document=expected_document,
+            tags=[
+                *common_tags,
+                {
+                    "Key": "Purpose",
+                    "Value": f"CloudFormationExecutionPart{part}",
+                },
+            ],
+            create_if_missing=create_if_missing,
+            purpose=f"bootstrap execution policy part {part}",
+        )
+    return identity, expected_arns
 
 
 def _assert_cdk_execution_role_policy(
@@ -797,7 +813,7 @@ def _assert_cdk_execution_role_policy(
     *,
     config: AgentCoreSetupConfig,
     identity: AwsIdentity,
-    expected_policy_arn: str,
+    expected_policy_arns: tuple[str, ...],
 ) -> None:
     qualifier = bootstrap_qualifier_for_namespace(_ACTIVE_DEPLOYMENT_NAMESPACE)
     role_name = f"cdk-{qualifier}-cfn-exec-role-{identity.account_id}-{config.aws_region}"
@@ -846,7 +862,7 @@ def _assert_cdk_execution_role_policy(
     inline_names = inline.get("PolicyNames")
     permissions_boundary = role.get("PermissionsBoundary") if isinstance(role, dict) else None
     if (
-        attached != [expected_policy_arn]
+        sorted(attached) != sorted(expected_policy_arns)
         or not isinstance(inline_names, list)
         or inline_names
         or not isinstance(permissions_boundary, dict)
@@ -855,7 +871,7 @@ def _assert_cdk_execution_role_policy(
     ):
         raise AgentCoreDeploymentError(
             "CDK CloudFormation execution role must contain only the "
-            "repository-defined policy, exact permissions boundary, and no "
+            "repository-defined policies, exact permissions boundary, and no "
             "inline policies"
         )
 
@@ -1471,7 +1487,7 @@ def cdk_bootstrap_command(
     config: AgentCoreSetupConfig,
     *,
     identity: AwsIdentity,
-    execution_policy_arn: str,
+    execution_policy_arns: tuple[str, ...],
 ) -> list[str]:
     qualifier = bootstrap_qualifier_for_namespace(_ACTIVE_DEPLOYMENT_NAMESPACE)
     command = [
@@ -1482,19 +1498,28 @@ def cdk_bootstrap_command(
         "deployment_target=identity",
         "-c",
         f"region={config.aws_region}",
-        "--cloudformation-execution-policies",
-        execution_policy_arn,
-        "--custom-permissions-boundary",
-        bootstrap_role_boundary_name(
-            config.aws_region,
-            qualifier=qualifier,
-        ),
-        "--qualifier",
-        qualifier,
-        "--termination-protection",
-        "--toolkit-stack-name",
-        bootstrap_toolkit_stack_name(qualifier),
     ]
+    for policy_arn in execution_policy_arns:
+        command.extend(
+            [
+                "--cloudformation-execution-policies",
+                policy_arn,
+            ]
+        )
+    command.extend(
+        [
+            "--custom-permissions-boundary",
+            bootstrap_role_boundary_name(
+                config.aws_region,
+                qualifier=qualifier,
+            ),
+            "--qualifier",
+            qualifier,
+            "--termination-protection",
+            "--toolkit-stack-name",
+            bootstrap_toolkit_stack_name(qualifier),
+        ]
+    )
     command.extend(_deployment_context_arguments(_ACTIVE_DEPLOYMENT_NAMESPACE))
     return command
 
@@ -2274,7 +2299,7 @@ def deploy(
                 config=config,
             )
 
-    aws_identity, execution_policy_arn = _require_bootstrap_execution_policy(
+    aws_identity, execution_policy_arns = _require_bootstrap_execution_policy(
         boto3_session,
         config=config,
         create_if_missing=bootstrap_cdk,
@@ -2285,7 +2310,7 @@ def deploy(
             cdk_bootstrap_command(
                 config,
                 identity=aws_identity,
-                execution_policy_arn=execution_policy_arn,
+                execution_policy_arns=execution_policy_arns,
             ),
             INFRA_ROOT,
         )
@@ -2293,7 +2318,7 @@ def deploy(
         boto3_session,
         config=config,
         identity=aws_identity,
-        expected_policy_arn=execution_policy_arn,
+        expected_policy_arns=execution_policy_arns,
     )
 
     if config.identity_mode == MANAGED_COGNITO:
@@ -3163,7 +3188,7 @@ def deploy_control_plane(
         boto3_session,
         config=config,
     )
-    aws_identity, execution_policy_arn = _require_bootstrap_execution_policy(
+    aws_identity, execution_policy_arns = _require_bootstrap_execution_policy(
         boto3_session,
         config=config,
         create_if_missing=False,
@@ -3172,7 +3197,7 @@ def deploy_control_plane(
         boto3_session,
         config=config,
         identity=aws_identity,
-        expected_policy_arn=execution_policy_arn,
+        expected_policy_arns=execution_policy_arns,
     )
     runtime_outputs = _existing_agentcore_outputs(cloudformation_client)
     if (

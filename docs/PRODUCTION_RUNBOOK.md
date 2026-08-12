@@ -570,14 +570,15 @@ mappings.
 
 For the first account/region bootstrap, use a separate IAM bootstrap principal
 with permission to create/read the repository-owned
-`AxonLLMAgentCoreCloudFormationExecution-<region>` policy and create or update
-the standard CDK bootstrap stack resources. `--bootstrap-cdk` generates and
-verifies that exact bounded policy, supplies it as the sole CloudFormation
-execution policy, and enables bootstrap-stack termination protection. Routine
-deployment verifies the canonical policy document and rejects any extra
-managed or inline policy on the CDK execution role. Do not bootstrap AgentCore
-with `AdministratorAccess`, and do not give the one-time bootstrap principal to
-the routine deployment workflow.
+`AxonLLMAgentCoreCloudFormationExecution-<qualifier>-<region>-part1` through
+`part3` policy set and create or update the isolated CDK bootstrap stack
+resources. `--bootstrap-cdk` generates and verifies those exact bounded
+policies, supplies all three as the only CloudFormation execution policies,
+and enables bootstrap-stack termination protection. Routine deployment
+verifies every canonical policy document and rejects missing, extra, or inline
+policies on the CDK execution role. Do not bootstrap AgentCore with
+`AdministratorAccess`, and do not give the one-time bootstrap principal to the
+routine deployment workflow.
 
 Before changing AWS resources, the wrapper resolves every supplied managed
 prefix list and requires a stable, nonempty, customer-owned IPv4 list in the

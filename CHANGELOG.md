@@ -33,6 +33,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Wheel deployment launchers are self-contained.** Packaged deployments now
   carry the required infrastructure modules, locked CDK inputs, runtime
   configuration, and operational tooling.
+- **CDK bootstrap execution permissions fit IAM quotas.** The unchanged
+  least-privilege execution statements are deterministically partitioned into
+  three exact managed policies, and deployments reject missing, drifted, or
+  additional policies on the CloudFormation execution role.
 - **The Google AI launch catalog no longer advertises a retired preview.**
   Google's live model list no longer contains `gemini-3-pro-preview`; AxonLLM
   now offers the listed, priced `gemini-2.5-pro` tier instead.
