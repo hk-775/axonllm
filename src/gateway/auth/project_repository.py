@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 import logging
 from typing import TYPE_CHECKING, Protocol
 
 from src.gateway.models import Project
 from src.gateway.persistence import (
+    PersistenceConflictError,
     tenant_project_partition_key,
     tenant_project_sort_key,
 )
@@ -26,11 +28,26 @@ class ProjectStoreUnavailable(ProjectRepositoryError):
     """Tenant project ownership could not be established safely."""
 
 
+class ProjectConfigConflict(ProjectRepositoryError):
+    """A project configuration changed before a conditional update."""
+
+
 class ProjectResolver(Protocol):
     """Resolve a project only inside an explicit tenant namespace."""
 
     async def resolve(self, tenant_id: str, project_id: str) -> Project | None:
         ...
+
+
+class ProjectConfigStore(Protocol):
+    """Conditionally persist one canonical tenant project configuration."""
+
+    async def update(
+        self,
+        project: Project,
+        *,
+        expected_revision: int,
+    ) -> Project: ...
 
 
 class DynamoProjectRepository:
@@ -103,3 +120,50 @@ class DynamoProjectRepository:
                 "tenant project row does not match its key"
             )
         return project
+
+    async def update(
+        self,
+        project: Project,
+        *,
+        expected_revision: int,
+    ) -> Project:
+        if (
+            not self.enabled
+            or project.tenant_id is None
+            or not project.tenant_id.strip()
+        ):
+            raise ProjectStoreUnavailable(
+                "tenant project persistence is disabled"
+            )
+        if (
+            isinstance(expected_revision, bool)
+            or not isinstance(expected_revision, int)
+            or expected_revision < 0
+        ):
+            raise ValueError(
+                "expected project revision must be a non-negative integer"
+            )
+        try:
+            revision = await self._persistence.save_project(
+                project,
+                expected_revision=expected_revision,
+            )
+        except PersistenceConflictError as exc:
+            raise ProjectConfigConflict(
+                "project configuration changed concurrently"
+            ) from exc
+        except Exception as exc:
+            logger.error(
+                "Tenant project update failed tenant=%s project=%s",
+                project.tenant_id,
+                project.project_id,
+                exc_info=True,
+            )
+            raise ProjectStoreUnavailable(
+                "tenant project update failed"
+            ) from exc
+        if revision != expected_revision + 1:
+            raise ProjectStoreUnavailable(
+                "tenant project update returned an invalid revision"
+            )
+        return replace(project, revision=revision)

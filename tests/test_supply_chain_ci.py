@@ -8,6 +8,7 @@ import json
 import re
 import tomllib
 from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
@@ -21,6 +22,13 @@ from scripts.ci.verify_cdk_asset import (
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github/workflows/ci.yml"
+
+
+def _workflow_step(job_name: str, step_name: str) -> dict[str, Any]:
+    workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    assert isinstance(workflow, dict)
+    steps = workflow["jobs"][job_name]["steps"]
+    return next(step for step in steps if step.get("name") == step_name)
 
 
 def test_workflow_actions_are_commit_pinned_and_read_only() -> None:
@@ -39,8 +47,10 @@ def test_workflow_actions_are_commit_pinned_and_read_only() -> None:
 def test_workflow_enforces_each_release_gate() -> None:
     workflow = WORKFLOW.read_text(encoding="utf-8")
     required_commands = (
+        "python -m py_compile",
         "ruff check",
         "pytest tests",
+        "git diff --check",
         "gitleaks git",
         "audit_python_dependencies.sh",
         "trivy config",
@@ -66,6 +76,109 @@ def test_workflow_enforces_each_release_gate() -> None:
         '"${CDK_CI_OUTDIR}/release-foundation/'
         'AxonLLMReleaseFoundationStack.template.json"'
         in workflow
+    )
+    assert (
+        '"${CDK_CI_OUTDIR}/launch-workers/'
+        'AxonLLMLaunchWorkersStack-managed.template.json"'
+        in workflow
+    )
+    synthesis = (
+        ROOT / "scripts/ci/synthesize_and_verify_cdk.sh"
+    ).read_text(encoding="utf-8")
+    assert (
+        'verify_target "launch-workers" '
+        '"AxonLLMLaunchWorkersStack-managed" "managed"'
+        in synthesis
+    )
+
+
+def test_ci_compiles_production_and_release_python_syntax() -> None:
+    step = _workflow_step("supply-chain", "Compile production and release Python")
+
+    assert step["env"] == {
+        "PYTHONPYCACHEPREFIX": "${{ runner.temp }}/python-syntax-cache"
+    }
+    command = step["run"]
+    assert 'python -m py_compile "${source}"' in command
+    assert "git ls-files -z -- '*.py' ':!tests/**'" in command
+    assert "compileall" not in command
+
+
+def test_supply_chain_installs_and_runs_release_security_tests() -> None:
+    install = _workflow_step("supply-chain", "Install locked audit dependencies")
+    validate = _workflow_step(
+        "supply-chain",
+        "Validate workflow and operational tooling",
+    )
+
+    assert install["run"] == "uv sync --frozen --extra security --extra dev"
+    assert (
+        "uv run --frozen --no-sync pytest "
+        "tests/release_security -q --tb=short"
+        in validate["run"]
+    )
+    assert "unittest discover" not in validate["run"]
+
+
+def test_ci_validates_every_tracked_shell_script() -> None:
+    step = _workflow_step("supply-chain", "Validate tracked shell syntax")
+    command = step["run"]
+
+    assert 'bash -n "${script}"' in command
+    assert "git ls-files -z -- '*.sh'" in command
+    assert "find scripts" not in command
+    for path in (
+        "deploy-agentcore.sh",
+        "deploy-fargate.sh",
+        "deploy.sh",
+        "site/deploy.sh",
+    ):
+        assert (ROOT / path).is_file()
+
+
+@pytest.mark.parametrize(
+    "installer",
+    (
+        "scripts/ci/install_registry_tools.sh",
+        "scripts/ci/install_security_tools.sh",
+    ),
+)
+def test_ci_tool_downloads_tolerate_transient_release_outages(
+    installer: str,
+) -> None:
+    script = (ROOT / installer).read_text(encoding="utf-8")
+
+    assert "--connect-timeout 15" in script
+    assert "--max-time 180" in script
+    assert "--retry 8 --retry-all-errors --retry-max-time 120" in script
+    assert "sha256sum --check" in script
+    assert "shasum -a 256 --check" in script
+
+
+def test_ci_checks_worktree_and_event_patch_whitespace() -> None:
+    step = _workflow_step("supply-chain", "Check patch whitespace")
+    command = step["run"]
+
+    assert "\ngit diff --check\n" in f"\n{command}"
+    assert 'git diff --check "${PR_BASE_SHA}...${PR_HEAD_SHA}"' in command
+    assert 'git diff --check "${BEFORE_SHA}..${GITHUB_SHA}"' in command
+    assert "git diff-tree --check --root --no-commit-id" in command
+
+
+def test_ci_scans_agentcore_dockerfile_configuration() -> None:
+    step = _workflow_step(
+        "supply-chain",
+        "Scan AgentCore Dockerfile configuration",
+    )
+
+    assert step["run"] == (
+        "trivy config "
+        "--disable-telemetry "
+        "--skip-check-update "
+        "--ignorefile .github/trivyignore.yaml "
+        "--severity HIGH,CRITICAL "
+        "--exit-code 1 "
+        "infra/agentcore-image/Dockerfile"
     )
 
 
@@ -113,6 +226,7 @@ def test_trivy_exception_is_narrow_and_expires() -> None:
                 "paths": [
                     "AxonLLMStack.template.json",
                     "AxonLLMControlPlaneStack.template.json",
+                    "AxonLLMLaunchWorkersStack-managed.template.json",
                 ],
                 "statement": (
                     "The task volume is ephemeral Fargate scratch storage "
@@ -120,6 +234,18 @@ def test_trivy_exception_is_narrow_and_expires() -> None:
                     "EFS transit encryption does not apply."
                 ),
                 "expired_at": "2027-08-07T00:00:00Z",
+            },
+            {
+                "id": "AWS-0036",
+                "paths": [
+                    "AxonLLMLaunchWorkersStack-managed.template.json"
+                ],
+                "statement": (
+                    "The environment value is an exact Secrets Manager ARN "
+                    "used to fetch credentials at runtime; secret material is "
+                    "never placed in the task environment."
+                ),
+                "expired_at": "2027-08-12T00:00:00Z",
             },
             {
                 "id": "AWS-0053",
@@ -149,7 +275,14 @@ def test_pip_audit_exception_is_narrow_and_current() -> None:
 
 
 def test_ecdsa_exception_remains_verification_only() -> None:
-    runtime_paths = [ROOT / "agentcore_agent.py", *(ROOT / "src").rglob("*.py")]
+    runtime_paths = [
+        ROOT / "agentcore_agent.py",
+        *(
+            path
+            for path in (ROOT / "src").rglob("*.py")
+            if "node_modules" not in path.parts
+        ),
+    ]
     prohibited: list[str] = []
 
     for path in runtime_paths:

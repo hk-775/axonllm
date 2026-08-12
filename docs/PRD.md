@@ -5,12 +5,10 @@
 | Field              | Value                                      |
 |--------------------|--------------------------------------------|
 | **Product Name**   | AxonLLM                                    |
-| **Author**         | Amazon Bedrock Product Management           |
-| **Status**         | Draft; production evidence pending              |
+| **Status**         | Draft; production evidence pending         |
 | **Version**        | 1.3                                         |
 | **Date**           | 2026-08-11 (reconciled against the code)    |
 | **Target Launch**  | TBD                                         |
-| **Classification** | Internal / Confidential                     |
 
 ---
 
@@ -45,12 +43,13 @@ AxonLLM is a unified gateway that sits between applications and LLM providers, g
 
 AxonLLM's full HTTP and admin surface runs as a Starlette application. A
 separate Amazon Bedrock AgentCore adapter and CDK stack provide chat, model
-listing, bounded Athena query, liveness, dependency readiness, canonical
+listing, bounded Athena query, viewer-readable and administrator-writable
+tenant-project runtime configuration, liveness, dependency readiness, canonical
 identity, private networking, backup, and monitoring. Managed-Cognito adopters
-also receive a dedicated shared-state Fargate control plane that exposes tenant
-administration while suppressing chat/model/query execution and holding no
-Athena/STS authority. Canonical SCIM convergence, schema-v3 release evidence
-for both image targets, and target-aware Fargate/AgentCore deployment
+also receive a dedicated shared-state Fargate control plane that exposes
+broader tenant administration while suppressing chat/model/query execution and
+holding no Athena/STS authority. Canonical SCIM convergence, schema-v3 release
+evidence for both image targets, and target-aware Fargate/AgentCore deployment
 verification are implemented.
 
 `v0.2.4` completed the tagged private-ECR/KMS-signature flow for both image
@@ -208,7 +207,7 @@ Stakeholders who need visibility into LLM spend and assurance that usage complie
 | ID | Requirement | Details |
 |----|-------------|---------|
 | FR-A1 | **Provider adapter interface** | Each provider implements a `ProviderAdapter` with: `translate_request()`, `translate_response()`, `translate_stream_chunk()`, `list_models()`, `health_check()`. Only the first three are `@abstractmethod`; `list_models()` and `health_check()` have default implementations, so a new adapter can omit them. |
-| FR-A2 | **Supported providers** | Thirteen: AWS Bedrock (via boto3, including AI21 Jamba 1.5), Bedrock Mantle, Anthropic (HTTP), OpenAI (HTTP), Azure OpenAI (HTTP), Google Vertex AI (HTTP), Google AI (HTTP), Cohere (HTTP), xAI, Groq, Together, Fireworks, AI21 direct (Jamba 1.6). `VALID_PROVIDERS` in `config.py` is the authoritative list. |
+| FR-A2 | **Supported providers** | Thirteen adapters: AWS Bedrock (via boto3, including AI21 Jamba 1.5), Bedrock Mantle, Anthropic (HTTP), OpenAI (HTTP), Azure OpenAI (HTTP), Google Vertex AI (HTTP), Google AI (HTTP), Cohere (HTTP), xAI, Groq, Together, Fireworks, and AI21 direct (Jamba 1.6). AgentCore defaults to twelve providers: direct `ai21` is opt-in, while Bedrock-hosted Jamba remains in the default `bedrock` path. `VALID_PROVIDERS` in `config.py` is the authoritative general list. |
 | FR-A3 | **Dual execution paths** | Bedrock requests use boto3 native SDK (invoke_model for Anthropic models, converse API for others). All non-Bedrock providers use async HTTP with session pooling. |
 | FR-A4 | **Request/response normalization** | All provider-specific payloads are translated to/from a unified OpenAI-compatible format (ChatCompletionRequest/Response). Provider differences (field names, message formats, system prompt handling) are abstracted. |
 | FR-A5 | **Streaming translation** | Each adapter translates provider-specific SSE events into a unified StreamChunk format. True streaming is the primary path — `HttpClient.execute_streaming` reads the provider's own SSE and translates chunk by chunk. Simulated streaming (word-level chunking of a complete response) is the *fallback*, for providers or routes without a native stream. |
@@ -243,7 +242,8 @@ Stakeholders who need visibility into LLM spend and assurance that usage complie
 | FR-AC12 | **Atomic canonical project grants** | In canonical mode, `POST /admin/projects/{id}/members` accepts a SCIM resource id as `user_id`; POST/DELETE member operations use one CAS-guarded transaction to update `Project.members`, `ScimUser.project_ids`, authoritative `Principal.project_ids`, both authorization versions, and tenant `SCIM#VERSION`. Stored and returned members use `scim:<id>`. Project creation rejects a non-empty `members` list, and project PUT rejects any `members` field, so canonical grants cannot bypass the dedicated routes. Legacy member routes update only `Project.members`. |
 | FR-AC13 | **Restartable tenant bootstrap** | `axon bootstrap-tenant` conditionally creates or verifies the tenant project and first SCIM-backed administrator, applies the canonical project-membership transaction, and returns only after a strong principal lookup proves active `tenant_admin` authority and the project grant. Conflicting issuer/subject ownership fails closed. |
 | FR-AC14 | **Canonical service-key bootstrap** | `axon issue-key --tenant` uses tenant-qualified API-key/service-principal persistence, defaults to `model.list`, `inference.invoke`, and `query.select`, and rejects legacy `admin:` scopes. |
-| FR-AC15 | **First-adopter identity choices** | Schema-v2 `axon setup agentcore` accepts only `managed-cognito` or `external-oidc`. Managed identity requires a retained/deletion-protected pool, required TOTP, strong passwords, public AgentCore and confidential ALB clients, explicit HTTPS callbacks, tenant/project custom claims, and a required `control_plane` object. The deployer creates identity, AgentCore, canonical bootstrap, and the shared-state web control plane. Tenant-specific Cognito SAML IdP metadata and app-client enablement remain reviewed operator inputs; no SAML secret enters AxonLLM. External OIDC requires exact issuer, discovery URL, client, audience, immutable first-admin subject, and tenant/project claim mappings; it currently deploys AgentCore and bootstrap only, not the Cognito-authenticated web control plane. No unauthenticated AgentCore mode exists. |
+| FR-AC15 | **First-adopter identity choices** | Schema-v2 `axon setup agentcore` accepts only `managed-cognito` or `external-oidc`. Managed identity requires a retained/deletion-protected pool, required TOTP, strong passwords, public AgentCore and confidential ALB clients, explicit HTTPS callbacks, tenant/project custom claims, and a required `control_plane` object. The deployer creates identity, AgentCore, canonical bootstrap, and the shared-state web control plane. Tenant-specific Cognito SAML IdP metadata and app-client enablement remain reviewed operator inputs; no SAML secret enters AxonLLM. External OIDC requires exact issuer, discovery URL, client, audience, immutable first-admin subject, and tenant/project claim mappings; it deploys AgentCore and bootstrap but not the Cognito-authenticated web control plane. External-OIDC viewers can read project runtime configuration and tenant admins can update it through AgentCore; broader administration needs another trusted control plane or reviewed operator path. No unauthenticated AgentCore mode exists. |
+| FR-AC16 | **AgentCore tenant configuration** | `get_tenant_config` strongly resolves and returns the selected tenant-project runtime settings to canonical tenant viewers and administrators. `update_tenant_config` accepts only a nonempty allowlisted partial configuration and is restricted to `tenant_admin`; it requires the current revision, returns `409` on a stale writer, and transactionally advances both project revision and fleet configuration version. Payload identity, membership, revision, and creation metadata are immutable. Canonical service principals are denied. |
 
 ### 6.4.1 Policy Hierarchy and Quotas
 
@@ -306,7 +306,7 @@ Stakeholders who need visibility into LLM spend and assurance that usage complie
 | FR-AD8 | **API key management** | Issue, list, revoke and rotate keys. The plaintext appears once, in the issue response. |
 | FR-AD9 | **Audit and PII views** | Browse audit records, verify the hash chain, and inspect PII redaction activity. |
 | FR-AD10 | **Production readiness checklist** | `/admin/production-checklist` runs eight checks over the live configuration and reports PASS/WARN/FAIL, including canonical identity and the API-key caveat in FR-AC6. |
-| FR-AD11 | **Drift detection** | Catalogue drift compares `config/catalog.yaml` against `models.yaml`; pricing drift reports models configured without pricing (currently 5 of 51). |
+| FR-AD11 | **Drift detection** | Catalogue drift compares `config/catalog.yaml` against `models.yaml`; pricing drift reports provider mappings without usable rates. The shipped registry has 51 configured logical models across 56 mappings; 5 mappings lack usable shipped rates, leaving 46 models production-price-ready. |
 | FR-AD12 | **Runtime configuration surface** | What is *not* runtime-editable is provider credentials. Projects, users, models, Cedar policies, the policy hierarchy, quotas, regions, webhooks and guardrail rules all take effect without a restart. |
 | FR-AD13 | **Datasource administration** | `/admin/datasources` stores tenant/project Athena metadata without credentials. `tenant_admin` may create/update/delete; `tenant_member` and `tenant_auditor` may read with the role ARN concealed; `service` is denied. Lists use bounded opaque-cursor pages, creates enforce a transactional tenant quota, writes use revision compare-and-swap, and mutations emit durable redacted audit records. |
 
@@ -319,7 +319,7 @@ Stakeholders who need visibility into LLM spend and assurance that usage complie
 | FR-T3 | **Normalized completion signal** | A tool call always surfaces as `finish_reason: "tool_calls"` regardless of the provider's own signal (Anthropic/Bedrock `stop_reason: "tool_use"`; Gemini leaves `finishReason` at `STOP` and signals only via the part itself). |
 | FR-T4 | **Arguments encoding** | OpenAI carries tool arguments as a JSON string, every other dialect as an object; the value is re-encoded at each boundary. Malformed model output yields `{}` rather than failing the request, so the tool reports the bad call. |
 | FR-T5 | **Schema compatibility** | Gemini rejects unknown JSON Schema keys (`additionalProperties`, `$schema`, `title`, `default`) rather than ignoring them, so schemas are filtered recursively before dispatch. |
-| FR-T6 | **Unsupported-parameter reporting** | Where a provider has no equivalent for a requested parameter (e.g. Cohere v1 chat has no `tool_choice`), the response carries a warning rather than dropping the instruction silently. |
+| FR-T6 | **Unsupported-parameter reporting** | Where a provider has no equivalent for required or named tool selection, AxonLLM rejects the request before provider invocation with sanitized `400 unsupported_provider_feature` rather than dropping the instruction silently. |
 | FR-T7 | **Multi-round tool loops** | A full loop is supported: tool spec → tool call → tool result → final answer. Governance applies to every round (cost, quota, audit, guardrails), and smart routing classifies the last real user text rather than the intervening tool result, so all rounds of one loop route consistently. |
 
 ### 6.11 Persistence
@@ -1084,31 +1084,52 @@ must therefore be evaluated separately.
 | Option | Description | Use Case |
 |--------|-------------|----------|
 | **ECS Fargate via CDK** | `infra/stack.py` requires a private regional ECR `@sha256` image. Production mode adds ALB OIDC and canonical identity to CloudFront/WAF, an internal TLS ALB, private tasks, DynamoDB/PITR/AWS Backup with governance Vault Lock, optional SCIM-secret injection, a KMS/TLS FIFO event outbox and DLQ, managed SNS/Logs sinks over private endpoints, alarms, rollback, an ALB `/ready` gate, and guarded restored-table cutover. `deploy-fargate.sh` defaults to staging but supplies the complete production parameter set when `AXON_DEPLOYMENT_MODE=production`. | Production candidate after release and operational gates |
-| **Amazon Bedrock AgentCore via CDK** | `infra/agentcore_stack.py` deploys the ARM64 `chat`, `list_models`, and optional `query` action runtime with JWT authorization, private VPC mode, canonical identity, exact Bedrock/query-role IAM, digest-only image input, backups, outbox, alarms, and `GET /ready`. Schema-v2 setup supports managed Cognito or external OIDC. | Production candidate after a successful `agentcore` target verification and operational gates |
+| **Amazon Bedrock AgentCore via CDK** | `infra/agentcore_stack.py` can deploy the ARM64 `chat`, `list_models`, conditional `query`, viewer-readable `get_tenant_config`, tenant-admin-only CAS `update_tenant_config`, authenticated `readiness`, liveness, and HTTP readiness surfaces with JWT authorization, private VPC mode, canonical identity, exact Bedrock/query-role IAM, digest-only image input, backups, outbox, alarms, and a confirmed administrator-email subscription. Schema-v2 setup supports managed Cognito or external OIDC. The current production launch requires Athena query bindings and a successful `SELECT`; it has no query-disabled certification mode. The protected orchestrator separately certifies external OIDC and a reviewed managed-Cognito namespace, runs seven launch gates, proves qualification teardown, then invokes a production leaf that certifies a high-entropy candidate, exercises backup/restore, promotes the exact version, compensates failures, and persists signed schema-v5 deployment evidence. | Production candidate after a successful `agentcore` target verification and operational gates |
 | **Managed-Cognito shared control plane** | `infra/control_plane_stack.py` deploys a separate verified AMD64 image to private Fargate tasks behind a Cognito-authenticated HTTPS ALB and stable Route 53 alias. It imports AgentCore state/KMS/outbox resources, sets `AXON_CONTROL_PLANE_ONLY=true` and managed SAML handoff settings, exposes admin/datasource routes, bypasses Cognito only for SCIM, and has no Athena/STS execution authority. | Managed-Cognito administration surface; not deployed by external OIDC |
 | **AWS App Runner** | `deploy.sh` remains a legacy reference path without the canonical identity, private-network, digest-verification, backup, and readiness controls of the CDK stacks. | Evaluation only |
 | **Docker / Compose** | `docker build` + `docker run`, or `docker compose up` using `docker-compose.yml` (gateway + DynamoDB Local). | Staging, on-premises |
 | **Local development** | `uv run python serve_dashboard.py`. Uvicorn dev server with demo data seeded and `AXON_AUTH_MODE=LOG_ONLY`. | Development |
 | **CLI** | `uv run axon serve` (or `uv run axon demo`) after `uv sync`. Same app, argparse front end. | Development, scripted runs |
 
+The production candidate qualifier is a temporary 128-bit bearer capability
+layered on the runtime JWT, not an independent endpoint authorization policy.
+Candidate and production share the authorizer; a valid runtime principal that
+learns the candidate qualifier can invoke it. Use a separate runtime or
+qualifier-aware authorization when certification requires endpoint isolation.
+
+Launch-gate review is deliberately separate from launch execution. Operators
+must pre-stage namespace `managed` with the exact release, collect its physical
+resource bindings, and upload an independently reviewed schema-v2 gate document
+whose lifetime is no more than 48 hours. The orchestrator later updates and
+exercises those same resources, deletes all managed and external qualification
+stacks, signs the teardown proof, and only then permits production mutation.
+Because teardown changes the physical bindings, every launch requires a fresh
+pre-stage and review.
+
 AgentCore does not mount the Starlette application or admin console. Its
-invocation surface is `chat`, `list_models`, optional `query`, and
+invocation surface is `chat`, `list_models`, optional `query`,
+`get_tenant_config`, `update_tenant_config`, authenticated `readiness`, and
 liveness-only `health`; a separate `GET /ready` checks runtime initialization,
-OIDC/JWKS, canonical authority, and the configured event outbox. It does not
-enumerate datasource roles or validate Athena workgroups; each workgroup is
-validated immediately before query execution. AgentCore accepts OIDC JWTs, not
-Axon API keys. AgentCore Memory is not wired. Direct-provider credentials load
-from a retained KMS-encrypted Secrets Manager secret over a private endpoint;
-Bedrock and Mantle use runtime IAM. A synchronous bootstrap worker cannot be
-forcibly cancelled if it outlives its
+OIDC/JWKS, canonical authority, and the configured event outbox. The
+configuration actions expose project runtime settings only: viewers can read,
+and `tenant_admin` can perform revision-checked partial updates. They do not
+administer membership, datasources, API keys, policies, webhooks, provider
+secrets, or event destinations. AgentCore does not enumerate datasource roles
+or validate Athena workgroups; each workgroup is validated immediately before
+query execution. AgentCore accepts OIDC JWTs, not Axon API keys. AgentCore
+Memory is not wired. Direct-provider credentials load from a retained
+KMS-encrypted Secrets Manager secret over a private endpoint; Bedrock and
+Mantle use runtime IAM. A synchronous bootstrap worker cannot be forcibly
+cancelled if it outlives its
 deadline, so deployment must retain process-level startup containment.
 
 Both state-owning runtime stacks require canonical identity and alarm
 subscriptions before traffic. The AgentCore first-adopter workflow invokes the
 same canonical bootstrap automatically. Managed Cognito then deploys the
-shared-state web control plane; external OIDC currently does not. Use
-`axon bootstrap-tenant` directly for Fargate or manual recovery. Fargate injects
-Anthropic/OpenAI provider secrets and can inject the complete
+shared-state web control plane; external OIDC does not, although its canonical
+users retain the AgentCore project-configuration actions above. Use
+`axon bootstrap-tenant` directly for Fargate or manual recovery. Fargate
+injects Anthropic/OpenAI provider secrets and can inject the complete
 `AXON_SCIM_TENANTS` JSON from an optional Secrets Manager ARN. The state-owning
 stacks configure governance-mode Vault Lock with 30-365 day retention. See the
 [Production Runbook](PRODUCTION_RUNBOOK.md) and
@@ -1396,7 +1417,7 @@ call. With no URL and no registered sink, the forwarder is inert.
 ### Phase 1: Foundation (Current)
 
 - [x] Multi-provider routing with 5 strategies, plus ensemble scatter-gather
-- [x] 13 provider adapters. Verified live: Bedrock, Bedrock Mantle, Anthropic, OpenAI, Google AI, xAI, Together, Fireworks. AI21 Jamba 1.5 is mapped through Bedrock; the direct Jamba 1.6 adapter remains untested for want of a direct credential. Built but untested for want of credentials: Azure, Vertex, Cohere, Groq.
+- [x] 13 provider adapters. AgentCore enables 12 by default and requires an explicit `ai21` opt-in for direct Jamba 1.6; AI21 Jamba 1.5 remains available through Bedrock. Verified live: Bedrock, Bedrock Mantle, Anthropic, OpenAI, Google AI, xAI, Together, Fireworks. The direct Jamba 1.6 adapter remains untested for want of a direct credential. Built but untested for want of credentials: Azure, Vertex, Cohere, Groq.
 - [x] Automatic retry with exponential backoff and fallback chains
 - [x] Cost tracking with comprehensive token-level attribution
 - [x] Project and user budget enforcement
@@ -1410,6 +1431,8 @@ call. With no URL and no registered sink, the forwarder is inert.
 - [x] Chat, Playground, and Routing Explorer web interfaces
 - [x] DynamoDB persistence layer
 - [x] AgentCore action adapter and private-network CDK stack
+- [x] Viewer-readable and tenant-admin-only CAS AgentCore project
+      configuration actions with fleet-version convergence
 - [x] Shared HTTP/AgentCore Athena query service with single-SELECT AST policy,
       deployment-bound roles, bounded results, and durable audit
 - [x] Credential-free datasource administration with canonical RBAC and CAS
@@ -1442,6 +1465,10 @@ call. With no URL and no registered sink, the forwarder is inert.
 - [x] Schema-v3 release evidence and target-aware deployment verification for
       Fargate and AgentCore image identities, with exact manifest key ARNs
       constrained by account-scoped retained signing-key version aliases
+- [x] Protected AgentCore candidate certification and promotion with frozen
+      shared IAM/network inputs, confirmed alarms, automatic backup/restore
+      comparison, compensating rollback, and immutable signed deployment
+      evidence
 - [x] Obtain and retain green required CI for the `v0.2.4` release commit
 - [x] Execute and retain the `v0.2.4` tagged
       private-ECR/KMS-signature verification flow for each deployment target
@@ -1466,8 +1493,10 @@ call. With no URL and no registered sink, the forwarder is inert.
       mode pinned to zero tasks, phase tooling, RBAC canaries, and read-only
       load harness
 - [x] AWS service metrics, alarms, and operations dashboards in both CDK stacks
-- [ ] Confirmed alarm-topic subscriptions and delivery exercises; neither stack
-      creates a subscriber
+- [ ] Confirmed alarm-topic and security-event delivery exercises. AgentCore
+      creates and launch-verifies its administrator-email alarm subscription;
+      Fargate alarms and both stacks' tenant security-event topics still need
+      configured and tested receivers
 - [ ] Usage export to S3 for long-term analytics
 - [ ] Budget reset schedules (daily, weekly, monthly) — *partial*: manual reset
       ships as `POST /admin/quotas/{project_id}/reset`; there is no scheduler
@@ -1542,9 +1571,10 @@ call. With no URL and no registered sink, the forwarder is inert.
 
 ### Appendix A: Configured Models (Current Configuration)
 
-Generated from `config/models.yaml` — 48 models. Regenerate rather than hand-edit,
-since a table maintained by hand is what left this appendix 17 rows long and one
-routing strategy wrong.
+Generated from `config/models.yaml` — 51 configured models across 56 provider
+mappings. Of those models, 46 are production-price-ready with the shipped
+pricing. Regenerate rather than hand-edit, since a table maintained by hand is
+what left this appendix 17 rows long and one routing strategy wrong.
 
 | Model | Description | Routing Strategy | Providers |
 |-------|-------------|-----------------|-----------|

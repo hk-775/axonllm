@@ -59,7 +59,7 @@ filler_strategy = st.text(
     suffix=filler_strategy,
 )
 @settings(max_examples=100)
-def test_request_guardrail_violations_return_block(keyword, rule_name, model, prefix, suffix):
+async def test_request_guardrail_violations_return_block(keyword, rule_name, model, prefix, suffix):
     """Property 26: Request guardrail violations return 400.
 
     For any request matching a project's request guardrail rule (with
@@ -91,7 +91,7 @@ def test_request_guardrail_violations_return_block(keyword, rule_name, model, pr
         applies_to="request",
     )
 
-    result = engine.evaluate_request(request, [rule])
+    result = await engine.evaluate_request(request, [rule])
 
     # Must fail
     assert result.passed is False, (
@@ -124,7 +124,7 @@ def test_request_guardrail_violations_return_block(keyword, rule_name, model, pr
     completion_tokens=st.integers(min_value=1, max_value=500),
 )
 @settings(max_examples=100)
-def test_response_guardrail_violations_replace_response(
+async def test_response_guardrail_violations_replace_response(
     keyword, rule_name, model, prefix, suffix, prompt_tokens, completion_tokens
 ):
     """Property 27: Response guardrail violations replace the response.
@@ -163,7 +163,7 @@ def test_response_guardrail_violations_replace_response(
         applies_to="response",
     )
 
-    result = engine.evaluate_response(response, [rule])
+    result = await engine.evaluate_response(response, [rule])
 
     # Must fail
     assert result.passed is False, (

@@ -919,6 +919,7 @@ async def test_production_runtime_probes_and_closes_owned_resources(
 
     services = build_runtime_services()
     assert services.query_service is query_service
+    assert services.project_config_store is components.project_resolver
     assert isinstance(services.policy_service, CedarPolicyService)
     assert services.policy_service._policies is policies
     assert services.policy_service._persistence is components.persistence

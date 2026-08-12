@@ -14,7 +14,10 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any, Protocol
 
 from src.gateway.auth.principal import PrincipalResolver
-from src.gateway.auth.project_repository import ProjectResolver
+from src.gateway.auth.project_repository import (
+    ProjectConfigStore,
+    ProjectResolver,
+)
 from src.gateway.models import RequestContext
 
 if TYPE_CHECKING:
@@ -205,9 +208,12 @@ class RuntimeServices:
     token_verifier: OIDCTokenVerifier
     principal_resolver: PrincipalResolver
     project_resolver: ProjectResolver
+    project_config_store: ProjectConfigStore | None = None
+    audit_trail: Any | None = None
     query_service: QueryService | None = None
     policy_service: PolicyService | None = None
     config_sync: ConfigSync | None = None
+    rehearsal_ledger: Any | None = None
     readiness_checks: tuple[RuntimeDependency, ...] = field(default_factory=tuple)
     close_hooks: tuple[RuntimeCloseHook, ...] = field(default_factory=tuple)
 
@@ -377,6 +383,7 @@ def build_runtime_services() -> RuntimeServices:
     from src.gateway.auth.cedar_policy import CedarPolicyService
     from src.gateway.bootstrap import build_gateway_components
     from src.gateway.config_sync import ConfigSyncService
+    from src.gateway.rehearsal_control import RehearsalControlLedger
 
     components = build_gateway_components()
     if components.oidc_service is None:
@@ -390,6 +397,7 @@ def build_runtime_services() -> RuntimeServices:
         user_configs=components.user_configs,
         cost_tracker=components.cost_tracker,
         persistence=components.persistence,
+        model_registry=getattr(components, "registry", None),
         policy_resolver=components.policy_resolver,
         region_config=components.region_router.config,
         health_monitor=components.health_monitor,
@@ -457,7 +465,11 @@ def build_runtime_services() -> RuntimeServices:
         await query_reconciliation_worker.start()
         return query_reconciliation_worker.running
 
-    async def _close_provider_http() -> None:
+    async def _close_provider_factory() -> None:
+        close = getattr(components.multi_factory, "close", None)
+        if callable(close):
+            await close()
+            return
         client = getattr(components.multi_factory, "_http_client", None)
         close = getattr(client, "close", None)
         if callable(close):
@@ -497,12 +509,15 @@ def build_runtime_services() -> RuntimeServices:
         token_verifier=components.oidc_service,
         principal_resolver=components.principal_resolver,
         project_resolver=components.project_resolver,
+        project_config_store=components.project_resolver,
+        audit_trail=components.audit_trail,
         query_service=query_service,
         policy_service=CedarPolicyService(
             components.policies,
             persistence=components.persistence,
         ),
         config_sync=config_sync,
+        rehearsal_ledger=RehearsalControlLedger(),
         readiness_checks=(
             RuntimeDependency(
                 "identity_provider",
@@ -527,7 +542,7 @@ def build_runtime_services() -> RuntimeServices:
                 "spoke_health_monitor",
                 components.health_monitor.stop,
             ),
-            RuntimeCloseHook("provider_http", _close_provider_http),
+            RuntimeCloseHook("provider_http", _close_provider_factory),
             RuntimeCloseHook(
                 "security_event_outbox",
                 components.event_dispatcher.stop,

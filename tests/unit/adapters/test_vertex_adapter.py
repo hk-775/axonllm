@@ -29,7 +29,7 @@ class TestTranslateRequest:
             model="gemini-1.5-pro",
         )
         result = await adapter.translate_request(req)
-        assert result["model"] == "gemini-1.5-pro"
+        assert "model" not in result
         assert result["contents"] == [
             {"role": "user", "parts": [{"text": "Hello"}]}
         ]
@@ -109,15 +109,15 @@ class TestTranslateRequest:
         assert gc["stopSequences"] == ["\n", "END"]
 
     @pytest.mark.asyncio
-    async def test_stream_param_produces_warning(self, adapter):
+    async def test_stream_param_needs_no_body_flag_or_warning(self, adapter):
         req = ChatCompletionRequest(
             messages=[{"role": "user", "content": "Hi"}],
             model="gemini-1.5-pro",
             stream=True,
         )
         result = await adapter.translate_request(req)
-        assert "_warnings" in result
-        assert any("stream" in w.lower() for w in result["_warnings"])
+        assert "stream" not in result
+        assert "_warnings" not in result
 
     @pytest.mark.asyncio
     async def test_no_system_instruction_when_none(self, adapter):
@@ -156,7 +156,7 @@ class TestTranslateResponse:
         assert isinstance(resp, ChatCompletionResponse)
         assert resp.id == "vertex_123"
         assert resp.choices[0]["message"]["content"] == "Hello there!"
-        assert resp.choices[0]["finish_reason"] == "STOP"
+        assert resp.choices[0]["finish_reason"] == "stop"
         assert resp.usage == TokenUsage(prompt_tokens=12, completion_tokens=5, total_tokens=17)
         assert resp.provider == "vertex_ai"
 
@@ -216,11 +216,47 @@ class TestTranslateStreamChunk:
         }
         chunk = adapter.translate_stream_chunk(raw)
         assert chunk.is_final is True
-        assert chunk.choices[0]["finish_reason"] == "STOP"
+        assert chunk.choices[0]["finish_reason"] == "stop"
 
     def test_empty_candidates(self, adapter):
         chunk = adapter.translate_stream_chunk({"id": "x", "candidates": [], "model": "m"})
         assert chunk.is_final is False
+
+    def test_tool_usage_and_native_metadata_are_translated(self, adapter):
+        chunk = adapter.translate_stream_chunk({
+            "responseId": "vertex-response-1",
+            "modelVersion": "gemini-2.5-pro-001",
+            "candidates": [{
+                "content": {"parts": [{
+                    "functionCall": {
+                        "name": "lookup",
+                        "args": {"city": "Paris"},
+                    }
+                }]},
+                "finishReason": "STOP",
+            }],
+            "usageMetadata": {
+                "promptTokenCount": 12,
+                "candidatesTokenCount": 5,
+                "totalTokenCount": 17,
+                "cachedContentTokenCount": 3,
+            },
+        })
+
+        call = chunk.choices[0]["delta"]["tool_calls"][0]
+        assert chunk.id == "vertex-response-1"
+        assert chunk.model == "gemini-2.5-pro-001"
+        assert chunk.is_final is True
+        assert chunk.choices[0]["finish_reason"] == "tool_calls"
+        assert call["index"] == 0
+        assert call["function"]["name"] == "lookup"
+        assert call["function"]["arguments"] == '{"city": "Paris"}'
+        assert chunk.usage == TokenUsage(
+            prompt_tokens=12,
+            completion_tokens=5,
+            total_tokens=17,
+            cached_tokens=3,
+        )
 
 
 # --- list_models ---

@@ -48,6 +48,30 @@ _TENANT_DATASOURCE_DOCUMENT_FIELDS = frozenset(
         "updated_at",
     }
 )
+_MODEL_REGISTRY_MAX_DOCUMENT_BYTES = 350 * 1024
+_DYNAMODB_MAX_ITEM_BYTES = 400 * 1024
+
+
+def _validate_project_item_size(item: dict) -> None:
+    """Reject project documents that cannot fit in one DynamoDB item."""
+    try:
+        encoded = json.dumps(
+            item,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise ValueError("project contains values that cannot be persisted") from exc
+    # JSON adds structural bytes and escapes stored strings, so this is a
+    # conservative upper bound for this flat scalar DynamoDB item.
+    if len(encoded) > _DYNAMODB_MAX_ITEM_BYTES:
+        raise ValueError("project exceeds the DynamoDB item size limit")
+
+
+def validate_project_storage_size(project: Project) -> None:
+    """Validate the complete serialized project before a storage write."""
+    DynamoPersistence.serialize_project(project)
 
 
 class CanonicalMembershipNotFoundError(RuntimeError):
@@ -366,6 +390,7 @@ class DynamoPersistence:
             "semantic_cache_threshold": project.semantic_cache_threshold,
             "log_level": project.log_level,
             "log_destination": project.log_destination,
+            "prompt_caching_enabled": project.prompt_caching_enabled,
             "ltm_enabled": project.ltm_enabled,
             "retention_period_hours": project.retention_period_hours,
             "rate_limit_rpm": project.rate_limit_rpm,
@@ -375,6 +400,7 @@ class DynamoPersistence:
         }
         if project.tenant_id is not None:
             item["tenant_id"] = project.tenant_id
+        _validate_project_item_size(item)
         return item
 
     @staticmethod
@@ -430,6 +456,9 @@ class DynamoPersistence:
             ),
             log_level=item.get("log_level", "INFO"),
             log_destination=item.get("log_destination"),
+            prompt_caching_enabled=bool(
+                item.get("prompt_caching_enabled", False)
+            ),
             ltm_enabled=bool(item.get("ltm_enabled", False)),
             retention_period_hours=int(item.get("retention_period_hours", 24)),
             rate_limit_rpm=int(item["rate_limit_rpm"]) if item.get("rate_limit_rpm") is not None else None,
@@ -854,6 +883,163 @@ class DynamoPersistence:
         normalized.sort(key=lambda row: row.get("SK", ""))
         return normalized
 
+    # --- Durable model registry ---
+
+    @staticmethod
+    def serialize_model_registry(
+        config: dict,
+        *,
+        revision: int,
+    ) -> dict:
+        """Serialize one authoritative, revisioned model registry document."""
+        revision = _require_revision(
+            revision,
+            name="model registry revision",
+        )
+        if not isinstance(config, dict):
+            raise ValueError("model registry config must be a mapping")
+        try:
+            document = json.dumps(
+                config,
+                allow_nan=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "model registry config must be JSON serializable"
+            ) from exc
+        if len(document.encode("utf-8")) > _MODEL_REGISTRY_MAX_DOCUMENT_BYTES:
+            raise ValueError("model registry exceeds the durable size limit")
+
+        import hashlib
+
+        return {
+            "PK": "MODEL_REGISTRY",
+            "SK": "CONFIG",
+            "entity_type": "model_registry",
+            "schema_version": 1,
+            "revision": revision,
+            "document": document,
+            "document_sha256": hashlib.sha256(
+                document.encode("utf-8")
+            ).hexdigest(),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+    async def save_model_registry(
+        self,
+        config: dict,
+        *,
+        expected_revision: int,
+    ) -> int:
+        """CAS the complete model registry and return its new revision."""
+        if not self._enabled:
+            raise RuntimeError("model registry persistence is disabled")
+        expected = _require_revision(
+            expected_revision,
+            name="expected model registry revision",
+        )
+        next_revision = expected + 1
+        item = self.serialize_model_registry(
+            config,
+            revision=next_revision,
+        )
+
+        def _put() -> None:
+            kwargs: dict = {"Item": item}
+            if expected == 0:
+                kwargs["ConditionExpression"] = (
+                    "attribute_not_exists(PK) AND "
+                    "attribute_not_exists(SK)"
+                )
+            else:
+                kwargs.update(
+                    {
+                        "ConditionExpression": (
+                            "entity_type = :entity_type AND "
+                            "#revision = :expected"
+                        ),
+                        "ExpressionAttributeNames": {
+                            "#revision": "revision",
+                        },
+                        "ExpressionAttributeValues": {
+                            ":entity_type": "model_registry",
+                            ":expected": expected,
+                        },
+                    }
+                )
+            self._get_table().put_item(**kwargs)
+
+        try:
+            await asyncio.to_thread(_put)
+        except Exception as exc:
+            if self._api_key_condition_failed(exc, 0):
+                raise PersistenceConflictError(
+                    "model registry changed concurrently"
+                ) from exc
+            self._record_write_failure("model registry", "CONFIG")
+            raise RuntimeError("model registry write failed") from exc
+        return next_revision
+
+    async def load_model_registry_snapshot(
+        self,
+    ) -> tuple[dict, int] | None:
+        """Strongly load the durable model registry, or None when none exists."""
+        if not self._enabled:
+            raise RuntimeError("model registry persistence is disabled")
+
+        def _get() -> dict | None:
+            return self._get_table().get_item(
+                Key={"PK": "MODEL_REGISTRY", "SK": "CONFIG"},
+                ConsistentRead=True,
+            ).get("Item")
+
+        try:
+            item = await asyncio.to_thread(_get)
+        except Exception as exc:
+            logger.error(
+                "Failed to load the model registry from DynamoDB",
+                exc_info=True,
+            )
+            raise RuntimeError("model registry read failed") from exc
+        if item is None:
+            return None
+        if (
+            item.get("entity_type") != "model_registry"
+            or item.get("schema_version") != 1
+        ):
+            raise RuntimeError("model registry row is malformed")
+        try:
+            revision = _require_revision(
+                item.get("revision"),
+                name="model registry revision",
+            )
+        except ValueError as exc:
+            raise RuntimeError("model registry row is malformed") from exc
+        if revision < 1:
+            raise RuntimeError("model registry row is malformed")
+
+        document = item.get("document")
+        digest = item.get("document_sha256")
+        if not isinstance(document, str) or not isinstance(digest, str):
+            raise RuntimeError("model registry row is malformed")
+
+        import hashlib
+
+        if (
+            hashlib.sha256(document.encode("utf-8")).hexdigest()
+            != digest
+        ):
+            raise RuntimeError("model registry document checksum mismatch")
+        try:
+            config = json.loads(document)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("model registry document is malformed") from exc
+        if not isinstance(config, dict):
+            raise RuntimeError("model registry document is malformed")
+        return config, revision
+
     def _config_version_operation(self) -> dict:
         return {
             "Update": {
@@ -911,14 +1097,6 @@ class DynamoPersistence:
 
         def _put() -> None:
             table = self._get_table()
-            if project.tenant_id is not None:
-                table.put_item(
-                    Item=item,
-                    ConditionExpression=condition,
-                    ExpressionAttributeNames=names,
-                    ExpressionAttributeValues=values,
-                )
-                return
             client = getattr(getattr(table, "meta", None), "client", None)
             if client is None:
                 raise RuntimeError(
@@ -967,12 +1145,6 @@ class DynamoPersistence:
 
         def _put() -> None:
             table = self._get_table()
-            if project.tenant_id is not None:
-                table.put_item(
-                    Item=item,
-                    ConditionExpression=condition,
-                )
-                return
             client = getattr(getattr(table, "meta", None), "client", None)
             if client is None:
                 raise RuntimeError(

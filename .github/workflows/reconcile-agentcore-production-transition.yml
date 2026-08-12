@@ -1,0 +1,139 @@
+name: Reconcile AgentCore production transition
+
+on:
+  workflow_run:
+    workflows:
+      - Launch AgentCore production
+    types:
+      - completed
+    branches:
+      - main
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: agentcore-production-deployment
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-east-1
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  UV_CACHE_DIR: /tmp/axonllm-uv-cache
+  UV_VERSION: "0.10.7"
+
+jobs:
+  reconcile:
+    name: Reconcile signed nonterminal transition
+    runs-on:
+      group: axonllm-production
+      labels: axonllm-production-allowlisted
+    timeout-minutes: 30
+    environment: agentcore-production-watchdog
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Check out protected reconciliation tooling
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          clean: true
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+
+      - name: Validate protected watchdog context
+        env:
+          AWS_ACCOUNT_ID: ${{ vars.AXON_AWS_ACCOUNT_ID }}
+          EVIDENCE_BUCKET: ${{ vars.AXON_DEPLOYMENT_EVIDENCE_BUCKET }}
+          EVIDENCE_PREFIX: ${{ vars.AXON_DEPLOYMENT_EVIDENCE_PREFIX }}
+          INTENT_SIGNING_KEY_ARN: ${{ vars.AXON_AGENTCORE_TRANSITION_SIGNING_KEY_ARN }}
+          TERMINAL_SIGNING_KEY_ARN: ${{ vars.AXON_AGENTCORE_TRANSITION_TERMINAL_SIGNING_KEY_ARN }}
+          MUTATION_BROKER_VERSION_ARN: ${{ vars.AXON_AGENTCORE_PRODUCTION_MUTATION_BROKER_VERSION_ARN }}
+          STORAGE_KEY_ARN: ${{ vars.AXON_DEPLOYMENT_EVIDENCE_KMS_KEY_ARN }}
+          TRIGGER_REPOSITORY_ID: ${{ github.event.repository.id }}
+          WATCHDOG_ROLE_ARN: ${{ secrets.AXON_AGENTCORE_TRANSITION_WATCHDOG_ROLE_ARN }}
+          WORKFLOW_RUN_EVENT: ${{ github.event.workflow_run.event }}
+          WORKFLOW_RUN_HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          WORKFLOW_RUN_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          WORKFLOW_RUN_PATH: ${{ github.event.workflow_run.path }}
+        run: |
+          set -euo pipefail
+          [[ "${GITHUB_REF}" == "refs/heads/main" ]]
+          [[ "${RUNNER_ENVIRONMENT}" == "self-hosted" ]]
+          checkout_sha="${GITHUB_SHA}"
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_run" ]]; then
+            checkout_sha="${WORKFLOW_RUN_HEAD_SHA}"
+          fi
+          [[ "${checkout_sha}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$(git rev-parse HEAD)" == "${checkout_sha}" ]]
+          [[ -z "$(git status --porcelain)" ]]
+          [[ "${AWS_ACCOUNT_ID}" =~ ^[0-9]{12}$ ]]
+          [[ "${EVIDENCE_BUCKET}" =~ ^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$ ]]
+          [[ "${EVIDENCE_PREFIX}" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$ ]]
+          [[ "${EVIDENCE_PREFIX}" != */ ]]
+          [[ "${EVIDENCE_PREFIX}" != *//* ]]
+          key_prefix="arn:aws:kms:${AWS_REGION}:${AWS_ACCOUNT_ID}:key/"
+          [[ "${INTENT_SIGNING_KEY_ARN}" == "${key_prefix}"* ]]
+          [[ "${TERMINAL_SIGNING_KEY_ARN}" == "${key_prefix}"* ]]
+          [[ "${STORAGE_KEY_ARN}" == "${key_prefix}"* ]]
+          [[ "${INTENT_SIGNING_KEY_ARN}" != "${TERMINAL_SIGNING_KEY_ARN}" ]]
+          [[ "${INTENT_SIGNING_KEY_ARN}" != "${STORAGE_KEY_ARN}" ]]
+          [[ "${TERMINAL_SIGNING_KEY_ARN}" != "${STORAGE_KEY_ARN}" ]]
+          [[ "${MUTATION_BROKER_VERSION_ARN}" =~ ^arn:aws:lambda:${AWS_REGION}:${AWS_ACCOUNT_ID}:function:axonllm-production-transition-mutation-broker:[1-9][0-9]*$ ]]
+          [[ "${WATCHDOG_ROLE_ARN}" =~ ^arn:aws:iam::${AWS_ACCOUNT_ID}:role/.+ ]]
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_run" ]]; then
+            [[ "${TRIGGER_REPOSITORY_ID}" == "${GITHUB_REPOSITORY_ID}" ]]
+            [[ "${WORKFLOW_RUN_EVENT}" == "workflow_dispatch" ]]
+            [[ "${WORKFLOW_RUN_HEAD_BRANCH}" == "main" ]]
+            [[ "${WORKFLOW_RUN_HEAD_SHA}" =~ ^[0-9a-f]{40}$ ]]
+            [[ "${WORKFLOW_RUN_PATH}" == \
+              ".github/workflows/launch-agentcore-production.yml" ]]
+          fi
+
+      - name: Install locked reconciliation dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --no-deps "uv==${UV_VERSION}"
+          uv sync --frozen --extra agentcore
+
+      - name: Configure least-privilege watchdog credentials
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with:
+          aws-region: us-east-1
+          role-to-assume: ${{ secrets.AXON_AGENTCORE_TRANSITION_WATCHDOG_ROLE_ARN }}
+          role-session-name: AxonLLMTransitionWatchdog
+          role-duration-seconds: 3600
+          allowed-account-ids: ${{ vars.AXON_AWS_ACCOUNT_ID }}
+          mask-aws-account-id: true
+          inline-session-policy: >-
+            {"Version":"2012-10-17","Statement":[{"Sid":"ListTransitionJournal","Effect":"Allow","Action":"s3:ListBucketVersions","Resource":"arn:aws:s3:::${{ vars.AXON_DEPLOYMENT_EVIDENCE_BUCKET }}","Condition":{"StringLike":{"s3:prefix":"${{ vars.AXON_DEPLOYMENT_EVIDENCE_PREFIX }}/${{ github.repository }}/*"}}},{"Sid":"ReadTransitionJournal","Effect":"Allow","Action":["s3:GetObject","s3:GetObjectRetention","s3:GetObjectVersion"],"Resource":"arn:aws:s3:::${{ vars.AXON_DEPLOYMENT_EVIDENCE_BUCKET }}/${{ vars.AXON_DEPLOYMENT_EVIDENCE_PREFIX }}/${{ github.repository }}/*"},{"Sid":"AppendTerminalTransition","Effect":"Allow","Action":["s3:PutObject","s3:PutObjectRetention"],"Resource":["arn:aws:s3:::${{ vars.AXON_DEPLOYMENT_EVIDENCE_BUCKET }}/${{ vars.AXON_DEPLOYMENT_EVIDENCE_PREFIX }}/${{ github.repository }}/*/transition-terminal.json","arn:aws:s3:::${{ vars.AXON_DEPLOYMENT_EVIDENCE_BUCKET }}/${{ vars.AXON_DEPLOYMENT_EVIDENCE_PREFIX }}/${{ github.repository }}/*/transition-terminal-kms-signature.json"]},{"Sid":"VerifyTransitionIntent","Effect":"Allow","Action":["kms:DescribeKey","kms:Verify"],"Resource":"${{ vars.AXON_AGENTCORE_TRANSITION_SIGNING_KEY_ARN }}"},{"Sid":"SignTerminalTransition","Effect":"Allow","Action":["kms:DescribeKey","kms:Sign","kms:Verify"],"Resource":"${{ vars.AXON_AGENTCORE_TRANSITION_TERMINAL_SIGNING_KEY_ARN }}"},{"Sid":"UseEvidenceEncryption","Effect":"Allow","Action":["kms:Decrypt","kms:DescribeKey","kms:Encrypt","kms:GenerateDataKey"],"Resource":"${{ vars.AXON_DEPLOYMENT_EVIDENCE_KMS_KEY_ARN }}"},{"Sid":"InvokeExactMutationBroker","Effect":"Allow","Action":"lambda:InvokeFunction","Resource":"${{ vars.AXON_AGENTCORE_PRODUCTION_MUTATION_BROKER_VERSION_ARN }}"}]}
+
+      - name: Reconcile signed production transition
+        env:
+          EVIDENCE_BUCKET: ${{ vars.AXON_DEPLOYMENT_EVIDENCE_BUCKET }}
+          EVIDENCE_PREFIX: ${{ vars.AXON_DEPLOYMENT_EVIDENCE_PREFIX }}
+          INTENT_SIGNING_KEY_ARN: ${{ vars.AXON_AGENTCORE_TRANSITION_SIGNING_KEY_ARN }}
+          TERMINAL_SIGNING_KEY_ARN: ${{ vars.AXON_AGENTCORE_TRANSITION_TERMINAL_SIGNING_KEY_ARN }}
+          MUTATION_BROKER_VERSION_ARN: ${{ vars.AXON_AGENTCORE_PRODUCTION_MUTATION_BROKER_VERSION_ARN }}
+        run: |
+          set -euo pipefail
+          retain_until=$(date -u -d "+2555 days" "+%Y-%m-%dT%H:%M:%SZ")
+          uv run --frozen --no-sync python \
+            scripts/release/reconcile_deployment_transition.py \
+            --evidence-bucket "${EVIDENCE_BUCKET}" \
+            --evidence-prefix "${EVIDENCE_PREFIX}" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --intent-signing-key-arn "${INTENT_SIGNING_KEY_ARN}" \
+            --terminal-signing-key-arn "${TERMINAL_SIGNING_KEY_ARN}" \
+            --mutation-broker-version-arn "${MUTATION_BROKER_VERSION_ARN}" \
+            --retain-until "${retain_until}"

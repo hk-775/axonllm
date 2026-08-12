@@ -8,10 +8,14 @@ OpenAI-style (Nova, DeepSeek) models.
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 import json
+import math
 from typing import Awaitable, Callable
 
 import boto3
+from botocore.config import Config
+from botocore.exceptions import ConnectTimeoutError, ReadTimeoutError
 
 from src.gateway.adapters.bedrock_adapter import BedrockAdapter
 from src.gateway.models import (
@@ -27,6 +31,90 @@ _ANTHROPIC_PREFIXES = ("anthropic.",)
 
 # Models that use the Bedrock Converse API (Nova, DeepSeek, etc.)
 _CONVERSE_MODELS = True  # default for non-Anthropic models
+_MAX_BEDROCK_RESPONSE_BYTES = 10 * 1024 * 1024
+_BEDROCK_READ_CHUNK_BYTES = 64 * 1024
+
+
+def _validate_timeout(value: float, name: str) -> float:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        or value <= 0
+    ):
+        raise ValueError(f"{name} must be finite and greater than zero")
+    return float(value)
+
+
+def _read_bounded_body(body: object, provider: str) -> dict:
+    read = getattr(body, "read", None)
+    if not callable(read):
+        raise ProviderError(
+            502,
+            provider,
+            "Bedrock returned an unreadable response",
+        )
+    payload = bytearray()
+    try:
+        while True:
+            chunk = read(_BEDROCK_READ_CHUNK_BYTES)
+            if not chunk:
+                break
+            if not isinstance(chunk, bytes):
+                raise ProviderError(
+                    502,
+                    provider,
+                    "Bedrock returned an unreadable response",
+                )
+            if len(payload) + len(chunk) > _MAX_BEDROCK_RESPONSE_BYTES:
+                raise ProviderError(
+                    502,
+                    provider,
+                    "Bedrock response exceeded the maximum size",
+                )
+            payload.extend(chunk)
+    finally:
+        close = getattr(body, "close", None)
+        if callable(close):
+            with suppress(Exception):
+                close()
+    try:
+        value = json.loads(payload)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ProviderError(
+            502,
+            provider,
+            "Bedrock returned malformed JSON",
+        ) from exc
+    return _bounded_response(value, provider)
+
+
+def _bounded_response(value: object, provider: str) -> dict:
+    if not isinstance(value, dict):
+        raise ProviderError(
+            502,
+            provider,
+            "Bedrock returned a non-object response",
+        )
+    try:
+        encoded = json.dumps(
+            value,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise ProviderError(
+            502,
+            provider,
+            "Bedrock returned an invalid response",
+        ) from exc
+    if len(encoded) > _MAX_BEDROCK_RESPONSE_BYTES:
+        raise ProviderError(
+            502,
+            provider,
+            "Bedrock response exceeded the maximum size",
+        )
+    return value
 
 
 def _is_anthropic_model(model_id: str) -> bool:
@@ -37,8 +125,7 @@ def _converse_tool_choice(choice) -> dict | None:
     """Map OpenAI's tool_choice onto the Converse API's toolChoice.
 
     Converse: {"auto":{}} | {"any":{}} | {"tool":{"name":…}}. "none" has no
-    equivalent (it means "don't call a tool"), so it's left unset rather than
-    sent as something the API rejects.
+    equivalent, so the caller omits toolConfig entirely.
     """
     if choice is None or choice == "none":
         return None
@@ -97,10 +184,21 @@ def create_bedrock_provider_fn(
     *,
     endpoint_url: str = "",
     credentials: dict[str, str] | None = None,
+    connect_timeout: float = 30.0,
+    read_timeout: float = 120.0,
 ) -> Callable[[ChatCompletionRequest], Callable[[ProviderModelMapping], Awaitable[ChatCompletionResponse]]]:
     """Return a factory that creates provider_fn callables for Bedrock."""
+    connect_timeout = _validate_timeout(connect_timeout, "connect_timeout")
+    read_timeout = _validate_timeout(read_timeout, "read_timeout")
+    request_deadline = connect_timeout + read_timeout
     credentials = credentials or {}
-    client_kwargs: dict = {"region_name": region}
+    client_kwargs: dict = {
+        "region_name": region,
+        "config": Config(
+            connect_timeout=connect_timeout,
+            read_timeout=read_timeout,
+        ),
+    }
     if endpoint_url:
         client_kwargs["endpoint_url"] = endpoint_url
     if credentials.get("access_key") and credentials.get("secret_key"):
@@ -118,20 +216,42 @@ def create_bedrock_provider_fn(
     def create(request: ChatCompletionRequest, prompt_caching_enabled: bool = False) -> Callable[[ProviderModelMapping], Awaitable[ChatCompletionResponse]]:
         async def provider_fn(mapping: ProviderModelMapping) -> ChatCompletionResponse:
             try:
-                if _is_anthropic_model(mapping.model_id):
-                    return await _invoke_anthropic(client, anthropic_adapter, request, mapping, prompt_caching_enabled=prompt_caching_enabled)
-                else:
+                async with asyncio.timeout(request_deadline):
+                    if _is_anthropic_model(mapping.model_id):
+                        return await _invoke_anthropic(client, anthropic_adapter, request, mapping, prompt_caching_enabled=prompt_caching_enabled)
                     return await _invoke_converse(client, request, mapping, prompt_caching_enabled=prompt_caching_enabled)
             except ProviderError:
                 raise
+            except (TimeoutError, ConnectTimeoutError, ReadTimeoutError) as exc:
+                raise ProviderError(
+                    504,
+                    mapping.provider,
+                    "Bedrock request timed out",
+                ) from exc
             except client.exceptions.AccessDeniedException as exc:
-                raise ProviderError(403, mapping.provider, f"Bedrock access denied: {exc}") from exc
+                raise ProviderError(
+                    403,
+                    mapping.provider,
+                    "Bedrock access denied",
+                ) from exc
             except client.exceptions.ResourceNotFoundException as exc:
-                raise ProviderError(404, mapping.provider, f"Model not found: {exc}") from exc
+                raise ProviderError(
+                    404,
+                    mapping.provider,
+                    "Bedrock model was not found",
+                ) from exc
             except client.exceptions.ThrottlingException as exc:
-                raise ProviderError(429, mapping.provider, f"Bedrock throttled: {exc}") from exc
+                raise ProviderError(
+                    429,
+                    mapping.provider,
+                    "Bedrock request was throttled",
+                ) from exc
             except Exception as exc:
-                raise ProviderError(502, mapping.provider, f"Bedrock error: {exc}") from exc
+                raise ProviderError(
+                    502,
+                    mapping.provider,
+                    "Bedrock request failed",
+                ) from exc
 
         return provider_fn
 
@@ -152,15 +272,20 @@ async def _invoke_anthropic(
     body = json.dumps(payload)
 
     def _call():
-        return client.invoke_model(
+        response = client.invoke_model(
             modelId=mapping.model_id,
             contentType="application/json",
             accept="application/json",
             body=body,
         )
+        response_body = (
+            response.get("body")
+            if isinstance(response, dict)
+            else None
+        )
+        return _read_bounded_body(response_body, mapping.provider)
 
-    response = await asyncio.to_thread(_call)
-    response_body = json.loads(response["body"].read())
+    response_body = await asyncio.to_thread(_call)
     result = adapter.translate_response(response_body)
     return ChatCompletionResponse(
         id=result.id or "bedrock-response",
@@ -200,7 +325,7 @@ async def _invoke_converse(
             system_parts[-1]["cache_control"] = {"type": "ephemeral"}
         kwargs["system"] = system_parts
 
-    if request.tools:
+    if request.tools and request.tool_choice != "none":
         kwargs["toolConfig"] = {
             "tools": [
                 {"toolSpec": {
@@ -230,7 +355,10 @@ async def _invoke_converse(
         kwargs["inferenceConfig"] = inference_config
 
     def _call():
-        return client.converse(**kwargs)
+        return _bounded_response(
+            client.converse(**kwargs),
+            mapping.provider,
+        )
 
     response = await asyncio.to_thread(_call)
 

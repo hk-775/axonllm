@@ -115,9 +115,15 @@ Supported route fields are:
 | `priority` | Lower values are preferred; higher values are failover tiers |
 | `max_concurrency` | Per-route in-flight limit |
 | `capacity_group`, `capacity_limit` | Shared-account in-flight limit |
-| `connect_timeout`, `read_timeout` | Route transport deadlines |
+| `connect_timeout` | Maximum time to establish or acquire a connection |
+| `read_timeout` | Idle socket-read timeout between received bytes; not an end-to-end request or stream deadline |
 | `max_connections`, `max_connections_per_host` | TCP pool limits |
 | `keepalive_timeout` | Idle connection retention |
+
+The HTTP client configures `read_timeout` as `aiohttp`'s `sock_read` value and
+leaves the total timeout unset. A response or stream that continues delivering
+data can therefore run longer than `read_timeout`; use a caller or workflow
+deadline when an end-to-end bound is required.
 
 `MultiProviderFactory.configure_routes()` atomically replaces the catalog for
 future requests. In-flight requests retain their existing route lease. Health is

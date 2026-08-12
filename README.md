@@ -50,7 +50,7 @@ install paths — local or AWS, seeded or clean — and which flag decides.
 ## Features
 
 ### Routing & Providers
-- **Multi-provider routing** — 13 provider adapters: Bedrock, Bedrock Mantle, Anthropic, OpenAI, Azure, Vertex AI, Google AI, Cohere, AI21, Fireworks, Groq, Together, xAI
+- **Multi-provider routing** — 13 provider adapters: Bedrock, Bedrock Mantle, Anthropic, OpenAI, Azure, Vertex AI, Google AI, Cohere, AI21, Fireworks, Groq, Together, xAI. The shipped registry configures 51 logical models across 56 provider mappings; 46 models are production-price-ready with the shipped pricing. AgentCore enables 12 providers by default; direct `ai21` is opt-in, while AI21 Jamba 1.5 remains available through the default `bedrock` provider.
 - **Adaptive provider route pools** — balance multiple credentials and endpoints per provider using route-level health, token-adjusted latency, capacity, priority, and recovery probes; reuse TCP/TLS pools by transport identity
 - **Tool calling (function calling)** — send OpenAI-shaped `tools`/`tool_choice`; each adapter translates into its provider's own dialect (Anthropic `input_schema`, Bedrock `toolSpec`, Gemini `functionDeclarations`, Cohere `parameter_definitions`) and translates the call back. One tool definition works across every provider.
 - **5 routing strategies** — round-robin, weighted, least-latency, cost-optimized, smart (intent-aware)
@@ -106,6 +106,11 @@ install paths — local or AWS, seeded or clean — and which flag decides.
   deploys a dedicated AMD64 Fargate service against AgentCore's canonical
   table. `AXON_CONTROL_PLANE_ONLY=true` suppresses chat, model, and query
   execution, and its task has no Athena or STS authority.
+- **AgentCore tenant configuration** — canonical tenant viewers can read the
+  selected project's runtime configuration through `get_tenant_config`;
+  `tenant_admin` can apply revision-checked partial updates through
+  `update_tenant_config`. Membership, datasource, key, policy, webhook, and
+  event-destination administration remain control-plane operations.
 
 ### Identity & Access
 - **Multi-strategy auth** — ALB OIDC JWT, Bearer token (OIDC or API key), X-Api-Key header
@@ -633,6 +638,12 @@ uv run axon setup agentcore \
 ./deploy-agentcore.sh --config axonllm-agentcore.json --bootstrap-cdk
 ```
 
+The current AgentCore production certification path has no query-disabled
+mode. At least one exact Athena query role, a reviewed datasource/workgroup,
+and a runnable `SELECT` certification scenario are mandatory for launch even
+though the reusable setup schema can represent an AgentCore runtime without
+query.
+
 The deployer retains the identity resources, invites the first Cognito
 administrator, deploys the authenticated AgentCore runtime, idempotently
 creates or verifies canonical authority, and then deploys the
@@ -657,7 +668,11 @@ as the AgentCore bearer token; that token contains `custom:tenant_id` and
 Existing OIDC setup and the complete production checks are in the
 [AgentCore Runbook](docs/AGENTCORE_RUNBOOK.md#first-adopter-setup).
 The external-OIDC path currently deploys AgentCore and canonical bootstrap
-only; it does not deploy the Cognito-authenticated web control plane.
+only; it does not deploy the Cognito-authenticated web control plane. Its
+canonical viewers can still read project runtime configuration through
+AgentCore, and `tenant_admin` can apply revision-checked updates. Broader
+administration requires a separately trusted control plane or reviewed
+operator path connected to the same table.
 
 ### AWS seeded demos
 
@@ -1724,8 +1739,9 @@ Notes that matter in practice:
   something different than you wrote.
 - **Not every model supports tools.** Routing honors your `model`; smart routing
   picks by task, not by tool support, so pin a model when a call requires them.
-- Cohere's v1 chat has no `tool_choice` equivalent — a non-`auto` value comes back
-  as a response warning rather than being silently ignored.
+- Cohere's v1 chat has no required/named `tool_choice` equivalent. AxonLLM
+  rejects that selection before provider invocation with a sanitized
+  `400 unsupported_provider_feature`; it is never silently ignored.
 - **Bedrock Mantle serves three APIs**, chosen by model, and each has its own tool
   dialect — including one where the tool spec is *flat* (`name` beside `type`, no
   `function` wrapper). AxonLLM picks the route and the dialect for you, so the loop
@@ -2414,18 +2430,31 @@ schema-v2 `axon setup agentcore` configuration and `deploy-agentcore.sh` feed
 either that stack or an existing OIDC provider into the same AgentCore OIDC
 contract.
 
-The runtime exposes `chat`, `list_models`, `query`, `health`, and `GET /ready`;
-it does not host the Starlette admin console. Query is enabled only when exact
-tenant/project/IAM-role bindings are deployed. The runtime role and private STS
-endpoint allow `sts:AssumeRole`, `sts:TagSession`, and
+The runtime exposes `chat`, `list_models`, `query`, `get_tenant_config`,
+`update_tenant_config`, authenticated `readiness`, `health`, and `GET /ready`;
+it does not host the Starlette admin console. Canonical tenant viewers can read
+the selected project's complete runtime configuration. Only `tenant_admin` can
+submit a nonempty partial update, and every update must match the strongly read
+revision; a stale writer receives `409` without a write. Tenant/project
+identity, membership, revision, and creation metadata cannot be changed through
+the action.
+
+Query is enabled only when exact tenant/project/IAM-role bindings are deployed.
+Those bindings and a live Athena `SELECT` scenario are mandatory for the
+current AgentCore production-launch certification; query-disabled certification
+is not implemented. The runtime role and private STS endpoint allow
+`sts:AssumeRole`, `sts:TagSession`, and
 `sts:SetSourceIdentity` only for those role ARNs; the private Athena endpoint
 allows only the approved roles and bounded Athena API set. The datasource role
 trust policy must name the exact AgentCore runtime execution role and permit
 all three STS actions.
 
-The stack allowlists all supported providers. Bedrock and Mantle use the runtime
-role; direct HTTP providers become available only when their credential is
-present in the retained KMS-encrypted secret exported as `ProviderSecretArn`.
+The stack supports 13 provider adapters but enables 12 by default. Direct
+`ai21` is opt-in through `enabled_providers` and requires `AI21_API_KEY`; AI21
+Jamba 1.5 is available through the default `bedrock` provider and runtime IAM.
+Bedrock and Mantle use the runtime role; direct HTTP providers become available
+only when their credential is present in the retained KMS-encrypted secret
+exported as `ProviderSecretArn`.
 The runtime reads that secret through a resource-scoped private Secrets Manager
 endpoint. The approved HTTPS prefix list must include the current addresses for
 `bedrock-mantle.<region>.api.aws` and every configured direct-provider
@@ -2434,6 +2463,20 @@ new value is used. AgentCore Memory is not wired. AgentCore exposes no bootstrap
 action. The first-adopter deployer invokes the restartable canonical bootstrap
 out of band against its DynamoDB table before traffic; `axon bootstrap-tenant`
 remains available for manual recovery.
+
+Candidate deployment and promotion reject unknown provider-secret fields,
+freeze production-shared alarm/network/Bedrock/Athena inputs, and require the
+administrator's automatically requested alarm-email subscription to be
+confirmed. Unrelated entries in an owner-only provider env file are ignored and
+never copied into the retained secret.
+
+The candidate qualifier is a temporary 128-bit random bearer capability layered
+on the same runtime JWT authorizer used by production. Its unpredictability
+limits accidental discovery, but it is not endpoint-specific authorization:
+any principal with a JWT accepted by the runtime can invoke the candidate if it
+learns the qualifier. Keep it short-lived and restricted to certification; a
+separate runtime or qualifier-aware authorization is required for a true
+candidate/production isolation boundary.
 
 For `managed-cognito`, that deployer also creates a separate
 `AxonLLMControlPlaneStack`: private AMD64 Fargate tasks behind a
@@ -2449,8 +2492,32 @@ verification selects `fargate` or `agentcore`, binds the selected private ECR
 digest to its target evidence, verifies both KMS signatures and the remote
 image, and rescans it. A separate protected workflow copies the signed OCI
 archives into retained KMS-encrypted immutable ECR repositories without
-rebuilding and verifies both remote digests. The workflows do not deploy either
-runtime. Only the tag-producing signer uses the repository's current exact
+rebuilding and verifies both remote digests. Those release workflows do not
+deploy either runtime.
+
+`launch-agentcore-production.yml` is the only manual AgentCore production
+entry point. It certifies an isolated external-OIDC runtime, updates an
+independently pre-staged and reviewed managed-Cognito qualification namespace,
+runs seven coordinated launch gates, publishes signed rehearsal evidence,
+tears down both qualification namespaces, and records a signed teardown
+receipt. Only then can its `workflow_call`-only production leaf deploy a
+high-entropy candidate, complete backup/restore and authenticated
+provider/query/tool certification, promote the exact runtime version, and
+persist KMS-signed schema-v5 deployment evidence under S3 Object Lock. It
+discards pre-promotion failures and compensates post-promotion failures that
+occur before evidence persistence.
+
+The reviewed gate document contains exact physical resource bindings, so
+namespace `managed` must be pre-staged and independently reviewed before each
+launch; orchestrator teardown prevents reusing those bindings. Start from the
+non-secret
+[`agentcore_certification.example.json`](scripts/operations/agentcore_certification.example.json)
+and
+[`agentcore_launch_gates.example.json`](scripts/operations/agentcore_launch_gates.example.json),
+then follow the
+[protected launch procedure](docs/AGENTCORE_RUNBOOK.md#protected-launch-prerequisites).
+Only the tag-producing signer uses the
+repository's current exact
 `AXON_RELEASE_SIGNING_KEY_ARN`; publication and deployment obtain the exact key
 ARN from the manifest and require it to belong to `AXON_AWS_ACCOUNT_ID` and a
 retained `alias/axonllm/release-signing-v*` alias. `v0.2.4` completed this flow

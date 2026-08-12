@@ -1,0 +1,140 @@
+{
+  "schemaVersion": 1,
+  "profile": "production-launch",
+  "region": "us-east-1",
+  "runtimeArn": "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/AxonLLMRuntime-ABCDEFGHIJ",
+  "qualifier": "production",
+  "timeoutSeconds": 60,
+  "maxResponseBytes": 10485760,
+  "identities": {
+    "activeCredentialEnv": "AXON_ACTIVE_CREDENTIAL",
+    "inactiveCredentialEnv": "AXON_INACTIVE_CREDENTIAL",
+    "ungrantedCredentialEnv": "AXON_UNGRANTED_CREDENTIAL",
+    "crossTenantCredentialEnv": "AXON_CROSS_TENANT_CREDENTIAL",
+    "adminCredentialEnv": "AXON_ADMIN_CREDENTIAL",
+    "viewerCredentialEnv": "AXON_VIEWER_CREDENTIAL"
+  },
+  "tenantConfig": {
+    "tenantId": "tenant-launch",
+    "projectId": "project-launch"
+  },
+  "providers": [
+    {
+      "provider": "anthropic",
+      "model": "claude-opus",
+      "features": [
+        "completion",
+        "stream",
+        "tool_calling"
+      ]
+    },
+    {
+      "provider": "azure_openai",
+      "model": "gpt-4o",
+      "features": [
+        "completion",
+        "stream",
+        "tool_calling"
+      ]
+    },
+    {
+      "provider": "bedrock",
+      "model": "claude-opus",
+      "features": [
+        "completion",
+        "stream",
+        "tool_calling"
+      ]
+    },
+    {
+      "provider": "bedrock-mantle",
+      "model": "gpt-oss-120b-mantle",
+      "features": [
+        "completion",
+        "stream",
+        "tool_calling"
+      ]
+    },
+    {
+      "provider": "cohere",
+      "model": "cohere-command-r",
+      "features": [
+        "completion",
+        "stream",
+        "tool_calling"
+      ]
+    },
+    {
+      "provider": "fireworks",
+      "model": "fireworks-deepseek-v4",
+      "features": [
+        "completion",
+        "stream"
+      ]
+    },
+    {
+      "provider": "google_ai",
+      "model": "gemini-2.5-pro",
+      "features": [
+        "completion",
+        "stream",
+        "tool_calling"
+      ]
+    },
+    {
+      "provider": "groq",
+      "model": "groq-llama-3.3-70b",
+      "features": [
+        "completion",
+        "stream",
+        "tool_calling"
+      ]
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-4.1",
+      "features": [
+        "completion",
+        "stream",
+        "tool_calling"
+      ]
+    },
+    {
+      "provider": "together",
+      "model": "together-llama-3.3-70b",
+      "features": [
+        "completion",
+        "stream",
+        "tool_calling"
+      ]
+    },
+    {
+      "provider": "vertex_ai",
+      "model": "gemini-2.5-pro",
+      "features": [
+        "completion",
+        "stream",
+        "tool_calling"
+      ]
+    },
+    {
+      "provider": "xai",
+      "model": "grok-4.3",
+      "features": [
+        "completion",
+        "stream",
+        "tool_calling"
+      ]
+    }
+  ],
+  "query": {
+    "catalog": "AwsDataCatalog",
+    "database": "axonllm_launch",
+    "datasourceId": "launch-datasource",
+    "region": "us-east-1",
+    "roleArn": "arn:aws:iam::123456789012:role/AxonLLMAthenaReadOnlyRole",
+    "sql": "SELECT canary_id, status FROM launch_canary WHERE tenant_id = 'tenant-launch' LIMIT 10",
+    "maxRows": 10,
+    "workgroup": "axonllm_read_only"
+  }
+}

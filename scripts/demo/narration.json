@@ -1,5 +1,5 @@
 {
-  "_comment": "Customer-facing narration, v2. Numbers here must match what the seeded gateway actually renders — 66 requests, $1.26, 1.4s average latency, 9 models with traffic, 5 of 51 unpriced mappings. Checked against the live API before recording, not written from memory.",
+  "_comment": "Customer-facing narration, v2. Numbers here must match what the seeded gateway actually renders — 66 requests, $1.26, 1.4s average latency, 9 models with traffic, 51 configured models across 56 mappings, 5 unpriced mappings, and 46 production-price-ready models. Checked against the live API before recording, not written from memory.",
   "voice": "Matthew",
   "engine": "neural",
   "_engine_note": "<emphasis> is unsupported on the neural engine (InvalidSsmlException); phrasing comes from <break> and sentence shape instead.",
@@ -14,8 +14,8 @@
     {
       "id": "02-stats",
       "surface": "landing",
-      "ssml": "<speak>It fronts thirteen providers and forty-eight models behind a single OpenAI-compatible endpoint. <break time=\"400ms\"/>One wire format, whatever is answering underneath.</speak>",
-      "text": "It fronts thirteen providers and forty-eight models behind a single OpenAI-compatible endpoint. One wire format, whatever is answering underneath.",
+      "ssml": "<speak>It configures fifty-one models across thirteen provider adapters. Forty-six are production-price-ready with shipped pricing, all behind a single OpenAI-compatible endpoint. <break time=\"400ms\"/>One wire format, whatever is answering underneath.</speak>",
+      "text": "It configures 51 models across 13 provider adapters. Forty-six are production-price-ready with shipped pricing, all behind a single OpenAI-compatible endpoint. One wire format, whatever is answering underneath.",
       "duration": 8.47
     },
     {
@@ -64,8 +64,8 @@
     {
       "id": "09-pricing",
       "surface": "dashboard",
-      "ssml": "<speak>And this page is the one worth showing a sceptic. <break time=\"450ms\"/>Five of fifty-one provider mappings have no verified price attached. Production excludes them from routing, so budgets cannot silently under-count. <break time=\"400ms\"/>The gateway makes the gap visible instead of serving an unpriced model.</speak>",
-      "text": "And this page is the one worth showing a sceptic. Five of 51 provider mappings have no verified price attached. Production excludes them from routing, so budgets cannot silently under-count. The gateway makes the gap visible instead of serving an unpriced model.",
+      "ssml": "<speak>And this page is the one worth showing a sceptic. <break time=\"450ms\"/>Five of fifty-six provider mappings have no verified price attached. Production excludes them from routing, leaving forty-six of fifty-one configured models production-price-ready with shipped pricing. <break time=\"400ms\"/>The gateway makes the gap visible instead of serving an unpriced model.</speak>",
+      "text": "And this page is the one worth showing a sceptic. Five of 56 provider mappings have no verified price attached. Production excludes them from routing, leaving 46 of 51 configured models production-price-ready with shipped pricing. The gateway makes the gap visible instead of serving an unpriced model.",
       "duration": 15.94
     },
     {

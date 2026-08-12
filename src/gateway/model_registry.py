@@ -7,11 +7,11 @@ import yaml
 
 from .config import DEFAULT_CONFIG
 from .models import (
+    ModelConfig,
     ProviderModelMapping,
     RoutingStrategy,
     TokenPricing,
     ValidationError,
-    ModelConfig,
 )
 
 logger = logging.getLogger(__name__)
@@ -26,6 +26,9 @@ class ModelRegistry:
 
     def __init__(self) -> None:
         self.models: dict[str, ModelConfig] = {}
+        # Revision 0 is the checked-in bootstrap configuration. Durable
+        # snapshots start at 1 and advance through DynamoDB compare-and-swap.
+        self.revision = 0
 
     def load(self, config_path: str) -> None:
         """Load and validate YAML configuration file.
@@ -49,6 +52,24 @@ class ModelRegistry:
         registry._load_config(config)
         return registry
 
+    @classmethod
+    def from_config(
+        cls,
+        config: dict,
+        *,
+        revision: int = 0,
+    ) -> "ModelRegistry":
+        """Build a registry from one fully valid configuration snapshot.
+
+        File loading remains deliberately tolerant so one malformed checked-in
+        entry does not hide every valid default. A durable snapshot is
+        authoritative, so partial adoption would silently route a different
+        registry than the administrator committed; reject it as a unit instead.
+        """
+        registry = cls()
+        registry.replace_config(config, revision=revision)
+        return registry
+
     def resolve(self, model: str) -> list[ProviderModelMapping]:
         """Resolve model to provider-specific mappings.
 
@@ -61,6 +82,38 @@ class ModelRegistry:
     def list_models(self) -> list[ModelConfig]:
         """Return all configured models."""
         return list(self.models.values())
+
+    def replace_config(self, config: dict, *, revision: int) -> None:
+        """Atomically adopt a fully validated registry snapshot."""
+        if (
+            not isinstance(revision, int)
+            or isinstance(revision, bool)
+            or revision < 0
+        ):
+            raise ValueError(
+                "model registry revision must be a non-negative integer"
+            )
+
+        errors = self.validate(config)
+        if errors:
+            details = "; ".join(
+                f"{error.field}: {error.message}" for error in errors
+            )
+            raise ValueError(f"invalid model registry snapshot: {details}")
+
+        entries = config.get("models")
+        assert isinstance(entries, list)
+        parsed = {
+            entry["name"]: self._parse_entry(entry)
+            for entry in entries
+        }
+
+        # One assignment keeps request-time readers on either the old complete
+        # registry or the new complete registry. The Router, request validator,
+        # and smart-routing strategy all retain this ModelRegistry object and
+        # therefore consume the replacement without a process restart.
+        self.models = parsed
+        self.revision = revision
 
     def validate(self, config: dict) -> list[ValidationError]:
         """Validate configuration dict. Returns list of errors (empty if valid)."""
@@ -129,6 +182,20 @@ class ModelRegistry:
                     message=f"Invalid routing strategy: '{strategy}'. Must be one of: {sorted(VALID_ROUTING_STRATEGIES)}",
                 ))
 
+            max_context_tokens = entry.get("max_context_tokens")
+            if (
+                max_context_tokens is not None
+                and (
+                    isinstance(max_context_tokens, bool)
+                    or not isinstance(max_context_tokens, int)
+                    or max_context_tokens < 1
+                )
+            ):
+                errors.append(ValidationError(
+                    field=f"{prefix}.max_context_tokens",
+                    message="'max_context_tokens' must be a positive integer",
+                ))
+
             # Required: providers
             providers = entry.get("providers")
             if providers is None:
@@ -177,8 +244,8 @@ class ModelRegistry:
 
         return errors
 
-    def pretty_print(self) -> str:
-        """Format current registry state as valid YAML."""
+    def to_config(self) -> dict:
+        """Return the complete registry as a persistence-safe mapping."""
         entries = []
         for model_config in self.models.values():
             entry: dict = {
@@ -187,7 +254,11 @@ class ModelRegistry:
                 "routing_strategy": model_config.routing_strategy.value,
             }
             if model_config.capabilities is not None:
-                entry["capabilities"] = model_config.capabilities
+                entry["capabilities"] = list(model_config.capabilities)
+            if model_config.max_context_tokens is not None:
+                entry["max_context_tokens"] = (
+                    model_config.max_context_tokens
+                )
 
             provider_list = []
             for pm in model_config.providers:
@@ -207,8 +278,12 @@ class ModelRegistry:
             entry["providers"] = provider_list
             entries.append(entry)
 
+        return {"models": entries}
+
+    def pretty_print(self) -> str:
+        """Format current registry state as valid YAML."""
         return yaml.dump(
-            {"models": entries},
+            self.to_config(),
             default_flow_style=False,
             sort_keys=False,
             allow_unicode=True,
@@ -281,6 +356,7 @@ class ModelRegistry:
             providers=providers,
             routing_strategy=routing_strategy,
             capabilities=capabilities,
+            max_context_tokens=entry.get("max_context_tokens"),
         )
 
     @staticmethod

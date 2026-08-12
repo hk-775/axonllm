@@ -40,7 +40,9 @@ work_dir=$(mktemp -d)
 trap 'rm -rf "${work_dir}"' EXIT
 
 curl --fail --silent --show-error --location \
-  --retry 3 --retry-all-errors \
+  --connect-timeout 15 \
+  --max-time 180 \
+  --retry 8 --retry-all-errors --retry-max-time 120 \
   --output "${work_dir}/${archive}" \
   "https://github.com/oras-project/oras/releases/download/v${ORAS_VERSION}/${archive}"
 if command -v sha256sum >/dev/null 2>&1; then

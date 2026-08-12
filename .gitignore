@@ -10,7 +10,11 @@ build/
 # Virtual environments
 venv/
 .venv/
+infra/.venv
 env/
+
+# Node.js
+node_modules/
 
 # IDE
 .vscode/

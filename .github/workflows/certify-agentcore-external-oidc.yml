@@ -1,0 +1,729 @@
+name: Certify AgentCore external OIDC
+
+on:
+  workflow_call:
+    inputs:
+      evidence_run_id:
+        description: Successful tagged release-security workflow run
+        required: true
+        type: string
+      release_commit_sha:
+        description: Full commit SHA recorded by signed release evidence
+        required: true
+        type: string
+      agentcore_image_reference:
+        description: Immutable private AgentCore ECR digest URI
+        required: true
+        type: string
+      setup_config_s3_version_id:
+        description: Immutable S3 version ID for reviewed external-OIDC setup
+        required: true
+        type: string
+      setup_config_sha256:
+        description: Lowercase SHA-256 of reviewed external-OIDC setup
+        required: true
+        type: string
+      certification_config_s3_version_id:
+        description: Immutable S3 version ID for production launch certification
+        required: true
+        type: string
+      certification_config_sha256:
+        description: Lowercase SHA-256 of production launch certification config
+        required: true
+        type: string
+      aws_region:
+        description: AWS region containing the immutable AgentCore candidate
+        required: true
+        type: string
+    outputs:
+      report_s3_uri:
+        description: Immutable external-OIDC certification report location
+        value: ${{ jobs.certify.outputs.report_s3_uri }}
+      report_s3_version_id:
+        description: S3 version ID of the locked certification report
+        value: ${{ jobs.certify.outputs.report_s3_version_id }}
+      report_sha256:
+        description: SHA-256 of the locked certification report
+        value: ${{ jobs.certify.outputs.report_sha256 }}
+      signature_s3_uri:
+        description: Immutable KMS signature bundle location
+        value: ${{ jobs.certify.outputs.signature_s3_uri }}
+      signature_s3_version_id:
+        description: S3 version ID of the locked KMS signature bundle
+        value: ${{ jobs.certify.outputs.signature_s3_version_id }}
+      signature_sha256:
+        description: SHA-256 of the locked KMS signature bundle
+        value: ${{ jobs.certify.outputs.signature_sha256 }}
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: agentcore-external-oidc-certification
+  cancel-in-progress: false
+
+env:
+  EXTERNAL_NAMESPACE: external
+  EXTERNAL_RUNTIME_STACK: AxonLLMAgentCoreStack-external
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  UV_VERSION: "0.10.7"
+
+jobs:
+  verify-release:
+    name: Verify immutable AgentCore release
+    uses: ./.github/workflows/deploy-verification.yml
+    with:
+      evidence_run_id: ${{ inputs.evidence_run_id }}
+      commit_sha: ${{ inputs.release_commit_sha }}
+      image_reference: ${{ inputs.agentcore_image_reference }}
+      target: agentcore
+      aws_region: ${{ inputs.aws_region }}
+
+  certify:
+    name: Exercise external OIDC against immutable candidate
+    needs:
+      - verify-release
+    runs-on:
+      - self-hosted
+      - linux
+      - x64
+      - axonllm-agentcore-allowlisted
+    timeout-minutes: 90
+    environment: agentcore-external-oidc-production-like
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+    outputs:
+      report_s3_uri: ${{ steps.persist.outputs.report_s3_uri }}
+      report_s3_version_id: ${{ steps.persist.outputs.report_s3_version_id }}
+      report_sha256: ${{ steps.persist.outputs.report_sha256 }}
+      signature_s3_uri: ${{ steps.persist.outputs.signature_s3_uri }}
+      signature_s3_version_id: ${{ steps.persist.outputs.signature_s3_version_id }}
+      signature_sha256: ${{ steps.persist.outputs.signature_sha256 }}
+
+    steps:
+      - name: Check out exact signed release source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+          ref: ${{ inputs.release_commit_sha }}
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+
+      - name: Set up supported Node for CDK
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: "22"
+
+      - name: Validate immutable workflow inputs
+        env:
+          AGENTCORE_IMAGE: ${{ inputs.agentcore_image_reference }}
+          AWS_ACCOUNT_ID: ${{ vars.AXON_AWS_ACCOUNT_ID }}
+          AWS_REGION: ${{ inputs.aws_region }}
+          CALLED_WORKFLOW_COMMIT: ${{ github.workflow_sha }}
+          CERTIFICATION_CONFIG_SHA256: ${{ inputs.certification_config_sha256 }}
+          CERTIFICATION_CONFIG_VERSION_ID: ${{ inputs.certification_config_s3_version_id }}
+          RELEASE_COMMIT: ${{ inputs.release_commit_sha }}
+          RELEASE_RUN_ID: ${{ inputs.evidence_run_id }}
+          PARENT_WORKFLOW_COMMIT: ${{ github.workflow_sha }}
+          PROVIDER_SOURCE_SECRET_ARN: ${{ vars.AXON_AGENTCORE_EXTERNAL_PROVIDER_SOURCE_SECRET_ARN }}
+          SETUP_CONFIG_SHA256: ${{ inputs.setup_config_sha256 }}
+          SETUP_CONFIG_VERSION_ID: ${{ inputs.setup_config_s3_version_id }}
+          VERIFIED_AGENTCORE_IMAGE: ${{ needs.verify-release.outputs.verified_image }}
+        run: |
+          set -euo pipefail
+          parent_workflow_ref="${GITHUB_REPOSITORY}/.github/workflows/launch-agentcore-production.yml@refs/heads/main"
+          [[ "${GITHUB_REF}" == "refs/heads/main" ]]
+          [[ "${GITHUB_WORKFLOW_REF}" == "${parent_workflow_ref}" ]]
+          [[ "${EXTERNAL_NAMESPACE}" == "external" ]]
+          [[ "${EXTERNAL_RUNTIME_STACK}" == "AxonLLMAgentCoreStack-${EXTERNAL_NAMESPACE}" ]]
+          [[ "${AWS_ACCOUNT_ID}" =~ ^[0-9]{12}$ ]]
+          [[ "${AWS_REGION}" =~ ^[a-z]{2}(-[a-z0-9]+)+-[1-9][0-9]?$ ]]
+          [[ "${RELEASE_RUN_ID}" =~ ^[1-9][0-9]{0,19}$ ]]
+          [[ "${RELEASE_COMMIT}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$(git rev-parse HEAD)" == "${RELEASE_COMMIT}" ]]
+          [[ "${GITHUB_SHA}" == "${RELEASE_COMMIT}" ]]
+          [[ "${CALLED_WORKFLOW_COMMIT}" == "${RELEASE_COMMIT}" ]]
+          [[ "${PARENT_WORKFLOW_COMMIT}" == "${RELEASE_COMMIT}" ]]
+          [[ "${SETUP_CONFIG_SHA256}" =~ ^[0-9a-f]{64}$ ]]
+          [[ "${CERTIFICATION_CONFIG_SHA256}" =~ ^[0-9a-f]{64}$ ]]
+          [[ "${SETUP_CONFIG_VERSION_ID}" =~ ^[A-Za-z0-9._~+/=-]{1,1024}$ ]]
+          [[ "${CERTIFICATION_CONFIG_VERSION_ID}" =~ ^[A-Za-z0-9._~+/=-]{1,1024}$ ]]
+          [[ "${SETUP_CONFIG_VERSION_ID}" != "null" ]]
+          [[ "${CERTIFICATION_CONFIG_VERSION_ID}" != "null" ]]
+          [[ "${PROVIDER_SOURCE_SECRET_ARN}" =~ ^arn:aws:secretsmanager:${AWS_REGION}:${AWS_ACCOUNT_ID}:secret:.+ ]]
+          [[ "${AGENTCORE_IMAGE}" == "${VERIFIED_AGENTCORE_IMAGE}" ]]
+          [[ "${AGENTCORE_IMAGE}" =~ ^${AWS_ACCOUNT_ID}\.dkr\.ecr\.${AWS_REGION}\.amazonaws\.com/[a-z0-9]+([._/-][a-z0-9]+)*@sha256:[0-9a-f]{64}$ ]]
+
+      - name: Install locked certification dependencies
+        env:
+          UV_CACHE_DIR: ${{ runner.temp }}/axonllm-external-oidc-uv
+        run: |
+          set -euo pipefail
+          python -m pip install --no-deps "uv==${UV_VERSION}"
+          uv sync --frozen --extra oidc --extra agentcore
+
+      - name: Configure certification AWS credentials through OIDC
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with:
+          role-to-assume: ${{ secrets.AXON_EXTERNAL_OIDC_CERTIFICATION_ROLE_ARN }}
+          role-session-name: AxonLLMExternalOidcCertification
+          aws-region: ${{ inputs.aws_region }}
+          allowed-account-ids: ${{ vars.AXON_AWS_ACCOUNT_ID }}
+          role-duration-seconds: 7200
+          mask-aws-account-id: true
+          output-credentials: false
+
+      - name: Fetch exact reviewed external-OIDC contracts
+        env:
+          CERTIFICATION_CONFIG_SHA256: ${{ inputs.certification_config_sha256 }}
+          CERTIFICATION_CONFIG_URI: ${{ vars.AXON_AGENTCORE_CERTIFICATION_CONFIG_S3_URI }}
+          CERTIFICATION_CONFIG_VERSION_ID: ${{ inputs.certification_config_s3_version_id }}
+          SETUP_CONFIG_SHA256: ${{ inputs.setup_config_sha256 }}
+          SETUP_CONFIG_URI: ${{ vars.AXON_EXTERNAL_OIDC_SETUP_CONFIG_S3_URI }}
+          SETUP_CONFIG_VERSION_ID: ${{ inputs.setup_config_s3_version_id }}
+        run: |
+          set -euo pipefail
+          setup="${RUNNER_TEMP}/external-oidc-setup.json"
+          certification="${RUNNER_TEMP}/external-oidc-certification.json"
+          setup_location="${SETUP_CONFIG_URI#s3://}"
+          certification_location="${CERTIFICATION_CONFIG_URI#s3://}"
+          [[ "${SETUP_CONFIG_URI}" == s3://*/* ]]
+          [[ "${CERTIFICATION_CONFIG_URI}" == s3://*/* ]]
+          aws s3api get-object \
+            --bucket "${setup_location%%/*}" \
+            --key "${setup_location#*/}" \
+            --version-id "${SETUP_CONFIG_VERSION_ID}" \
+            "${setup}" >/dev/null
+          aws s3api get-object \
+            --bucket "${certification_location%%/*}" \
+            --key "${certification_location#*/}" \
+            --version-id "${CERTIFICATION_CONFIG_VERSION_ID}" \
+            "${certification}" >/dev/null
+          printf '%s  %s\n' "${SETUP_CONFIG_SHA256}" "${setup}" \
+            | sha256sum --check --status
+          printf '%s  %s\n' "${CERTIFICATION_CONFIG_SHA256}" "${certification}" \
+            | sha256sum --check --status
+          chmod 0600 "${setup}" "${certification}"
+
+      - name: Read provider source secret into an owner-only file
+        env:
+          PROVIDER_SOURCE_SECRET_ARN: ${{ vars.AXON_AGENTCORE_EXTERNAL_PROVIDER_SOURCE_SECRET_ARN }}
+        run: |
+          set -euo pipefail
+          work="${RUNNER_TEMP}/external-oidc-qualification"
+          install -d -m 0700 "${work}"
+          source_json="${work}/provider-source.json"
+          provider_env="${work}/provider.env"
+          umask 077
+          trap 'rm -f "${source_json}"' EXIT
+          aws secretsmanager get-secret-value \
+            --secret-id "${PROVIDER_SOURCE_SECRET_ARN}" \
+            --query SecretString \
+            --output text \
+            --no-cli-pager \
+            >"${source_json}"
+          uv run --frozen --no-sync python - \
+            "${source_json}" "${provider_env}" <<'PY'
+          import json
+          from pathlib import Path
+          import shlex
+          import sys
+
+          from src.gateway.deployment.provider_secret import (
+              ALLOWED_SECRET_FIELDS,
+          )
+
+          source = Path(sys.argv[1])
+          output = Path(sys.argv[2])
+          value = json.loads(source.read_text(encoding="utf-8"))
+          if (
+              not isinstance(value, dict)
+              or not value
+              or not set(value).issubset(ALLOWED_SECRET_FIELDS)
+              or any(
+                  not isinstance(item, str)
+                  or not item
+                  or "\r" in item
+                  or "\n" in item
+                  for item in value.values()
+              )
+          ):
+              raise SystemExit("provider source secret is malformed")
+          if "GCP_CREDENTIALS_JSON" in value:
+              document = json.loads(value["GCP_CREDENTIALS_JSON"])
+              value["GCP_CREDENTIALS_JSON"] = json.dumps(
+                  document,
+                  separators=(",", ":"),
+                  sort_keys=True,
+              )
+          output.write_text(
+              "".join(
+                  f"{name}={shlex.quote(value[name])}\n"
+                  for name in sorted(value)
+              ),
+              encoding="utf-8",
+          )
+          output.chmod(0o600)
+          PY
+
+      - name: Deploy and bind isolated external-OIDC candidate
+        env:
+          AWS_ACCOUNT_ID: ${{ vars.AXON_AWS_ACCOUNT_ID }}
+          AWS_REGION: ${{ inputs.aws_region }}
+        run: |
+          set -euo pipefail
+          work="${RUNNER_TEMP}/external-oidc-qualification"
+          outputs="${work}/deployment"
+          provider_env="${work}/provider.env"
+          trap 'rm -f "${provider_env}"' EXIT
+          ledger="arn:aws:dynamodb:${AWS_REGION}:${AWS_ACCOUNT_ID}:table/axonllm-rehearsal-control-ledger"
+          ./deploy-agentcore.sh \
+            --config "${RUNNER_TEMP}/external-oidc-setup.json" \
+            --outputs-dir "${outputs}" \
+            --deployment-namespace "${EXTERNAL_NAMESPACE}" \
+            --rehearsal-control-table-arn "${ledger}" \
+            --provider-env-file "${provider_env}" \
+            --yes
+          runtime_arn=$(jq -er \
+            --arg stack "${EXTERNAL_RUNTIME_STACK}" \
+            '.[$stack].RuntimeArn' \
+            "${outputs}/agentcore-outputs.json")
+          qualifier=$(jq -er \
+            --arg stack "${EXTERNAL_RUNTIME_STACK}" \
+            '.[$stack].CandidateRuntimeEndpointName' \
+            "${outputs}/agentcore-outputs.json")
+          jq -e \
+            --arg runtime_arn "${runtime_arn}" \
+            --arg qualifier "${qualifier}" '
+            .runtimeArn = $runtime_arn
+            | .qualifier = $qualifier
+          ' "${RUNNER_TEMP}/external-oidc-certification.json" \
+            >"${work}/certification-bound.json"
+          jq -e \
+            --arg runtime_arn "${runtime_arn}" \
+            --arg qualifier "${qualifier}" '
+            .runtimeArn == $runtime_arn
+            and .qualifier == $qualifier
+          ' "${work}/certification-bound.json" >/dev/null
+          chmod 0600 "${work}/certification-bound.json"
+
+      - name: Verify immutable evidence storage
+        env:
+          AWS_ACCOUNT_ID: ${{ vars.AXON_AWS_ACCOUNT_ID }}
+          AWS_REGION: ${{ inputs.aws_region }}
+          EVIDENCE_BUCKET: ${{ vars.AXON_DEPLOYMENT_EVIDENCE_BUCKET }}
+          EVIDENCE_PREFIX: ${{ vars.AXON_EXTERNAL_OIDC_EVIDENCE_PREFIX }}
+          SIGNING_KEY_ARN: ${{ vars.AXON_AGENTCORE_PREREQUISITE_SIGNING_KEY_ARN }}
+          STORAGE_KEY_ARN: ${{ vars.AXON_DEPLOYMENT_EVIDENCE_KMS_KEY_ARN }}
+        run: |
+          set -euo pipefail
+          [[ "${AWS_ACCOUNT_ID}" =~ ^[0-9]{12}$ ]]
+          [[ "${AWS_REGION}" =~ ^[a-z]{2}(-[a-z0-9]+)+-[1-9][0-9]?$ ]]
+          [[ "${EVIDENCE_BUCKET}" =~ ^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$ ]]
+          [[ "${EVIDENCE_BUCKET}" != *..* ]]
+          [[ "${EVIDENCE_BUCKET}" != *.-* ]]
+          [[ "${EVIDENCE_BUCKET}" != *-.* ]]
+          [[ "${EVIDENCE_PREFIX}" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,255}$ ]]
+          [[ "${EVIDENCE_PREFIX}" != */ ]]
+          [[ "${EVIDENCE_PREFIX}" != *//* ]]
+          [[ "/${EVIDENCE_PREFIX}/" != *"/./"* ]]
+          [[ "/${EVIDENCE_PREFIX}/" != *"/../"* ]]
+          kms_prefix="arn:aws:kms:${AWS_REGION}:${AWS_ACCOUNT_ID}:key/"
+          [[ "${SIGNING_KEY_ARN}" == "${kms_prefix}"* ]]
+          [[ "${STORAGE_KEY_ARN}" == "${kms_prefix}"* ]]
+          [[ "${SIGNING_KEY_ARN#"${kms_prefix}"}" =~ ^[A-Za-z0-9-]{1,128}$ ]]
+          [[ "${STORAGE_KEY_ARN#"${kms_prefix}"}" =~ ^[A-Za-z0-9-]{1,128}$ ]]
+          [[ "${SIGNING_KEY_ARN}" != "${STORAGE_KEY_ARN}" ]]
+          versioning=$(aws s3api get-bucket-versioning \
+            --bucket "${EVIDENCE_BUCKET}")
+          jq -e '.Status == "Enabled"' <<<"${versioning}" >/dev/null
+          locking=$(aws s3api get-object-lock-configuration \
+            --bucket "${EVIDENCE_BUCKET}")
+          jq -e \
+            '.ObjectLockConfiguration.ObjectLockEnabled == "Enabled"' \
+            <<<"${locking}" >/dev/null
+          encryption=$(aws s3api get-bucket-encryption \
+            --bucket "${EVIDENCE_BUCKET}")
+          jq -e --arg key "${STORAGE_KEY_ARN}" '
+            [.ServerSideEncryptionConfiguration.Rules[]
+             | select(
+                 .ApplyServerSideEncryptionByDefault.SSEAlgorithm == "aws:kms"
+               )]
+             | map(select(
+                 .ApplyServerSideEncryptionByDefault.KMSMasterKeyID == $key
+                 and .BucketKeyEnabled == true
+               ))
+            | length > 0
+          ' <<<"${encryption}" >/dev/null
+          policy="${RUNNER_TEMP}/external-oidc-evidence-policy.json"
+          aws s3api get-bucket-policy \
+            --bucket "${EVIDENCE_BUCKET}" \
+            --query Policy \
+            --output text >"${policy}"
+          uv run --frozen --no-sync python - \
+            "${policy}" "${EVIDENCE_BUCKET}" "${EVIDENCE_PREFIX}" <<'PY'
+          import json
+          from pathlib import Path
+          import sys
+
+          document = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          statements = document.get("Statement") if isinstance(document, dict) else None
+          if isinstance(statements, dict):
+              statements = [statements]
+          target = (
+              f"arn:aws:s3:::{sys.argv[2]}/{sys.argv[3]}/"
+              "external-oidc-certification-object"
+          )
+
+          def values(value):
+              if isinstance(value, str):
+                  return [value]
+              if (
+                  isinstance(value, list)
+                  and value
+                  and all(isinstance(item, str) for item in value)
+              ):
+                  return value
+              return []
+
+          def covers(resource):
+              return (
+                  isinstance(resource, str)
+                  and resource.endswith("*")
+                  and target.startswith(resource[:-1])
+              )
+
+          def protected(action):
+              return any(
+                  isinstance(statement, dict)
+                  and statement.get("Effect") == "Deny"
+                  and "Condition" not in statement
+                  and "NotPrincipal" not in statement
+                  and (
+                      statement.get("Principal") == "*"
+                      or (
+                          isinstance(statement.get("Principal"), dict)
+                          and "*" in values(
+                              statement["Principal"].get("AWS")
+                          )
+                      )
+                  )
+                  and any(
+                      candidate in {"*", "s3:*", action}
+                      for candidate in values(statement.get("Action"))
+                  )
+                  and any(
+                      covers(resource)
+                      for resource in values(statement.get("Resource"))
+                  )
+                  for statement in (statements or [])
+              )
+
+          for action in ("s3:DeleteObject", "s3:DeleteObjectVersion"):
+              if not protected(action):
+                  raise SystemExit(
+                      f"evidence prefix must deny {action} to every principal"
+                  )
+          PY
+
+      - name: Run live external-OIDC launch certification
+        env:
+          AGENTCORE_IMAGE: ${{ inputs.agentcore_image_reference }}
+          AXON_EXTERNAL_OIDC_FIXTURE_BROKER_TOKEN: ${{ secrets.AXON_EXTERNAL_OIDC_FIXTURE_BROKER_TOKEN }}
+          BROKER_URL: ${{ vars.AXON_EXTERNAL_OIDC_FIXTURE_BROKER_URL }}
+          CALLED_WORKFLOW_COMMIT: ${{ github.workflow_sha }}
+          MIXUP_ISSUER: ${{ vars.AXON_EXTERNAL_OIDC_MIXUP_ISSUER }}
+          PARENT_WORKFLOW_COMMIT: ${{ github.workflow_sha }}
+          PARENT_WORKFLOW_REF: ${{ github.workflow_ref }}
+          RELEASE_COMMIT: ${{ inputs.release_commit_sha }}
+          UV_CACHE_DIR: ${{ runner.temp }}/axonllm-external-oidc-uv
+        run: |
+          set -euo pipefail
+          report="${RUNNER_TEMP}/external-oidc-agentcore-report.json"
+          state="${RUNNER_TEMP}/external-oidc-cleanup-state.json"
+          cleanup() {
+            local status=$?
+            trap - EXIT INT TERM
+            if [[ -f "${state}" ]]; then
+              uv run --frozen --no-sync python \
+                scripts/operations/certify_external_oidc_agentcore.py cleanup \
+                --state "${state}" || status=1
+            fi
+            exit "${status}"
+          }
+          trap cleanup EXIT
+          trap 'exit 130' INT
+          trap 'exit 143' TERM
+          uv run --frozen --no-sync python \
+            scripts/operations/certify_external_oidc_agentcore.py run \
+            --setup-config "${RUNNER_TEMP}/external-oidc-setup.json" \
+            --certification-config "${RUNNER_TEMP}/external-oidc-qualification/certification-bound.json" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --workflow-ref "${GITHUB_REPOSITORY}/.github/workflows/certify-agentcore-external-oidc.yml@refs/heads/main" \
+            --parent-workflow-ref "${PARENT_WORKFLOW_REF}" \
+            --run-id "${GITHUB_RUN_ID}" \
+            --run-attempt "${GITHUB_RUN_ATTEMPT}" \
+            --workflow-commit "${CALLED_WORKFLOW_COMMIT}" \
+            --parent-workflow-commit "${PARENT_WORKFLOW_COMMIT}" \
+            --release-commit "${RELEASE_COMMIT}" \
+            --agentcore-image "${AGENTCORE_IMAGE}" \
+            --runtime-stack-name "${EXTERNAL_RUNTIME_STACK}" \
+            --broker-url "${BROKER_URL}" \
+            --mixup-issuer "${MIXUP_ISSUER}" \
+            --cleanup-state "${state}" \
+            --output "${report}"
+          [[ ! -e "${state}" ]]
+          trap - EXIT INT TERM
+
+      - name: Revalidate live-produced report
+        id: report
+        env:
+          AGENTCORE_IMAGE: ${{ inputs.agentcore_image_reference }}
+          CALLED_WORKFLOW_COMMIT: ${{ github.workflow_sha }}
+          PARENT_WORKFLOW_COMMIT: ${{ github.workflow_sha }}
+          PARENT_WORKFLOW_REF: ${{ github.workflow_ref }}
+          RELEASE_COMMIT: ${{ inputs.release_commit_sha }}
+          UV_CACHE_DIR: ${{ runner.temp }}/axonllm-external-oidc-uv
+        run: |
+          set -euo pipefail
+          report="${RUNNER_TEMP}/external-oidc-agentcore-report.json"
+          uv run --frozen --no-sync python \
+            scripts/operations/certify_external_oidc_agentcore.py verify-report \
+            --setup-config "${RUNNER_TEMP}/external-oidc-setup.json" \
+            --certification-config "${RUNNER_TEMP}/external-oidc-qualification/certification-bound.json" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --workflow-ref "${GITHUB_REPOSITORY}/.github/workflows/certify-agentcore-external-oidc.yml@refs/heads/main" \
+            --parent-workflow-ref "${PARENT_WORKFLOW_REF}" \
+            --run-id "${GITHUB_RUN_ID}" \
+            --run-attempt "${GITHUB_RUN_ATTEMPT}" \
+            --workflow-commit "${CALLED_WORKFLOW_COMMIT}" \
+            --parent-workflow-commit "${PARENT_WORKFLOW_COMMIT}" \
+            --release-commit "${RELEASE_COMMIT}" \
+            --agentcore-image "${AGENTCORE_IMAGE}" \
+            --runtime-stack-name "${EXTERNAL_RUNTIME_STACK}" \
+            --report "${report}"
+          report_sha256=$(sha256sum "${report}" | cut -d' ' -f1)
+          [[ "${report_sha256}" =~ ^[0-9a-f]{64}$ ]]
+          chmod 0400 "${report}"
+          printf 'sha256=%s\n' "${report_sha256}" >>"${GITHUB_OUTPUT}"
+
+      - name: KMS-sign and verify external-OIDC report
+        env:
+          SIGNING_KEY_ARN: ${{ vars.AXON_AGENTCORE_PREREQUISITE_SIGNING_KEY_ARN }}
+          UV_CACHE_DIR: ${{ runner.temp }}/axonllm-external-oidc-uv
+        run: |
+          set -euo pipefail
+          report="${RUNNER_TEMP}/external-oidc-agentcore-report.json"
+          signature="${RUNNER_TEMP}/external-oidc-agentcore-kms-signature.json"
+          [[ "$(sha256sum "${report}" | cut -d' ' -f1)" == "${{ steps.report.outputs.sha256 }}" ]]
+          uv run --frozen --no-sync python scripts/release/kms_evidence.py sign \
+            --artifact "${report}" \
+            --bundle "${signature}" \
+            --key-arn "${SIGNING_KEY_ARN}"
+          uv run --frozen --no-sync python scripts/release/kms_evidence.py verify \
+            --artifact "${report}" \
+            --bundle "${signature}" \
+            --key-arn "${SIGNING_KEY_ARN}"
+          chmod 0400 "${signature}"
+
+      - name: Persist and reverify locked external-OIDC evidence
+        id: persist
+        env:
+          AGENTCORE_IMAGE: ${{ inputs.agentcore_image_reference }}
+          CALLED_WORKFLOW_COMMIT: ${{ github.workflow_sha }}
+          EVIDENCE_BUCKET: ${{ vars.AXON_DEPLOYMENT_EVIDENCE_BUCKET }}
+          EVIDENCE_PREFIX: ${{ vars.AXON_EXTERNAL_OIDC_EVIDENCE_PREFIX }}
+          RELEASE_COMMIT: ${{ inputs.release_commit_sha }}
+          PARENT_WORKFLOW_COMMIT: ${{ github.workflow_sha }}
+          PARENT_WORKFLOW_REF: ${{ github.workflow_ref }}
+          SIGNING_KEY_ARN: ${{ vars.AXON_AGENTCORE_PREREQUISITE_SIGNING_KEY_ARN }}
+          STORAGE_KEY_ARN: ${{ vars.AXON_DEPLOYMENT_EVIDENCE_KMS_KEY_ARN }}
+          UV_CACHE_DIR: ${{ runner.temp }}/axonllm-external-oidc-uv
+        run: |
+          set -euo pipefail
+          report="${RUNNER_TEMP}/external-oidc-agentcore-report.json"
+          signature="${RUNNER_TEMP}/external-oidc-agentcore-kms-signature.json"
+          [[ "$(sha256sum "${report}" | cut -d' ' -f1)" == "${{ steps.report.outputs.sha256 }}" ]]
+          signature_sha256=$(sha256sum "${signature}" | cut -d' ' -f1)
+          [[ "${signature_sha256}" =~ ^[0-9a-f]{64}$ ]]
+          base_key="${EVIDENCE_PREFIX}/${GITHUB_REPOSITORY}/${RELEASE_COMMIT}/${GITHUB_RUN_ID}/${GITHUB_RUN_ATTEMPT}"
+          report_key="${base_key}/external-oidc-agentcore-report.json"
+          signature_key="${base_key}/external-oidc-agentcore-kms-signature.json"
+          retain_until=$(date -u -d "+2555 days" "+%Y-%m-%dT%H:%M:%SZ")
+
+          put_locked() {
+            local path=$1
+            local key=$2
+            local result=$3
+            aws s3api put-object \
+              --bucket "${EVIDENCE_BUCKET}" \
+              --key "${key}" \
+              --body "${path}" \
+              --content-type application/json \
+              --checksum-algorithm SHA256 \
+              --server-side-encryption aws:kms \
+              --ssekms-key-id "${STORAGE_KEY_ARN}" \
+              --bucket-key-enabled \
+              --object-lock-mode COMPLIANCE \
+              --object-lock-retain-until-date "${retain_until}" \
+              --if-none-match '*' >"${result}"
+            jq -e '
+              (.VersionId | type == "string" and length > 0)
+              and (.ChecksumSHA256 | type == "string" and length > 0)
+            ' "${result}" >/dev/null
+          }
+
+          signature_result="${RUNNER_TEMP}/external-oidc-signature-put.json"
+          report_result="${RUNNER_TEMP}/external-oidc-report-put.json"
+          put_locked "${signature}" "${signature_key}" "${signature_result}"
+          put_locked "${report}" "${report_key}" "${report_result}"
+          signature_version=$(jq -er '.VersionId' "${signature_result}")
+          report_version=$(jq -er '.VersionId' "${report_result}")
+
+          verify_locked() {
+            local key=$1
+            local version=$2
+            local metadata
+            metadata=$(aws s3api head-object \
+              --bucket "${EVIDENCE_BUCKET}" \
+              --key "${key}" \
+              --version-id "${version}" \
+              --checksum-mode ENABLED)
+            jq -e \
+              --arg key "${STORAGE_KEY_ARN}" \
+              --arg retain "${retain_until}" '
+              .ObjectLockMode == "COMPLIANCE"
+              and .ObjectLockRetainUntilDate == $retain
+              and (.VersionId | type == "string" and length > 0)
+              and (.ChecksumSHA256 | type == "string" and length > 0)
+              and .ServerSideEncryption == "aws:kms"
+              and .SSEKMSKeyId == $key
+              and .BucketKeyEnabled == true
+            ' <<<"${metadata}" >/dev/null
+          }
+          verify_locked "${signature_key}" "${signature_version}"
+          verify_locked "${report_key}" "${report_version}"
+
+          remote="${RUNNER_TEMP}/external-oidc-remote"
+          install -d -m 0700 "${remote}"
+          aws s3api get-object \
+            --bucket "${EVIDENCE_BUCKET}" \
+            --key "${signature_key}" \
+            --version-id "${signature_version}" \
+            "${remote}/signature.json" >/dev/null
+          aws s3api get-object \
+            --bucket "${EVIDENCE_BUCKET}" \
+            --key "${report_key}" \
+            --version-id "${report_version}" \
+            "${remote}/report.json" >/dev/null
+          [[ "$(sha256sum "${remote}/report.json" | cut -d' ' -f1)" == "${{ steps.report.outputs.sha256 }}" ]]
+          [[ "$(sha256sum "${remote}/signature.json" | cut -d' ' -f1)" == "${signature_sha256}" ]]
+          uv run --frozen --no-sync python scripts/release/kms_evidence.py verify \
+            --artifact "${remote}/report.json" \
+            --bundle "${remote}/signature.json" \
+            --key-arn "${SIGNING_KEY_ARN}"
+          uv run --frozen --no-sync python \
+            scripts/operations/certify_external_oidc_agentcore.py verify-report \
+            --setup-config "${RUNNER_TEMP}/external-oidc-setup.json" \
+            --certification-config "${RUNNER_TEMP}/external-oidc-qualification/certification-bound.json" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --workflow-ref "${GITHUB_REPOSITORY}/.github/workflows/certify-agentcore-external-oidc.yml@refs/heads/main" \
+            --parent-workflow-ref "${PARENT_WORKFLOW_REF}" \
+            --run-id "${GITHUB_RUN_ID}" \
+            --run-attempt "${GITHUB_RUN_ATTEMPT}" \
+            --workflow-commit "${CALLED_WORKFLOW_COMMIT}" \
+            --parent-workflow-commit "${PARENT_WORKFLOW_COMMIT}" \
+            --release-commit "${RELEASE_COMMIT}" \
+            --agentcore-image "${AGENTCORE_IMAGE}" \
+            --runtime-stack-name "${EXTERNAL_RUNTIME_STACK}" \
+            --report "${remote}/report.json"
+
+          {
+            printf 'report_s3_uri=s3://%s/%s\n' \
+              "${EVIDENCE_BUCKET}" "${report_key}"
+            printf 'report_s3_version_id=%s\n' "${report_version}"
+            printf 'report_sha256=%s\n' "${{ steps.report.outputs.sha256 }}"
+            printf 'signature_s3_uri=s3://%s/%s\n' \
+              "${EVIDENCE_BUCKET}" "${signature_key}"
+            printf 'signature_s3_version_id=%s\n' "${signature_version}"
+            printf 'signature_sha256=%s\n' "${signature_sha256}"
+          } >>"${GITHUB_OUTPUT}"
+
+      - name: Remove local external qualification credentials
+        if: ${{ always() }}
+        run: |
+          set -euo pipefail
+          rm -f \
+            "${RUNNER_TEMP}/external-oidc-qualification/provider-source.json" \
+            "${RUNNER_TEMP}/external-oidc-qualification/provider.env"
+
+  teardown:
+    name: Always destroy isolated external-OIDC runtime
+    needs:
+      - verify-release
+      - certify
+    if: ${{ always() }}
+    runs-on:
+      - self-hosted
+      - linux
+      - x64
+      - axonllm-agentcore-allowlisted
+    timeout-minutes: 45
+    environment: agentcore-external-oidc-production-like
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Configure teardown AWS credentials through OIDC
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with:
+          role-to-assume: ${{ secrets.AXON_EXTERNAL_OIDC_CERTIFICATION_ROLE_ARN }}
+          role-session-name: AxonLLMExternalOidcTeardown-${{ github.run_id }}-${{ github.run_attempt }}
+          aws-region: ${{ inputs.aws_region }}
+          allowed-account-ids: ${{ vars.AXON_AWS_ACCOUNT_ID }}
+          role-duration-seconds: 3600
+          mask-aws-account-id: true
+          output-credentials: false
+          output-env-credentials: true
+          unset-current-credentials: true
+
+      - name: Delete and prove absence of exact external runtime stack
+        env:
+          AWS_ACCOUNT_ID: ${{ vars.AXON_AWS_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          error_file="${RUNNER_TEMP}/external-runtime-stack.err"
+          if aws cloudformation describe-stacks \
+            --stack-name "${EXTERNAL_RUNTIME_STACK}" \
+            --output json \
+            --no-cli-pager \
+            >/dev/null 2>"${error_file}"
+          then
+            aws cloudformation delete-stack \
+              --stack-name "${EXTERNAL_RUNTIME_STACK}" \
+              --no-cli-pager
+            aws cloudformation wait stack-delete-complete \
+              --stack-name "${EXTERNAL_RUNTIME_STACK}"
+          elif ! grep -Fq "does not exist" "${error_file}"; then
+            cat "${error_file}" >&2
+            exit 1
+          fi
+          rm -f "${error_file}"
+          if aws cloudformation describe-stacks \
+            --stack-name "${EXTERNAL_RUNTIME_STACK}" \
+            --output json \
+            --no-cli-pager \
+            >/dev/null 2>"${error_file}"
+          then
+            echo "${EXTERNAL_RUNTIME_STACK} still exists after teardown" >&2
+            exit 1
+          fi
+          grep -Fq "does not exist" "${error_file}"
+          rm -f "${error_file}"

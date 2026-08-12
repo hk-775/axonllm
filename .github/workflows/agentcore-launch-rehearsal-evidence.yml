@@ -1,0 +1,500 @@
+name: Produce immutable AgentCore launch rehearsal evidence
+
+on:
+  workflow_call:
+    inputs:
+      release_commit_sha:
+        description: Full release commit exercised by every gate command
+        required: true
+        type: string
+      agentcore_image_reference:
+        description: Immutable private AgentCore ECR digest URI under rehearsal
+        required: true
+        type: string
+      control_plane_image_reference:
+        description: Immutable private Fargate ECR digest URI under rehearsal
+        required: true
+        type: string
+      gate_manifest_s3_version_id:
+        description: Immutable S3 VersionId for the signed command-receipt manifest
+        required: true
+        type: string
+      gate_manifest_sha256:
+        description: Lowercase SHA-256 for the command-receipt manifest
+        required: true
+        type: string
+      gate_manifest_signature_s3_version_id:
+        description: Immutable S3 VersionId for the manifest KMS signature
+        required: true
+        type: string
+      gate_manifest_signature_sha256:
+        description: Lowercase SHA-256 for the manifest KMS signature
+        required: true
+        type: string
+      aws_region:
+        description: Production AWS region containing the exercised release
+        required: true
+        type: string
+    outputs:
+      report_uri:
+        description: Compatibility launch-rehearsal report URI
+        value: ${{ jobs.produce.outputs.report_uri }}
+      report_version_id:
+        description: Compatibility report VersionId
+        value: ${{ jobs.produce.outputs.report_version_id }}
+      report_sha256:
+        description: Compatibility report SHA-256
+        value: ${{ jobs.produce.outputs.report_sha256 }}
+      signature_uri:
+        description: Compatibility signature URI
+        value: ${{ jobs.produce.outputs.signature_uri }}
+      signature_version_id:
+        description: Compatibility signature VersionId
+        value: ${{ jobs.produce.outputs.signature_version_id }}
+      signature_sha256:
+        description: Compatibility signature SHA-256
+        value: ${{ jobs.produce.outputs.signature_sha256 }}
+      detailed_report_uri:
+        description: Detailed launch-rehearsal report URI
+        value: ${{ jobs.produce.outputs.detailed_report_uri }}
+      detailed_report_version_id:
+        description: Detailed report VersionId
+        value: ${{ jobs.produce.outputs.detailed_report_version_id }}
+      detailed_report_sha256:
+        description: Detailed report SHA-256
+        value: ${{ jobs.produce.outputs.detailed_report_sha256 }}
+      detailed_signature_uri:
+        description: Detailed launch-rehearsal signature URI
+        value: ${{ jobs.produce.outputs.detailed_signature_uri }}
+      detailed_signature_version_id:
+        description: Detailed signature VersionId
+        value: ${{ jobs.produce.outputs.detailed_signature_version_id }}
+      detailed_signature_sha256:
+        description: Detailed signature SHA-256
+        value: ${{ jobs.produce.outputs.detailed_signature_sha256 }}
+permissions:
+  contents: read
+
+concurrency:
+  group: agentcore-production-launch-rehearsal-evidence
+  cancel-in-progress: false
+
+jobs:
+  produce:
+    name: Verify gates and publish immutable evidence
+    runs-on:
+      group: axonllm-production
+      labels: axonllm-production-allowlisted
+    environment: agentcore-production-evidence
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      report_uri: ${{ steps.publish.outputs.report_uri }}
+      report_version_id: ${{ steps.publish.outputs.report_version_id }}
+      report_sha256: ${{ steps.publish.outputs.report_sha256 }}
+      signature_uri: ${{ steps.publish.outputs.signature_uri }}
+      signature_version_id: ${{ steps.publish.outputs.signature_version_id }}
+      signature_sha256: ${{ steps.publish.outputs.signature_sha256 }}
+      detailed_report_uri: ${{ steps.publish.outputs.detailed_report_uri }}
+      detailed_report_version_id: ${{ steps.publish.outputs.detailed_report_version_id }}
+      detailed_report_sha256: ${{ steps.publish.outputs.detailed_report_sha256 }}
+      detailed_signature_uri: ${{ steps.publish.outputs.detailed_signature_uri }}
+      detailed_signature_version_id: ${{ steps.publish.outputs.detailed_signature_version_id }}
+      detailed_signature_sha256: ${{ steps.publish.outputs.detailed_signature_sha256 }}
+
+    steps:
+      - name: Check out protected producer tooling
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          clean: true
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ inputs.release_commit_sha }}
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+
+      - name: Validate protected dispatch and immutable bindings
+        env:
+          AGENTCORE_IMAGE: ${{ inputs.agentcore_image_reference }}
+          AWS_ACCOUNT_ID: ${{ vars.AXON_AWS_ACCOUNT_ID }}
+          AWS_REGION: ${{ inputs.aws_region }}
+          CALLED_WORKFLOW_COMMIT: ${{ github.workflow_sha }}
+          COMPAT_REPORT_URI: ${{ vars.AXON_AGENTCORE_LAUNCH_REHEARSAL_REPORT_S3_URI }}
+          COMPAT_SIGNATURE_URI: ${{ vars.AXON_AGENTCORE_LAUNCH_REHEARSAL_SIGNATURE_S3_URI }}
+          CONTROL_PLANE_IMAGE: ${{ inputs.control_plane_image_reference }}
+          EVIDENCE_BUCKET: ${{ vars.AXON_DEPLOYMENT_EVIDENCE_BUCKET }}
+          EVIDENCE_PREFIX: ${{ vars.AXON_AGENTCORE_REHEARSAL_EVIDENCE_PREFIX }}
+          GATE_MANIFEST_SHA256: ${{ inputs.gate_manifest_sha256 }}
+          GATE_MANIFEST_SIGNATURE_SHA256: ${{ inputs.gate_manifest_signature_sha256 }}
+          GATE_MANIFEST_SIGNATURE_URI: ${{ vars.AXON_AGENTCORE_REHEARSAL_GATE_MANIFEST_SIGNATURE_S3_URI }}
+          GATE_MANIFEST_SIGNATURE_VERSION_ID: ${{ inputs.gate_manifest_signature_s3_version_id }}
+          GATE_MANIFEST_URI: ${{ vars.AXON_AGENTCORE_REHEARSAL_GATE_MANIFEST_S3_URI }}
+          GATE_MANIFEST_VERSION_ID: ${{ inputs.gate_manifest_s3_version_id }}
+          RELEASE_COMMIT: ${{ inputs.release_commit_sha }}
+          PARENT_WORKFLOW_COMMIT: ${{ github.workflow_sha }}
+          SIGNING_KEY_ARN: ${{ vars.AXON_AGENTCORE_PREREQUISITE_SIGNING_KEY_ARN }}
+          STORAGE_KEY_ARN: ${{ vars.AXON_DEPLOYMENT_EVIDENCE_KMS_KEY_ARN }}
+        run: |
+          set -euo pipefail
+          [[ "${GITHUB_REF}" == "refs/heads/main" ]]
+          parent_workflow_ref="${GITHUB_REPOSITORY}/.github/workflows/launch-agentcore-production.yml@refs/heads/main"
+          [[ "${GITHUB_WORKFLOW_REF}" == "${parent_workflow_ref}" ]]
+          [[ "${RUNNER_ENVIRONMENT}" == "self-hosted" ]]
+          [[ "$(git rev-parse HEAD)" == "${RELEASE_COMMIT}" ]]
+          [[ -z "$(git status --porcelain)" ]]
+          [[ "${GITHUB_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${RELEASE_COMMIT}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${GITHUB_SHA}" == "${RELEASE_COMMIT}" ]]
+          [[ "${CALLED_WORKFLOW_COMMIT}" == "${RELEASE_COMMIT}" ]]
+          [[ "${PARENT_WORKFLOW_COMMIT}" == "${RELEASE_COMMIT}" ]]
+          test -f ".github/workflows/agentcore-launch-rehearsal-evidence.yml"
+          [[ "${AWS_ACCOUNT_ID}" =~ ^[0-9]{12}$ ]]
+          [[ "${AWS_REGION}" == "us-east-1" ]]
+          image_prefix="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/"
+          [[ "${AGENTCORE_IMAGE}" == "${image_prefix}"*"@sha256:"* ]]
+          [[ "${CONTROL_PLANE_IMAGE}" == "${image_prefix}"*"@sha256:"* ]]
+          [[ "${AGENTCORE_IMAGE##*@}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "${CONTROL_PLANE_IMAGE##*@}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "${EVIDENCE_BUCKET}" =~ ^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$ ]]
+          [[ "${EVIDENCE_PREFIX}" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,255}$ ]]
+          [[ "${EVIDENCE_PREFIX}" != */ ]]
+          expected_base="s3://${EVIDENCE_BUCKET}/${EVIDENCE_PREFIX}/"
+          for uri in \
+            "${GATE_MANIFEST_URI}" \
+            "${GATE_MANIFEST_SIGNATURE_URI}" \
+            "${COMPAT_REPORT_URI}" \
+            "${COMPAT_SIGNATURE_URI}"
+          do
+            [[ "${uri}" == "${expected_base}"* ]]
+            [[ "${uri}" != */ ]]
+          done
+          [[ "${GATE_MANIFEST_URI}" != "${GATE_MANIFEST_SIGNATURE_URI}" ]]
+          [[ "${COMPAT_REPORT_URI}" != "${COMPAT_SIGNATURE_URI}" ]]
+          [[ "${GATE_MANIFEST_URI}" != "${COMPAT_REPORT_URI}" ]]
+          [[ "${GATE_MANIFEST_URI}" != "${COMPAT_SIGNATURE_URI}" ]]
+          [[ "${GATE_MANIFEST_SIGNATURE_URI}" != "${COMPAT_REPORT_URI}" ]]
+          [[ "${GATE_MANIFEST_SIGNATURE_URI}" != "${COMPAT_SIGNATURE_URI}" ]]
+          for version_id in \
+            "${GATE_MANIFEST_VERSION_ID}" \
+            "${GATE_MANIFEST_SIGNATURE_VERSION_ID}"
+          do
+            [[ "${version_id}" =~ ^[A-Za-z0-9._~+/=-]{1,1024}$ ]]
+            [[ "${version_id}" != "null" ]]
+          done
+          for digest in \
+            "${GATE_MANIFEST_SHA256}" \
+            "${GATE_MANIFEST_SIGNATURE_SHA256}"
+          do
+            [[ "${digest}" =~ ^[0-9a-f]{64}$ ]]
+          done
+          signing_prefix="arn:aws:kms:${AWS_REGION}:${AWS_ACCOUNT_ID}:key/"
+          [[ "${SIGNING_KEY_ARN}" == "${signing_prefix}"* ]]
+          [[ "${STORAGE_KEY_ARN}" == "${signing_prefix}"* ]]
+          [[ "${SIGNING_KEY_ARN}" != "${STORAGE_KEY_ARN}" ]]
+
+      - name: Configure production evidence credentials with OIDC
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with:
+          aws-region: ${{ inputs.aws_region }}
+          role-to-assume: ${{ secrets.AXON_AGENTCORE_REHEARSAL_EVIDENCE_ROLE_ARN }}
+          role-session-name: AxonLLMLaunchRehearsalEvidence
+          role-duration-seconds: 7200
+          allowed-account-ids: ${{ vars.AXON_AWS_ACCOUNT_ID }}
+          mask-aws-account-id: true
+          inline-session-policy: >-
+            {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:GetBucketObjectLockConfiguration","s3:GetBucketVersioning"],"Resource":"arn:aws:s3:::${{ vars.AXON_DEPLOYMENT_EVIDENCE_BUCKET }}"},{"Effect":"Allow","Action":["s3:GetObjectRetention","s3:GetObjectVersion","s3:PutObject","s3:PutObjectRetention"],"Resource":"arn:aws:s3:::${{ vars.AXON_DEPLOYMENT_EVIDENCE_BUCKET }}/${{ vars.AXON_AGENTCORE_REHEARSAL_EVIDENCE_PREFIX }}/*"},{"Effect":"Allow","Action":["kms:DescribeKey","kms:Sign","kms:Verify"],"Resource":"${{ vars.AXON_AGENTCORE_PREREQUISITE_SIGNING_KEY_ARN }}"},{"Effect":"Allow","Action":["kms:Decrypt","kms:DescribeKey","kms:Encrypt","kms:GenerateDataKey"],"Resource":"${{ vars.AXON_DEPLOYMENT_EVIDENCE_KMS_KEY_ARN }}"}]}
+
+      - name: Require versioning and Object Lock
+        env:
+          EVIDENCE_BUCKET: ${{ vars.AXON_DEPLOYMENT_EVIDENCE_BUCKET }}
+        run: |
+          set -euo pipefail
+          versioning=$(aws s3api get-bucket-versioning \
+            --bucket "${EVIDENCE_BUCKET}" \
+            --output json \
+            --no-cli-pager)
+          object_lock=$(aws s3api get-object-lock-configuration \
+            --bucket "${EVIDENCE_BUCKET}" \
+            --output json \
+            --no-cli-pager)
+          jq -e '.Status == "Enabled"' <<<"${versioning}" >/dev/null
+          jq -e \
+            '.ObjectLockConfiguration.ObjectLockEnabled == "Enabled"' \
+            <<<"${object_lock}" >/dev/null
+
+      - name: Verify signed gate commands and derive reports
+        env:
+          AGENTCORE_IMAGE: ${{ inputs.agentcore_image_reference }}
+          AWS_REGION: ${{ inputs.aws_region }}
+          CONTROL_PLANE_IMAGE: ${{ inputs.control_plane_image_reference }}
+          CALLED_WORKFLOW_COMMIT: ${{ github.workflow_sha }}
+          EVIDENCE_BUCKET: ${{ vars.AXON_DEPLOYMENT_EVIDENCE_BUCKET }}
+          EVIDENCE_PREFIX: ${{ vars.AXON_AGENTCORE_REHEARSAL_EVIDENCE_PREFIX }}
+          GATE_MANIFEST_SHA256: ${{ inputs.gate_manifest_sha256 }}
+          GATE_MANIFEST_SIGNATURE_SHA256: ${{ inputs.gate_manifest_signature_sha256 }}
+          GATE_MANIFEST_SIGNATURE_URI: ${{ vars.AXON_AGENTCORE_REHEARSAL_GATE_MANIFEST_SIGNATURE_S3_URI }}
+          GATE_MANIFEST_SIGNATURE_VERSION_ID: ${{ inputs.gate_manifest_signature_s3_version_id }}
+          GATE_MANIFEST_URI: ${{ vars.AXON_AGENTCORE_REHEARSAL_GATE_MANIFEST_S3_URI }}
+          GATE_MANIFEST_VERSION_ID: ${{ inputs.gate_manifest_s3_version_id }}
+          RELEASE_COMMIT: ${{ inputs.release_commit_sha }}
+          PARENT_WORKFLOW_COMMIT: ${{ github.workflow_sha }}
+          PARENT_WORKFLOW_REF: ${{ github.workflow_ref }}
+          SIGNING_KEY_ARN: ${{ vars.AXON_AGENTCORE_PREREQUISITE_SIGNING_KEY_ARN }}
+          STORAGE_KEY_ARN: ${{ vars.AXON_DEPLOYMENT_EVIDENCE_KMS_KEY_ARN }}
+        run: |
+          set -euo pipefail
+          detailed="${RUNNER_TEMP}/agentcore-launch-rehearsal-evidence.json"
+          compatible="${RUNNER_TEMP}/agentcore-launch-rehearsal.json"
+          python scripts/release/launch_rehearsal_evidence.py produce \
+            --release-commit "${RELEASE_COMMIT}" \
+            --region "${AWS_REGION}" \
+            --agentcore-image "${AGENTCORE_IMAGE}" \
+            --control-plane-image "${CONTROL_PLANE_IMAGE}" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --workflow-ref "${GITHUB_REPOSITORY}/.github/workflows/agentcore-launch-rehearsal-evidence.yml@refs/heads/main" \
+            --workflow-commit "${CALLED_WORKFLOW_COMMIT}" \
+            --parent-workflow-ref "${PARENT_WORKFLOW_REF}" \
+            --parent-workflow-commit "${PARENT_WORKFLOW_COMMIT}" \
+            --run-id "${GITHUB_RUN_ID}" \
+            --run-attempt "${GITHUB_RUN_ATTEMPT}" \
+            --evidence-bucket "${EVIDENCE_BUCKET}" \
+            --evidence-prefix "${EVIDENCE_PREFIX}" \
+            --source-manifest-uri "${GATE_MANIFEST_URI}" \
+            --source-manifest-version-id "${GATE_MANIFEST_VERSION_ID}" \
+            --source-manifest-sha256 "${GATE_MANIFEST_SHA256}" \
+            --source-signature-uri "${GATE_MANIFEST_SIGNATURE_URI}" \
+            --source-signature-version-id \
+              "${GATE_MANIFEST_SIGNATURE_VERSION_ID}" \
+            --source-signature-sha256 \
+              "${GATE_MANIFEST_SIGNATURE_SHA256}" \
+            --storage-kms-key-arn "${STORAGE_KEY_ARN}" \
+            --signing-key-arn "${SIGNING_KEY_ARN}" \
+            --output "${detailed}" \
+            --compatibility-output "${compatible}"
+          chmod 0600 "${detailed}" "${compatible}"
+
+      - name: KMS-sign and locally verify both reports
+        env:
+          AGENTCORE_IMAGE: ${{ inputs.agentcore_image_reference }}
+          AWS_REGION: ${{ inputs.aws_region }}
+          CONTROL_PLANE_IMAGE: ${{ inputs.control_plane_image_reference }}
+          CALLED_WORKFLOW_COMMIT: ${{ github.workflow_sha }}
+          EVIDENCE_BUCKET: ${{ vars.AXON_DEPLOYMENT_EVIDENCE_BUCKET }}
+          EVIDENCE_PREFIX: ${{ vars.AXON_AGENTCORE_REHEARSAL_EVIDENCE_PREFIX }}
+          RELEASE_COMMIT: ${{ inputs.release_commit_sha }}
+          PARENT_WORKFLOW_COMMIT: ${{ github.workflow_sha }}
+          PARENT_WORKFLOW_REF: ${{ github.workflow_ref }}
+          SIGNING_KEY_ARN: ${{ vars.AXON_AGENTCORE_PREREQUISITE_SIGNING_KEY_ARN }}
+        run: |
+          set -euo pipefail
+          detailed="${RUNNER_TEMP}/agentcore-launch-rehearsal-evidence.json"
+          detailed_signature="${RUNNER_TEMP}/agentcore-launch-rehearsal-evidence-kms-signature.json"
+          compatible="${RUNNER_TEMP}/agentcore-launch-rehearsal.json"
+          compatible_signature="${RUNNER_TEMP}/agentcore-launch-rehearsal-kms-signature.json"
+          python scripts/release/kms_evidence.py sign \
+            --artifact "${detailed}" \
+            --bundle "${detailed_signature}" \
+            --key-arn "${SIGNING_KEY_ARN}"
+          python scripts/release/kms_evidence.py sign \
+            --artifact "${compatible}" \
+            --bundle "${compatible_signature}" \
+            --key-arn "${SIGNING_KEY_ARN}"
+          python scripts/release/kms_evidence.py verify \
+            --artifact "${detailed}" \
+            --bundle "${detailed_signature}" \
+            --key-arn "${SIGNING_KEY_ARN}"
+          python scripts/release/kms_evidence.py verify \
+            --artifact "${compatible}" \
+            --bundle "${compatible_signature}" \
+            --key-arn "${SIGNING_KEY_ARN}"
+          python scripts/release/launch_rehearsal_evidence.py verify \
+            --release-commit "${RELEASE_COMMIT}" \
+            --region "${AWS_REGION}" \
+            --agentcore-image "${AGENTCORE_IMAGE}" \
+            --control-plane-image "${CONTROL_PLANE_IMAGE}" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --workflow-ref "${GITHUB_REPOSITORY}/.github/workflows/agentcore-launch-rehearsal-evidence.yml@refs/heads/main" \
+            --workflow-commit "${CALLED_WORKFLOW_COMMIT}" \
+            --parent-workflow-ref "${PARENT_WORKFLOW_REF}" \
+            --parent-workflow-commit "${PARENT_WORKFLOW_COMMIT}" \
+            --run-id "${GITHUB_RUN_ID}" \
+            --run-attempt "${GITHUB_RUN_ATTEMPT}" \
+            --evidence-bucket "${EVIDENCE_BUCKET}" \
+            --evidence-prefix "${EVIDENCE_PREFIX}" \
+            --report "${detailed}" \
+            --compatibility-report "${compatible}"
+
+      - name: Publish and read back COMPLIANCE-locked evidence
+        id: publish
+        env:
+          AGENTCORE_IMAGE: ${{ inputs.agentcore_image_reference }}
+          AWS_REGION: ${{ inputs.aws_region }}
+          COMPAT_REPORT_URI: ${{ vars.AXON_AGENTCORE_LAUNCH_REHEARSAL_REPORT_S3_URI }}
+          COMPAT_SIGNATURE_URI: ${{ vars.AXON_AGENTCORE_LAUNCH_REHEARSAL_SIGNATURE_S3_URI }}
+          CONTROL_PLANE_IMAGE: ${{ inputs.control_plane_image_reference }}
+          CALLED_WORKFLOW_COMMIT: ${{ github.workflow_sha }}
+          EVIDENCE_BUCKET: ${{ vars.AXON_DEPLOYMENT_EVIDENCE_BUCKET }}
+          EVIDENCE_PREFIX: ${{ vars.AXON_AGENTCORE_REHEARSAL_EVIDENCE_PREFIX }}
+          RELEASE_COMMIT: ${{ inputs.release_commit_sha }}
+          PARENT_WORKFLOW_COMMIT: ${{ github.workflow_sha }}
+          PARENT_WORKFLOW_REF: ${{ github.workflow_ref }}
+          SIGNING_KEY_ARN: ${{ vars.AXON_AGENTCORE_PREREQUISITE_SIGNING_KEY_ARN }}
+          STORAGE_KEY_ARN: ${{ vars.AXON_DEPLOYMENT_EVIDENCE_KMS_KEY_ARN }}
+        run: |
+          set -euo pipefail
+          retain_until=$(date -u -d "+2555 days" "+%Y-%m-%dT%H:%M:%SZ")
+          base="${EVIDENCE_PREFIX}/launch-rehearsal-reports/${GITHUB_REPOSITORY}/${GITHUB_RUN_ID}/${GITHUB_RUN_ATTEMPT}"
+          detailed_uri="s3://${EVIDENCE_BUCKET}/${base}/agentcore-launch-rehearsal-evidence.json"
+          detailed_signature_uri="s3://${EVIDENCE_BUCKET}/${base}/agentcore-launch-rehearsal-evidence-kms-signature.json"
+          [[ "${detailed_uri}" != "${COMPAT_REPORT_URI}" ]]
+          [[ "${detailed_uri}" != "${COMPAT_SIGNATURE_URI}" ]]
+          [[ "${detailed_signature_uri}" != "${COMPAT_REPORT_URI}" ]]
+          [[ "${detailed_signature_uri}" != "${COMPAT_SIGNATURE_URI}" ]]
+
+          uri_key() {
+            local uri="$1"
+            local expected="s3://${EVIDENCE_BUCKET}/"
+            [[ "${uri}" == "${expected}"* ]]
+            printf '%s' "${uri#"${expected}"}"
+          }
+
+          upload_locked() {
+            local local_path="$1"
+            local uri="$2"
+            local label="$3"
+            local key response version readback metadata digest
+            key=$(uri_key "${uri}")
+            response=$(aws s3api put-object \
+              --bucket "${EVIDENCE_BUCKET}" \
+              --key "${key}" \
+              --body "${local_path}" \
+              --content-type application/json \
+              --checksum-algorithm SHA256 \
+              --server-side-encryption aws:kms \
+              --ssekms-key-id "${STORAGE_KEY_ARN}" \
+              --object-lock-mode COMPLIANCE \
+              --object-lock-retain-until-date "${retain_until}" \
+              --output json \
+              --no-cli-pager)
+            version=$(jq -er '.VersionId' <<<"${response}")
+            [[ "${version}" =~ ^[A-Za-z0-9._~+/=-]{1,1024}$ ]]
+            [[ "${version}" != "null" ]]
+            readback="${RUNNER_TEMP}/readback-${label}.json"
+            metadata="${RUNNER_TEMP}/readback-${label}-metadata.json"
+            aws s3api get-object \
+              --bucket "${EVIDENCE_BUCKET}" \
+              --key "${key}" \
+              --version-id "${version}" \
+              --checksum-mode ENABLED \
+              "${readback}" \
+              --output json \
+              --no-cli-pager >"${metadata}"
+            python - \
+              "${metadata}" \
+              "${version}" \
+              "${STORAGE_KEY_ARN}" \
+              "${retain_until}" <<'PY'
+          import json
+          import sys
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          metadata = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          retained = datetime.fromisoformat(
+              str(metadata.get("ObjectLockRetainUntilDate", "")).replace(
+                  "Z", "+00:00"
+              )
+          )
+          required = datetime.fromisoformat(sys.argv[4].replace("Z", "+00:00"))
+          if not (
+              metadata.get("VersionId") == sys.argv[2]
+              and metadata.get("ServerSideEncryption") == "aws:kms"
+              and metadata.get("SSEKMSKeyId") == sys.argv[3]
+              and metadata.get("ObjectLockMode") == "COMPLIANCE"
+              and retained.astimezone(timezone.utc)
+              >= required.astimezone(timezone.utc)
+          ):
+              raise SystemExit("published evidence is not COMPLIANCE locked")
+          PY
+            cmp --silent "${local_path}" "${readback}"
+            digest=$(sha256sum "${local_path}" | awk '{print $1}')
+            printf -v "${label}_URI" '%s' "${uri}"
+            printf -v "${label}_VERSION" '%s' "${version}"
+            printf -v "${label}_SHA256" '%s' "${digest}"
+          }
+
+          upload_locked \
+            "${RUNNER_TEMP}/agentcore-launch-rehearsal-evidence.json" \
+            "${detailed_uri}" \
+            DETAILED_REPORT
+          upload_locked \
+            "${RUNNER_TEMP}/agentcore-launch-rehearsal-evidence-kms-signature.json" \
+            "${detailed_signature_uri}" \
+            DETAILED_SIGNATURE
+          upload_locked \
+            "${RUNNER_TEMP}/agentcore-launch-rehearsal.json" \
+            "${COMPAT_REPORT_URI}" \
+            REPORT
+          upload_locked \
+            "${RUNNER_TEMP}/agentcore-launch-rehearsal-kms-signature.json" \
+            "${COMPAT_SIGNATURE_URI}" \
+            SIGNATURE
+
+          python scripts/release/kms_evidence.py verify \
+            --artifact "${RUNNER_TEMP}/readback-DETAILED_REPORT.json" \
+            --bundle "${RUNNER_TEMP}/readback-DETAILED_SIGNATURE.json" \
+            --key-arn "${SIGNING_KEY_ARN}"
+          python scripts/release/kms_evidence.py verify \
+            --artifact "${RUNNER_TEMP}/readback-REPORT.json" \
+            --bundle "${RUNNER_TEMP}/readback-SIGNATURE.json" \
+            --key-arn "${SIGNING_KEY_ARN}"
+          python scripts/release/launch_rehearsal_evidence.py verify \
+            --release-commit "${RELEASE_COMMIT}" \
+            --region "${AWS_REGION}" \
+            --agentcore-image "${AGENTCORE_IMAGE}" \
+            --control-plane-image "${CONTROL_PLANE_IMAGE}" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --workflow-ref "${GITHUB_REPOSITORY}/.github/workflows/agentcore-launch-rehearsal-evidence.yml@refs/heads/main" \
+            --workflow-commit "${CALLED_WORKFLOW_COMMIT}" \
+            --parent-workflow-ref "${PARENT_WORKFLOW_REF}" \
+            --parent-workflow-commit "${PARENT_WORKFLOW_COMMIT}" \
+            --run-id "${GITHUB_RUN_ID}" \
+            --run-attempt "${GITHUB_RUN_ATTEMPT}" \
+            --evidence-bucket "${EVIDENCE_BUCKET}" \
+            --evidence-prefix "${EVIDENCE_PREFIX}" \
+            --report "${RUNNER_TEMP}/readback-DETAILED_REPORT.json" \
+            --compatibility-report "${RUNNER_TEMP}/readback-REPORT.json"
+
+          {
+            printf 'report_uri=%s\n' "${REPORT_URI}"
+            printf 'report_version_id=%s\n' "${REPORT_VERSION}"
+            printf 'report_sha256=%s\n' "${REPORT_SHA256}"
+            printf 'signature_uri=%s\n' "${SIGNATURE_URI}"
+            printf 'signature_version_id=%s\n' "${SIGNATURE_VERSION}"
+            printf 'signature_sha256=%s\n' "${SIGNATURE_SHA256}"
+            printf 'detailed_report_uri=%s\n' "${DETAILED_REPORT_URI}"
+            printf 'detailed_report_version_id=%s\n' "${DETAILED_REPORT_VERSION}"
+            printf 'detailed_report_sha256=%s\n' "${DETAILED_REPORT_SHA256}"
+            printf 'detailed_signature_uri=%s\n' "${DETAILED_SIGNATURE_URI}"
+            printf 'detailed_signature_version_id=%s\n' "${DETAILED_SIGNATURE_VERSION}"
+            printf 'detailed_signature_sha256=%s\n' "${DETAILED_SIGNATURE_SHA256}"
+          } >>"${GITHUB_OUTPUT}"
+          {
+            printf '## AgentCore launch-rehearsal evidence\n\n'
+            printf -- '- Release: \x60%s\x60\n' "${{ inputs.release_commit_sha }}"
+            printf -- '- Compatibility report: \x60%s\x60 version \x60%s\x60\n' \
+              "${REPORT_URI}" "${REPORT_VERSION}"
+            printf -- '- Compatibility SHA-256: \x60%s\x60\n' "${REPORT_SHA256}"
+            printf -- '- Signature version: \x60%s\x60\n' "${SIGNATURE_VERSION}"
+            printf -- '- Detailed report: \x60%s\x60 version \x60%s\x60\n' \
+              "${DETAILED_REPORT_URI}" "${DETAILED_REPORT_VERSION}"
+            printf -- '- Detailed signature version: \x60%s\x60\n' \
+              "${DETAILED_SIGNATURE_VERSION}"
+            printf -- '- Retained in COMPLIANCE mode until: \x60%s\x60\n' \
+              "${retain_until}"
+          } >>"${GITHUB_STEP_SUMMARY}"

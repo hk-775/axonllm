@@ -1,6 +1,7 @@
 """Abstract base class for provider adapters."""
 
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from datetime import datetime, timezone
 
 from src.gateway.models import (
@@ -23,6 +24,9 @@ class ProviderAdapter(ABC):
     PROVIDER_NAME: str = ""
     _MODELS: list[ModelInfo] = []
 
+    def validate_request(self, request: ChatCompletionRequest) -> None:
+        """Reject provider-specific capability mismatches before transport."""
+
     @abstractmethod
     async def translate_request(
         self, request: ChatCompletionRequest, *, prompt_caching_enabled: bool = False
@@ -42,6 +46,10 @@ class ProviderAdapter(ABC):
     def translate_stream_chunk(self, chunk: dict) -> StreamChunk:
         """Translate a single streaming chunk to unified SSE format."""
         ...
+
+    def stream_translator(self) -> Callable[[dict], StreamChunk]:
+        """Return request-local stream translation state."""
+        return self.translate_stream_chunk
 
     async def list_models(self) -> list[ModelInfo]:
         """Return available models from this provider."""

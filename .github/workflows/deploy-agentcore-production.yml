@@ -1,0 +1,2974 @@
+name: Deploy AgentCore production
+
+on:
+  workflow_call:
+    inputs:
+      evidence_run_id:
+        description: Successful tagged release-security workflow run
+        required: true
+        type: string
+      release_commit_sha:
+        description: Full commit SHA recorded by the signed release
+        required: true
+        type: string
+      agentcore_image_reference:
+        description: Immutable private AgentCore ECR digest URI
+        required: true
+        type: string
+      control_plane_image_reference:
+        description: Immutable private Fargate ECR digest URI
+        required: true
+        type: string
+      setup_config_s3_version_id:
+        description: Immutable S3 version ID for the reviewed setup configuration
+        required: true
+        type: string
+      setup_config_sha256:
+        description: Lowercase SHA-256 of the reviewed setup configuration
+        required: true
+        type: string
+      certification_config_s3_version_id:
+        description: Immutable S3 version ID for the reviewed certification configuration
+        required: true
+        type: string
+      certification_config_sha256:
+        description: Lowercase SHA-256 of the reviewed certification configuration
+        required: true
+        type: string
+      production_validation_config_s3_version_id:
+        description: Immutable S3 version ID for the reviewed control-plane validation
+        required: true
+        type: string
+      production_validation_config_sha256:
+        description: Lowercase SHA-256 of the control-plane validation configuration
+        required: true
+        type: string
+      launch_rehearsal_detailed_report_s3_uri:
+        description: Detailed report URI output by the protected launch-rehearsal workflow
+        required: true
+        type: string
+      launch_rehearsal_detailed_report_s3_version_id:
+        description: Detailed report VersionId output by the protected launch-rehearsal workflow
+        required: true
+        type: string
+      launch_rehearsal_detailed_report_sha256:
+        description: Detailed report SHA-256 output by the protected launch-rehearsal workflow
+        required: true
+        type: string
+      launch_rehearsal_detailed_signature_s3_uri:
+        description: Detailed signature URI output by the protected launch-rehearsal workflow
+        required: true
+        type: string
+      launch_rehearsal_detailed_signature_s3_version_id:
+        description: Detailed signature VersionId output by the protected launch-rehearsal workflow
+        required: true
+        type: string
+      launch_rehearsal_detailed_signature_sha256:
+        description: Detailed signature SHA-256 output by the protected launch-rehearsal workflow
+        required: true
+        type: string
+      external_oidc_report_s3_uri:
+        description: Report URI output by the protected external-OIDC certification workflow
+        required: true
+        type: string
+      external_oidc_report_s3_version_id:
+        description: Report VersionId output by the protected external-OIDC certification workflow
+        required: true
+        type: string
+      external_oidc_report_sha256:
+        description: Report SHA-256 output by the protected external-OIDC certification workflow
+        required: true
+        type: string
+      external_oidc_signature_s3_uri:
+        description: Signature URI output by the protected external-OIDC certification workflow
+        required: true
+        type: string
+      external_oidc_signature_s3_version_id:
+        description: Signature VersionId output by the protected external-OIDC certification workflow
+        required: true
+        type: string
+      external_oidc_signature_sha256:
+        description: Signature SHA-256 output by the protected external-OIDC certification workflow
+        required: true
+        type: string
+      qualification_teardown_receipt_s3_uri:
+        description: Receipt URI output by the protected qualification teardown job
+        required: true
+        type: string
+      qualification_teardown_receipt_s3_version_id:
+        description: Receipt VersionId output by the protected qualification teardown job
+        required: true
+        type: string
+      qualification_teardown_receipt_sha256:
+        description: Receipt SHA-256 output by the protected qualification teardown job
+        required: true
+        type: string
+      qualification_teardown_signature_s3_uri:
+        description: Signature URI output by the protected qualification teardown job
+        required: true
+        type: string
+      qualification_teardown_signature_s3_version_id:
+        description: Signature VersionId output by the protected qualification teardown job
+        required: true
+        type: string
+      qualification_teardown_signature_sha256:
+        description: Signature SHA-256 output by the protected qualification teardown job
+        required: true
+        type: string
+      operation:
+        description: Deploy or restore a previously signed image and secret version
+        required: false
+        default: deploy
+        type: string
+      rollback_provider_secret_version:
+        description: Existing reviewed AWSCURRENT target; required only for rollback
+        required: false
+        type: string
+      change_id:
+        description: Approved change or incident identifier
+        required: true
+        type: string
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: agentcore-production-deployment
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-east-1
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  UV_CACHE_DIR: /tmp/axonllm-uv-cache
+  UV_VERSION: "0.10.7"
+
+jobs:
+  verify-agentcore:
+    name: Verify AgentCore release target
+    uses: ./.github/workflows/deploy-verification.yml
+    with:
+      evidence_run_id: ${{ inputs.evidence_run_id }}
+      commit_sha: ${{ inputs.release_commit_sha }}
+      image_reference: ${{ inputs.agentcore_image_reference }}
+      target: agentcore
+      aws_region: us-east-1
+
+  verify-control-plane:
+    name: Verify control-plane release target
+    uses: ./.github/workflows/deploy-verification.yml
+    with:
+      evidence_run_id: ${{ inputs.evidence_run_id }}
+      commit_sha: ${{ inputs.release_commit_sha }}
+      image_reference: ${{ inputs.control_plane_image_reference }}
+      target: fargate
+      aws_region: us-east-1
+
+  deploy:
+    name: Deploy, certify, and record production
+    needs:
+      - verify-agentcore
+      - verify-control-plane
+    runs-on:
+      group: axonllm-production
+      labels: axonllm-production-allowlisted
+    timeout-minutes: 180
+    environment: agentcore-production-deploy
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Check out reviewed deployment tooling
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ inputs.release_commit_sha }}
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+
+      - name: Set up supported Node for CDK
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: "22"
+
+      - name: Validate immutable production inputs
+        env:
+          AGENTCORE_IMAGE: ${{ inputs.agentcore_image_reference }}
+          AWS_ACCOUNT_ID: ${{ vars.AXON_AWS_ACCOUNT_ID }}
+          AWS_REGION: us-east-1
+          CALLED_WORKFLOW_COMMIT: ${{ github.workflow_sha }}
+          CERTIFICATION_CONFIG_SHA256: ${{ inputs.certification_config_sha256 }}
+          CERTIFICATION_CONFIG_URI: ${{ vars.AXON_AGENTCORE_CERTIFICATION_CONFIG_S3_URI }}
+          CERTIFICATION_CONFIG_VERSION_ID: ${{ inputs.certification_config_s3_version_id }}
+          CONTROL_PLANE_IMAGE: ${{ inputs.control_plane_image_reference }}
+          DEPLOY_ROLE_ARN: ${{ secrets.AXON_AGENTCORE_DEPLOY_ROLE_ARN }}
+          EVIDENCE_BUCKET: ${{ vars.AXON_DEPLOYMENT_EVIDENCE_BUCKET }}
+          EVIDENCE_PREFIX: ${{ vars.AXON_DEPLOYMENT_EVIDENCE_PREFIX }}
+          EVIDENCE_STORAGE_KEY_ARN: ${{ vars.AXON_DEPLOYMENT_EVIDENCE_KMS_KEY_ARN }}
+          EXTERNAL_OIDC_EVIDENCE_PREFIX: ${{ vars.AXON_EXTERNAL_OIDC_EVIDENCE_PREFIX }}
+          EXTERNAL_OIDC_REPORT_SHA256: ${{ inputs.external_oidc_report_sha256 }}
+          EXTERNAL_OIDC_REPORT_URI: ${{ inputs.external_oidc_report_s3_uri }}
+          EXTERNAL_OIDC_REPORT_VERSION_ID: ${{ inputs.external_oidc_report_s3_version_id }}
+          EXTERNAL_OIDC_SIGNATURE_SHA256: ${{ inputs.external_oidc_signature_sha256 }}
+          EXTERNAL_OIDC_SIGNATURE_URI: ${{ inputs.external_oidc_signature_s3_uri }}
+          EXTERNAL_OIDC_SIGNATURE_VERSION_ID: ${{ inputs.external_oidc_signature_s3_version_id }}
+          LAUNCH_REHEARSAL_REPORT_SHA256: ${{ inputs.launch_rehearsal_detailed_report_sha256 }}
+          LAUNCH_REHEARSAL_REPORT_URI: ${{ inputs.launch_rehearsal_detailed_report_s3_uri }}
+          LAUNCH_REHEARSAL_REPORT_VERSION_ID: ${{ inputs.launch_rehearsal_detailed_report_s3_version_id }}
+          LAUNCH_REHEARSAL_SIGNATURE_SHA256: ${{ inputs.launch_rehearsal_detailed_signature_sha256 }}
+          LAUNCH_REHEARSAL_SIGNATURE_URI: ${{ inputs.launch_rehearsal_detailed_signature_s3_uri }}
+          LAUNCH_REHEARSAL_SIGNATURE_VERSION_ID: ${{ inputs.launch_rehearsal_detailed_signature_s3_version_id }}
+          OPERATION: ${{ inputs.operation }}
+          PREREQUISITE_SIGNING_KEY_ARN: ${{ vars.AXON_AGENTCORE_PREREQUISITE_SIGNING_KEY_ARN }}
+          PRODUCTION_VALIDATION_CONFIG_SHA256: ${{ inputs.production_validation_config_sha256 }}
+          PRODUCTION_VALIDATION_CONFIG_URI: ${{ vars.AXON_AGENTCORE_PRODUCTION_VALIDATION_CONFIG_S3_URI }}
+          PRODUCTION_VALIDATION_CONFIG_VERSION_ID: ${{ inputs.production_validation_config_s3_version_id }}
+          PROVIDER_SOURCE_SECRET_ARN: ${{ vars.AXON_AGENTCORE_PRODUCTION_PROVIDER_SOURCE_SECRET_ARN }}
+          QUALIFICATION_TEARDOWN_EVIDENCE_PREFIX: ${{ vars.AXON_AGENTCORE_QUALIFICATION_TEARDOWN_EVIDENCE_PREFIX }}
+          REHEARSAL_EVIDENCE_PREFIX: ${{ vars.AXON_AGENTCORE_REHEARSAL_EVIDENCE_PREFIX }}
+          PARENT_WORKFLOW_COMMIT: ${{ github.workflow_sha }}
+          RELEASE_COMMIT: ${{ inputs.release_commit_sha }}
+          RELEASE_RUN_ID: ${{ inputs.evidence_run_id }}
+          ROLLBACK_SECRET_VERSION: ${{ inputs.rollback_provider_secret_version }}
+          SETUP_CONFIG_SHA256: ${{ inputs.setup_config_sha256 }}
+          SETUP_CONFIG_URI: ${{ vars.AXON_AGENTCORE_SETUP_CONFIG_S3_URI }}
+          SETUP_CONFIG_VERSION_ID: ${{ inputs.setup_config_s3_version_id }}
+          TRANSITION_SIGNING_KEY_ARN: ${{ vars.AXON_AGENTCORE_TRANSITION_SIGNING_KEY_ARN }}
+          TEARDOWN_RECEIPT_SHA256: ${{ inputs.qualification_teardown_receipt_sha256 }}
+          TEARDOWN_RECEIPT_URI: ${{ inputs.qualification_teardown_receipt_s3_uri }}
+          TEARDOWN_RECEIPT_VERSION_ID: ${{ inputs.qualification_teardown_receipt_s3_version_id }}
+          TEARDOWN_SIGNATURE_SHA256: ${{ inputs.qualification_teardown_signature_sha256 }}
+          TEARDOWN_SIGNATURE_URI: ${{ inputs.qualification_teardown_signature_s3_uri }}
+          TEARDOWN_SIGNATURE_VERSION_ID: ${{ inputs.qualification_teardown_signature_s3_version_id }}
+          VERIFIED_AGENTCORE: ${{ needs.verify-agentcore.outputs.verified_image }}
+          VERIFIED_CONTROL_PLANE: ${{ needs.verify-control-plane.outputs.verified_image }}
+        run: |
+          set -euo pipefail
+          [[ "${GITHUB_REF}" == "refs/heads/main" ]]
+          parent_workflow_ref="${GITHUB_REPOSITORY}/.github/workflows/launch-agentcore-production.yml@refs/heads/main"
+          [[ "${GITHUB_WORKFLOW_REF}" == "${parent_workflow_ref}" ]]
+          [[ "${GITHUB_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${RELEASE_COMMIT}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${GITHUB_SHA}" == "${RELEASE_COMMIT}" ]]
+          [[ "${CALLED_WORKFLOW_COMMIT}" == "${RELEASE_COMMIT}" ]]
+          [[ "${PARENT_WORKFLOW_COMMIT}" == "${RELEASE_COMMIT}" ]]
+          [[ "$(git rev-parse HEAD)" == "${RELEASE_COMMIT}" ]]
+          [[ -z "$(git status --porcelain)" ]]
+          [[ "${RELEASE_RUN_ID}" =~ ^[1-9][0-9]*$ ]]
+          [[ "${AWS_ACCOUNT_ID}" =~ ^[0-9]{12}$ ]]
+          [[ "${AWS_REGION}" == "us-east-1" ]]
+          [[ "${SETUP_CONFIG_URI}" =~ ^s3://[a-z0-9.-]+/.+[^/]$ ]]
+          [[ "${CERTIFICATION_CONFIG_URI}" =~ ^s3://[a-z0-9.-]+/.+[^/]$ ]]
+          [[ "${PRODUCTION_VALIDATION_CONFIG_URI}" =~ ^s3://[a-z0-9.-]+/.+[^/]$ ]]
+          [[ "${LAUNCH_REHEARSAL_REPORT_URI}" =~ ^s3://[a-z0-9.-]+/.+[^/]$ ]]
+          [[ "${LAUNCH_REHEARSAL_SIGNATURE_URI}" =~ ^s3://[a-z0-9.-]+/.+[^/]$ ]]
+          rehearsal_root="s3://${EVIDENCE_BUCKET}/${REHEARSAL_EVIDENCE_PREFIX}/launch-rehearsal-reports/${GITHUB_REPOSITORY}/"
+          [[ "${LAUNCH_REHEARSAL_REPORT_URI}" == "${rehearsal_root}"*"/agentcore-launch-rehearsal-evidence.json" ]]
+          [[ "${LAUNCH_REHEARSAL_SIGNATURE_URI}" == "${rehearsal_root}"*"/agentcore-launch-rehearsal-evidence-kms-signature.json" ]]
+          [[ "${LAUNCH_REHEARSAL_REPORT_URI%/agentcore-launch-rehearsal-evidence.json}" == "${LAUNCH_REHEARSAL_SIGNATURE_URI%/agentcore-launch-rehearsal-evidence-kms-signature.json}" ]]
+          [[ "${LAUNCH_REHEARSAL_REPORT_URI}" != "${LAUNCH_REHEARSAL_SIGNATURE_URI}" ]]
+          [[ "${EXTERNAL_OIDC_EVIDENCE_PREFIX}" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,255}$ ]]
+          [[ "${EXTERNAL_OIDC_EVIDENCE_PREFIX}" != */ ]]
+          [[ "${EXTERNAL_OIDC_EVIDENCE_PREFIX}" != *//* ]]
+          external_oidc_root="s3://${EVIDENCE_BUCKET}/${EXTERNAL_OIDC_EVIDENCE_PREFIX}/${GITHUB_REPOSITORY}/${RELEASE_COMMIT}/"
+          [[ "${EXTERNAL_OIDC_REPORT_URI}" == "${external_oidc_root}"*"/external-oidc-agentcore-report.json" ]]
+          [[ "${EXTERNAL_OIDC_SIGNATURE_URI}" == "${external_oidc_root}"*"/external-oidc-agentcore-kms-signature.json" ]]
+          [[ "${EXTERNAL_OIDC_REPORT_URI%/external-oidc-agentcore-report.json}" == "${EXTERNAL_OIDC_SIGNATURE_URI%/external-oidc-agentcore-kms-signature.json}" ]]
+          [[ "${EXTERNAL_OIDC_REPORT_URI}" != "${EXTERNAL_OIDC_SIGNATURE_URI}" ]]
+          teardown_root="s3://${EVIDENCE_BUCKET}/${QUALIFICATION_TEARDOWN_EVIDENCE_PREFIX}/${GITHUB_REPOSITORY}/${RELEASE_COMMIT}/${GITHUB_RUN_ID}/${GITHUB_RUN_ATTEMPT}"
+          [[ "${TEARDOWN_RECEIPT_URI}" == "${teardown_root}/qualification-teardown-receipt.json" ]]
+          [[ "${TEARDOWN_SIGNATURE_URI}" == "${teardown_root}/qualification-teardown-signature.json" ]]
+          [[ "${TEARDOWN_RECEIPT_URI}" != "${TEARDOWN_SIGNATURE_URI}" ]]
+          [[ "${SETUP_CONFIG_VERSION_ID}" =~ ^[A-Za-z0-9._~+/=-]{1,1024}$ ]]
+          [[ "${SETUP_CONFIG_VERSION_ID}" != "null" ]]
+          [[ "${CERTIFICATION_CONFIG_VERSION_ID}" =~ ^[A-Za-z0-9._~+/=-]{1,1024}$ ]]
+          [[ "${CERTIFICATION_CONFIG_VERSION_ID}" != "null" ]]
+          [[ "${PRODUCTION_VALIDATION_CONFIG_VERSION_ID}" =~ ^[A-Za-z0-9._~+/=-]{1,1024}$ ]]
+          [[ "${PRODUCTION_VALIDATION_CONFIG_VERSION_ID}" != "null" ]]
+          [[ "${LAUNCH_REHEARSAL_REPORT_VERSION_ID}" =~ ^[A-Za-z0-9._~+/=-]{1,1024}$ ]]
+          [[ "${LAUNCH_REHEARSAL_REPORT_VERSION_ID}" != "null" ]]
+          [[ "${LAUNCH_REHEARSAL_SIGNATURE_VERSION_ID}" =~ ^[A-Za-z0-9._~+/=-]{1,1024}$ ]]
+          [[ "${LAUNCH_REHEARSAL_SIGNATURE_VERSION_ID}" != "null" ]]
+          [[ "${EXTERNAL_OIDC_REPORT_VERSION_ID}" =~ ^[A-Za-z0-9._~+/=-]{1,1024}$ ]]
+          [[ "${EXTERNAL_OIDC_REPORT_VERSION_ID}" != "null" ]]
+          [[ "${EXTERNAL_OIDC_SIGNATURE_VERSION_ID}" =~ ^[A-Za-z0-9._~+/=-]{1,1024}$ ]]
+          [[ "${EXTERNAL_OIDC_SIGNATURE_VERSION_ID}" != "null" ]]
+          [[ "${TEARDOWN_RECEIPT_VERSION_ID}" =~ ^[A-Za-z0-9._~+/=-]{1,1024}$ ]]
+          [[ "${TEARDOWN_RECEIPT_VERSION_ID}" != "null" ]]
+          [[ "${TEARDOWN_SIGNATURE_VERSION_ID}" =~ ^[A-Za-z0-9._~+/=-]{1,1024}$ ]]
+          [[ "${TEARDOWN_SIGNATURE_VERSION_ID}" != "null" ]]
+          [[ "${SETUP_CONFIG_SHA256}" =~ ^[0-9a-f]{64}$ ]]
+          [[ "${CERTIFICATION_CONFIG_SHA256}" =~ ^[0-9a-f]{64}$ ]]
+          [[ "${PRODUCTION_VALIDATION_CONFIG_SHA256}" =~ ^[0-9a-f]{64}$ ]]
+          [[ "${LAUNCH_REHEARSAL_REPORT_SHA256}" =~ ^[0-9a-f]{64}$ ]]
+          [[ "${LAUNCH_REHEARSAL_SIGNATURE_SHA256}" =~ ^[0-9a-f]{64}$ ]]
+          [[ "${EXTERNAL_OIDC_REPORT_SHA256}" =~ ^[0-9a-f]{64}$ ]]
+          [[ "${EXTERNAL_OIDC_SIGNATURE_SHA256}" =~ ^[0-9a-f]{64}$ ]]
+          [[ "${TEARDOWN_RECEIPT_SHA256}" =~ ^[0-9a-f]{64}$ ]]
+          [[ "${TEARDOWN_SIGNATURE_SHA256}" =~ ^[0-9a-f]{64}$ ]]
+          [[ "${PROVIDER_SOURCE_SECRET_ARN}" =~ ^arn:aws:secretsmanager:us-east-1:${AWS_ACCOUNT_ID}:secret:.+ ]]
+          [[ "${DEPLOY_ROLE_ARN}" =~ ^arn:aws:iam::${AWS_ACCOUNT_ID}:role/.+ ]]
+          [[ "${PREREQUISITE_SIGNING_KEY_ARN}" =~ ^arn:aws:kms:us-east-1:${AWS_ACCOUNT_ID}:key/[A-Za-z0-9-]+$ ]]
+          [[ "${TRANSITION_SIGNING_KEY_ARN}" =~ ^arn:aws:kms:us-east-1:${AWS_ACCOUNT_ID}:key/[A-Za-z0-9-]+$ ]]
+          [[ "${EVIDENCE_STORAGE_KEY_ARN}" =~ ^arn:aws:kms:us-east-1:${AWS_ACCOUNT_ID}:key/[A-Za-z0-9-]+$ ]]
+          [[ "${PREREQUISITE_SIGNING_KEY_ARN}" != "${TRANSITION_SIGNING_KEY_ARN}" ]]
+          [[ "${EVIDENCE_STORAGE_KEY_ARN}" != "${PREREQUISITE_SIGNING_KEY_ARN}" ]]
+          [[ "${EVIDENCE_STORAGE_KEY_ARN}" != "${TRANSITION_SIGNING_KEY_ARN}" ]]
+          [[ "${EVIDENCE_BUCKET}" =~ ^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$ ]]
+          [[ "${EVIDENCE_PREFIX}" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$ ]]
+          [[ "${EVIDENCE_PREFIX}" != */ ]]
+          [[ "${EVIDENCE_PREFIX}" != *//* ]]
+          [[ "${AGENTCORE_IMAGE}" == "${VERIFIED_AGENTCORE}" ]]
+          [[ "${CONTROL_PLANE_IMAGE}" == "${VERIFIED_CONTROL_PLANE}" ]]
+          if [[ "${OPERATION}" == "rollback" ]]; then
+            [[ "${ROLLBACK_SECRET_VERSION}" =~ ^[A-Za-z0-9._-]{1,256}$ ]]
+          else
+            [[ "${OPERATION}" == "deploy" ]]
+            [[ -z "${ROLLBACK_SECRET_VERSION}" ]]
+          fi
+
+      - name: Require successful CI for deployment tooling
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          response="${RUNNER_TEMP}/deployment-tooling-ci.json"
+          gh api \
+            --method GET \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs" \
+            -f "head_sha=${GITHUB_SHA}" \
+            -f status=completed \
+            -f per_page=100 >"${response}"
+          jq -e --arg commit "${GITHUB_SHA}" '
+            [.workflow_runs[] | select(
+              .head_sha == $commit
+              and .status == "completed"
+              and .conclusion == "success"
+            )] | length > 0
+          ' "${response}" >/dev/null
+
+      - name: Install locked deployment dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --no-deps "uv==${UV_VERSION}"
+          uv sync --frozen --extra agentcore --extra dev --extra security
+          uv run --frozen --no-sync playwright install chromium
+          npm ci \
+            --prefix src/gateway/deployment/infra \
+            --ignore-scripts \
+            --no-audit \
+            --no-fund
+          src/gateway/deployment/infra/node_modules/.bin/cdk --version
+
+      - name: Install checksum-verified security tools
+        run: |
+          scripts/ci/install_security_tools.sh "${RUNNER_TEMP}/bin"
+          printf '%s\n' "${RUNNER_TEMP}/bin" >>"${GITHUB_PATH}"
+
+      - name: Synthesize and validate production infrastructure
+        env:
+          CDK_CI_OUTDIR: ${{ runner.temp }}/cdk.out
+          JSII_RUNTIME_PACKAGE_CACHE_ROOT: ${{ runner.temp }}/jsii-cache
+        run: |
+          set -euo pipefail
+          scripts/ci/synthesize_and_verify_cdk.sh "${CDK_CI_OUTDIR}"
+          for template in \
+            "${CDK_CI_OUTDIR}/identity/AxonLLMIdentityStack.template.json" \
+            "${CDK_CI_OUTDIR}/agentcore/AxonLLMAgentCoreStack.template.json" \
+            "${CDK_CI_OUTDIR}/control-plane/AxonLLMControlPlaneStack.template.json"
+          do
+            trivy config \
+              --disable-telemetry \
+              --skip-check-update \
+              --ignorefile .github/trivyignore.yaml \
+              --severity HIGH,CRITICAL \
+              --exit-code 1 \
+              "${template}"
+          done
+
+      - name: Download signed release evidence
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: axonllm-release-evidence-${{ inputs.release_commit_sha }}
+          path: ${{ runner.temp }}/release-evidence
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.evidence_run_id }}
+
+      - name: Configure production AWS credentials through OIDC
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with:
+          aws-region: us-east-1
+          role-to-assume: ${{ secrets.AXON_AGENTCORE_DEPLOY_ROLE_ARN }}
+          role-session-name: AxonLLMAgentCoreProduction
+          role-duration-seconds: 10800
+          allowed-account-ids: ${{ vars.AXON_AWS_ACCOUNT_ID }}
+          mask-aws-account-id: true
+
+      - name: Require reviewed templates before transactional promotion
+        run: |
+          set -euo pipefail
+          for specification in \
+            "AxonLLMIdentityStack:${RUNNER_TEMP}/cdk.out/identity/AxonLLMIdentityStack.template.json" \
+            "AxonLLMAgentCoreStack:${RUNNER_TEMP}/cdk.out/agentcore/AxonLLMAgentCoreStack.template.json" \
+            "AxonLLMControlPlaneStack:${RUNNER_TEMP}/cdk.out/control-plane/AxonLLMControlPlaneStack.template.json"
+          do
+            stack=${specification%%:*}
+            template=${specification#*:}
+            deployed="${RUNNER_TEMP}/${stack}-deployed-template.json"
+            error="${RUNNER_TEMP}/${stack}-get-template.err"
+            if ! aws cloudformation get-template \
+              --stack-name "${stack}" \
+              --template-stage Original \
+              --query TemplateBody \
+              --output json >"${deployed}" 2>"${error}"
+            then
+              if grep -Fq "does not exist" "${error}"; then
+                continue
+              fi
+              cat "${error}" >&2
+              exit 1
+            fi
+            uv run --frozen --no-sync python - \
+              "${template}" "${deployed}" "${stack}" <<'PY'
+          import json
+          from pathlib import Path
+          import sys
+
+          expected = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          deployed = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
+          if isinstance(deployed, str):
+              deployed = json.loads(deployed)
+          if deployed != expected:
+              raise SystemExit(
+                  f"{sys.argv[3]} does not use the reviewed template; "
+                  "complete a separate approved infrastructure migration first"
+              )
+          PY
+          done
+
+      - name: Reverify release evidence under deployment authority
+        id: release
+        env:
+          AGENTCORE_IMAGE: ${{ inputs.agentcore_image_reference }}
+          CONTROL_PLANE_IMAGE: ${{ inputs.control_plane_image_reference }}
+          EVIDENCE_DIR: ${{ runner.temp }}/release-evidence
+          RELEASE_COMMIT: ${{ inputs.release_commit_sha }}
+          RELEASE_RUN_ID: ${{ inputs.evidence_run_id }}
+        run: |
+          set -euo pipefail
+          agentcore_digest=${AGENTCORE_IMAGE##*@}
+          fargate_digest=${CONTROL_PLANE_IMAGE##*@}
+          output="${RUNNER_TEMP}/release-output"
+          uv run --frozen --no-sync python scripts/release/release_evidence.py verify \
+            --directory "${EVIDENCE_DIR}" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --commit "${RELEASE_COMMIT}" \
+            --image-digest "${agentcore_digest}" \
+            --signing-account-id "${{ vars.AXON_AWS_ACCOUNT_ID }}" \
+            --require-release-tag \
+            --target agentcore \
+            --run-id "${RELEASE_RUN_ID}" \
+            --github-output "${output}"
+          uv run --frozen --no-sync python scripts/release/release_evidence.py verify \
+            --directory "${EVIDENCE_DIR}" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --commit "${RELEASE_COMMIT}" \
+            --image-digest "${fargate_digest}" \
+            --signing-account-id "${{ vars.AXON_AWS_ACCOUNT_ID }}" \
+            --require-release-tag \
+            --target fargate \
+            --run-id "${RELEASE_RUN_ID}"
+          signing_key_arn=$(sed -n 's/^signing_key_arn=//p' "${output}")
+          [[ "${signing_key_arn}" =~ ^arn:aws:kms:us-east-1:${{ vars.AXON_AWS_ACCOUNT_ID }}:key/[A-Za-z0-9-]+$ ]]
+          uv run --frozen --no-sync python scripts/release/kms_evidence.py verify \
+            --artifact "${EVIDENCE_DIR}/provenance.intoto.json" \
+            --bundle "${EVIDENCE_DIR}/provenance-kms-signature.json" \
+            --key-arn "${signing_key_arn}"
+          uv run --frozen --no-sync python scripts/release/kms_evidence.py verify \
+            --artifact "${EVIDENCE_DIR}/release-manifest.json" \
+            --bundle "${EVIDENCE_DIR}/manifest-kms-signature.json" \
+            --key-arn "${signing_key_arn}"
+
+      - name: Verify immutable transition journal storage
+        env:
+          EVIDENCE_BUCKET: ${{ vars.AXON_DEPLOYMENT_EVIDENCE_BUCKET }}
+          EVIDENCE_PREFIX: ${{ vars.AXON_DEPLOYMENT_EVIDENCE_PREFIX }}
+        run: |
+          set -euo pipefail
+          versioning=$(aws s3api get-bucket-versioning --bucket "${EVIDENCE_BUCKET}")
+          jq -e '.Status == "Enabled"' <<<"${versioning}" >/dev/null
+          locking=$(aws s3api get-object-lock-configuration --bucket "${EVIDENCE_BUCKET}")
+          jq -e '.ObjectLockConfiguration.ObjectLockEnabled == "Enabled"' \
+            <<<"${locking}" >/dev/null
+          encryption=$(aws s3api get-bucket-encryption --bucket "${EVIDENCE_BUCKET}")
+          jq -e '
+            [.ServerSideEncryptionConfiguration.Rules[]
+             | select(
+                 .ApplyServerSideEncryptionByDefault.SSEAlgorithm == "aws:kms"
+                 or .ApplyServerSideEncryptionByDefault.SSEAlgorithm == "aws:kms:dsse"
+               )
+             | select(.BucketKeyEnabled == true)]
+            | length > 0
+          ' <<<"${encryption}" >/dev/null
+          policy="${RUNNER_TEMP}/deployment-evidence-bucket-policy.json"
+          aws s3api get-bucket-policy \
+            --bucket "${EVIDENCE_BUCKET}" \
+            --query Policy \
+            --output text >"${policy}"
+          uv run --frozen --no-sync python - \
+            "${policy}" "${EVIDENCE_BUCKET}" "${EVIDENCE_PREFIX}" <<'PY'
+          import json
+          from pathlib import Path
+          import sys
+
+          document = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          statements = document.get("Statement") if isinstance(document, dict) else None
+          if isinstance(statements, dict):
+              statements = [statements]
+          target = f"arn:aws:s3:::{sys.argv[2]}/{sys.argv[3]}/"
+
+          def values(value):
+              return value if isinstance(value, list) else [value]
+
+          def covers(resource):
+              return (
+                  isinstance(resource, str)
+                  and resource.endswith("*")
+                  and target.startswith(resource[:-1])
+              )
+
+          protected = any(
+              isinstance(statement, dict)
+              and statement.get("Effect") == "Deny"
+              and "Condition" not in statement
+              and "NotPrincipal" not in statement
+              and (
+                  statement.get("Principal") == "*"
+                  or (
+                      isinstance(statement.get("Principal"), dict)
+                      and "*" in values(statement["Principal"].get("AWS"))
+                  )
+              )
+              and any(
+                  action in {"*", "s3:*", "s3:DeleteObject"}
+                  for action in values(statement.get("Action"))
+              )
+              and any(covers(resource) for resource in values(statement.get("Resource")))
+              for statement in (statements or [])
+          )
+          if not protected:
+              raise SystemExit(
+                  "evidence bucket policy must unconditionally deny "
+                  "s3:DeleteObject for every principal under the journal prefix"
+              )
+          PY
+          base_key="${EVIDENCE_PREFIX}/${GITHUB_REPOSITORY}/${GITHUB_RUN_ID}/${GITHUB_RUN_ATTEMPT}"
+          retain_until=$(date -u -d "+2555 days" "+%Y-%m-%dT%H:%M:%SZ")
+          printf 'EVIDENCE_BASE_KEY=%s\n' "${base_key}" >>"${GITHUB_ENV}"
+          printf 'EVIDENCE_RETAIN_UNTIL=%s\n' "${retain_until}" >>"${GITHUB_ENV}"
+
+      - name: Fetch and verify qualification teardown evidence
+        env:
+          AWS_ACCOUNT_ID: ${{ vars.AXON_AWS_ACCOUNT_ID }}
+          EVIDENCE_STORAGE_KEY_ARN: ${{ vars.AXON_DEPLOYMENT_EVIDENCE_KMS_KEY_ARN }}
+          RELEASE_COMMIT: ${{ inputs.release_commit_sha }}
+          SIGNING_KEY_ARN: ${{ vars.AXON_AGENTCORE_PREREQUISITE_SIGNING_KEY_ARN }}
+          TEARDOWN_RECEIPT_SHA256: ${{ inputs.qualification_teardown_receipt_sha256 }}
+          TEARDOWN_RECEIPT_URI: ${{ inputs.qualification_teardown_receipt_s3_uri }}
+          TEARDOWN_RECEIPT_VERSION_ID: ${{ inputs.qualification_teardown_receipt_s3_version_id }}
+          TEARDOWN_SIGNATURE_SHA256: ${{ inputs.qualification_teardown_signature_sha256 }}
+          TEARDOWN_SIGNATURE_URI: ${{ inputs.qualification_teardown_signature_s3_uri }}
+          TEARDOWN_SIGNATURE_VERSION_ID: ${{ inputs.qualification_teardown_signature_s3_version_id }}
+        run: |
+          set -euo pipefail
+          receipt="${RUNNER_TEMP}/qualification-teardown-receipt.json"
+          signature="${RUNNER_TEMP}/qualification-teardown-signature.json"
+          receipt_metadata="${RUNNER_TEMP}/qualification-teardown-receipt-metadata.json"
+          signature_metadata="${RUNNER_TEMP}/qualification-teardown-signature-metadata.json"
+          receipt_location="${TEARDOWN_RECEIPT_URI#s3://}"
+          signature_location="${TEARDOWN_SIGNATURE_URI#s3://}"
+          aws s3api head-object \
+            --bucket "${receipt_location%%/*}" \
+            --key "${receipt_location#*/}" \
+            --version-id "${TEARDOWN_RECEIPT_VERSION_ID}" \
+            --expected-bucket-owner "${AWS_ACCOUNT_ID}" \
+            --checksum-mode ENABLED \
+            --output json \
+            --no-cli-pager >"${receipt_metadata}"
+          aws s3api head-object \
+            --bucket "${signature_location%%/*}" \
+            --key "${signature_location#*/}" \
+            --version-id "${TEARDOWN_SIGNATURE_VERSION_ID}" \
+            --expected-bucket-owner "${AWS_ACCOUNT_ID}" \
+            --checksum-mode ENABLED \
+            --output json \
+            --no-cli-pager >"${signature_metadata}"
+          aws s3api get-object \
+            --bucket "${receipt_location%%/*}" \
+            --key "${receipt_location#*/}" \
+            --version-id "${TEARDOWN_RECEIPT_VERSION_ID}" \
+            --expected-bucket-owner "${AWS_ACCOUNT_ID}" \
+            --checksum-mode ENABLED \
+            "${receipt}" >/dev/null
+          aws s3api get-object \
+            --bucket "${signature_location%%/*}" \
+            --key "${signature_location#*/}" \
+            --version-id "${TEARDOWN_SIGNATURE_VERSION_ID}" \
+            --expected-bucket-owner "${AWS_ACCOUNT_ID}" \
+            --checksum-mode ENABLED \
+            "${signature}" >/dev/null
+          uv run --frozen --no-sync python - \
+            "${receipt_metadata}" \
+            "${receipt}" \
+            "${TEARDOWN_RECEIPT_VERSION_ID}" \
+            "${signature_metadata}" \
+            "${signature}" \
+            "${TEARDOWN_SIGNATURE_VERSION_ID}" \
+            "${EVIDENCE_STORAGE_KEY_ARN}" <<'PY'
+          import base64
+          from datetime import datetime, timezone
+          import hashlib
+          import json
+          from pathlib import Path
+          import sys
+
+          storage_key = sys.argv[7]
+          now = datetime.now(timezone.utc)
+          for metadata_name, artifact_name, version_id in (
+              (sys.argv[1], sys.argv[2], sys.argv[3]),
+              (sys.argv[4], sys.argv[5], sys.argv[6]),
+          ):
+              metadata = json.loads(
+                  Path(metadata_name).read_text(encoding="utf-8")
+              )
+              artifact = Path(artifact_name).read_bytes()
+              retained = datetime.fromisoformat(
+                  str(metadata.get("ObjectLockRetainUntilDate", "")).replace(
+                      "Z", "+00:00"
+                  )
+              )
+              checksum = base64.b64encode(
+                  hashlib.sha256(artifact).digest()
+              ).decode("ascii")
+              if not (
+                  metadata.get("VersionId") == version_id
+                  and metadata.get("ServerSideEncryption") == "aws:kms"
+                  and metadata.get("SSEKMSKeyId") == storage_key
+                  and metadata.get("BucketKeyEnabled") is True
+                  and metadata.get("ObjectLockMode") == "COMPLIANCE"
+                  and retained.astimezone(timezone.utc) > now
+                  and metadata.get("ContentType") == "application/json"
+                  and metadata.get("ContentLength") == len(artifact)
+                  and metadata.get("ChecksumSHA256") == checksum
+              ):
+                  raise SystemExit(
+                      "qualification teardown evidence is not the expected "
+                      "COMPLIANCE-locked object version"
+                  )
+          PY
+          printf '%s  %s\n' "${TEARDOWN_RECEIPT_SHA256}" "${receipt}" \
+            | sha256sum --check --status
+          printf '%s  %s\n' "${TEARDOWN_SIGNATURE_SHA256}" "${signature}" \
+            | sha256sum --check --status
+          chmod 0400 "${receipt}" "${signature}"
+          uv run --frozen --no-sync python scripts/release/kms_evidence.py verify \
+            --artifact "${receipt}" \
+            --bundle "${signature}" \
+            --key-arn "${SIGNING_KEY_ARN}"
+          uv run --frozen --no-sync python \
+            scripts/release/deployment_evidence.py \
+            verify-qualification-teardown \
+            --receipt "${receipt}" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --release-commit "${RELEASE_COMMIT}" \
+            --run-id "${GITHUB_RUN_ID}" \
+            --run-attempt "${GITHUB_RUN_ATTEMPT}" \
+            --account-id "${AWS_ACCOUNT_ID}" \
+            --region "${AWS_REGION}"
+
+      - name: Fetch and verify external OIDC certification evidence
+        env:
+          AGENTCORE_IMAGE: ${{ inputs.agentcore_image_reference }}
+          EVIDENCE_STORAGE_KEY_ARN: ${{ vars.AXON_DEPLOYMENT_EVIDENCE_KMS_KEY_ARN }}
+          EXTERNAL_OIDC_REPORT_SHA256: ${{ inputs.external_oidc_report_sha256 }}
+          EXTERNAL_OIDC_REPORT_URI: ${{ inputs.external_oidc_report_s3_uri }}
+          EXTERNAL_OIDC_REPORT_VERSION_ID: ${{ inputs.external_oidc_report_s3_version_id }}
+          EXTERNAL_OIDC_SIGNATURE_SHA256: ${{ inputs.external_oidc_signature_sha256 }}
+          EXTERNAL_OIDC_SIGNATURE_URI: ${{ inputs.external_oidc_signature_s3_uri }}
+          EXTERNAL_OIDC_SIGNATURE_VERSION_ID: ${{ inputs.external_oidc_signature_s3_version_id }}
+          RELEASE_COMMIT: ${{ inputs.release_commit_sha }}
+          SIGNING_KEY_ARN: ${{ vars.AXON_AGENTCORE_PREREQUISITE_SIGNING_KEY_ARN }}
+        run: |
+          set -euo pipefail
+          report="${RUNNER_TEMP}/external-oidc-agentcore-report.json"
+          signature="${RUNNER_TEMP}/external-oidc-agentcore-kms-signature.json"
+          report_metadata="${RUNNER_TEMP}/external-oidc-report-metadata.json"
+          signature_metadata="${RUNNER_TEMP}/external-oidc-signature-metadata.json"
+          report_location="${EXTERNAL_OIDC_REPORT_URI#s3://}"
+          signature_location="${EXTERNAL_OIDC_SIGNATURE_URI#s3://}"
+          aws s3api get-object \
+            --bucket "${report_location%%/*}" \
+            --key "${report_location#*/}" \
+            --version-id "${EXTERNAL_OIDC_REPORT_VERSION_ID}" \
+            --checksum-mode ENABLED \
+            "${report}" >"${report_metadata}"
+          aws s3api get-object \
+            --bucket "${signature_location%%/*}" \
+            --key "${signature_location#*/}" \
+            --version-id "${EXTERNAL_OIDC_SIGNATURE_VERSION_ID}" \
+            --checksum-mode ENABLED \
+            "${signature}" >"${signature_metadata}"
+          uv run --frozen --no-sync python - \
+            "${report_metadata}" \
+            "${report}" \
+            "${EXTERNAL_OIDC_REPORT_VERSION_ID}" \
+            "${signature_metadata}" \
+            "${signature}" \
+            "${EXTERNAL_OIDC_SIGNATURE_VERSION_ID}" \
+            "${EVIDENCE_STORAGE_KEY_ARN}" <<'PY'
+          import base64
+          from datetime import datetime, timezone
+          import hashlib
+          import json
+          from pathlib import Path
+          import sys
+
+          storage_key = sys.argv[7]
+          now = datetime.now(timezone.utc)
+          for metadata_name, artifact_name, version_id in (
+              (sys.argv[1], sys.argv[2], sys.argv[3]),
+              (sys.argv[4], sys.argv[5], sys.argv[6]),
+          ):
+              metadata = json.loads(
+                  Path(metadata_name).read_text(encoding="utf-8")
+              )
+              artifact = Path(artifact_name).read_bytes()
+              retained = datetime.fromisoformat(
+                  str(metadata.get("ObjectLockRetainUntilDate", "")).replace(
+                      "Z", "+00:00"
+                  )
+              )
+              checksum = base64.b64encode(
+                  hashlib.sha256(artifact).digest()
+              ).decode("ascii")
+              if not (
+                  metadata.get("VersionId") == version_id
+                  and metadata.get("ServerSideEncryption") == "aws:kms"
+                  and metadata.get("SSEKMSKeyId") == storage_key
+                  and metadata.get("BucketKeyEnabled") is True
+                  and metadata.get("ObjectLockMode") == "COMPLIANCE"
+                  and retained.astimezone(timezone.utc) > now
+                  and metadata.get("ContentLength") == len(artifact)
+                  and metadata.get("ChecksumSHA256") == checksum
+              ):
+                  raise SystemExit(
+                      "external OIDC evidence is not the expected "
+                      "COMPLIANCE-locked object version"
+                  )
+          PY
+          printf '%s  %s\n' "${EXTERNAL_OIDC_REPORT_SHA256}" "${report}" \
+            | sha256sum --check --status
+          printf '%s  %s\n' "${EXTERNAL_OIDC_SIGNATURE_SHA256}" "${signature}" \
+            | sha256sum --check --status
+          chmod 0600 "${report}" "${signature}"
+          uv run --frozen --no-sync python scripts/release/kms_evidence.py verify \
+            --artifact "${report}" \
+            --bundle "${signature}" \
+            --key-arn "${SIGNING_KEY_ARN}"
+          uv run --frozen --no-sync python \
+            scripts/operations/certify_external_oidc_agentcore.py \
+            verify-published-report \
+            --repository "${GITHUB_REPOSITORY}" \
+            --release-commit "${RELEASE_COMMIT}" \
+            --agentcore-image "${AGENTCORE_IMAGE}" \
+            --region "${AWS_REGION}" \
+            --report "${report}"
+          producer_commit=$(jq -er '.source.workflowCommit' "${report}")
+          [[ "${producer_commit}" =~ ^[0-9a-f]{40}$ ]]
+          git cat-file -e "${producer_commit}^{commit}"
+          git merge-base --is-ancestor "${RELEASE_COMMIT}" "${producer_commit}"
+          git merge-base --is-ancestor "${producer_commit}" "${GITHUB_SHA}"
+
+      - name: Fetch and bind reviewed launch configuration
+        env:
+          AGENTCORE_IMAGE: ${{ inputs.agentcore_image_reference }}
+          CERTIFICATION_CONFIG_SHA256: ${{ inputs.certification_config_sha256 }}
+          CERTIFICATION_CONFIG_URI: ${{ vars.AXON_AGENTCORE_CERTIFICATION_CONFIG_S3_URI }}
+          CERTIFICATION_CONFIG_VERSION_ID: ${{ inputs.certification_config_s3_version_id }}
+          CONTROL_PLANE_IMAGE: ${{ inputs.control_plane_image_reference }}
+          EVIDENCE_BUCKET: ${{ vars.AXON_DEPLOYMENT_EVIDENCE_BUCKET }}
+          EVIDENCE_PREFIX: ${{ vars.AXON_AGENTCORE_REHEARSAL_EVIDENCE_PREFIX }}
+          EVIDENCE_STORAGE_KEY_ARN: ${{ vars.AXON_DEPLOYMENT_EVIDENCE_KMS_KEY_ARN }}
+          LAUNCH_REHEARSAL_REPORT_SHA256: ${{ inputs.launch_rehearsal_detailed_report_sha256 }}
+          LAUNCH_REHEARSAL_REPORT_URI: ${{ inputs.launch_rehearsal_detailed_report_s3_uri }}
+          LAUNCH_REHEARSAL_REPORT_VERSION_ID: ${{ inputs.launch_rehearsal_detailed_report_s3_version_id }}
+          LAUNCH_REHEARSAL_SIGNATURE_SHA256: ${{ inputs.launch_rehearsal_detailed_signature_sha256 }}
+          LAUNCH_REHEARSAL_SIGNATURE_URI: ${{ inputs.launch_rehearsal_detailed_signature_s3_uri }}
+          LAUNCH_REHEARSAL_SIGNATURE_VERSION_ID: ${{ inputs.launch_rehearsal_detailed_signature_s3_version_id }}
+          PRODUCTION_VALIDATION_CONFIG_SHA256: ${{ inputs.production_validation_config_sha256 }}
+          PRODUCTION_VALIDATION_CONFIG_URI: ${{ vars.AXON_AGENTCORE_PRODUCTION_VALIDATION_CONFIG_S3_URI }}
+          PRODUCTION_VALIDATION_CONFIG_VERSION_ID: ${{ inputs.production_validation_config_s3_version_id }}
+          SETUP_CONFIG_SHA256: ${{ inputs.setup_config_sha256 }}
+          SETUP_CONFIG_URI: ${{ vars.AXON_AGENTCORE_SETUP_CONFIG_S3_URI }}
+          SETUP_CONFIG_VERSION_ID: ${{ inputs.setup_config_s3_version_id }}
+          SIGNING_KEY_ARN: ${{ vars.AXON_AGENTCORE_PREREQUISITE_SIGNING_KEY_ARN }}
+        run: |
+          set -euo pipefail
+          setup="${RUNNER_TEMP}/agentcore-setup.json"
+          certification="${RUNNER_TEMP}/agentcore-certification.json"
+          production_validation="${RUNNER_TEMP}/production-validation.json"
+          launch_rehearsal="${RUNNER_TEMP}/launch-rehearsal-evidence.json"
+          launch_signature="${RUNNER_TEMP}/launch-rehearsal-evidence-kms-signature.json"
+          rehearsal_metadata="${RUNNER_TEMP}/launch-rehearsal-evidence-metadata.json"
+          signature_metadata="${RUNNER_TEMP}/launch-rehearsal-signature-metadata.json"
+          setup_location="${SETUP_CONFIG_URI#s3://}"
+          setup_bucket="${setup_location%%/*}"
+          setup_key="${setup_location#*/}"
+          certification_location="${CERTIFICATION_CONFIG_URI#s3://}"
+          certification_bucket="${certification_location%%/*}"
+          certification_key="${certification_location#*/}"
+          validation_location="${PRODUCTION_VALIDATION_CONFIG_URI#s3://}"
+          validation_bucket="${validation_location%%/*}"
+          validation_key="${validation_location#*/}"
+          rehearsal_location="${LAUNCH_REHEARSAL_REPORT_URI#s3://}"
+          rehearsal_bucket="${rehearsal_location%%/*}"
+          rehearsal_key="${rehearsal_location#*/}"
+          signature_location="${LAUNCH_REHEARSAL_SIGNATURE_URI#s3://}"
+          signature_bucket="${signature_location%%/*}"
+          signature_key="${signature_location#*/}"
+          aws s3api get-object \
+            --bucket "${setup_bucket}" \
+            --key "${setup_key}" \
+            --version-id "${SETUP_CONFIG_VERSION_ID}" \
+            "${setup}" >/dev/null
+          aws s3api get-object \
+            --bucket "${certification_bucket}" \
+            --key "${certification_key}" \
+            --version-id "${CERTIFICATION_CONFIG_VERSION_ID}" \
+            "${certification}" >/dev/null
+          aws s3api get-object \
+            --bucket "${validation_bucket}" \
+            --key "${validation_key}" \
+            --version-id "${PRODUCTION_VALIDATION_CONFIG_VERSION_ID}" \
+            "${production_validation}" >/dev/null
+          aws s3api get-object \
+            --bucket "${rehearsal_bucket}" \
+            --key "${rehearsal_key}" \
+            --version-id "${LAUNCH_REHEARSAL_REPORT_VERSION_ID}" \
+            --checksum-mode ENABLED \
+            "${launch_rehearsal}" >"${rehearsal_metadata}"
+          aws s3api get-object \
+            --bucket "${signature_bucket}" \
+            --key "${signature_key}" \
+            --version-id "${LAUNCH_REHEARSAL_SIGNATURE_VERSION_ID}" \
+            --checksum-mode ENABLED \
+            "${launch_signature}" >"${signature_metadata}"
+          uv run --frozen --no-sync python - \
+            "${rehearsal_metadata}" \
+            "${launch_rehearsal}" \
+            "${LAUNCH_REHEARSAL_REPORT_VERSION_ID}" \
+            "${signature_metadata}" \
+            "${launch_signature}" \
+            "${LAUNCH_REHEARSAL_SIGNATURE_VERSION_ID}" \
+            "${EVIDENCE_STORAGE_KEY_ARN}" <<'PY'
+          import base64
+          from datetime import datetime, timezone
+          import hashlib
+          import json
+          from pathlib import Path
+          import sys
+
+          storage_key = sys.argv[7]
+          now = datetime.now(timezone.utc)
+          for metadata_name, artifact_name, version_id in (
+              (sys.argv[1], sys.argv[2], sys.argv[3]),
+              (sys.argv[4], sys.argv[5], sys.argv[6]),
+          ):
+              metadata = json.loads(
+                  Path(metadata_name).read_text(encoding="utf-8")
+              )
+              artifact = Path(artifact_name).read_bytes()
+              retained = datetime.fromisoformat(
+                  str(metadata.get("ObjectLockRetainUntilDate", "")).replace(
+                      "Z", "+00:00"
+                  )
+              )
+              checksum = base64.b64encode(
+                  hashlib.sha256(artifact).digest()
+              ).decode("ascii")
+              if not (
+                  metadata.get("VersionId") == version_id
+                  and metadata.get("ServerSideEncryption") == "aws:kms"
+                  and metadata.get("SSEKMSKeyId") == storage_key
+                  and metadata.get("ObjectLockMode") == "COMPLIANCE"
+                  and retained.astimezone(timezone.utc) > now
+                  and metadata.get("ContentLength") == len(artifact)
+                  and metadata.get("ChecksumSHA256") == checksum
+              ):
+                  raise SystemExit(
+                      "launch-rehearsal evidence is not the expected "
+                      "COMPLIANCE-locked object version"
+                  )
+          PY
+          printf '%s  %s\n' "${SETUP_CONFIG_SHA256}" "${setup}" \
+            | sha256sum --check --status
+          printf '%s  %s\n' "${CERTIFICATION_CONFIG_SHA256}" "${certification}" \
+            | sha256sum --check --status
+          printf '%s  %s\n' \
+            "${PRODUCTION_VALIDATION_CONFIG_SHA256}" "${production_validation}" \
+            | sha256sum --check --status
+          printf '%s  %s\n' "${LAUNCH_REHEARSAL_REPORT_SHA256}" "${launch_rehearsal}" \
+            | sha256sum --check --status
+          printf '%s  %s\n' "${LAUNCH_REHEARSAL_SIGNATURE_SHA256}" "${launch_signature}" \
+            | sha256sum --check --status
+          chmod 0600 \
+            "${setup}" \
+            "${certification}" \
+            "${production_validation}" \
+            "${launch_rehearsal}" \
+            "${launch_signature}"
+          uv run --frozen --no-sync python scripts/release/kms_evidence.py verify \
+            --artifact "${launch_rehearsal}" \
+            --bundle "${launch_signature}" \
+            --key-arn "${SIGNING_KEY_ARN}"
+          uv run --frozen --no-sync python \
+            scripts/release/launch_rehearsal_evidence.py verify-detailed \
+            --release-commit "${{ inputs.release_commit_sha }}" \
+            --region "${AWS_REGION}" \
+            --agentcore-image "${AGENTCORE_IMAGE}" \
+            --control-plane-image "${CONTROL_PLANE_IMAGE}" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --evidence-bucket "${EVIDENCE_BUCKET}" \
+            --evidence-prefix "${EVIDENCE_PREFIX}" \
+            --report "${launch_rehearsal}"
+          producer_commit=$(jq -er '.producer.workflowCommit' "${launch_rehearsal}")
+          [[ "${producer_commit}" =~ ^[0-9a-f]{40}$ ]]
+          git cat-file -e "${producer_commit}^{commit}"
+          git merge-base --is-ancestor \
+            "${{ inputs.release_commit_sha }}" "${producer_commit}"
+          git merge-base --is-ancestor "${producer_commit}" "${GITHUB_SHA}"
+          uv run --frozen --no-sync python - \
+            "${setup}" \
+            "${certification}" \
+            "${AGENTCORE_IMAGE}" \
+            "${CONTROL_PLANE_IMAGE}" <<'PY'
+          import json
+          from datetime import datetime, timedelta, timezone
+          import os
+          from pathlib import Path
+          import sys
+
+          from scripts.operations.certify_agentcore import (
+              PRODUCTION_ALLOWED_PROVIDERS,
+              PRODUCTION_LAUNCH_PROFILE,
+              PRODUCTION_LAUNCH_PROVIDERS,
+              PRODUCTION_PROVIDER_FEATURES_BY_PROVIDER,
+              parse_config as parse_certification_config,
+          )
+
+          path = Path(sys.argv[1])
+          certification_path = Path(sys.argv[2])
+          value = json.loads(path.read_text(encoding="utf-8"))
+          if not isinstance(value, dict) or value.get("identity_mode") != "managed-cognito":
+              raise SystemExit("production setup must use managed-cognito")
+          runtime = value.get("runtime")
+          control = value.get("control_plane")
+          if not isinstance(runtime, dict) or not isinstance(control, dict):
+              raise SystemExit("production setup lacks runtime or control plane")
+          enabled_providers = runtime.get("enabled_providers")
+          enabled_provider_set = (
+              set(enabled_providers)
+              if isinstance(enabled_providers, list)
+              else set()
+          )
+          if (
+              not isinstance(enabled_providers, list)
+              or len(enabled_providers) != len(set(enabled_providers))
+              or not PRODUCTION_LAUNCH_PROVIDERS.issubset(
+                  enabled_provider_set
+              )
+              or not enabled_provider_set.issubset(
+                  PRODUCTION_ALLOWED_PROVIDERS
+              )
+          ):
+              raise SystemExit(
+                  "production setup must enable the mandatory launch "
+                  "providers and only reviewed optional providers"
+              )
+          certification = parse_certification_config(
+              json.loads(certification_path.read_text(encoding="utf-8"))
+          )
+          if (
+              certification.profile != PRODUCTION_LAUNCH_PROFILE
+              or {case.provider for case in certification.providers}
+              != enabled_provider_set
+              or any(
+                  case.features
+                  != PRODUCTION_PROVIDER_FEATURES_BY_PROVIDER[
+                      case.provider
+                  ]
+                  for case in certification.providers
+              )
+          ):
+              raise SystemExit(
+                  "production certification must cover the exact "
+                  "provider-specific launch feature matrix"
+              )
+          athena = runtime.get("athena_query")
+          if (
+              not isinstance(athena, dict)
+              or not isinstance(athena.get("role_arns"), list)
+              or not athena["role_arns"]
+          ):
+              raise SystemExit("production launch requires Athena query configuration")
+          runtime["verified_image_uri"] = sys.argv[3]
+          control["verified_image_uri"] = sys.argv[4]
+          temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+          temporary.write_text(
+              json.dumps(value, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          temporary.chmod(0o600)
+          temporary.replace(path)
+          PY
+          ./deploy-agentcore.sh \
+            --config "${setup}" \
+            --validate-only
+
+      - name: Reconcile any prior signed production transition
+        env:
+          EVIDENCE_BUCKET: ${{ vars.AXON_DEPLOYMENT_EVIDENCE_BUCKET }}
+          EVIDENCE_PREFIX: ${{ vars.AXON_DEPLOYMENT_EVIDENCE_PREFIX }}
+          SIGNING_KEY_ARN: ${{ vars.AXON_AGENTCORE_TRANSITION_SIGNING_KEY_ARN }}
+        run: |
+          set -euo pipefail
+          journal_root="${EVIDENCE_PREFIX}/${GITHUB_REPOSITORY}"
+          listing="${RUNNER_TEMP}/transition-versions.json"
+          aws s3api list-object-versions \
+            --bucket "${EVIDENCE_BUCKET}" \
+            --prefix "${journal_root}/" >"${listing}"
+          jq -e --arg prefix "${journal_root}/" '
+            ([.DeleteMarkers[]?
+              | select(.Key | startswith($prefix))] | length) == 0
+            and
+            ([.Versions[]?
+              | select(.Key | startswith($prefix))
+              | .Key]
+             | group_by(.)
+             | all(length == 1))
+          ' "${listing}" >/dev/null
+          fetch_state() {
+            local key=$1
+            local path=$2
+            local state
+            state=$(uv run --frozen --no-sync python \
+              scripts/release/deployment_transition.py fetch-s3-object \
+              --bucket "${EVIDENCE_BUCKET}" \
+              --key "${key}" \
+              --output "${path}")
+            case "${state}" in
+              present|absent|indeterminate)
+                printf '%s\n' "${state}"
+                ;;
+              *)
+                echo "Unexpected S3 object state for ${key}: ${state}" >&2
+                exit 1
+                ;;
+            esac
+          }
+          put_locked() {
+            local path=$1
+            local key=$2
+            aws s3api put-object \
+              --bucket "${EVIDENCE_BUCKET}" \
+              --key "${key}" \
+              --body "${path}" \
+              --checksum-algorithm SHA256 \
+              --object-lock-mode COMPLIANCE \
+              --object-lock-retain-until-date "${EVIDENCE_RETAIN_UNTIL}" \
+              --if-none-match '*' >/dev/null
+            local metadata
+            metadata=$(aws s3api head-object \
+              --bucket "${EVIDENCE_BUCKET}" \
+              --key "${key}" \
+              --checksum-mode ENABLED)
+            jq -e \
+              '.ObjectLockMode == "COMPLIANCE"
+               and (.ObjectLockRetainUntilDate | type == "string" and length > 0)
+               and (.ChecksumSHA256 | type == "string" and length > 0)' \
+              <<<"${metadata}" >/dev/null
+          }
+          verify_deployment_commit() {
+            local evidence=$1
+            local bundle=$2
+            local commit_record=$3
+            local commit_bundle=$4
+            local expected_run=$5
+            local expected_attempt=$6
+            local repository deployment_commit release_commit
+            local evidence_run evidence_attempt agentcore_image control_image
+            uv run --frozen --no-sync python scripts/release/kms_evidence.py verify \
+              --artifact "${evidence}" \
+              --bundle "${bundle}" \
+              --key-arn "${SIGNING_KEY_ARN}"
+            uv run --frozen --no-sync python scripts/release/kms_evidence.py verify \
+              --artifact "${commit_record}" \
+              --bundle "${commit_bundle}" \
+              --key-arn "${SIGNING_KEY_ARN}"
+            repository=$(jq -er '.deployment.repository' "${evidence}")
+            deployment_commit=$(jq -er '.deployment.commit' "${evidence}")
+            release_commit=$(jq -er '.release.commit' "${evidence}")
+            evidence_run=$(jq -er '.deployment.runId' "${evidence}")
+            evidence_attempt=$(jq -er '.deployment.runAttempt' "${evidence}")
+            agentcore_image=$(jq -er '.images.agentcore.reference' "${evidence}")
+            control_image=$(jq -er '.images.controlPlane.reference' "${evidence}")
+            [[ "${repository}" == "${GITHUB_REPOSITORY}" ]]
+            [[ "${evidence_run}" == "${expected_run}" ]]
+            [[ "${evidence_attempt}" == "${expected_attempt}" ]]
+            uv run --frozen --no-sync python \
+              scripts/release/deployment_evidence.py verify-commit \
+              --evidence "${evidence}" \
+              --evidence-signature "${bundle}" \
+              --commit-record "${commit_record}" \
+              --repository "${repository}" \
+              --deployment-commit "${deployment_commit}" \
+              --release-commit "${release_commit}" \
+              --run-id "${evidence_run}" \
+              --run-attempt "${evidence_attempt}" \
+              --agentcore-image "${agentcore_image}" \
+              --fargate-image "${control_image}"
+          }
+          listed_key() {
+            jq -e --arg key "$1" '
+              [.Versions[]?
+               | select(.IsLatest == true and .Key == $key)]
+              | length == 1
+            ' "${listing}" >/dev/null
+          }
+          mapfile -t intent_keys < <(
+            jq -r '
+              [.Versions[]?
+               | select(.IsLatest == true)
+               | select(.Key | endswith("/promotion.json"))]
+              | sort_by(.LastModified)
+              | .[].Key
+            ' "${listing}"
+          )
+          if (( ${#intent_keys[@]} == 0 )); then
+            exit 0
+          fi
+          unresolved=()
+          for intent_key in "${intent_keys[@]}"; do
+            base=${intent_key%/promotion.json}
+            terminal_key="${base}/transition-terminal.json"
+            terminal_bundle_key="${base}/transition-terminal-kms-signature.json"
+            if listed_key "${terminal_bundle_key}"; then
+              if ! listed_key "${terminal_key}"; then
+                echo "A terminal signature exists without its terminal at ${base}." >&2
+                exit 1
+              fi
+            else
+              unresolved+=("${intent_key}")
+            fi
+          done
+          if (( ${#unresolved[@]} != 1 )); then
+            if (( ${#unresolved[@]} > 1 )); then
+              echo "Multiple unresolved production transitions require incident review." >&2
+              exit 1
+            fi
+          fi
+
+          latest_index=$(( ${#intent_keys[@]} - 1 ))
+          latest_intent_key=${intent_keys[latest_index]}
+          latest_base=${latest_intent_key%/promotion.json}
+          latest_terminal_bundle_key="${latest_base}/transition-terminal-kms-signature.json"
+          if listed_key "${latest_terminal_bundle_key}"; then
+            latest_relative=${latest_base#"${journal_root}/"}
+            IFS=/ read -r latest_run latest_attempt extra <<<"${latest_relative}"
+            [[ -z "${extra}" ]]
+            [[ "${latest_run}" =~ ^[1-9][0-9]*$ ]]
+            [[ "${latest_attempt}" =~ ^[1-9][0-9]*$ ]]
+            latest_dir="${RUNNER_TEMP}/latest-transition"
+            install -d -m 0700 "${latest_dir}"
+            intent_state=$(fetch_state \
+              "${latest_intent_key}" "${latest_dir}/promotion.json")
+            intent_bundle_state=$(fetch_state \
+              "${latest_base}/promotion-kms-signature.json" \
+              "${latest_dir}/promotion-kms-signature.json")
+            terminal_state=$(fetch_state \
+              "${latest_base}/transition-terminal.json" \
+              "${latest_dir}/transition-terminal.json")
+            terminal_bundle_state=$(fetch_state \
+              "${latest_terminal_bundle_key}" \
+              "${latest_dir}/transition-terminal-kms-signature.json")
+            combined_state="${intent_state}:${intent_bundle_state}:${terminal_state}:${terminal_bundle_state}"
+            if [[ "${combined_state}" != "present:present:present:present" ]]; then
+              echo "Latest completed transition is partial or indeterminate." >&2
+              exit 1
+            fi
+            uv run --frozen --no-sync python scripts/release/kms_evidence.py verify \
+              --artifact "${latest_dir}/promotion.json" \
+              --bundle "${latest_dir}/promotion-kms-signature.json" \
+              --key-arn "${SIGNING_KEY_ARN}"
+            uv run --frozen --no-sync python scripts/release/kms_evidence.py verify \
+              --artifact "${latest_dir}/transition-terminal.json" \
+              --bundle "${latest_dir}/transition-terminal-kms-signature.json" \
+              --key-arn "${SIGNING_KEY_ARN}"
+            uv run --frozen --no-sync python \
+              scripts/release/deployment_transition.py verify \
+              --intent "${latest_dir}/promotion.json" \
+              --record "${latest_dir}/transition-terminal.json" \
+              --repository "${GITHUB_REPOSITORY}" \
+              --run-id "${latest_run}" \
+              --run-attempt "${latest_attempt}"
+            terminal_outcome=$(jq -er \
+              '.outcome' "${latest_dir}/transition-terminal.json")
+            evidence_state=$(fetch_state \
+              "${latest_base}/agentcore-deployment.json" \
+              "${latest_dir}/agentcore-deployment.json")
+            evidence_bundle_state=$(fetch_state \
+              "${latest_base}/agentcore-deployment-kms-signature.json" \
+              "${latest_dir}/agentcore-deployment-kms-signature.json")
+            evidence_commit_state=$(fetch_state \
+              "${latest_base}/agentcore-deployment-commit.json" \
+              "${latest_dir}/agentcore-deployment-commit.json")
+            evidence_commit_bundle_state=$(fetch_state \
+              "${latest_base}/agentcore-deployment-commit-kms-signature.json" \
+              "${latest_dir}/agentcore-deployment-commit-kms-signature.json")
+            if [[ "${terminal_outcome}" == "committed" ]]; then
+              evidence_commit_states="${evidence_state}:${evidence_bundle_state}:${evidence_commit_state}:${evidence_commit_bundle_state}"
+              if [[ "${evidence_commit_states}" != "present:present:present:present" ]]; then
+                echo "Committed terminal lacks verified deployment evidence." >&2
+                exit 1
+              fi
+              verify_deployment_commit \
+                "${latest_dir}/agentcore-deployment.json" \
+                "${latest_dir}/agentcore-deployment-kms-signature.json" \
+                "${latest_dir}/agentcore-deployment-commit.json" \
+                "${latest_dir}/agentcore-deployment-commit-kms-signature.json" \
+                "${latest_run}" "${latest_attempt}"
+            elif [[ "${terminal_outcome}" == "rolled-back" ]]; then
+              if [[ "${evidence_commit_bundle_state}" == "indeterminate" ]]; then
+                echo "Rolled-back terminal has indeterminate deployment commit state." >&2
+                exit 1
+              fi
+              if [[ "${evidence_commit_bundle_state}" == "present" ]]; then
+                echo "Rolled-back terminal conflicts with committed deployment evidence." >&2
+                exit 1
+              fi
+            else
+              echo "Latest terminal has an unsupported outcome." >&2
+              exit 1
+            fi
+          fi
+          if (( ${#unresolved[@]} == 0 )); then
+            exit 0
+          fi
+
+          prior_intent_key=${unresolved[0]}
+          prior_base=${prior_intent_key%/promotion.json}
+          prior_relative=${prior_base#"${journal_root}/"}
+          IFS=/ read -r prior_run prior_attempt extra <<<"${prior_relative}"
+          [[ -z "${extra}" ]]
+          [[ "${prior_run}" =~ ^[1-9][0-9]*$ ]]
+          [[ "${prior_attempt}" =~ ^[1-9][0-9]*$ ]]
+          prior_dir="${RUNNER_TEMP}/transition-scan/${prior_run}-${prior_attempt}"
+          install -d -m 0700 "${prior_dir}"
+          intent_state=$(fetch_state \
+            "${prior_intent_key}" "${prior_dir}/promotion.json")
+          intent_bundle_state=$(fetch_state \
+            "${prior_base}/promotion-kms-signature.json" \
+            "${prior_dir}/promotion-kms-signature.json")
+          if [[ "${intent_state}:${intent_bundle_state}" != "present:present" ]]; then
+            echo "Promotion intent pair is partial or indeterminate." >&2
+            exit 1
+          fi
+          uv run --frozen --no-sync python scripts/release/kms_evidence.py verify \
+            --artifact "${prior_dir}/promotion.json" \
+            --bundle "${prior_dir}/promotion-kms-signature.json" \
+            --key-arn "${SIGNING_KEY_ARN}"
+          uv run --frozen --no-sync python \
+            scripts/release/deployment_transition.py verify-intent \
+            --intent "${prior_dir}/promotion.json" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --run-id "${prior_run}" \
+            --run-attempt "${prior_attempt}"
+
+          evidence_key="${prior_base}/agentcore-deployment.json"
+          evidence_bundle_key="${prior_base}/agentcore-deployment-kms-signature.json"
+          evidence_commit_key="${prior_base}/agentcore-deployment-commit.json"
+          evidence_commit_bundle_key="${prior_base}/agentcore-deployment-commit-kms-signature.json"
+          evidence_commit_bundle_state=$(fetch_state \
+            "${evidence_commit_bundle_key}" \
+            "${prior_dir}/agentcore-deployment-commit-kms-signature.json")
+          case "${evidence_commit_bundle_state}" in
+            present)
+              evidence_state=$(fetch_state \
+                "${evidence_key}" "${prior_dir}/agentcore-deployment.json")
+              evidence_bundle_state=$(fetch_state \
+                "${evidence_bundle_key}" \
+                "${prior_dir}/agentcore-deployment-kms-signature.json")
+              evidence_commit_state=$(fetch_state \
+                "${evidence_commit_key}" \
+                "${prior_dir}/agentcore-deployment-commit.json")
+              evidence_states="${evidence_state}:${evidence_bundle_state}:${evidence_commit_state}"
+              if [[ "${evidence_states}" != "present:present:present" ]]; then
+                echo "Committed deployment evidence is incomplete." >&2
+                exit 1
+              fi
+              verify_deployment_commit \
+                "${prior_dir}/agentcore-deployment.json" \
+                "${prior_dir}/agentcore-deployment-kms-signature.json" \
+                "${prior_dir}/agentcore-deployment-commit.json" \
+                "${prior_dir}/agentcore-deployment-commit-kms-signature.json" \
+                "${prior_run}" "${prior_attempt}"
+              outcome=committed
+              ;;
+            absent)
+              outcome=rolled-back
+              ;;
+            indeterminate)
+              echo "Deployment evidence commit state is indeterminate." >&2
+              exit 1
+              ;;
+            *)
+              echo "Unexpected deployment evidence commit state." >&2
+              exit 1
+              ;;
+          esac
+
+          terminal="${prior_dir}/transition-terminal.json"
+          terminal_bundle="${prior_dir}/transition-terminal-kms-signature.json"
+          terminal_key="${prior_base}/transition-terminal.json"
+          terminal_bundle_key="${prior_base}/transition-terminal-kms-signature.json"
+          terminal_state=$(fetch_state "${terminal_key}" "${terminal}")
+          terminal_bundle_state=$(fetch_state \
+            "${terminal_bundle_key}" "${terminal_bundle}")
+          terminal_needs_persist=false
+          case "${terminal_state}:${terminal_bundle_state}" in
+            present:present)
+              uv run --frozen --no-sync python scripts/release/kms_evidence.py verify \
+                --artifact "${terminal}" \
+                --bundle "${terminal_bundle}" \
+                --key-arn "${SIGNING_KEY_ARN}"
+              uv run --frozen --no-sync python \
+                scripts/release/deployment_transition.py verify \
+                --intent "${prior_dir}/promotion.json" \
+                --record "${terminal}" \
+                --outcome "${outcome}" \
+                --repository "${GITHUB_REPOSITORY}" \
+                --run-id "${prior_run}" \
+                --run-attempt "${prior_attempt}"
+              exit 0
+              ;;
+            present:absent)
+              uv run --frozen --no-sync python \
+                scripts/release/deployment_transition.py verify \
+                --intent "${prior_dir}/promotion.json" \
+                --record "${terminal}" \
+                --outcome "${outcome}" \
+                --repository "${GITHUB_REPOSITORY}" \
+                --run-id "${prior_run}" \
+                --run-attempt "${prior_attempt}"
+              ;;
+            absent:absent)
+              terminal_needs_persist=true
+              ;;
+            *)
+              echo "Terminal pair is partial or indeterminate at ${prior_base}." >&2
+              exit 1
+              ;;
+          esac
+          outputs="${RUNNER_TEMP}/prior-agentcore-transition"
+          install -d -m 0700 "${outputs}"
+          cp "${prior_dir}/promotion.json" "${outputs}/promotion.json"
+          chmod 0600 "${outputs}/promotion.json"
+          if [[ "${outcome}" == "committed" ]]; then
+            ./deploy-agentcore.sh \
+              --config "${RUNNER_TEMP}/agentcore-setup.json" \
+              --outputs-dir "${outputs}" \
+              --yes \
+              --finalize-promotion
+          else
+            ./deploy-agentcore.sh \
+              --config "${RUNNER_TEMP}/agentcore-setup.json" \
+              --outputs-dir "${outputs}" \
+              --yes \
+              --rollback-promotion
+          fi
+          if [[ "${terminal_needs_persist}" == "true" ]]; then
+            uv run --frozen --no-sync python \
+              scripts/release/deployment_transition.py create \
+              --intent "${prior_dir}/promotion.json" \
+              --output "${terminal}" \
+              --outcome "${outcome}" \
+              --repository "${GITHUB_REPOSITORY}" \
+              --run-id "${prior_run}" \
+              --run-attempt "${prior_attempt}"
+            put_locked "${terminal}" "${terminal_key}"
+            terminal_state=$(fetch_state "${terminal_key}" "${terminal}")
+            if [[ "${terminal_state}" != "present" ]]; then
+              echo "Persisted terminal could not be read back exactly." >&2
+              exit 1
+            fi
+          fi
+          uv run --frozen --no-sync python \
+            scripts/release/deployment_transition.py verify \
+            --intent "${prior_dir}/promotion.json" \
+            --record "${terminal}" \
+            --outcome "${outcome}" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --run-id "${prior_run}" \
+            --run-attempt "${prior_attempt}"
+          uv run --frozen --no-sync python scripts/release/kms_evidence.py sign \
+            --artifact "${terminal}" \
+            --bundle "${terminal_bundle}" \
+            --key-arn "${SIGNING_KEY_ARN}"
+          uv run --frozen --no-sync python scripts/release/kms_evidence.py verify \
+            --artifact "${terminal}" \
+            --bundle "${terminal_bundle}" \
+            --key-arn "${SIGNING_KEY_ARN}"
+          put_locked "${terminal_bundle}" "${terminal_bundle_key}"
+          terminal_bundle_state=$(fetch_state \
+            "${terminal_bundle_key}" "${terminal_bundle}")
+          if [[ "${terminal_bundle_state}" != "present" ]]; then
+            echo "Persisted terminal signature could not be read back." >&2
+            exit 1
+          fi
+          uv run --frozen --no-sync python scripts/release/kms_evidence.py verify \
+            --artifact "${terminal}" \
+            --bundle "${terminal_bundle}" \
+            --key-arn "${SIGNING_KEY_ARN}"
+
+      - name: Read provider credentials into an owner-only temporary file
+        if: ${{ inputs.operation == 'deploy' }}
+        env:
+          PROVIDER_SOURCE_SECRET_ARN: ${{ vars.AXON_AGENTCORE_PRODUCTION_PROVIDER_SOURCE_SECRET_ARN }}
+        run: |
+          set -euo pipefail
+          source_json="${RUNNER_TEMP}/provider-source.json"
+          provider_env="${RUNNER_TEMP}/provider.env"
+          umask 077
+          aws secretsmanager get-secret-value \
+            --secret-id "${PROVIDER_SOURCE_SECRET_ARN}" \
+            --query SecretString \
+            --output text >"${source_json}"
+          uv run --frozen --no-sync python - \
+            "${source_json}" "${provider_env}" <<'PY'
+          import json
+          from pathlib import Path
+          import shlex
+          import sys
+
+          from src.gateway.deployment.provider_secret import (
+              ALLOWED_SECRET_FIELDS,
+          )
+
+          source = Path(sys.argv[1])
+          output = Path(sys.argv[2])
+          value = json.loads(source.read_text(encoding="utf-8"))
+          if (
+              not isinstance(value, dict)
+              or not value
+              or not set(value).issubset(ALLOWED_SECRET_FIELDS)
+              or any(not isinstance(item, str) for item in value.values())
+          ):
+              raise SystemExit("provider source secret is malformed")
+          normalized = dict(value)
+          if "GCP_CREDENTIALS_JSON" in normalized:
+              document = json.loads(normalized["GCP_CREDENTIALS_JSON"])
+              normalized["GCP_CREDENTIALS_JSON"] = json.dumps(
+                  document,
+                  separators=(",", ":"),
+                  sort_keys=True,
+              )
+          if any(
+              "\r" in item or "\n" in item
+              for item in normalized.values()
+          ):
+              raise SystemExit("provider source secret contains multiline values")
+          output.write_text(
+              "".join(
+                  f"{name}={shlex.quote(normalized[name])}\n"
+                  for name in sorted(normalized)
+              ),
+              encoding="utf-8",
+          )
+          output.chmod(0o600)
+          PY
+          rm -f "${source_json}"
+
+      - name: Stage identity and AgentCore candidate only
+        id: candidate
+        env:
+          OPERATION: ${{ inputs.operation }}
+          ROLLBACK_SECRET_VERSION: ${{ inputs.rollback_provider_secret_version }}
+        run: |
+          set -euo pipefail
+          arguments=(
+            --config "${RUNNER_TEMP}/agentcore-setup.json"
+            --outputs-dir "${RUNNER_TEMP}/agentcore-deployment"
+            --yes
+          )
+          if [[ "${OPERATION}" == "rollback" ]]; then
+            arguments+=(
+              --rollback-provider-secret-version
+              "${ROLLBACK_SECRET_VERSION}"
+            )
+          else
+            arguments+=(
+              --provider-env-file
+              "${RUNNER_TEMP}/provider.env"
+            )
+          fi
+          ./deploy-agentcore.sh "${arguments[@]}"
+
+      - name: Start deployment backup and validate state protection
+        env:
+          RECOVERY_REPORT: ${{ runner.temp }}/recovery-validation.json
+        run: |
+          set -euo pipefail
+          uv run --frozen --no-sync python \
+            scripts/operations/validate_state_recovery.py \
+            --region "${AWS_REGION}" \
+            --stack-name AxonLLMAgentCoreStack \
+            --require-vault-lock \
+            --start-backup >"${RECOVERY_REPORT}"
+
+      - name: Bind candidate certification configuration
+        run: |
+          set -euo pipefail
+          config="${RUNNER_TEMP}/agentcore-certification.json"
+          runtime_outputs="${RUNNER_TEMP}/agentcore-deployment/agentcore-outputs.json"
+          umask 077
+          runtime_arn=$(jq -er '.AxonLLMAgentCoreStack.RuntimeArn' "${runtime_outputs}")
+          qualifier=$(jq -er '.AxonLLMAgentCoreStack.CandidateRuntimeEndpointName' "${runtime_outputs}")
+          uv run --frozen --no-sync python - \
+            "${config}" "${runtime_arn}" "${qualifier}" <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import sys
+
+          path = Path(sys.argv[1])
+          value = json.loads(path.read_text(encoding="utf-8"))
+          if not isinstance(value, dict):
+              raise SystemExit("certification configuration is malformed")
+          value["runtimeArn"] = sys.argv[2]
+          value["qualifier"] = sys.argv[3]
+          temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+          temporary.write_text(
+              json.dumps(value, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          temporary.chmod(0o600)
+          temporary.replace(path)
+          PY
+
+      - name: Prepare fresh certification identities
+        run: |
+          set -euo pipefail
+          uv run --frozen --no-sync python \
+            scripts/operations/prepare_agentcore_certification.py prepare \
+            --setup-config "${RUNNER_TEMP}/agentcore-setup.json" \
+            --certification-config "${RUNNER_TEMP}/agentcore-certification.json" \
+            --identity-outputs "${RUNNER_TEMP}/agentcore-deployment/identity-outputs.json" \
+            --runtime-outputs "${RUNNER_TEMP}/agentcore-deployment/agentcore-outputs.json" \
+            --credentials-output "${RUNNER_TEMP}/certification-credentials.json" \
+            --state-output "${RUNNER_TEMP}/certification-fixtures.json"
+
+      - name: Run direct AgentCore candidate certification
+        run: |
+          set -euo pipefail
+          config="${RUNNER_TEMP}/agentcore-certification.json"
+          credentials="${RUNNER_TEMP}/certification-credentials.json"
+          report="${RUNNER_TEMP}/agentcore-certification-report.json"
+          uv run --frozen --no-sync python - \
+            "${config}" "${credentials}" "${report}" <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import subprocess
+          import sys
+
+          config_path = Path(sys.argv[1])
+          credential_path = Path(sys.argv[2])
+          report_path = Path(sys.argv[3])
+          config = json.loads(config_path.read_text(encoding="utf-8"))
+          credentials = json.loads(credential_path.read_text(encoding="utf-8"))
+          identities = config.get("identities")
+          if not isinstance(identities, dict) or not isinstance(credentials, dict):
+              raise SystemExit("certification credentials are malformed")
+          required = set(identities.values())
+          if (
+              set(credentials) != required
+              or any(re.fullmatch(r"[A-Z_][A-Z0-9_]{0,127}", name) is None for name in required)
+              or any(not isinstance(value, str) or not value for value in credentials.values())
+          ):
+              raise SystemExit("certification credentials do not match the scenario")
+          environment = os.environ.copy()
+          environment.update(credentials)
+          completed = subprocess.run(
+              [
+                  sys.executable,
+                  "scripts/operations/certify_agentcore.py",
+                  "--config",
+                  str(config_path),
+                  "--output",
+                  str(report_path),
+              ],
+              check=False,
+              env=environment,
+          )
+          raise SystemExit(completed.returncode)
+          PY
+
+      - name: Prepare exact promotion and rollback metadata
+        id: intent
+        env:
+          CHANGE_ID: ${{ inputs.change_id }}
+        run: |
+          set -euo pipefail
+          outputs="${RUNNER_TEMP}/agentcore-deployment/agentcore-outputs.json"
+          transition="${RUNNER_TEMP}/agentcore-transition-context.json"
+          uv run --frozen --no-sync python - \
+            "${transition}" \
+            "${GITHUB_REPOSITORY}" \
+            "${GITHUB_RUN_ID}" \
+            "${GITHUB_RUN_ATTEMPT}" \
+            "${GITHUB_SHA}" \
+            "${CHANGE_ID}" <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import secrets
+          import sys
+
+          path = Path(sys.argv[1])
+          path.write_text(
+              json.dumps(
+                  {
+                      "changeId": sys.argv[6],
+                      "deploymentCommit": sys.argv[5],
+                      "repository": sys.argv[2],
+                      "rollbackNotBefore": (
+                          datetime.now(timezone.utc)
+                          + timedelta(hours=3)
+                      ).isoformat(timespec="seconds"),
+                      "runAttempt": sys.argv[4],
+                      "runId": sys.argv[3],
+                      "transitionId": secrets.token_hex(32),
+                  },
+                  indent=2,
+                  sort_keys=True,
+              )
+              + "\n",
+              encoding="utf-8",
+          )
+          path.chmod(0o600)
+          PY
+          candidate_version=$(jq -er \
+            '.AxonLLMAgentCoreStack.CandidateRuntimeVersion' \
+            "${outputs}")
+          candidate_endpoint_name=$(jq -er \
+            '.AxonLLMAgentCoreStack.CandidateRuntimeEndpointName' \
+            "${outputs}")
+          ./deploy-agentcore.sh \
+            --config "${RUNNER_TEMP}/agentcore-setup.json" \
+            --outputs-dir "${RUNNER_TEMP}/agentcore-deployment" \
+            --yes \
+            --candidate-endpoint-name "${candidate_endpoint_name}" \
+            --transition-context "${transition}" \
+            --prepare-candidate-promotion-version "${candidate_version}"
+
+      - name: Sign and persist promotion intent before changing production
+        id: persist_intent
+        env:
+          EVIDENCE_BUCKET: ${{ vars.AXON_DEPLOYMENT_EVIDENCE_BUCKET }}
+          SIGNING_KEY_ARN: ${{ vars.AXON_AGENTCORE_TRANSITION_SIGNING_KEY_ARN }}
+        run: |
+          set -euo pipefail
+          evidence_dir="${RUNNER_TEMP}/deployment-evidence"
+          install -d -m 0700 "${evidence_dir}"
+          intent="${RUNNER_TEMP}/agentcore-deployment/promotion.json"
+          bundle="${evidence_dir}/promotion-kms-signature.json"
+          recovery_setup="${evidence_dir}/transition-recovery-setup.json"
+          recovery_setup_bundle="${evidence_dir}/transition-recovery-setup-kms-signature.json"
+          recovery_binding="${evidence_dir}/transition-recovery-binding.json"
+          recovery_binding_bundle="${evidence_dir}/transition-recovery-binding-kms-signature.json"
+          install -m 0600 \
+            "${RUNNER_TEMP}/agentcore-setup.json" \
+            "${recovery_setup}"
+          uv run --frozen --no-sync python \
+            scripts/release/deployment_transition.py create-recovery-binding \
+            --intent "${intent}" \
+            --setup-config "${recovery_setup}" \
+            --output "${recovery_binding}" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --run-id "${GITHUB_RUN_ID}" \
+            --run-attempt "${GITHUB_RUN_ATTEMPT}"
+          uv run --frozen --no-sync python scripts/release/kms_evidence.py sign \
+            --artifact "${recovery_setup}" \
+            --bundle "${recovery_setup_bundle}" \
+            --key-arn "${SIGNING_KEY_ARN}"
+          uv run --frozen --no-sync python scripts/release/kms_evidence.py sign \
+            --artifact "${recovery_binding}" \
+            --bundle "${recovery_binding_bundle}" \
+            --key-arn "${SIGNING_KEY_ARN}"
+          uv run --frozen --no-sync python scripts/release/kms_evidence.py verify \
+            --artifact "${recovery_setup}" \
+            --bundle "${recovery_setup_bundle}" \
+            --key-arn "${SIGNING_KEY_ARN}"
+          uv run --frozen --no-sync python scripts/release/kms_evidence.py verify \
+            --artifact "${recovery_binding}" \
+            --bundle "${recovery_binding_bundle}" \
+            --key-arn "${SIGNING_KEY_ARN}"
+          uv run --frozen --no-sync python \
+            scripts/release/deployment_transition.py verify-recovery-binding \
+            --intent "${intent}" \
+            --setup-config "${recovery_setup}" \
+            --binding "${recovery_binding}" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --run-id "${GITHUB_RUN_ID}" \
+            --run-attempt "${GITHUB_RUN_ATTEMPT}"
+          uv run --frozen --no-sync python scripts/release/kms_evidence.py sign \
+            --artifact "${intent}" \
+            --bundle "${bundle}" \
+            --key-arn "${SIGNING_KEY_ARN}"
+          uv run --frozen --no-sync python scripts/release/kms_evidence.py verify \
+            --artifact "${intent}" \
+            --bundle "${bundle}" \
+            --key-arn "${SIGNING_KEY_ARN}"
+          uv run --frozen --no-sync python \
+            scripts/release/deployment_transition.py verify-intent \
+            --intent "${intent}" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --run-id "${GITHUB_RUN_ID}" \
+            --run-attempt "${GITHUB_RUN_ATTEMPT}"
+
+          # Publish the intent last so an interrupted pair is never actionable.
+          for pair in \
+            "${recovery_setup_bundle}:${EVIDENCE_BASE_KEY}/transition-recovery-setup-kms-signature.json" \
+            "${recovery_setup}:${EVIDENCE_BASE_KEY}/transition-recovery-setup.json" \
+            "${recovery_binding_bundle}:${EVIDENCE_BASE_KEY}/transition-recovery-binding-kms-signature.json" \
+            "${recovery_binding}:${EVIDENCE_BASE_KEY}/transition-recovery-binding.json" \
+            "${bundle}:${EVIDENCE_BASE_KEY}/promotion-kms-signature.json" \
+            "${intent}:${EVIDENCE_BASE_KEY}/promotion.json"
+          do
+            path=${pair%%:*}
+            key=${pair#*:}
+            aws s3api put-object \
+              --bucket "${EVIDENCE_BUCKET}" \
+              --key "${key}" \
+              --body "${path}" \
+              --checksum-algorithm SHA256 \
+              --object-lock-mode COMPLIANCE \
+              --object-lock-retain-until-date "${EVIDENCE_RETAIN_UNTIL}" \
+              --if-none-match '*' >/dev/null
+            metadata=$(aws s3api head-object \
+              --bucket "${EVIDENCE_BUCKET}" \
+              --key "${key}" \
+              --checksum-mode ENABLED)
+            jq -e \
+              '.ObjectLockMode == "COMPLIANCE"
+               and (.ObjectLockRetainUntilDate | type == "string" and length > 0)
+               and (.ChecksumSHA256 | type == "string" and length > 0)' \
+              <<<"${metadata}" >/dev/null
+          done
+
+          remote="${RUNNER_TEMP}/persisted-promotion"
+          install -d -m 0700 "${remote}"
+          aws s3api get-object \
+            --bucket "${EVIDENCE_BUCKET}" \
+            --key "${EVIDENCE_BASE_KEY}/promotion.json" \
+            "${remote}/promotion.json" >/dev/null
+          aws s3api get-object \
+            --bucket "${EVIDENCE_BUCKET}" \
+            --key "${EVIDENCE_BASE_KEY}/promotion-kms-signature.json" \
+            "${remote}/promotion-kms-signature.json" >/dev/null
+          uv run --frozen --no-sync python scripts/release/kms_evidence.py verify \
+            --artifact "${remote}/promotion.json" \
+            --bundle "${remote}/promotion-kms-signature.json" \
+            --key-arn "${SIGNING_KEY_ARN}"
+
+      - name: Promote certified AgentCore candidate
+        id: promotion
+        run: |
+          set -euo pipefail
+          outputs="${RUNNER_TEMP}/agentcore-deployment/agentcore-outputs.json"
+          candidate_version=$(jq -er \
+            '.AxonLLMAgentCoreStack.CandidateRuntimeVersion' \
+            "${outputs}")
+          candidate_endpoint_name=$(jq -er \
+            '.AxonLLMAgentCoreStack.CandidateRuntimeEndpointName' \
+            "${outputs}")
+          ./deploy-agentcore.sh \
+            --config "${RUNNER_TEMP}/agentcore-setup.json" \
+            --outputs-dir "${RUNNER_TEMP}/agentcore-deployment" \
+            --yes \
+            --candidate-endpoint-name "${candidate_endpoint_name}" \
+            --transition-context "${RUNNER_TEMP}/agentcore-transition-context.json" \
+            --promote-candidate-version "${candidate_version}"
+          jq -e \
+            --arg endpoint "${candidate_endpoint_name}" \
+            --arg version "${candidate_version}" '
+            .AxonLLMAgentCoreStack as $runtime
+            | $runtime.RuntimeVersion == $version
+            and $runtime.CandidateRuntimeVersion == $version
+            and $runtime.ProductionRuntimeVersion == $version
+            and $runtime.RuntimeEndpointName == "production"
+            and $runtime.CandidateRuntimeEndpointName == $endpoint
+          ' "${outputs}" >/dev/null
+
+      - name: Deploy reviewed Fargate control plane after promotion
+        id: control_plane
+        run: |
+          set -euo pipefail
+          ./deploy-agentcore.sh \
+            --config "${RUNNER_TEMP}/agentcore-setup.json" \
+            --outputs-dir "${RUNNER_TEMP}/agentcore-deployment" \
+            --yes \
+            --deploy-control-plane
+          jq -e \
+            --arg image "${{ inputs.control_plane_image_reference }}" '
+            .AxonLLMControlPlaneStack as $control
+            | $control.ControlPlaneImageUri == $image
+            and $control.QueryPlaneEnabled == "true"
+            and ($control.TaskDefinitionArn | type == "string" and length > 0)
+          ' "${RUNNER_TEMP}/agentcore-deployment/control-plane-outputs.json" \
+            >/dev/null
+
+      - name: Bind production certification to the promoted endpoint
+        run: |
+          set -euo pipefail
+          candidate="${RUNNER_TEMP}/agentcore-certification.json"
+          production="${RUNNER_TEMP}/agentcore-production-certification.json"
+          cp "${candidate}" "${production}"
+          chmod 0600 "${production}"
+          uv run --frozen --no-sync python - "${production}" <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import sys
+
+          path = Path(sys.argv[1])
+          value = json.loads(path.read_text(encoding="utf-8"))
+          if not isinstance(value, dict):
+              raise SystemExit("production certification configuration is malformed")
+          value["qualifier"] = "production"
+          temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+          temporary.write_text(
+              json.dumps(value, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          temporary.chmod(0o600)
+          temporary.replace(path)
+          PY
+
+      - name: Run direct AgentCore production certification
+        run: |
+          set -euo pipefail
+          config="${RUNNER_TEMP}/agentcore-production-certification.json"
+          credentials="${RUNNER_TEMP}/certification-credentials.json"
+          report="${RUNNER_TEMP}/agentcore-production-certification-report.json"
+          uv run --frozen --no-sync python - \
+            "${config}" "${credentials}" "${report}" <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import subprocess
+          import sys
+
+          config_path = Path(sys.argv[1])
+          credential_path = Path(sys.argv[2])
+          report_path = Path(sys.argv[3])
+          config = json.loads(config_path.read_text(encoding="utf-8"))
+          credentials = json.loads(credential_path.read_text(encoding="utf-8"))
+          identities = config.get("identities")
+          if not isinstance(identities, dict) or not isinstance(credentials, dict):
+              raise SystemExit("certification credentials are malformed")
+          required = set(identities.values())
+          if (
+              set(credentials) != required
+              or any(re.fullmatch(r"[A-Z_][A-Z0-9_]{0,127}", name) is None for name in required)
+              or any(not isinstance(value, str) or not value for value in credentials.values())
+          ):
+              raise SystemExit("certification credentials do not match the scenario")
+          environment = os.environ.copy()
+          environment.update(credentials)
+          completed = subprocess.run(
+              [
+                  sys.executable,
+                  "scripts/operations/certify_agentcore.py",
+                  "--config",
+                  str(config_path),
+                  "--output",
+                  str(report_path),
+              ],
+              check=False,
+              env=environment,
+          )
+          raise SystemExit(completed.returncode)
+          PY
+
+      - name: Prepare fresh control-plane canary sessions
+        run: |
+          set -euo pipefail
+          uv run --frozen --no-sync python - \
+            "${AWS_REGION}" \
+            "${RUNNER_TEMP}/agentcore-setup.json" \
+            "${RUNNER_TEMP}/production-validation.json" \
+            "${RUNNER_TEMP}/agentcore-deployment/identity-outputs.json" \
+            "${RUNNER_TEMP}/agentcore-deployment/control-plane-outputs.json" \
+            "${RUNNER_TEMP}/control-plane-canary-credentials.json" \
+            "${RUNNER_TEMP}/control-plane-canary-sessions.json" <<'PY'
+          import json
+          from pathlib import Path
+          import sys
+
+          from scripts.operations.prepare_control_plane_canary_sessions import (
+              prepare_sessions,
+          )
+          from scripts.operations.run_production_validation import parse_config
+          from src.gateway.agentcore_setup import AgentCoreSetupConfig
+
+          region = sys.argv[1]
+          setup = AgentCoreSetupConfig.from_mapping(
+              json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
+          )
+          validation = parse_config(
+              json.loads(Path(sys.argv[3]).read_text(encoding="utf-8"))
+          )
+          if validation.target != "fargate":
+              raise SystemExit("control-plane validation must target Fargate")
+
+          def request_for(category):
+              matches = [
+                  canary.request
+                  for canary in validation.canaries
+                  if canary.category == category
+              ]
+              if not matches:
+                  raise SystemExit(
+                      f"control-plane validation lacks {category}"
+                  )
+              credential_names = {
+                  request.credential_env for request in matches
+              }
+              if len(credential_names) != 1:
+                  raise SystemExit(
+                      f"control-plane validation has ambiguous {category}"
+                  )
+              return matches[0]
+
+          member = request_for("authenticated_read_allowed")
+          viewer = request_for("viewer_mutation_denied")
+          admin = request_for("tenant_admin_mutation_round_trip")
+          cross = request_for("cross_tenant_denied")
+          ungranted = request_for("ungranted_project_denied")
+          expected_path = f"/admin/projects/{setup.tenant.project_id}"
+          if (
+              any(
+                  request.path != expected_path
+                  for request in (
+                      member,
+                      viewer,
+                      admin,
+                      cross,
+                      ungranted,
+                      validation.load.request,
+                  )
+              )
+              or viewer.csrf_token_env is None
+              or admin.csrf_token_env is None
+          ):
+              raise SystemExit(
+                  "control-plane validation is not bound to the setup project"
+              )
+
+          prepare_sessions(
+              region=region,
+              identity_outputs=sys.argv[4],
+              control_plane_outputs=sys.argv[5],
+              tenant_id=setup.tenant.tenant_id,
+              project_id=setup.tenant.project_id,
+              credentials_output=sys.argv[6],
+              state_output=sys.argv[7],
+              member_cookie_env=member.credential_env,
+              viewer_cookie_env=viewer.credential_env,
+              viewer_csrf_env=viewer.csrf_token_env,
+              admin_cookie_env=admin.credential_env,
+              admin_csrf_env=admin.csrf_token_env,
+              cross_tenant_cookie_env=cross.credential_env,
+              ungranted_project_cookie_env=ungranted.credential_env,
+          )
+          PY
+
+      - name: Run production control-plane RBAC and load validation
+        run: |
+          set -euo pipefail
+          secret="${RUNNER_TEMP}/control-plane-canary-credentials.json"
+          uv run --frozen --no-sync python - \
+            "${RUNNER_TEMP}/production-validation.json" \
+            "${RUNNER_TEMP}/agentcore-setup.json" \
+            "${secret}" \
+            "${RUNNER_TEMP}/production-validation-report.json" \
+            "${RUNNER_TEMP}/agentcore-deployment/control-plane-outputs.json" <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import subprocess
+          import sys
+
+          config_path = Path(sys.argv[1])
+          setup_path = Path(sys.argv[2])
+          credential_path = Path(sys.argv[3])
+          report_path = Path(sys.argv[4])
+          control_outputs_path = Path(sys.argv[5])
+          config = json.loads(config_path.read_text(encoding="utf-8"))
+          setup = json.loads(setup_path.read_text(encoding="utf-8"))
+          credentials = json.loads(credential_path.read_text(encoding="utf-8"))
+          control_outputs = json.loads(
+              control_outputs_path.read_text(encoding="utf-8")
+          )
+          canaries = config.get("canaries")
+          load = config.get("load")
+          control = setup.get("control_plane")
+          deployed_control = control_outputs.get(
+              "AxonLLMControlPlaneStack"
+          )
+          if (
+              config.get("target") != "fargate"
+              or not isinstance(canaries, list)
+              or not isinstance(load, dict)
+              or not isinstance(load.get("request"), dict)
+              or not isinstance(control, dict)
+              or not isinstance(deployed_control, dict)
+          ):
+              raise SystemExit("control-plane production validation is malformed")
+          requests = [*canaries, load["request"]]
+          if any(item.get("credentialType") != "alb-session-cookie" for item in requests):
+              raise SystemExit("Fargate validation requires short-lived ALB session cookies")
+          required = {item.get("credentialEnv") for item in requests}
+          required.update(
+              item.get("csrfTokenEnv")
+              for item in requests
+              if item.get("csrfTokenEnv") is not None
+          )
+          if (
+              None in required
+              or any(
+                  not isinstance(name, str)
+                  or re.fullmatch(r"[A-Z_][A-Z0-9_]{0,127}", name) is None
+                  for name in required
+              )
+              or not isinstance(credentials, dict)
+              or set(credentials) != required
+              or any(
+                  not isinstance(value, str)
+                  or not value
+                  or "\r" in value
+                  or "\n" in value
+                  for value in credentials.values()
+              )
+          ):
+              raise SystemExit("control-plane canary credentials do not match the scenario")
+          domain = control.get("domain_name")
+          target_group_arn = deployed_control.get("TargetGroupArn")
+          if (
+              not isinstance(domain, str)
+              or not domain
+              or not isinstance(target_group_arn, str)
+              or not target_group_arn
+          ):
+              raise SystemExit("control-plane domain is missing")
+          environment = os.environ.copy()
+          environment.update(credentials)
+          completed = subprocess.run(
+              [
+                  sys.executable,
+                  "scripts/operations/run_production_validation.py",
+                  "--config",
+                  str(config_path),
+                  "--base-url",
+                  f"https://{domain}",
+                  "--output",
+                  str(report_path),
+                  "--target-group-arn",
+                  target_group_arn,
+                  "--rollback-journal",
+                  str(
+                      Path(os.environ["RUNNER_TEMP"])
+                      / "production-validation-rollback-journal.json"
+                  ),
+              ],
+              check=False,
+              env=environment,
+          )
+          raise SystemExit(completed.returncode)
+          PY
+
+      - name: Reconcile production validation rollback journal
+        if: ${{ always() }}
+        run: |
+          set -euo pipefail
+          uv run --frozen --no-sync python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import subprocess
+          import sys
+
+          root = Path(os.environ["RUNNER_TEMP"])
+          journal = root / "production-validation-rollback-journal.json"
+          credentials_path = (
+              root / "control-plane-canary-credentials.json"
+          )
+          if not journal.exists():
+              raise SystemExit(0)
+          credentials = json.loads(
+              credentials_path.read_text(encoding="utf-8")
+          )
+          if (
+              not isinstance(credentials, dict)
+              or any(
+                  not isinstance(name, str)
+                  or not isinstance(value, str)
+                  or not value
+                  for name, value in credentials.items()
+              )
+          ):
+              raise SystemExit(
+                  "control-plane rollback credentials are malformed"
+              )
+          environment = os.environ.copy()
+          environment.update(credentials)
+          completed = subprocess.run(
+              [
+                  sys.executable,
+                  "scripts/operations/run_production_validation.py",
+                  "--reconcile-rollback-journal",
+                  str(journal),
+              ],
+              check=False,
+              env=environment,
+          )
+          raise SystemExit(completed.returncode)
+          PY
+
+      - name: Remove control-plane canary sessions
+        if: ${{ always() }}
+        run: |
+          set -euo pipefail
+          uv run --frozen --no-sync python \
+            scripts/operations/prepare_control_plane_canary_sessions.py cleanup \
+            --state "${RUNNER_TEMP}/control-plane-canary-sessions.json" \
+            --credentials-output "${RUNNER_TEMP}/control-plane-canary-credentials.json"
+
+      - name: Remove certification fixtures after both certifications
+        if: ${{ always() }}
+        run: |
+          set -euo pipefail
+          uv run --frozen --no-sync python \
+            scripts/operations/prepare_agentcore_certification.py cleanup \
+            --state "${RUNNER_TEMP}/certification-fixtures.json" \
+            --credentials-output "${RUNNER_TEMP}/certification-credentials.json"
+
+      - name: Require stable production recovery posture
+        env:
+          TRANSITION_REPORT: ${{ runner.temp }}/recovery-transition.json
+        run: |
+          set -euo pipefail
+          uv run --frozen --no-sync python \
+            scripts/operations/agentcore_recovery.py \
+            --region "${AWS_REGION}" \
+            --stack-name AxonLLMAgentCoreStack \
+            status >"${TRANSITION_REPORT}"
+          jq -e '
+            .phase == "status"
+            and .mode == "normal"
+            and .endpoint.name == "production"
+            and .endpoint.status == "READY"
+            and .controlPlane.recoveryMode == "normal"
+            and .controlPlane.selectedTable == .selectedTable
+            and .controlPlane.pendingCount == 0
+            and .controlPlane.desiredCount >= 1
+            and .controlPlane.runningCount == .controlPlane.desiredCount
+          ' "${TRANSITION_REPORT}" >/dev/null
+
+      - name: Create and KMS-sign deployment evidence
+        env:
+          AGENTCORE_IMAGE: ${{ inputs.agentcore_image_reference }}
+          CALLED_WORKFLOW_COMMIT: ${{ github.workflow_sha }}
+          CHANGE_ID: ${{ inputs.change_id }}
+          CONTROL_PLANE_IMAGE: ${{ inputs.control_plane_image_reference }}
+          EVIDENCE_BUCKET: ${{ vars.AXON_DEPLOYMENT_EVIDENCE_BUCKET }}
+          EVIDENCE_DIR: ${{ runner.temp }}/deployment-evidence
+          EVIDENCE_PREFIX: ${{ vars.AXON_AGENTCORE_REHEARSAL_EVIDENCE_PREFIX }}
+          EXTERNAL_OIDC_EVIDENCE_PREFIX: ${{ vars.AXON_EXTERNAL_OIDC_EVIDENCE_PREFIX }}
+          EXTERNAL_OIDC_REPORT_SHA256: ${{ inputs.external_oidc_report_sha256 }}
+          EXTERNAL_OIDC_REPORT_URI: ${{ inputs.external_oidc_report_s3_uri }}
+          EXTERNAL_OIDC_REPORT_VERSION_ID: ${{ inputs.external_oidc_report_s3_version_id }}
+          EXTERNAL_OIDC_SIGNATURE_SHA256: ${{ inputs.external_oidc_signature_sha256 }}
+          EXTERNAL_OIDC_SIGNATURE_URI: ${{ inputs.external_oidc_signature_s3_uri }}
+          EXTERNAL_OIDC_SIGNATURE_VERSION_ID: ${{ inputs.external_oidc_signature_s3_version_id }}
+          LAUNCH_REHEARSAL_REPORT_SHA256: ${{ inputs.launch_rehearsal_detailed_report_sha256 }}
+          LAUNCH_REHEARSAL_REPORT_URI: ${{ inputs.launch_rehearsal_detailed_report_s3_uri }}
+          LAUNCH_REHEARSAL_REPORT_VERSION_ID: ${{ inputs.launch_rehearsal_detailed_report_s3_version_id }}
+          LAUNCH_REHEARSAL_SIGNATURE_SHA256: ${{ inputs.launch_rehearsal_detailed_signature_sha256 }}
+          LAUNCH_REHEARSAL_SIGNATURE_URI: ${{ inputs.launch_rehearsal_detailed_signature_s3_uri }}
+          LAUNCH_REHEARSAL_SIGNATURE_VERSION_ID: ${{ inputs.launch_rehearsal_detailed_signature_s3_version_id }}
+          OPERATION: ${{ inputs.operation }}
+          PARENT_WORKFLOW_COMMIT: ${{ github.workflow_sha }}
+          PARENT_WORKFLOW_REF: ${{ github.workflow_ref }}
+          RELEASE_COMMIT: ${{ inputs.release_commit_sha }}
+          RELEASE_EVIDENCE_DIR: ${{ runner.temp }}/release-evidence
+          RELEASE_RUN_ID: ${{ inputs.evidence_run_id }}
+          SIGNING_KEY_ARN: ${{ vars.AXON_AGENTCORE_TRANSITION_SIGNING_KEY_ARN }}
+          TEARDOWN_RECEIPT_SHA256: ${{ inputs.qualification_teardown_receipt_sha256 }}
+          TEARDOWN_RECEIPT_URI: ${{ inputs.qualification_teardown_receipt_s3_uri }}
+          TEARDOWN_RECEIPT_VERSION_ID: ${{ inputs.qualification_teardown_receipt_s3_version_id }}
+          TEARDOWN_SIGNATURE_SHA256: ${{ inputs.qualification_teardown_signature_sha256 }}
+          TEARDOWN_SIGNATURE_URI: ${{ inputs.qualification_teardown_signature_s3_uri }}
+          TEARDOWN_SIGNATURE_VERSION_ID: ${{ inputs.qualification_teardown_signature_s3_version_id }}
+        run: |
+          set -euo pipefail
+          install -d -m 0700 "${EVIDENCE_DIR}"
+          evidence="${EVIDENCE_DIR}/agentcore-deployment.json"
+          bundle="${EVIDENCE_DIR}/agentcore-deployment-kms-signature.json"
+          uv run --frozen --no-sync python \
+            scripts/release/deployment_evidence.py create \
+            --output "${evidence}" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --deployment-commit "${GITHUB_SHA}" \
+            --release-commit "${RELEASE_COMMIT}" \
+            --release-run-id "${RELEASE_RUN_ID}" \
+            --release-manifest "${RELEASE_EVIDENCE_DIR}/release-manifest.json" \
+            --workflow-ref "${GITHUB_REPOSITORY}/.github/workflows/deploy-agentcore-production.yml@refs/heads/main" \
+            --workflow-commit "${CALLED_WORKFLOW_COMMIT}" \
+            --parent-workflow-ref "${PARENT_WORKFLOW_REF}" \
+            --parent-workflow-commit "${PARENT_WORKFLOW_COMMIT}" \
+            --run-id "${GITHUB_RUN_ID}" \
+            --run-attempt "${GITHUB_RUN_ATTEMPT}" \
+            --actor "${GITHUB_ACTOR}" \
+            --actor-id "${GITHUB_ACTOR_ID}" \
+            --triggering-actor "${GITHUB_TRIGGERING_ACTOR}" \
+            --change-id "${CHANGE_ID}" \
+            --operation "${OPERATION}" \
+            --region "${AWS_REGION}" \
+            --agentcore-image "${AGENTCORE_IMAGE}" \
+            --fargate-image "${CONTROL_PLANE_IMAGE}" \
+            --setup-config "${RUNNER_TEMP}/agentcore-setup.json" \
+            --certification-config "${RUNNER_TEMP}/agentcore-certification.json" \
+            --production-validation-config "${RUNNER_TEMP}/production-validation.json" \
+            --identity-outputs "${RUNNER_TEMP}/agentcore-deployment/identity-outputs.json" \
+            --runtime-outputs "${RUNNER_TEMP}/agentcore-deployment/agentcore-outputs.json" \
+            --control-outputs "${RUNNER_TEMP}/agentcore-deployment/control-plane-outputs.json" \
+            --provider-secret "${RUNNER_TEMP}/agentcore-deployment/provider-secret-version.json" \
+            --recovery-report "${RUNNER_TEMP}/recovery-validation.json" \
+            --transition-report "${RUNNER_TEMP}/recovery-transition.json" \
+            --certification-report "${RUNNER_TEMP}/agentcore-certification-report.json" \
+            --production-certification-report "${RUNNER_TEMP}/agentcore-production-certification-report.json" \
+            --production-validation-report "${RUNNER_TEMP}/production-validation-report.json" \
+            --launch-rehearsal-report "${RUNNER_TEMP}/launch-rehearsal-evidence.json" \
+            --launch-rehearsal-signature "${RUNNER_TEMP}/launch-rehearsal-evidence-kms-signature.json" \
+            --evidence-bucket "${EVIDENCE_BUCKET}" \
+            --evidence-prefix "${EVIDENCE_PREFIX}" \
+            --launch-rehearsal-report-uri "${LAUNCH_REHEARSAL_REPORT_URI}" \
+            --launch-rehearsal-report-version-id "${LAUNCH_REHEARSAL_REPORT_VERSION_ID}" \
+            --launch-rehearsal-report-sha256 "${LAUNCH_REHEARSAL_REPORT_SHA256}" \
+            --launch-rehearsal-signature-uri "${LAUNCH_REHEARSAL_SIGNATURE_URI}" \
+            --launch-rehearsal-signature-version-id "${LAUNCH_REHEARSAL_SIGNATURE_VERSION_ID}" \
+            --launch-rehearsal-signature-sha256 "${LAUNCH_REHEARSAL_SIGNATURE_SHA256}" \
+            --external-oidc-certification-report "${RUNNER_TEMP}/external-oidc-agentcore-report.json" \
+            --external-oidc-certification-signature "${RUNNER_TEMP}/external-oidc-agentcore-kms-signature.json" \
+            --external-oidc-evidence-prefix "${EXTERNAL_OIDC_EVIDENCE_PREFIX}" \
+            --external-oidc-report-uri "${EXTERNAL_OIDC_REPORT_URI}" \
+            --external-oidc-report-version-id "${EXTERNAL_OIDC_REPORT_VERSION_ID}" \
+            --external-oidc-report-sha256 "${EXTERNAL_OIDC_REPORT_SHA256}" \
+            --external-oidc-signature-uri "${EXTERNAL_OIDC_SIGNATURE_URI}" \
+            --external-oidc-signature-version-id "${EXTERNAL_OIDC_SIGNATURE_VERSION_ID}" \
+            --external-oidc-signature-sha256 "${EXTERNAL_OIDC_SIGNATURE_SHA256}" \
+            --qualification-teardown-receipt "${RUNNER_TEMP}/qualification-teardown-receipt.json" \
+            --qualification-teardown-signature "${RUNNER_TEMP}/qualification-teardown-signature.json" \
+            --qualification-teardown-receipt-uri "${TEARDOWN_RECEIPT_URI}" \
+            --qualification-teardown-receipt-version-id "${TEARDOWN_RECEIPT_VERSION_ID}" \
+            --qualification-teardown-receipt-sha256 "${TEARDOWN_RECEIPT_SHA256}" \
+            --qualification-teardown-signature-uri "${TEARDOWN_SIGNATURE_URI}" \
+            --qualification-teardown-signature-version-id "${TEARDOWN_SIGNATURE_VERSION_ID}" \
+            --qualification-teardown-signature-sha256 "${TEARDOWN_SIGNATURE_SHA256}"
+          uv run --frozen --no-sync python scripts/release/kms_evidence.py sign \
+            --artifact "${evidence}" \
+            --bundle "${bundle}" \
+            --key-arn "${SIGNING_KEY_ARN}"
+          uv run --frozen --no-sync python scripts/release/kms_evidence.py verify \
+            --artifact "${evidence}" \
+            --bundle "${bundle}" \
+            --key-arn "${SIGNING_KEY_ARN}"
+          uv run --frozen --no-sync python \
+            scripts/release/deployment_evidence.py verify \
+            --evidence "${evidence}" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --deployment-commit "${GITHUB_SHA}" \
+            --release-commit "${RELEASE_COMMIT}" \
+            --run-id "${GITHUB_RUN_ID}" \
+            --run-attempt "${GITHUB_RUN_ATTEMPT}" \
+            --agentcore-image "${AGENTCORE_IMAGE}" \
+            --fargate-image "${CONTROL_PLANE_IMAGE}"
+
+      - name: Persist immutable deployment evidence
+        id: persist_evidence
+        env:
+          EVIDENCE_BUCKET: ${{ vars.AXON_DEPLOYMENT_EVIDENCE_BUCKET }}
+          EVIDENCE_DIR: ${{ runner.temp }}/deployment-evidence
+          SIGNING_KEY_ARN: ${{ vars.AXON_AGENTCORE_TRANSITION_SIGNING_KEY_ARN }}
+        run: |
+          set -euo pipefail
+          fetch_state() {
+            local key=$1
+            local path=$2
+            local state
+            state=$(uv run --frozen --no-sync python \
+              scripts/release/deployment_transition.py fetch-s3-object \
+              --bucket "${EVIDENCE_BUCKET}" \
+              --key "${key}" \
+              --output "${path}")
+            case "${state}" in
+              present|absent|indeterminate)
+                printf '%s\n' "${state}"
+                ;;
+              *)
+                echo "Unexpected S3 object state for ${key}: ${state}" >&2
+                exit 1
+                ;;
+            esac
+          }
+          evidence="${EVIDENCE_DIR}/agentcore-deployment.json"
+          bundle="${EVIDENCE_DIR}/agentcore-deployment-kms-signature.json"
+          commit_record="${EVIDENCE_DIR}/agentcore-deployment-commit.json"
+          commit_bundle="${EVIDENCE_DIR}/agentcore-deployment-commit-kms-signature.json"
+          evidence_key="${EVIDENCE_BASE_KEY}/agentcore-deployment.json"
+          bundle_key="${EVIDENCE_BASE_KEY}/agentcore-deployment-kms-signature.json"
+          commit_key="${EVIDENCE_BASE_KEY}/agentcore-deployment-commit.json"
+          commit_bundle_key="${EVIDENCE_BASE_KEY}/agentcore-deployment-commit-kms-signature.json"
+          repository=$(jq -er '.deployment.repository' "${evidence}")
+          deployment_commit=$(jq -er '.deployment.commit' "${evidence}")
+          release_commit=$(jq -er '.release.commit' "${evidence}")
+          evidence_run=$(jq -er '.deployment.runId' "${evidence}")
+          evidence_attempt=$(jq -er '.deployment.runAttempt' "${evidence}")
+          agentcore_image=$(jq -er '.images.agentcore.reference' "${evidence}")
+          control_image=$(jq -er '.images.controlPlane.reference' "${evidence}")
+          [[ "${repository}" == "${GITHUB_REPOSITORY}" ]]
+          [[ "${evidence_run}" == "${GITHUB_RUN_ID}" ]]
+          [[ "${evidence_attempt}" == "${GITHUB_RUN_ATTEMPT}" ]]
+          uv run --frozen --no-sync python \
+            scripts/release/deployment_evidence.py create-commit \
+            --evidence "${evidence}" \
+            --evidence-signature "${bundle}" \
+            --output "${commit_record}" \
+            --repository "${repository}" \
+            --deployment-commit "${deployment_commit}" \
+            --release-commit "${release_commit}" \
+            --run-id "${evidence_run}" \
+            --run-attempt "${evidence_attempt}" \
+            --agentcore-image "${agentcore_image}" \
+            --fargate-image "${control_image}"
+          uv run --frozen --no-sync python scripts/release/kms_evidence.py sign \
+            --artifact "${commit_record}" \
+            --bundle "${commit_bundle}" \
+            --key-arn "${SIGNING_KEY_ARN}"
+          uv run --frozen --no-sync python scripts/release/kms_evidence.py verify \
+            --artifact "${commit_record}" \
+            --bundle "${commit_bundle}" \
+            --key-arn "${SIGNING_KEY_ARN}"
+
+          # The final signature is the sole atomic completion signal.
+          for pair in \
+            "${evidence}:${evidence_key}" \
+            "${bundle}:${bundle_key}" \
+            "${commit_record}:${commit_key}" \
+            "${commit_bundle}:${commit_bundle_key}"
+          do
+            path=${pair%%:*}
+            key=${pair#*:}
+            aws s3api put-object \
+              --bucket "${EVIDENCE_BUCKET}" \
+              --key "${key}" \
+              --body "${path}" \
+              --checksum-algorithm SHA256 \
+              --object-lock-mode COMPLIANCE \
+              --object-lock-retain-until-date "${EVIDENCE_RETAIN_UNTIL}" \
+              --if-none-match '*' >/dev/null
+            metadata=$(aws s3api head-object \
+              --bucket "${EVIDENCE_BUCKET}" \
+              --key "${key}" \
+              --checksum-mode ENABLED)
+            jq -e \
+              '.ObjectLockMode == "COMPLIANCE"
+               and (.ObjectLockRetainUntilDate | type == "string" and length > 0)
+               and (.ChecksumSHA256 | type == "string" and length > 0)' \
+              <<<"${metadata}" >/dev/null
+          done
+
+          remote="${RUNNER_TEMP}/remote-deployment-evidence"
+          install -d -m 0700 "${remote}"
+          evidence_state=$(fetch_state \
+            "${evidence_key}" "${remote}/agentcore-deployment.json")
+          bundle_state=$(fetch_state \
+            "${bundle_key}" \
+            "${remote}/agentcore-deployment-kms-signature.json")
+          commit_state=$(fetch_state \
+            "${commit_key}" \
+            "${remote}/agentcore-deployment-commit.json")
+          commit_bundle_state=$(fetch_state \
+            "${commit_bundle_key}" \
+            "${remote}/agentcore-deployment-commit-kms-signature.json")
+          persisted_states="${evidence_state}:${bundle_state}:${commit_state}:${commit_bundle_state}"
+          if [[ "${persisted_states}" != "present:present:present:present" ]]; then
+            echo "Persisted deployment evidence commit is incomplete or indeterminate." >&2
+            exit 1
+          fi
+          cmp --silent "${evidence}" "${remote}/agentcore-deployment.json"
+          cmp --silent \
+            "${bundle}" \
+            "${remote}/agentcore-deployment-kms-signature.json"
+          cmp --silent \
+            "${commit_record}" \
+            "${remote}/agentcore-deployment-commit.json"
+          cmp --silent \
+            "${commit_bundle}" \
+            "${remote}/agentcore-deployment-commit-kms-signature.json"
+          uv run --frozen --no-sync python scripts/release/kms_evidence.py verify \
+            --artifact "${remote}/agentcore-deployment.json" \
+            --bundle "${remote}/agentcore-deployment-kms-signature.json" \
+            --key-arn "${SIGNING_KEY_ARN}"
+          uv run --frozen --no-sync python scripts/release/kms_evidence.py verify \
+            --artifact "${remote}/agentcore-deployment-commit.json" \
+            --bundle "${remote}/agentcore-deployment-commit-kms-signature.json" \
+            --key-arn "${SIGNING_KEY_ARN}"
+          uv run --frozen --no-sync python \
+            scripts/release/deployment_evidence.py verify-commit \
+            --evidence "${remote}/agentcore-deployment.json" \
+            --evidence-signature "${remote}/agentcore-deployment-kms-signature.json" \
+            --commit-record "${remote}/agentcore-deployment-commit.json" \
+            --repository "${repository}" \
+            --deployment-commit "${deployment_commit}" \
+            --release-commit "${release_commit}" \
+            --run-id "${evidence_run}" \
+            --run-attempt "${evidence_attempt}" \
+            --agentcore-image "${agentcore_image}" \
+            --fargate-image "${control_image}"
+          printf 'verified=true\n' >>"${GITHUB_OUTPUT}"
+
+      - name: Summarize immutable deployment evidence
+        if: ${{ always() && steps.persist_evidence.outputs.verified == 'true' }}
+        continue-on-error: true
+        env:
+          EVIDENCE_DIR: ${{ runner.temp }}/deployment-evidence
+        run: |
+          set -euo pipefail
+          evidence="${EVIDENCE_DIR}/agentcore-deployment.json"
+          evidence_key="${EVIDENCE_BASE_KEY}/agentcore-deployment.json"
+          {
+            printf '### Production deployment evidence\n\n'
+            printf -- '- S3 key: \x60%s\x60\n' "${evidence_key}"
+            printf -- '- Retained in COMPLIANCE mode until: \x60%s\x60\n' \
+              "${EVIDENCE_RETAIN_UNTIL}"
+            printf -- '- Runtime version: \x60%s\x60\n' \
+              "$(jq -er '.stacks.runtime.RuntimeVersion' "${evidence}")"
+            printf -- '- Endpoint: \x60%s\x60\n' \
+              "$(jq -er '.stacks.runtime.RuntimeEndpointName' "${evidence}")"
+            printf -- '- Certification: \x60%s\x60\n' \
+              "$(jq -er '.certification.overallStatus' "${evidence}")"
+          } >>"${GITHUB_STEP_SUMMARY}"
+
+      - name: Finalize production promotion
+        id: finalization
+        run: |
+          set -euo pipefail
+          outputs="${RUNNER_TEMP}/agentcore-deployment"
+          intent="${outputs}/promotion.json"
+          ./deploy-agentcore.sh \
+            --config "${RUNNER_TEMP}/agentcore-setup.json" \
+            --outputs-dir "${outputs}" \
+            --yes \
+            --finalize-promotion
+          candidate_version=$(jq -er \
+            '.productionRuntimeVersion' \
+            "${intent}")
+          jq -e \
+            --arg version "${candidate_version}" '
+            .AxonLLMAgentCoreStack as $runtime
+            | $runtime.RuntimeVersion == $version
+            and $runtime.ProductionRuntimeVersion == $version
+            and $runtime.RuntimeEndpointName == "production"
+            and ($runtime | has("CandidateRuntimeEndpointArn") | not)
+            and ($runtime | has("CandidateRuntimeEndpointName") | not)
+            and ($runtime | has("CandidateRuntimeVersion") | not)
+          ' "${outputs}/agentcore-outputs.json" >/dev/null
+
+      - name: Append signed committed transition record
+        id: committed
+        env:
+          EVIDENCE_BUCKET: ${{ vars.AXON_DEPLOYMENT_EVIDENCE_BUCKET }}
+          EVIDENCE_DIR: ${{ runner.temp }}/deployment-evidence
+          SIGNING_KEY_ARN: ${{ vars.AXON_AGENTCORE_TRANSITION_SIGNING_KEY_ARN }}
+        run: |
+          set -euo pipefail
+          fetch_state() {
+            local key=$1
+            local path=$2
+            local state
+            state=$(uv run --frozen --no-sync python \
+              scripts/release/deployment_transition.py fetch-s3-object \
+              --bucket "${EVIDENCE_BUCKET}" \
+              --key "${key}" \
+              --output "${path}")
+            case "${state}" in
+              present|absent|indeterminate)
+                printf '%s\n' "${state}"
+                ;;
+              *)
+                echo "Unexpected S3 object state for ${key}: ${state}" >&2
+                exit 1
+                ;;
+            esac
+          }
+          put_locked() {
+            local path=$1
+            local key=$2
+            aws s3api put-object \
+              --bucket "${EVIDENCE_BUCKET}" \
+              --key "${key}" \
+              --body "${path}" \
+              --checksum-algorithm SHA256 \
+              --object-lock-mode COMPLIANCE \
+              --object-lock-retain-until-date "${EVIDENCE_RETAIN_UNTIL}" \
+              --if-none-match '*' >/dev/null
+            local metadata
+            metadata=$(aws s3api head-object \
+              --bucket "${EVIDENCE_BUCKET}" \
+              --key "${key}" \
+              --checksum-mode ENABLED)
+            jq -e \
+              '.ObjectLockMode == "COMPLIANCE"
+               and (.ObjectLockRetainUntilDate | type == "string" and length > 0)
+               and (.ChecksumSHA256 | type == "string" and length > 0)' \
+              <<<"${metadata}" >/dev/null
+          }
+          intent="${RUNNER_TEMP}/agentcore-deployment/promotion.json"
+          terminal="${EVIDENCE_DIR}/transition-terminal.json"
+          bundle="${EVIDENCE_DIR}/transition-terminal-kms-signature.json"
+          terminal_key="${EVIDENCE_BASE_KEY}/transition-terminal.json"
+          bundle_key="${EVIDENCE_BASE_KEY}/transition-terminal-kms-signature.json"
+          terminal_state=$(fetch_state "${terminal_key}" "${terminal}")
+          bundle_state=$(fetch_state "${bundle_key}" "${bundle}")
+          case "${terminal_state}:${bundle_state}" in
+            present:present)
+              uv run --frozen --no-sync python scripts/release/kms_evidence.py verify \
+                --artifact "${terminal}" \
+                --bundle "${bundle}" \
+                --key-arn "${SIGNING_KEY_ARN}"
+              uv run --frozen --no-sync python \
+                scripts/release/deployment_transition.py verify \
+                --intent "${intent}" \
+                --record "${terminal}" \
+                --outcome committed \
+                --repository "${GITHUB_REPOSITORY}" \
+                --run-id "${GITHUB_RUN_ID}" \
+                --run-attempt "${GITHUB_RUN_ATTEMPT}"
+              exit 0
+              ;;
+            present:absent)
+              ;;
+            absent:absent)
+              uv run --frozen --no-sync python \
+                scripts/release/deployment_transition.py create \
+                --intent "${intent}" \
+                --output "${terminal}" \
+                --outcome committed \
+                --repository "${GITHUB_REPOSITORY}" \
+                --run-id "${GITHUB_RUN_ID}" \
+                --run-attempt "${GITHUB_RUN_ATTEMPT}"
+              put_locked "${terminal}" "${terminal_key}"
+              terminal_state=$(fetch_state "${terminal_key}" "${terminal}")
+              if [[ "${terminal_state}" != "present" ]]; then
+                echo "Persisted terminal could not be read back exactly." >&2
+                exit 1
+              fi
+              ;;
+            *)
+              echo "Terminal pair is partial or indeterminate." >&2
+              exit 1
+              ;;
+          esac
+          uv run --frozen --no-sync python \
+            scripts/release/deployment_transition.py verify \
+            --intent "${intent}" \
+            --record "${terminal}" \
+            --outcome committed \
+            --repository "${GITHUB_REPOSITORY}" \
+            --run-id "${GITHUB_RUN_ID}" \
+            --run-attempt "${GITHUB_RUN_ATTEMPT}"
+          uv run --frozen --no-sync python scripts/release/kms_evidence.py sign \
+            --artifact "${terminal}" \
+            --bundle "${bundle}" \
+            --key-arn "${SIGNING_KEY_ARN}"
+          uv run --frozen --no-sync python scripts/release/kms_evidence.py verify \
+            --artifact "${terminal}" \
+            --bundle "${bundle}" \
+            --key-arn "${SIGNING_KEY_ARN}"
+          put_locked "${bundle}" "${bundle_key}"
+          bundle_state=$(fetch_state "${bundle_key}" "${bundle}")
+          if [[ "${bundle_state}" != "present" ]]; then
+            echo "Persisted terminal signature could not be read back." >&2
+            exit 1
+          fi
+          uv run --frozen --no-sync python scripts/release/kms_evidence.py verify \
+            --artifact "${terminal}" \
+            --bundle "${bundle}" \
+            --key-arn "${SIGNING_KEY_ARN}"
+
+      - name: Roll back the full persisted transition after failure
+        id: rollback
+        if: ${{ failure() && steps.persist_intent.outcome == 'success' && steps.persist_evidence.outputs.verified != 'true' && steps.committed.outcome != 'success' }}
+        env:
+          EVIDENCE_BUCKET: ${{ vars.AXON_DEPLOYMENT_EVIDENCE_BUCKET }}
+          SIGNING_KEY_ARN: ${{ vars.AXON_AGENTCORE_TRANSITION_SIGNING_KEY_ARN }}
+        run: |
+          set -euo pipefail
+          listing="${RUNNER_TEMP}/current-transition-versions.json"
+          aws s3api list-object-versions \
+            --bucket "${EVIDENCE_BUCKET}" \
+            --prefix "${EVIDENCE_BASE_KEY}/" >"${listing}"
+          jq -e --arg prefix "${EVIDENCE_BASE_KEY}/" '
+            ([.DeleteMarkers[]?
+              | select(.Key | startswith($prefix))] | length) == 0
+            and
+            ([.Versions[]?
+              | select(.Key | startswith($prefix))
+              | .Key]
+             | group_by(.)
+             | all(length == 1))
+          ' "${listing}" >/dev/null
+          fetch_state() {
+            local key=$1
+            local path=$2
+            local state
+            state=$(uv run --frozen --no-sync python \
+              scripts/release/deployment_transition.py fetch-s3-object \
+              --bucket "${EVIDENCE_BUCKET}" \
+              --key "${key}" \
+              --output "${path}")
+            case "${state}" in
+              present|absent|indeterminate)
+                printf '%s\n' "${state}"
+                ;;
+              *)
+                echo "Unexpected S3 object state for ${key}: ${state}" >&2
+                exit 1
+                ;;
+            esac
+          }
+          evidence_key="${EVIDENCE_BASE_KEY}/agentcore-deployment.json"
+          bundle_key="${EVIDENCE_BASE_KEY}/agentcore-deployment-kms-signature.json"
+          commit_key="${EVIDENCE_BASE_KEY}/agentcore-deployment-commit.json"
+          commit_bundle_key="${EVIDENCE_BASE_KEY}/agentcore-deployment-commit-kms-signature.json"
+          remote="${RUNNER_TEMP}/persisted-deployment-after-failure"
+          install -d -m 0700 "${remote}"
+          commit_bundle_state=$(fetch_state \
+            "${commit_bundle_key}" \
+            "${remote}/agentcore-deployment-commit-kms-signature.json")
+          case "${commit_bundle_state}" in
+            present)
+            evidence_state=$(fetch_state \
+              "${evidence_key}" "${remote}/agentcore-deployment.json")
+            bundle_state=$(fetch_state \
+              "${bundle_key}" \
+              "${remote}/agentcore-deployment-kms-signature.json")
+            commit_state=$(fetch_state \
+              "${commit_key}" \
+              "${remote}/agentcore-deployment-commit.json")
+            evidence_states="${evidence_state}:${bundle_state}:${commit_state}"
+            if [[ "${evidence_states}" != "present:present:present" ]]; then
+              echo "Committed deployment evidence is incomplete." >&2
+              exit 1
+            fi
+            uv run --frozen --no-sync python scripts/release/kms_evidence.py verify \
+              --artifact "${remote}/agentcore-deployment.json" \
+              --bundle "${remote}/agentcore-deployment-kms-signature.json" \
+              --key-arn "${SIGNING_KEY_ARN}"
+            uv run --frozen --no-sync python scripts/release/kms_evidence.py verify \
+              --artifact "${remote}/agentcore-deployment-commit.json" \
+              --bundle "${remote}/agentcore-deployment-commit-kms-signature.json" \
+              --key-arn "${SIGNING_KEY_ARN}"
+            repository=$(jq -er '.deployment.repository' "${remote}/agentcore-deployment.json")
+            deployment_commit=$(jq -er '.deployment.commit' "${remote}/agentcore-deployment.json")
+            release_commit=$(jq -er '.release.commit' "${remote}/agentcore-deployment.json")
+            evidence_run=$(jq -er '.deployment.runId' "${remote}/agentcore-deployment.json")
+            evidence_attempt=$(jq -er '.deployment.runAttempt' "${remote}/agentcore-deployment.json")
+            agentcore_image=$(jq -er '.images.agentcore.reference' "${remote}/agentcore-deployment.json")
+            control_image=$(jq -er '.images.controlPlane.reference' "${remote}/agentcore-deployment.json")
+            [[ "${repository}" == "${GITHUB_REPOSITORY}" ]]
+            [[ "${evidence_run}" == "${GITHUB_RUN_ID}" ]]
+            [[ "${evidence_attempt}" == "${GITHUB_RUN_ATTEMPT}" ]]
+            uv run --frozen --no-sync python \
+              scripts/release/deployment_evidence.py verify-commit \
+              --evidence "${remote}/agentcore-deployment.json" \
+              --evidence-signature "${remote}/agentcore-deployment-kms-signature.json" \
+              --commit-record "${remote}/agentcore-deployment-commit.json" \
+              --repository "${repository}" \
+              --deployment-commit "${deployment_commit}" \
+              --release-commit "${release_commit}" \
+              --run-id "${evidence_run}" \
+              --run-attempt "${evidence_attempt}" \
+              --agentcore-image "${agentcore_image}" \
+              --fargate-image "${control_image}"
+            printf 'rolled_back=false\n' >>"${GITHUB_OUTPUT}"
+            echo "Immutable deployment evidence exists; rollback is prohibited." >&2
+            exit 0
+              ;;
+            absent)
+              ./deploy-agentcore.sh \
+                --config "${RUNNER_TEMP}/agentcore-setup.json" \
+                --outputs-dir "${RUNNER_TEMP}/agentcore-deployment" \
+                --yes \
+                --rollback-promotion
+              printf 'rolled_back=true\n' >>"${GITHUB_OUTPUT}"
+              ;;
+            indeterminate)
+              echo "Deployment evidence commit state is indeterminate." >&2
+              exit 1
+              ;;
+            *)
+              echo "Unexpected deployment evidence commit state." >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Append signed rolled-back transition record
+        if: ${{ always() && steps.rollback.outputs.rolled_back == 'true' }}
+        env:
+          EVIDENCE_BUCKET: ${{ vars.AXON_DEPLOYMENT_EVIDENCE_BUCKET }}
+          EVIDENCE_DIR: ${{ runner.temp }}/deployment-evidence
+          SIGNING_KEY_ARN: ${{ vars.AXON_AGENTCORE_TRANSITION_SIGNING_KEY_ARN }}
+        run: |
+          set -euo pipefail
+          install -d -m 0700 "${EVIDENCE_DIR}"
+          fetch_state() {
+            local key=$1
+            local path=$2
+            local state
+            state=$(uv run --frozen --no-sync python \
+              scripts/release/deployment_transition.py fetch-s3-object \
+              --bucket "${EVIDENCE_BUCKET}" \
+              --key "${key}" \
+              --output "${path}")
+            case "${state}" in
+              present|absent|indeterminate)
+                printf '%s\n' "${state}"
+                ;;
+              *)
+                echo "Unexpected S3 object state for ${key}: ${state}" >&2
+                exit 1
+                ;;
+            esac
+          }
+          put_locked() {
+            local path=$1
+            local key=$2
+            aws s3api put-object \
+              --bucket "${EVIDENCE_BUCKET}" \
+              --key "${key}" \
+              --body "${path}" \
+              --checksum-algorithm SHA256 \
+              --object-lock-mode COMPLIANCE \
+              --object-lock-retain-until-date "${EVIDENCE_RETAIN_UNTIL}" \
+              --if-none-match '*' >/dev/null
+            local metadata
+            metadata=$(aws s3api head-object \
+              --bucket "${EVIDENCE_BUCKET}" \
+              --key "${key}" \
+              --checksum-mode ENABLED)
+            jq -e \
+              '.ObjectLockMode == "COMPLIANCE"
+               and (.ObjectLockRetainUntilDate | type == "string" and length > 0)
+               and (.ChecksumSHA256 | type == "string" and length > 0)' \
+              <<<"${metadata}" >/dev/null
+          }
+          intent="${RUNNER_TEMP}/agentcore-deployment/promotion.json"
+          terminal="${EVIDENCE_DIR}/transition-terminal.json"
+          bundle="${EVIDENCE_DIR}/transition-terminal-kms-signature.json"
+          terminal_key="${EVIDENCE_BASE_KEY}/transition-terminal.json"
+          bundle_key="${EVIDENCE_BASE_KEY}/transition-terminal-kms-signature.json"
+          terminal_state=$(fetch_state "${terminal_key}" "${terminal}")
+          bundle_state=$(fetch_state "${bundle_key}" "${bundle}")
+          case "${terminal_state}:${bundle_state}" in
+            present:present)
+              uv run --frozen --no-sync python scripts/release/kms_evidence.py verify \
+                --artifact "${terminal}" \
+                --bundle "${bundle}" \
+                --key-arn "${SIGNING_KEY_ARN}"
+              uv run --frozen --no-sync python \
+                scripts/release/deployment_transition.py verify \
+                --intent "${intent}" \
+                --record "${terminal}" \
+                --outcome rolled-back \
+                --repository "${GITHUB_REPOSITORY}" \
+                --run-id "${GITHUB_RUN_ID}" \
+                --run-attempt "${GITHUB_RUN_ATTEMPT}"
+              exit 0
+              ;;
+            present:absent)
+              ;;
+            absent:absent)
+              uv run --frozen --no-sync python \
+                scripts/release/deployment_transition.py create \
+                --intent "${intent}" \
+                --output "${terminal}" \
+                --outcome rolled-back \
+                --repository "${GITHUB_REPOSITORY}" \
+                --run-id "${GITHUB_RUN_ID}" \
+                --run-attempt "${GITHUB_RUN_ATTEMPT}"
+              put_locked "${terminal}" "${terminal_key}"
+              terminal_state=$(fetch_state "${terminal_key}" "${terminal}")
+              if [[ "${terminal_state}" != "present" ]]; then
+                echo "Persisted terminal could not be read back exactly." >&2
+                exit 1
+              fi
+              ;;
+            *)
+              echo "Terminal pair is partial or indeterminate." >&2
+              exit 1
+              ;;
+          esac
+          uv run --frozen --no-sync python \
+            scripts/release/deployment_transition.py verify \
+            --intent "${intent}" \
+            --record "${terminal}" \
+            --outcome rolled-back \
+            --repository "${GITHUB_REPOSITORY}" \
+            --run-id "${GITHUB_RUN_ID}" \
+            --run-attempt "${GITHUB_RUN_ATTEMPT}"
+          uv run --frozen --no-sync python scripts/release/kms_evidence.py sign \
+            --artifact "${terminal}" \
+            --bundle "${bundle}" \
+            --key-arn "${SIGNING_KEY_ARN}"
+          uv run --frozen --no-sync python scripts/release/kms_evidence.py verify \
+            --artifact "${terminal}" \
+            --bundle "${bundle}" \
+            --key-arn "${SIGNING_KEY_ARN}"
+          put_locked "${bundle}" "${bundle_key}"
+          bundle_state=$(fetch_state "${bundle_key}" "${bundle}")
+          if [[ "${bundle_state}" != "present" ]]; then
+            echo "Persisted terminal signature could not be read back." >&2
+            exit 1
+          fi
+          uv run --frozen --no-sync python scripts/release/kms_evidence.py verify \
+            --artifact "${terminal}" \
+            --bundle "${bundle}" \
+            --key-arn "${SIGNING_KEY_ARN}"
+
+      - name: Discard an uncertified failed candidate
+        if: ${{ always() && steps.candidate.outcome != 'skipped' && steps.persist_intent.outcome != 'success' }}
+        env:
+          EVIDENCE_BUCKET: ${{ vars.AXON_DEPLOYMENT_EVIDENCE_BUCKET }}
+        run: |
+          set -euo pipefail
+          listing="${RUNNER_TEMP}/current-intent-versions.json"
+          aws s3api list-object-versions \
+            --bucket "${EVIDENCE_BUCKET}" \
+            --prefix "${EVIDENCE_BASE_KEY}/" >"${listing}"
+          jq -e --arg prefix "${EVIDENCE_BASE_KEY}/" '
+            ([.DeleteMarkers[]?
+              | select(.Key | startswith($prefix))] | length) == 0
+            and
+            ([.Versions[]?
+              | select(.Key | startswith($prefix))
+              | .Key]
+             | group_by(.)
+             | all(length == 1))
+          ' "${listing}" >/dev/null
+          if jq -e --arg key "${EVIDENCE_BASE_KEY}/promotion.json" '
+            [.Versions[]?
+             | select(.IsLatest == true and .Key == $key)]
+            | length == 1
+          ' "${listing}" >/dev/null; then
+            echo "A promotion intent is visible; candidate discard is prohibited." >&2
+            exit 1
+          fi
+          if ! stack=$(aws cloudformation describe-stacks \
+            --stack-name AxonLLMAgentCoreStack); then
+            exit 0
+          fi
+          candidate_version=$(jq -r '
+            .Stacks[0].Outputs
+            | map({key: .OutputKey, value: .OutputValue})
+            | from_entries
+            | .CandidateRuntimeVersion // empty
+          ' <<<"${stack}")
+          candidate_endpoint_name=$(jq -r '
+            .Stacks[0].Outputs
+            | map({key: .OutputKey, value: .OutputValue})
+            | from_entries
+            | .CandidateRuntimeEndpointName // empty
+          ' <<<"${stack}")
+          if [[ -z "${candidate_version}" || -z "${candidate_endpoint_name}" ]]; then
+            exit 0
+          fi
+          ./deploy-agentcore.sh \
+            --config "${RUNNER_TEMP}/agentcore-setup.json" \
+            --outputs-dir "${RUNNER_TEMP}/agentcore-deployment" \
+            --yes \
+            --candidate-endpoint-name "${candidate_endpoint_name}" \
+            --discard-candidate-version "${candidate_version}"
+
+      - name: Retain signed evidence with the workflow run
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: axonllm-agentcore-deployment-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/agentcore-deployment/promotion.json
+            ${{ runner.temp }}/agentcore-deployment/promotion-finalization.json
+            ${{ runner.temp }}/deployment-evidence/promotion-kms-signature.json
+            ${{ runner.temp }}/deployment-evidence/agentcore-deployment.json
+            ${{ runner.temp }}/deployment-evidence/agentcore-deployment-kms-signature.json
+            ${{ runner.temp }}/deployment-evidence/agentcore-deployment-commit.json
+            ${{ runner.temp }}/deployment-evidence/agentcore-deployment-commit-kms-signature.json
+            ${{ runner.temp }}/deployment-evidence/transition-terminal.json
+            ${{ runner.temp }}/deployment-evidence/transition-terminal-kms-signature.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Remove temporary credentials and configuration
+        if: ${{ always() }}
+        run: |
+          rm -f \
+            "${RUNNER_TEMP}/provider.env" \
+            "${RUNNER_TEMP}/provider-source.json" \
+            "${RUNNER_TEMP}/control-plane-canary-credentials.json" \
+            "${RUNNER_TEMP}/control-plane-canary-secret-envelope.json" \
+            "${RUNNER_TEMP}/certification-credentials.json" \
+            "${RUNNER_TEMP}/certification-fixtures.json" \
+            "${RUNNER_TEMP}/agentcore-transition-context.json" \
+            "${RUNNER_TEMP}/agentcore-setup.json" \
+            "${RUNNER_TEMP}/agentcore-certification.json" \
+            "${RUNNER_TEMP}/agentcore-production-certification.json" \
+            "${RUNNER_TEMP}/production-validation.json" \
+            "${RUNNER_TEMP}/launch-rehearsal-evidence.json" \
+            "${RUNNER_TEMP}/launch-rehearsal-evidence-kms-signature.json" \
+            "${RUNNER_TEMP}/launch-rehearsal-evidence-metadata.json" \
+            "${RUNNER_TEMP}/launch-rehearsal-signature-metadata.json" \
+            "${RUNNER_TEMP}/external-oidc-agentcore-report.json" \
+            "${RUNNER_TEMP}/external-oidc-agentcore-kms-signature.json" \
+            "${RUNNER_TEMP}/external-oidc-report-metadata.json" \
+            "${RUNNER_TEMP}/external-oidc-signature-metadata.json"

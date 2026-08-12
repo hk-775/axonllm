@@ -9,6 +9,7 @@ import math
 import os
 import re
 import subprocess
+import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -22,7 +23,23 @@ IDENTITY_MODES = (MANAGED_COGNITO, EXTERNAL_OIDC)
 DEFAULT_TENANT_CLAIM = "custom:tenant_id"
 DEFAULT_PROJECT_CLAIM = "custom:project_id"
 DEFAULT_SAML_LOGIN_PATH = "/admin/dashboard"
-_REPO_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_AGENTCORE_PROVIDERS = (
+    "bedrock",
+    "bedrock-mantle",
+    "anthropic",
+    "openai",
+    "azure_openai",
+    "vertex_ai",
+    "google_ai",
+    "cohere",
+    "xai",
+    "groq",
+    "together",
+    "fireworks",
+)
+SUPPORTED_AGENTCORE_PROVIDERS = frozenset(
+    (*DEFAULT_AGENTCORE_PROVIDERS, "ai21")
+)
 _IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _DOMAIN_PREFIX_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9-]{1,61}[a-z0-9])$")
 _DOMAIN_NAME_PATTERN = re.compile(
@@ -101,6 +118,26 @@ def _identifier(value: Any, name: str) -> str:
     return value
 
 
+def _provider_names(value: Any, name: str) -> tuple[str, ...]:
+    if not isinstance(value, list) or not value:
+        raise AgentCoreSetupError(f"{name} must be a non-empty array")
+    providers: list[str] = []
+    for index, raw_provider in enumerate(value):
+        provider = _required_string(
+            raw_provider,
+            f"{name}[{index}]",
+            max_length=64,
+        )
+        if provider not in SUPPORTED_AGENTCORE_PROVIDERS:
+            raise AgentCoreSetupError(
+                f"{name}[{index}] is not a supported AgentCore provider"
+            )
+        if provider in providers:
+            raise AgentCoreSetupError(f"{name} must not contain duplicates")
+        providers.append(provider)
+    return tuple(providers)
+
+
 def _claim_name(value: Any, name: str) -> str:
     value = _required_string(value, name, max_length=256)
     if any(character.isspace() for character in value):
@@ -150,8 +187,10 @@ def _https_url(
 
 def _oauth_identifier(value: Any, name: str) -> str:
     value = _required_string(value, name, max_length=512)
-    if any(character.isspace() for character in value):
-        raise AgentCoreSetupError(f"{name} must not contain whitespace")
+    if "," in value or any(character.isspace() for character in value):
+        raise AgentCoreSetupError(
+            f"{name} must not contain commas or whitespace"
+        )
     return value
 
 
@@ -557,6 +596,7 @@ class RuntimeSetup:
     verified_image_uri: str
     bedrock_invoke_resource_arns: tuple[str, ...]
     approved_https_prefix_list_id: str
+    enabled_providers: tuple[str, ...] = DEFAULT_AGENTCORE_PROVIDERS
     athena_query: AthenaQuerySetup | None = None
 
     @classmethod
@@ -569,7 +609,7 @@ class RuntimeSetup:
                 "bedrock_invoke_resource_arns",
                 "approved_https_prefix_list_id",
             },
-            optional={"athena_query"},
+            optional={"athena_query", "enabled_providers"},
         )
         image = _required_string(
             value["verified_image_uri"],
@@ -607,6 +647,13 @@ class RuntimeSetup:
             verified_image_uri=image,
             bedrock_invoke_resource_arns=tuple(arns),
             approved_https_prefix_list_id=prefix_list_id,
+            enabled_providers=_provider_names(
+                value.get(
+                    "enabled_providers",
+                    list(DEFAULT_AGENTCORE_PROVIDERS),
+                ),
+                "runtime.enabled_providers",
+            ),
             athena_query=(
                 AthenaQuerySetup.from_mapping(value["athena_query"])
                 if value.get("athena_query") is not None
@@ -619,6 +666,8 @@ class RuntimeSetup:
 class ManagedCognitoSetup:
     hosted_ui_domain_prefix: str
     oauth_callback_urls: tuple[str, ...]
+    ses_from_email: str | None = None
+    ses_verified_domain: str | None = None
 
     @classmethod
     def from_mapping(cls, raw: Any) -> ManagedCognitoSetup:
@@ -626,6 +675,7 @@ class ManagedCognitoSetup:
             raw,
             "managed_cognito",
             required={"hosted_ui_domain_prefix", "oauth_callback_urls"},
+            optional={"ses_from_email", "ses_verified_domain"},
         )
         prefix = _required_string(
             value["hosted_ui_domain_prefix"],
@@ -652,9 +702,37 @@ class ManagedCognitoSetup:
             if url in urls:
                 raise AgentCoreSetupError("managed Cognito callback URLs must not contain duplicates")
             urls.append(url)
+        ses_from_email = value.get("ses_from_email")
+        ses_verified_domain = value.get("ses_verified_domain")
+        if (ses_from_email is None) != (ses_verified_domain is None):
+            raise AgentCoreSetupError(
+                "managed_cognito.ses_from_email and "
+                "managed_cognito.ses_verified_domain must be supplied together"
+            )
+        if ses_from_email is not None:
+            ses_from_email = _email(
+                ses_from_email,
+                "managed_cognito.ses_from_email",
+            )
+            ses_verified_domain = _required_string(
+                ses_verified_domain,
+                "managed_cognito.ses_verified_domain",
+                max_length=253,
+            )
+            if (
+                _DOMAIN_NAME_PATTERN.fullmatch(ses_verified_domain) is None
+                or ses_from_email.rpartition("@")[2].casefold()
+                != ses_verified_domain
+            ):
+                raise AgentCoreSetupError(
+                    "managed_cognito.ses_verified_domain must be the "
+                    "lowercase domain of managed_cognito.ses_from_email"
+                )
         return cls(
             hosted_ui_domain_prefix=prefix,
             oauth_callback_urls=tuple(urls),
+            ses_from_email=ses_from_email,
+            ses_verified_domain=ses_verified_domain,
         )
 
 
@@ -949,6 +1027,9 @@ class AgentCoreSetupConfig:
             value.pop("managed_cognito")
         else:
             value["managed_cognito"]["oauth_callback_urls"] = list(self.managed_cognito.oauth_callback_urls)
+            if self.managed_cognito.ses_from_email is None:
+                value["managed_cognito"].pop("ses_from_email")
+                value["managed_cognito"].pop("ses_verified_domain")
         if self.control_plane is None:
             value.pop("control_plane")
         elif value["control_plane"]["scim_tenants_secret_arn"] is None:
@@ -956,6 +1037,9 @@ class AgentCoreSetupConfig:
         if self.external_oidc is None:
             value.pop("external_oidc")
         value["runtime"]["bedrock_invoke_resource_arns"] = list(self.runtime.bedrock_invoke_resource_arns)
+        value["runtime"]["enabled_providers"] = list(
+            self.runtime.enabled_providers
+        )
         if self.runtime.athena_query is None:
             value["runtime"].pop("athena_query")
         else:
@@ -1058,6 +1142,11 @@ def config_from_args(args: argparse.Namespace) -> AgentCoreSetupConfig:
             "verified_image_uri": args.verified_image_uri,
             "bedrock_invoke_resource_arns": _comma_values(args.bedrock_invoke_resource_arns),
             "approved_https_prefix_list_id": (args.approved_https_prefix_list_id),
+            "enabled_providers": (
+                list(getattr(args, "enabled_provider", None) or [])
+                or _comma_values(os.environ.get("AXON_ENABLED_PROVIDERS"))
+                or list(DEFAULT_AGENTCORE_PROVIDERS)
+            ),
         },
     }
     athena_role_arns = list(args.athena_query_role_arn or [])
@@ -1101,6 +1190,13 @@ def config_from_args(args: argparse.Namespace) -> AgentCoreSetupConfig:
             "hosted_ui_domain_prefix": args.hosted_ui_domain_prefix,
             "oauth_callback_urls": callback_urls,
         }
+        if args.ses_from_email or args.ses_verified_domain:
+            mapping["managed_cognito"].update(
+                {
+                    "ses_from_email": args.ses_from_email,
+                    "ses_verified_domain": args.ses_verified_domain,
+                }
+            )
         mapping["control_plane"] = {
             "domain_name": args.control_plane_domain_name,
             "verified_image_uri": (
@@ -1174,6 +1270,21 @@ def add_setup_subcommands(subparsers: argparse._SubParsersAction) -> None:
     agentcore.add_argument("--bootstrap-cdk", action="store_true")
     agentcore.add_argument("--show-config", action="store_true")
     agentcore.add_argument(
+        "--provider-env-file",
+        default=_env("AXON_PROVIDER_ENV_FILE"),
+        help=(
+            "Owner-only env file containing allowlisted provider "
+            "credentials"
+        ),
+    )
+    agentcore.add_argument(
+        "--rollback-provider-secret-version",
+        help=(
+            "Roll back the deployed provider secret and force a new runtime "
+            "version"
+        ),
+    )
+    agentcore.add_argument(
         "--identity-mode",
         choices=IDENTITY_MODES,
         default=_env("AXON_IDENTITY_MODE"),
@@ -1220,6 +1331,15 @@ def add_setup_subcommands(subparsers: argparse._SubParsersAction) -> None:
     agentcore.add_argument(
         "--approved-https-prefix-list-id",
         default=_env("AXON_APPROVED_HTTPS_PREFIX_LIST_ID"),
+    )
+    agentcore.add_argument(
+        "--enabled-provider",
+        action="append",
+        choices=tuple(sorted(SUPPORTED_AGENTCORE_PROVIDERS)),
+        help=(
+            "Provider required in the production runtime; repeat for each "
+            "provider. Defaults to every supported provider."
+        ),
     )
     agentcore.add_argument(
         "--athena-query-role-arn",
@@ -1335,6 +1455,16 @@ def add_setup_subcommands(subparsers: argparse._SubParsersAction) -> None:
         help="Repeat for every managed Cognito PKCE callback URL",
     )
     agentcore.add_argument(
+        "--ses-from-email",
+        default=_env("AXON_COGNITO_SES_FROM_EMAIL"),
+        help="Verified SES sender used for Cognito invitations",
+    )
+    agentcore.add_argument(
+        "--ses-verified-domain",
+        default=_env("AXON_COGNITO_SES_VERIFIED_DOMAIN"),
+        help="Verified SES domain matching --ses-from-email",
+    )
+    agentcore.add_argument(
         "--control-plane-domain-name",
         default=_env("AXON_CONTROL_PLANE_DOMAIN_NAME"),
     )
@@ -1423,11 +1553,17 @@ def cmd_setup_agentcore(args: argparse.Namespace) -> None:
             )
         )
     if not args.deploy:
-        print(f"Deploy with: ./deploy-agentcore.sh --config {config_path}")
+        print(
+            "Deploy with: "
+            f"{sys.executable} -m src.gateway.deployment.agentcore_deploy "
+            f"--config {config_path}"
+        )
         return
 
     command = [
-        str(_REPO_ROOT / "deploy-agentcore.sh"),
+        sys.executable,
+        "-m",
+        "src.gateway.deployment.agentcore_deploy",
         "--config",
         str(config_path),
     ]
@@ -1435,10 +1571,23 @@ def cmd_setup_agentcore(args: argparse.Namespace) -> None:
         command.append("--yes")
     if args.bootstrap_cdk:
         command.append("--bootstrap-cdk")
+    if args.provider_env_file:
+        command.extend(
+            ["--provider-env-file", args.provider_env_file]
+        )
+    if args.rollback_provider_secret_version:
+        command.extend(
+            [
+                "--rollback-provider-secret-version",
+                args.rollback_provider_secret_version,
+            ]
+        )
     try:
-        subprocess.run(command, cwd=_REPO_ROOT, check=True)
+        subprocess.run(command, check=True)
     except subprocess.CalledProcessError as exc:
-        raise AgentCoreSetupError(f"AgentCore deployment failed with exit code {exc.returncode}") from exc
+        raise AgentCoreSetupError(
+            f"AgentCore deployment failed with exit code {exc.returncode}"
+        ) from exc
 
 
 def local_demo_environment(
@@ -1467,9 +1616,8 @@ def cmd_setup_local_demo(args: argparse.Namespace) -> None:
         return
     if not args.acknowledge_non_production:
         raise AgentCoreSetupError("--start requires --acknowledge-non-production")
-    os.chdir(_REPO_ROOT)
     os.execvpe(
-        "uv",
-        ["uv", "run", "python", "serve_dashboard.py"],
+        sys.executable,
+        [sys.executable, "-m", "src.gateway.local_server"],
         local_demo_environment(),
     )

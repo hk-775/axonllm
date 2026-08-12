@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from urllib.parse import urlparse
 
 import aiohttp
@@ -27,6 +28,144 @@ from src.gateway.router import ProviderError
 _PROVIDER_HEADERS: dict[str, dict[str, str]] = {
     "anthropic": {"anthropic-version": "2023-06-01"},
 }
+_MAX_PENDING_STREAM_METADATA = 32
+_MAX_PROVIDER_BODY_BYTES = 10 * 1024 * 1024
+_MAX_PROVIDER_STREAM_BYTES = 32 * 1024 * 1024
+_MAX_PROVIDER_STREAM_LINE_BYTES = 1024 * 1024
+_READ_CHUNK_BYTES = 64 * 1024
+
+
+async def _content_chunks(content: object) -> AsyncIterator[bytes]:
+    iterator = getattr(content, "iter_chunked", None)
+    source = iterator(_READ_CHUNK_BYTES) if callable(iterator) else content
+    async for chunk in source:  # type: ignore[union-attr]
+        if not isinstance(chunk, bytes):
+            raise TypeError("provider response chunk is not bytes")
+        yield chunk
+
+
+async def _read_bounded_body(
+    content: object,
+    *,
+    provider: str,
+) -> bytes:
+    body = bytearray()
+    async for chunk in _content_chunks(content):
+        if len(body) + len(chunk) > _MAX_PROVIDER_BODY_BYTES:
+            raise ProviderError(
+                status_code=502,
+                provider=provider,
+                message="Provider response exceeded the maximum size",
+            )
+        body.extend(chunk)
+    return bytes(body)
+
+
+async def _bounded_stream_lines(
+    content: object,
+    *,
+    provider: str,
+) -> AsyncIterator[bytes]:
+    pending = bytearray()
+    total = 0
+    async for chunk in _content_chunks(content):
+        total += len(chunk)
+        if total > _MAX_PROVIDER_STREAM_BYTES:
+            raise ProviderError(
+                status_code=502,
+                provider=provider,
+                message="Provider stream exceeded the maximum size",
+            )
+        pending.extend(chunk)
+        while True:
+            newline = pending.find(b"\n")
+            if newline < 0:
+                if len(pending) > _MAX_PROVIDER_STREAM_LINE_BYTES:
+                    raise ProviderError(
+                        status_code=502,
+                        provider=provider,
+                        message="Provider stream event exceeded the maximum size",
+                    )
+                break
+            if newline > _MAX_PROVIDER_STREAM_LINE_BYTES:
+                raise ProviderError(
+                    status_code=502,
+                    provider=provider,
+                    message="Provider stream event exceeded the maximum size",
+                )
+            line = bytes(pending[:newline])
+            del pending[: newline + 1]
+            yield line.removesuffix(b"\r")
+    if pending:
+        if len(pending) > _MAX_PROVIDER_STREAM_LINE_BYTES:
+            raise ProviderError(
+                status_code=502,
+                provider=provider,
+                message="Provider stream event exceeded the maximum size",
+            )
+        yield bytes(pending).removesuffix(b"\r")
+
+
+def _transport_payload(payload: dict) -> tuple[dict, list[str]]:
+    """Remove adapter-only metadata before serializing a provider request."""
+    warnings = payload.get("_warnings", [])
+    safe_warnings = (
+        [str(warning) for warning in warnings]
+        if isinstance(warnings, list)
+        else []
+    )
+    return (
+        {
+            key: value
+            for key, value in payload.items()
+            if not str(key).startswith("_")
+        },
+        safe_warnings,
+    )
+
+
+def _stream_chunk_has_signal(chunk: StreamChunk) -> bool:
+    """Return whether a chunk proves the provider produced a stream result."""
+    if chunk.is_final:
+        return True
+    for choice in chunk.choices:
+        if choice.get("finish_reason") is not None:
+            return True
+        delta = choice.get("delta")
+        if not isinstance(delta, dict):
+            continue
+        content = delta.get("content")
+        if isinstance(content, str) and content:
+            return True
+        if delta.get("tool_calls") or delta.get("function_call"):
+            return True
+    return False
+
+
+def _stream_chunk_has_metadata(chunk: StreamChunk) -> bool:
+    return bool(
+        chunk.id
+        or chunk.model
+        or chunk.usage is not None
+        or chunk.choices
+    )
+
+
+def _stream_chunk_is_terminal(chunk: StreamChunk) -> bool:
+    return chunk.is_final or any(
+        choice.get("finish_reason") is not None
+        for choice in chunk.choices
+    )
+
+
+def _is_stream_error_event(event: object) -> bool:
+    if not isinstance(event, dict):
+        return False
+    event_type = str(event.get("type") or event.get("event_type") or "")
+    if event_type in {"error", "response.failed"}:
+        return True
+    error = event.get("error")
+    return isinstance(error, (dict, str)) and bool(error)
 
 
 class HttpClient:
@@ -76,7 +215,8 @@ class HttpClient:
         if session is None or session.closed:
             timeout = aiohttp.ClientTimeout(
                 connect=config.connect_timeout,
-                total=config.read_timeout,
+                sock_read=config.read_timeout,
+                total=config.connect_timeout + config.read_timeout,
             )
             connector = aiohttp.TCPConnector(
                 limit=config.max_connections,
@@ -149,7 +289,13 @@ class HttpClient:
         6. On network error – raise ``ProviderError(502)``.
         """
         # 1. Translate request
-        payload = await adapter.translate_request(request, prompt_caching_enabled=prompt_caching_enabled)
+        provider_request = replace(request, model=mapping.model_id)
+        adapter.validate_request(provider_request)
+        translated = await adapter.translate_request(
+            provider_request,
+            prompt_caching_enabled=prompt_caching_enabled,
+        )
+        payload, adapter_warnings = _transport_payload(translated)
 
         # Override model with the actual provider model ID (not the gateway model name)
         if "model" in payload:
@@ -178,22 +324,48 @@ class HttpClient:
                 headers=headers,
                 proxy=config.extra_params.get("proxy_url") or None,
             ) as resp:
-                body_text = await resp.text()
+                raw_body = await _read_bounded_body(
+                    resp.content,
+                    provider=mapping.provider,
+                )
                 if 200 <= resp.status < 300:
-                    body = await resp.json(content_type=None)
-                    return adapter.translate_response(body)
+                    try:
+                        body = json.loads(raw_body)
+                    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                        raise ProviderError(
+                            status_code=502,
+                            provider=mapping.provider,
+                            message="Provider returned malformed JSON",
+                        ) from exc
+                    if not isinstance(body, dict):
+                        raise ProviderError(
+                            status_code=502,
+                            provider=mapping.provider,
+                            message="Provider returned a non-object response",
+                        )
+                    response = adapter.translate_response(body)
+                    response.warnings.extend(adapter_warnings)
+                    return response
                 raise ProviderError(
                     status_code=resp.status,
                     provider=mapping.provider,
-                    message=body_text,
+                    message=(
+                        f"Provider request failed with status {resp.status}"
+                    ),
                 )
         except ProviderError:
             raise
+        except TimeoutError as exc:
+            raise ProviderError(
+                status_code=504,
+                provider=mapping.provider,
+                message="Provider request timed out",
+            ) from exc
         except aiohttp.ClientError as exc:
             raise ProviderError(
                 status_code=502,
                 provider=mapping.provider,
-                message=f"Network error: {exc}",
+                message="Provider network request failed",
             ) from exc
 
     # ------------------------------------------------------------------
@@ -220,7 +392,17 @@ class HttpClient:
         7. On network error during streaming – raise ``ProviderError(502)``.
         """
         # 1. Translate request
-        payload = await adapter.translate_request(request, prompt_caching_enabled=prompt_caching_enabled)
+        stream_request = replace(
+            request,
+            model=mapping.model_id,
+            stream=True,
+        )
+        adapter.validate_request(stream_request)
+        translated = await adapter.translate_request(
+            stream_request,
+            prompt_caching_enabled=prompt_caching_enabled,
+        )
+        payload, _ = _transport_payload(translated)
 
         # Override model with the actual provider model ID
         if "model" in payload:
@@ -248,43 +430,109 @@ class HttpClient:
             ) as resp:
                 # Pre-flight check: non-2xx before streaming begins
                 if not (200 <= resp.status < 300):
-                    body_text = await resp.text()
+                    await _read_bounded_body(
+                        resp.content,
+                        provider=mapping.provider,
+                    )
                     raise ProviderError(
                         status_code=resp.status,
                         provider=mapping.provider,
-                        message=body_text,
+                        message=(
+                            "Provider streaming request failed with status "
+                            f"{resp.status}"
+                        ),
                     )
 
-                # Read SSE lines from the response body
-                async for raw_line in resp.content:
+                # Hold metadata-only events until an output/final event arrives.
+                # This lets a clean HTTP 200 with only pings/headers fail before
+                # the route is treated as having produced its first byte.
+                pending: list[StreamChunk] = []
+                saw_signal = False
+                saw_terminal = False
+                translate_stream_chunk = adapter.stream_translator()
+
+                # Read SSE or newline-delimited JSON events from the response.
+                async for raw_line in _bounded_stream_lines(
+                    resp.content,
+                    provider=mapping.provider,
+                ):
                     line = raw_line.decode("utf-8", errors="replace").rstrip("\n\r")
 
-                    if not line.startswith("data: "):
+                    if line.startswith("data:"):
+                        data = line[len("data:"):].lstrip(" ")
+                    elif line.lstrip().startswith(("{", "[")):
+                        # Cohere v1 streams one JSON object per line rather than
+                        # using the SSE data prefix.
+                        data = line.lstrip()
+                    else:
                         continue
-
-                    data = line[len("data: "):]
 
                     if data == "[DONE]":
-                        continue
+                        saw_terminal = True
+                        break
 
                     try:
                         parsed = json.loads(data)
-                    except json.JSONDecodeError:
-                        continue
+                    except json.JSONDecodeError as exc:
+                        raise ProviderError(
+                            status_code=502,
+                            provider=mapping.provider,
+                            message="Provider returned malformed streaming JSON",
+                        ) from exc
 
-                    chunk = adapter.translate_stream_chunk(parsed)
-                    yield chunk
+                    if _is_stream_error_event(parsed):
+                        raise ProviderError(
+                            status_code=502,
+                            provider=mapping.provider,
+                            message="Provider reported a streaming error",
+                        )
+
+                    chunk = translate_stream_chunk(parsed)
+                    if _stream_chunk_is_terminal(chunk):
+                        saw_terminal = True
+                    if _stream_chunk_has_signal(chunk):
+                        saw_signal = True
+                        for metadata in pending:
+                            yield metadata
+                        pending.clear()
+                        yield chunk
+                    elif _stream_chunk_has_metadata(chunk):
+                        if saw_signal:
+                            yield chunk
+                        elif len(pending) < _MAX_PENDING_STREAM_METADATA:
+                            pending.append(chunk)
 
                     # NB: do NOT stop on chunk.is_final. Providers that report
                     # usage in-stream (OpenAI stream_options.include_usage) send
                     # the usage chunk AFTER the finish_reason chunk, so returning
                     # on is_final would drop it. Read until the SSE [DONE]
                     # sentinel (above) or the connection closes.
+                if not saw_signal:
+                    raise ProviderError(
+                        status_code=502,
+                        provider=mapping.provider,
+                        message="Provider returned an empty streaming response",
+                    )
+                if not saw_terminal:
+                    raise ProviderError(
+                        status_code=502,
+                        provider=mapping.provider,
+                        message=(
+                            "Provider streaming response ended without a "
+                            "terminal event"
+                        ),
+                    )
         except ProviderError:
             raise
+        except TimeoutError as exc:
+            raise ProviderError(
+                status_code=504,
+                provider=mapping.provider,
+                message="Provider streaming request timed out",
+            ) from exc
         except aiohttp.ClientError as exc:
             raise ProviderError(
                 status_code=502,
                 provider=mapping.provider,
-                message=f"Streaming network error: {exc}",
+                message="Provider streaming network request failed",
             ) from exc

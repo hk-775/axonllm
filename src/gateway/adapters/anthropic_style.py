@@ -111,7 +111,7 @@ class AnthropicStyleAdapter(ProviderAdapter):
             payload["top_p"] = request.top_p
         if request.stop is not None:
             payload["stop_sequences"] = request.stop
-        if request.tools:
+        if request.tools and request.tool_choice != "none":
             payload["tools"] = [openai_tool_to_anthropic(t) for t in request.tools]
             tc = openai_tool_choice_to_anthropic(request.tool_choice)
             if tc is not None:
@@ -278,10 +278,9 @@ def openai_tool_choice_to_anthropic(choice: str | dict | None) -> dict | None:
     OpenAI: "auto" | "none" | "required" | {"type":"function","function":{"name":…}}
     Anthropic: {"type":"auto"} | {"type":"any"} | {"type":"tool","name":…}
 
-    "none" has no Anthropic equivalent — it means "tools exist but don't call
-    one", which Anthropic expresses by omitting tools entirely. Returning None
-    leaves tool_choice unset (Anthropic defaults to auto) rather than sending a
-    value the API would reject.
+    "none" has no Anthropic equivalent. Callers omit the tools collection
+    entirely for that mode; returning None also prevents an invalid
+    tool_choice value from being sent.
     """
     if choice is None or choice == "none":
         return None

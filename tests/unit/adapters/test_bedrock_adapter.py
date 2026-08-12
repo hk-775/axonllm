@@ -117,6 +117,26 @@ class TestTranslateRequest:
         assert "system" not in result
 
     @pytest.mark.asyncio
+    async def test_tool_choice_none_omits_tools(self, adapter):
+        req = ChatCompletionRequest(
+            messages=[{"role": "user", "content": "Hi"}],
+            model="anthropic.claude-3-sonnet-20240229-v1:0",
+            tools=[{
+                "type": "function",
+                "function": {
+                    "name": "lookup",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }],
+            tool_choice="none",
+        )
+
+        result = await adapter.translate_request(req)
+
+        assert "tools" not in result
+        assert "tool_choice" not in result
+
+    @pytest.mark.asyncio
     async def test_does_not_mutate_original_messages(self, adapter):
         original = [{"role": "system", "content": "sys"}, {"role": "user", "content": "Hi"}]
         req = ChatCompletionRequest(messages=original, model="anthropic.claude-3-sonnet-20240229-v1:0")

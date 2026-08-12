@@ -193,6 +193,33 @@ class GatewayComponents:
 # ---------------------------------------------------------------------------
 
 
+def _load_runtime_model_registry(
+    config_path: str,
+    persistence: DynamoPersistence,
+) -> ModelRegistry:
+    """Load file defaults, then replace them with durable state when present."""
+    registry = ModelRegistry()
+    registry.load(config_path)
+    if not persistence.enabled:
+        return registry
+
+    # The checked-in file is the bootstrap/fallback registry. Once an
+    # administrator commits a durable document it is authoritative, including
+    # deletions, so replace rather than merge. A failed read is allowed to abort
+    # startup; treating an outage as "no override" could silently reactivate a
+    # route that was removed in production.
+    snapshot = asyncio.run(
+        persistence.load_model_registry_snapshot()
+    )
+    if snapshot is not None:
+        model_config, model_revision = snapshot
+        registry.replace_config(
+            model_config,
+            revision=model_revision,
+        )
+    return registry
+
+
 def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComponents:
     """Construct all gateway components from configuration.
 
@@ -434,8 +461,10 @@ def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComp
     cost_tracker = CostTracker(pricing_config=pricing, persistence=persistence)
     health_tracker = ProviderHealthTracker()
 
-    registry = ModelRegistry()
-    registry.load(app_config.models_config_path)
+    registry = _load_runtime_model_registry(
+        app_config.models_config_path,
+        persistence,
+    )
     all_model_names = list(registry.models.keys())
 
     # --- Demo seed data ---
@@ -752,6 +781,7 @@ def build_starlette_app(app_config: AppConfig | None = None) -> Starlette:
         user_configs=comp.user_configs,
         cost_tracker=comp.cost_tracker,
         persistence=comp.persistence,
+        model_registry=comp.registry,
         policy_resolver=comp.policy_resolver,
         region_config=comp.region_router.config,
         health_monitor=comp.health_monitor,

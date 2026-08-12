@@ -1,10 +1,9 @@
 """Fleet-wide convergence for request-governing configuration.
 
-``self.projects`` and ``self._user_configs`` are hydrated once at startup and
-then only ever mutated by the task that served the write. Behind the shipped
-``desired_count=2`` (``infra/stack.py``, auto-scaling to 10) that makes every
-config write half-applied, and unlike a stale count it is not cosmetic — both
-dicts gate requests:
+Projects, user restrictions, and the model registry are hydrated at startup.
+Without refresh, a write is visible only to the task that served it. Behind the
+shipped multi-replica topology that makes request enforcement and routing depend
+on which task receives the next request:
 
 * ``GatewayAgent`` resolves ``self._projects[project_id]`` to find the project's
   budget limit, allowed-models list, guardrails, and rate limit. An unresolved
@@ -12,21 +11,21 @@ dicts gate requests:
 * ``self._user_configs[user_id]["allowed_models"]`` is the per-user model
   restriction, and ``cost_tracker._user_budgets`` is armed from the same row.
 
-So a restriction an operator sets is enforced by the task that took the PUT and
-ignored by the others, chosen per request by the load balancer:
+So a restriction or model mapping an operator sets is enforced by the task that
+took the PUT and ignored by the others, chosen per request by the load balancer.
 
     in the store: {'alice': {'allowed_models': ['claude-haiku']}}
     task A, alice asks for claude-opus: 403 model_not_allowed
     task B, alice asks for claude-opus: 200 routed
 
-Same mechanism as ``CedarPolicyService.refresh_if_stale`` and the same shape of
-fix: writes bump a shared version counter, and each instance re-reads the config
-scans only when that number moves. The cost in steady state is one small
-``GetItem`` per instance per window, not two table scans per request.
+Projects and users use the same version-counter mechanism as
+``CedarPolicyService.refresh_if_stale``. The model registry and region topology
+are each one revisioned document, so they are polled directly on the same
+bounded interval. Steady-state work is a few small ``GetItem`` calls per
+instance per window, not table scans per request.
 
-Region topology is already stored as one revisioned document, so it is polled
-directly on the same bounded interval. That keeps routing and data-residency
-rules converged without coupling a topology write to a second counter write.
+This keeps model routing and data-residency rules converged without coupling
+either document write to a second counter write.
 """
 
 from __future__ import annotations
@@ -45,7 +44,7 @@ class RegionTopologyUnavailable(RuntimeError):
 
 
 class ConfigSyncService:
-    """Re-adopts fleet-wide project and user config on a version change.
+    """Re-adopts fleet-wide request configuration on a version change.
 
     Holds the *same* dict objects ``AdminAPI`` and ``GatewayAgent`` hold and
     mutates them in place. Rebinding would put this service's converged view in
@@ -66,6 +65,7 @@ class ConfigSyncService:
         user_configs: dict[str, dict],
         cost_tracker,
         persistence=None,
+        model_registry=None,
         policy_resolver=None,
         region_config=None,
         health_monitor=None,
@@ -75,6 +75,7 @@ class ConfigSyncService:
         self._user_configs = user_configs
         self._cost_tracker = cost_tracker
         self._persistence = persistence
+        self._model_registry = model_registry
         self._policy_resolver = policy_resolver
         self._region_config = region_config
         self._health_monitor = health_monitor
@@ -86,6 +87,14 @@ class ConfigSyncService:
         self._known_version: int | None = None
         self._refresh_task: asyncio.Task | None = None
         self._local_generation = 0
+        self._last_model_check = float("-inf")
+        self._known_model_revision = (
+            getattr(model_registry, "revision", 0)
+            if model_registry is not None
+            else None
+        )
+        self._model_refresh_task: asyncio.Task | None = None
+        self._model_generation = 0
         self._last_region_check = float("-inf")
         self._known_region_revision = (
             getattr(region_config, "revision", 0)
@@ -109,19 +118,107 @@ class ConfigSyncService:
         if self._persistence is None or not self._persistence.enabled:
             return False
 
+        model_refreshed = await self._refresh_model_registry_if_stale()
         region_refreshed = await self._refresh_region_if_stale()
         now = time.monotonic()
         if now - self._last_version_check < self.CONFIG_SYNC_TTL_SECONDS:
-            return region_refreshed
+            return model_refreshed or region_refreshed
 
         if self._refresh_task is None or self._refresh_task.done():
             self._refresh_task = asyncio.create_task(self._refresh(now))
         try:
             config_refreshed = await asyncio.shield(self._refresh_task)
-            return region_refreshed or config_refreshed
+            return (
+                model_refreshed
+                or region_refreshed
+                or config_refreshed
+            )
         except Exception:
             logger.warning("Config refresh failed", exc_info=True)
-            return region_refreshed
+            return model_refreshed or region_refreshed
+
+    async def _refresh_model_registry_if_stale(self) -> bool:
+        """Adopt a newer complete registry document, at most once per TTL."""
+        if self._model_registry is None:
+            return False
+        loader = getattr(
+            self._persistence,
+            "load_model_registry_snapshot",
+            None,
+        )
+        if not callable(loader):
+            logger.error("Model registry loading is not configured")
+            return False
+        now = time.monotonic()
+        if (
+            now - self._last_model_check
+            < self.CONFIG_SYNC_TTL_SECONDS
+        ):
+            return False
+        if (
+            self._model_refresh_task is None
+            or self._model_refresh_task.done()
+        ):
+            self._model_refresh_task = asyncio.create_task(
+                self._refresh_model_registry(now)
+            )
+        try:
+            return await asyncio.shield(self._model_refresh_task)
+        except Exception:
+            # Keep routing with the last fully validated snapshot. Do not move
+            # the check clock: the next request retries instead of treating an
+            # outage or malformed document as a successful refresh.
+            logger.warning("Model registry refresh failed", exc_info=True)
+            return False
+
+    async def _refresh_model_registry(self, now: float) -> bool:
+        generation = self._model_generation
+        snapshot = (
+            await self._persistence.load_model_registry_snapshot()
+        )
+        if generation != self._model_generation:
+            return False
+        if snapshot is None:
+            if getattr(self._model_registry, "revision", 0) != 0:
+                logger.error(
+                    "The durable model registry disappeared; retaining "
+                    "revision %s",
+                    getattr(self._model_registry, "revision", 0),
+                )
+            self._last_model_check = now
+            return False
+
+        config, revision = snapshot
+        if (
+            not isinstance(revision, int)
+            or isinstance(revision, bool)
+            or revision < 1
+        ):
+            raise RuntimeError(
+                "The durable model registry revision is invalid"
+            )
+        live_revision = getattr(self._model_registry, "revision", 0)
+        if revision <= live_revision:
+            self._known_model_revision = live_revision
+            self._last_model_check = now
+            return False
+
+        # replace_config validates and parses into a detached dict before one
+        # assignment publishes it. Every routing consumer retains this registry
+        # object, so no request can observe a half-rebuilt route table.
+        self._model_registry.replace_config(
+            config,
+            revision=revision,
+        )
+        logger.info(
+            "Adopting model registry revision %s -> %s (%d models)",
+            live_revision,
+            revision,
+            len(self._model_registry.models),
+        )
+        self._known_model_revision = revision
+        self._last_model_check = now
+        return True
 
     async def _refresh_region_if_stale(self) -> bool:
         if self._region_config is None:
@@ -337,6 +434,22 @@ class ConfigSyncService:
         """Force a verified snapshot after this process commits a local write."""
         self._local_generation += 1
         self._last_version_check = float("-inf")
+
+    def note_local_model_revision(self, revision: int) -> None:
+        """Record a registry revision this instance has already published."""
+        if (
+            not isinstance(revision, int)
+            or isinstance(revision, bool)
+            or revision < 1
+        ):
+            raise ValueError(
+                "model registry revision must be a positive integer"
+            )
+        # Invalidates a snapshot whose read was already in flight before the
+        # local CAS committed, preventing it from publishing an older revision.
+        self._model_generation += 1
+        self._known_model_revision = revision
+        self._last_model_check = time.monotonic()
 
     def note_local_region_revision(self, revision: int) -> None:
         """Record a topology revision this instance already published."""

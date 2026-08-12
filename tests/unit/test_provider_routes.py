@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import random
+from unittest.mock import MagicMock
 
 import aiohttp
 import pytest
@@ -119,6 +120,67 @@ def test_shared_capacity_group_prevents_fake_capacity_from_multiple_keys() -> No
     assert pool.acquire("openai", "gpt-test")
 
 
+def test_same_id_replacement_isolated_from_old_lease_completion() -> None:
+    original = _route(
+        "openai:primary",
+        endpoint="https://old.example",
+        max_concurrency=1,
+    )
+    pool = ProviderRoutePool([original], rng=random.Random(1))
+    old_lease = pool.acquire("openai", "gpt-test")
+
+    replacement = _route(
+        "openai:primary",
+        endpoint="https://new.example",
+        max_concurrency=1,
+    )
+    pool.replace([replacement])
+    assert pool.has_available(
+        "openai",
+        "gpt-test",
+        exclude_route_id=old_lease.route.route_id,
+        exclude_generation=old_lease.generation,
+    )
+    new_lease = pool.acquire("openai", "gpt-test")
+
+    assert old_lease.generation != new_lease.generation
+    pool.record_failure(old_lease, 401)
+    snapshot = pool.snapshot()[0]
+    assert snapshot["endpoint"] == "https://new.example"
+    assert snapshot["inflight"] == 1
+    assert snapshot["failures"] == 0
+    assert snapshot["status"] == "healthy"
+
+    pool.record_success(new_lease, latency_ms=5)
+    assert pool.snapshot()[0]["inflight"] == 0
+    assert pool.snapshot()[0]["successes"] == 1
+
+
+def test_retired_generation_counts_against_shared_capacity() -> None:
+    original = _route(
+        "openai:primary",
+        endpoint="https://old.example",
+        capacity_group="shared-account",
+        capacity_limit=1,
+    )
+    pool = ProviderRoutePool([original])
+    old_lease = pool.acquire("openai", "gpt-test")
+    replacement = _route(
+        "openai:primary",
+        endpoint="https://new.example",
+        capacity_group="shared-account",
+        capacity_limit=1,
+    )
+
+    pool.replace([replacement])
+
+    with pytest.raises(NoAvailableRouteError):
+        pool.acquire("openai", "gpt-test")
+    pool.release(old_lease)
+    new_lease = pool.acquire("openai", "gpt-test")
+    assert new_lease.generation > old_lease.generation
+
+
 def test_route_snapshot_never_exposes_credentials() -> None:
     snapshot = ProviderRoutePool(
         [_route("openai:primary", api_key="must-not-leak")]
@@ -154,6 +216,112 @@ def test_private_header_rotation_changes_route_fingerprint() -> None:
     )
 
     assert first.fingerprint() != rotated.fingerprint()
+
+
+def test_timeout_change_invalidates_route_fingerprint() -> None:
+    first = _route(
+        "openai:primary",
+        connect_timeout=2,
+        read_timeout=10,
+    )
+    changed = _route(
+        "openai:primary",
+        connect_timeout=3,
+        read_timeout=11,
+    )
+
+    assert first.fingerprint() != changed.fingerprint()
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("connect_timeout", 0),
+        ("connect_timeout", float("nan")),
+        ("read_timeout", float("inf")),
+        ("keepalive_timeout", True),
+    ],
+)
+def test_route_rejects_non_finite_or_non_positive_timeouts(
+    field: str,
+    value: object,
+) -> None:
+    with pytest.raises(ValueError, match=field):
+        _route("openai:invalid-timeout", **{field: value})
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("connect_timeout", 0),
+        ("read_timeout", float("nan")),
+        ("keepalive_timeout", float("inf")),
+    ],
+)
+def test_provider_config_rejects_unsafe_timeouts(
+    field: str,
+    value: object,
+) -> None:
+    with pytest.raises(ValueError, match=field):
+        ProviderConfig(
+            provider_name="openai",
+            base_url="https://api.example",
+            auth_type="api_key",
+            credentials={"api_key": "secret"},
+            **{field: value},
+        )
+
+
+def test_bedrock_route_timeouts_reach_client_factory(monkeypatch) -> None:
+    captured: dict = {}
+
+    def create(**kwargs):
+        captured.update(kwargs)
+        return MagicMock()
+
+    monkeypatch.setattr(
+        "src.gateway.multi_provider_factory.create_bedrock_provider_fn",
+        create,
+    )
+    route = ProviderRoute(
+        route_id="bedrock:primary",
+        provider="bedrock",
+        auth_type="aws_credentials",
+        connect_timeout=4,
+        read_timeout=37,
+    )
+    factory = MultiProviderFactory(provider_routes=[route])
+
+    factory._bedrock_fn_for(route, "us-east-1")
+
+    assert captured["connect_timeout"] == 4
+    assert captured["read_timeout"] == 37
+
+
+def test_mantle_route_timeouts_reach_client_factory(monkeypatch) -> None:
+    captured: dict = {}
+
+    def create(**kwargs):
+        captured.update(kwargs)
+        return MagicMock()
+
+    monkeypatch.setattr(
+        "src.gateway.multi_provider_factory.create_mantle_provider_fn",
+        create,
+    )
+    route = ProviderRoute(
+        route_id="bedrock-mantle:primary",
+        provider="bedrock-mantle",
+        auth_type="aws_credentials",
+        connect_timeout=5,
+        read_timeout=41,
+    )
+    factory = MultiProviderFactory(provider_routes=[route])
+
+    factory._mantle_fn_for(route, "us-east-1")
+
+    assert captured["connect_timeout"] == 5
+    assert captured["read_timeout"] == 41
 
 
 def test_route_preserves_refreshable_credential_provider() -> None:
@@ -324,14 +492,18 @@ async def test_closing_stream_releases_route_capacity() -> None:
     factory = MultiProviderFactory(
         provider_routes=[_route("openai:only", max_concurrency=1)]
     )
+    source_closed = asyncio.Event()
 
     async def stream(*args, **kwargs):
-        yield StreamChunk(
-            id="chunk-1",
-            choices=[{"delta": {"content": "hello"}}],
-            model="gpt-test",
-        )
-        await asyncio.Event().wait()
+        try:
+            yield StreamChunk(
+                id="chunk-1",
+                choices=[{"delta": {"content": "hello"}}],
+                model="gpt-test",
+            )
+            await asyncio.Event().wait()
+        finally:
+            source_closed.set()
 
     factory._http_client.execute_streaming = stream
     request = ChatCompletionRequest(
@@ -357,3 +529,64 @@ async def test_closing_stream_releases_route_capacity() -> None:
         if item["route_id"] == "openai:only"
     )
     assert route["inflight"] == 0
+    assert source_closed.is_set()
+
+
+@pytest.mark.asyncio
+async def test_unexpected_transport_errors_do_not_expose_exception_text() -> None:
+    factory = MultiProviderFactory(
+        provider_routes=[_route("openai:only")]
+    )
+
+    async def execute(*_args, **_kwargs):
+        raise RuntimeError("credential=provider-secret")
+
+    factory._http_client.execute = execute
+    provider = factory.create(
+        ChatCompletionRequest(
+            messages=[{"role": "user", "content": "hello"}],
+            model="gpt-test",
+        )
+    )
+
+    with pytest.raises(ProviderError) as raised:
+        await provider(
+            ProviderModelMapping(
+                provider="openai",
+                model_id="gpt-test",
+            )
+        )
+
+    assert raised.value.message == "Provider route transport failed"
+    assert "provider-secret" not in str(raised.value)
+
+
+@pytest.mark.asyncio
+async def test_unexpected_stream_errors_do_not_expose_exception_text() -> None:
+    factory = MultiProviderFactory(
+        provider_routes=[_route("openai:only")]
+    )
+
+    async def stream(*_args, **_kwargs):
+        raise RuntimeError("credential=provider-secret")
+        yield
+
+    factory._http_client.execute_streaming = stream
+    request = ChatCompletionRequest(
+        messages=[{"role": "user", "content": "hello"}],
+        model="gpt-test",
+        stream=True,
+    )
+
+    with pytest.raises(ProviderError) as raised:
+        async for _ in factory.execute_streaming(
+            request,
+            ProviderModelMapping(
+                provider="openai",
+                model_id="gpt-test",
+            ),
+        ):
+            pass
+
+    assert raised.value.message == "Provider streaming transport failed"
+    assert "provider-secret" not in str(raised.value)

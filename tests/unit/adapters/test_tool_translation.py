@@ -52,8 +52,11 @@ TOOL_LOOP = [
         "id": "call_1", "type": "function",
         "function": {"name": "db_query", "arguments": '{"sql": "select count(*) from orders"}'},
     }]},
-    {"role": "tool", "tool_call_id": "call_1", "name": "db_query",
-     "content": '{"row_count": 42}'},
+    {"role": "tool", "tool_call_id": "call_1", "content": '{"row_count": 42}'},
+]
+NAMED_TOOL_LOOP = [
+    *TOOL_LOOP[:-1],
+    {**TOOL_LOOP[-1], "name": "db_query"},
 ]
 
 
@@ -142,10 +145,11 @@ class TestAnthropicTools:
         assert payload["tool_choice"] == expected
 
     @pytest.mark.asyncio
-    async def test_tool_choice_none_is_dropped(self, adapter):
-        """Anthropic has no "don't call tools" choice — omitting it is the closest."""
+    async def test_tool_choice_none_omits_tools(self, adapter):
+        """Anthropic expresses "none" by omitting the tool set entirely."""
         payload = await adapter.translate_request(_req(tools=[TOOL], tool_choice="none"))
         assert "tool_choice" not in payload
+        assert "tools" not in payload
 
     @pytest.mark.asyncio
     async def test_tool_loop_messages_become_blocks(self, adapter):
@@ -283,6 +287,37 @@ class TestGeminiTools:
         assert resp["name"] == "db_query"
         assert resp["response"]["content"] == '{"row_count": 42}'
 
+    @pytest.mark.asyncio
+    async def test_explicit_tool_result_name_remains_supported(self, adapter):
+        payload = await adapter.translate_request(
+            _req(messages=NAMED_TOOL_LOOP, tools=[TOOL])
+        )
+
+        response = payload["contents"][2]["parts"][0]["functionResponse"]
+        assert response["name"] == "db_query"
+
+    def test_thinking_and_cached_tokens_are_accounted(self, adapter):
+        response = adapter.translate_response({
+            "responseId": "gemini-response",
+            "modelVersion": "gemini-2.5-pro-001",
+            "candidates": [{
+                "finishReason": "STOP",
+                "content": {"parts": [{"text": "answer"}]},
+            }],
+            "usageMetadata": {
+                "promptTokenCount": 12,
+                "candidatesTokenCount": 5,
+                "thoughtsTokenCount": 7,
+                "cachedContentTokenCount": 3,
+                "totalTokenCount": 24,
+            },
+        })
+
+        assert response.usage.prompt_tokens == 12
+        assert response.usage.completion_tokens == 12
+        assert response.usage.total_tokens == 24
+        assert response.usage.cached_tokens == 3
+
     def test_function_call_part_forces_tool_calls_finish_reason(self, adapter):
         """Gemini returns STOP while calling a function — the part is the only signal."""
         res = adapter.translate_response({
@@ -305,7 +340,7 @@ class TestGeminiTools:
             "usageMetadata": {},
         })
         assert res.choices[0]["message"]["content"] == "42 rows"
-        assert res.choices[0]["finish_reason"] == "STOP"
+        assert res.choices[0]["finish_reason"] == "stop"
         assert "tool_calls" not in res.choices[0]["message"]
 
 
@@ -345,10 +380,21 @@ class TestCohereTools:
     async def test_tool_result_goes_to_top_level_tool_results(self, adapter):
         payload = await adapter.translate_request(_req(messages=TOOL_LOOP, tools=[TOOL]))
         assert payload["tool_results"][0]["call"]["name"] == "db_query"
+        assert payload["tool_results"][0]["call"]["parameters"] == {
+            "sql": "select count(*) from orders"
+        }
         assert payload["tool_results"][0]["outputs"][0]["output"] == '{"row_count": 42}'
         # Kept out of chat_history, or it would be read as the user's next message.
         assert all("row_count" not in str(h.get("message", "")) for h in
                    payload.get("chat_history", []))
+
+    @pytest.mark.asyncio
+    async def test_explicit_tool_result_name_remains_supported(self, adapter):
+        payload = await adapter.translate_request(
+            _req(messages=NAMED_TOOL_LOOP, tools=[TOOL])
+        )
+
+        assert payload["tool_results"][0]["call"]["name"] == "db_query"
 
     @pytest.mark.asyncio
     async def test_assistant_tool_calls_recorded_in_history(self, adapter):
@@ -360,15 +406,47 @@ class TestCohereTools:
             "sql": "select count(*) from orders"}
 
     @pytest.mark.asyncio
-    async def test_unsupported_tool_choice_is_reported_not_dropped(self, adapter):
-        payload = await adapter.translate_request(_req(tools=[TOOL], tool_choice="required"))
-        assert any("tool_choice" in w for w in payload["_warnings"])
+    async def test_none_tool_choice_omits_tools(self, adapter):
+        payload = await adapter.translate_request(
+            _req(tools=[TOOL], tool_choice="none")
+        )
+
+        assert "tools" not in payload
+        assert "tool_choice" not in payload
+        assert "force_single_step" not in payload
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("tool_choice", "unsupported_control"),
+        [
+            ("required", "required-tool selection"),
+            (
+                {"type": "function", "function": {"name": "db_query"}},
+                "named-tool selection",
+            ),
+        ],
+    )
+    async def test_unsupported_tool_choice_is_rejected(
+        self,
+        adapter,
+        tool_choice,
+        unsupported_control,
+    ):
+        from src.gateway.router import ProviderError
+
+        with pytest.raises(ProviderError, match=unsupported_control) as exc:
+            await adapter.translate_request(
+                _req(tools=[TOOL], tool_choice=tool_choice)
+            )
+        assert exc.value.status_code == 400
+        assert exc.value.retryable is False
 
     @pytest.mark.asyncio
     async def test_auto_tool_choice_needs_no_warning(self, adapter):
         """"auto" is what Cohere already does, so there's nothing to warn about."""
         payload = await adapter.translate_request(_req(tools=[TOOL], tool_choice="auto"))
-        assert not any("tool_choice" in w for w in payload.get("_warnings", []))
+        assert payload["tools"]
+        assert "_warnings" not in payload
 
     def test_response_parameters_become_an_arguments_string(self, adapter):
         res = adapter.translate_response({
@@ -436,6 +514,13 @@ class TestBedrockConverseTools:
     async def test_tool_choice_translation(self, choice, expected):
         kwargs, _ = await self._converse(_req(tools=[TOOL], tool_choice=choice))
         assert kwargs["toolConfig"]["toolChoice"] == expected
+
+    @pytest.mark.asyncio
+    async def test_tool_choice_none_omits_tool_config(self):
+        kwargs, _ = await self._converse(
+            _req(tools=[TOOL], tool_choice="none")
+        )
+        assert "toolConfig" not in kwargs
 
     @pytest.mark.asyncio
     async def test_tool_loop_becomes_tool_use_and_tool_result_blocks(self):

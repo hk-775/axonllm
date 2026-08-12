@@ -6,7 +6,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
+import logging
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import TYPE_CHECKING
@@ -38,11 +40,15 @@ from src.gateway.provider_routes import (
     NoAvailableRouteError,
     ProviderRoute,
     ProviderRoutePool,
+    RouteLease,
 )
 from src.gateway.router import ProviderError
 
 if TYPE_CHECKING:
     from src.gateway.multi_region.region_config import SpokeConfig
+
+
+logger = logging.getLogger(__name__)
 
 
 class MultiProviderFactory:
@@ -78,52 +84,63 @@ class MultiProviderFactory:
         self._enabled_providers = enabled_providers
         self._http_client = HttpClient()
         self._bedrock_region = bedrock_region
-        routes = list(provider_routes or [])
-        if not routes:
-            routes.extend(
-                ProviderRoute.from_provider_config(config)
-                for config in self._provider_configs.values()
-            )
         self._credential_providers = {
             config.provider_name: config.credential_provider
             for config in self._provider_configs.values()
             if config.credential_provider is not None
         }
-        for route in routes:
-            if route.credential_provider is not None:
-                self._credential_providers[route.provider] = (
-                    route.credential_provider
+        self._owned_credential_providers: dict[int, object] = {
+            id(provider): provider
+            for provider in self._credential_providers.values()
+        }
+        try:
+            routes = list(provider_routes or [])
+            if not routes:
+                routes.extend(
+                    ProviderRoute.from_provider_config(config)
+                    for config in self._provider_configs.values()
                 )
-        routes = self._resolve_credential_providers(routes)
-        configured = {route.provider for route in routes}
-        if "bedrock" not in configured:
-            routes.append(
-                ProviderRoute(
-                    route_id="bedrock:default",
-                    provider="bedrock",
-                    auth_type="aws_credentials",
-                    credentials={"region": bedrock_region},
-                    region=bedrock_region,
+            for route in routes:
+                if route.credential_provider is not None:
+                    self._credential_providers[route.provider] = (
+                        route.credential_provider
+                    )
+                    self._own_credential_provider(
+                        route.credential_provider
+                    )
+            routes = self._resolve_credential_providers(routes)
+            configured = {route.provider for route in routes}
+            if "bedrock" not in configured:
+                routes.append(
+                    ProviderRoute(
+                        route_id="bedrock:default",
+                        provider="bedrock",
+                        auth_type="aws_credentials",
+                        credentials={"region": bedrock_region},
+                        region=bedrock_region,
+                    )
                 )
-            )
-        if "bedrock-mantle" not in configured:
-            routes.append(
-                ProviderRoute(
-                    route_id="bedrock-mantle:default",
-                    provider="bedrock-mantle",
-                    auth_type="aws_credentials",
-                    credentials={"region": bedrock_region},
-                    region=bedrock_region,
+            if "bedrock-mantle" not in configured:
+                routes.append(
+                    ProviderRoute(
+                        route_id="bedrock-mantle:default",
+                        provider="bedrock-mantle",
+                        auth_type="aws_credentials",
+                        credentials={"region": bedrock_region},
+                        region=bedrock_region,
+                    )
                 )
-            )
-        self._route_pool = ProviderRoutePool(routes)
-        self._bedrock_by_route: dict[str, Callable] = {}
-        self._mantle_by_route: dict[str, Callable] = {}
-        # Region-keyed views remain for compatibility; route-keyed caches are
-        # authoritative when multiple credentials share a region.
-        self._bedrock_by_region: dict[str, Callable] = {}
-        self._mantle_by_region: dict[str, Callable] = {}
-        self._refresh_legacy_configs()
+            self._route_pool = ProviderRoutePool(routes)
+            self._bedrock_by_route: dict[str, Callable] = {}
+            self._mantle_by_route: dict[str, Callable] = {}
+            # Region-keyed views remain for compatibility; route-keyed caches
+            # are authoritative when multiple credentials share a region.
+            self._bedrock_by_region: dict[str, Callable] = {}
+            self._mantle_by_region: dict[str, Callable] = {}
+            self._refresh_legacy_configs()
+        except BaseException:
+            self.close_credential_providers()
+            raise
 
     @property
     def available_providers(self) -> frozenset[str]:
@@ -176,6 +193,7 @@ class MultiProviderFactory:
                 self._credential_providers[route.provider] = (
                     credential_provider
                 )
+                self._own_credential_provider(credential_provider)
             elif route.auth_type == "gcp_service_account":
                 credential_provider = self._credential_providers.get(
                     route.provider
@@ -192,6 +210,25 @@ class MultiProviderFactory:
                 )
             resolved.append(route)
         return resolved
+
+    def _own_credential_provider(self, provider: object) -> None:
+        self._owned_credential_providers[id(provider)] = provider
+
+    def close_credential_providers(self) -> None:
+        """Synchronously stop all unique refreshers owned by this factory."""
+        providers = tuple(self._owned_credential_providers.values())
+        self._owned_credential_providers.clear()
+        for provider in providers:
+            close = getattr(provider, "close", None)
+            if not callable(close):
+                continue
+            try:
+                close()
+            except Exception:
+                logger.warning(
+                    "provider credential refresher shutdown failed",
+                    exc_info=True,
+                )
 
     def route_snapshot(self) -> list[dict]:
         return self._route_pool.snapshot()
@@ -247,6 +284,8 @@ class MultiProviderFactory:
                 region=region,
                 endpoint_url=route.endpoint,
                 credentials=route.credentials,
+                connect_timeout=route.connect_timeout,
+                read_timeout=route.read_timeout,
             )
             self._bedrock_by_route[key] = fn
             self._bedrock_by_region.setdefault(region, fn)
@@ -260,6 +299,8 @@ class MultiProviderFactory:
                 region=region,
                 endpoint_url=route.endpoint,
                 credentials_config=route.credentials,
+                connect_timeout=route.connect_timeout,
+                read_timeout=route.read_timeout,
             )
             self._mantle_by_route[key] = fn
             self._mantle_by_region.setdefault(region, fn)
@@ -290,13 +331,15 @@ class MultiProviderFactory:
     def _routed_error(
         self,
         mapping: ProviderModelMapping,
-        route: ProviderRoute,
+        lease: RouteLease,
         exc: ProviderError,
     ) -> ProviderError:
+        route = lease.route
         alternate = self._route_pool.has_available(
             mapping.provider,
             mapping.model_id,
             exclude_route_id=route.route_id,
+            exclude_generation=lease.generation,
         )
         route_scoped = (
             exc.status_code in {401, 402, 403, 404, 429}
@@ -368,16 +411,16 @@ class MultiProviderFactory:
         except ProviderError as exc:
             self._route_pool.record_failure(lease, exc.status_code)
             settled = True
-            raise self._routed_error(mapping, route, exc) from exc
+            raise self._routed_error(mapping, lease, exc) from exc
         except Exception as exc:
             self._route_pool.record_failure(lease, 0)
             settled = True
             wrapped = ProviderError(
                 502,
                 mapping.provider,
-                f"Route transport error: {exc}",
+                "Provider route transport failed",
             )
-            raise self._routed_error(mapping, route, wrapped) from exc
+            raise self._routed_error(mapping, lease, wrapped) from exc
         else:
             self._route_pool.record_success(
                 lease,
@@ -472,6 +515,7 @@ class MultiProviderFactory:
             started = time.monotonic()
             yielded = False
             settled = False
+            stream: AsyncIterator | None = None
             try:
                 adapter = self._adapter_registry.get(mapping.provider)
                 config = self._config_for_route(route, spoke)
@@ -509,7 +553,7 @@ class MultiProviderFactory:
             except ProviderError as exc:
                 self._route_pool.record_failure(lease, exc.status_code)
                 settled = True
-                routed = self._routed_error(mapping, route, exc)
+                routed = self._routed_error(mapping, lease, exc)
                 last_error = routed
                 if yielded or not routed.retryable:
                     raise routed from exc
@@ -518,19 +562,31 @@ class MultiProviderFactory:
                 settled = True
                 routed = self._routed_error(
                     mapping,
-                    route,
+                    lease,
                     ProviderError(
                         502,
                         mapping.provider,
-                        f"Streaming route transport error: {exc}",
+                        "Provider streaming transport failed",
                     ),
                 )
                 last_error = routed
                 if yielded or not routed.retryable:
                     raise routed from exc
             finally:
-                if not settled:
-                    self._route_pool.release(lease)
+                try:
+                    if stream is not None:
+                        close = getattr(stream, "aclose", None)
+                        if callable(close):
+                            await close()
+                except Exception:  # noqa: BLE001 - cleanup cannot replace the result
+                    logger.debug(
+                        "provider HTTP stream close failed route=%s",
+                        route.route_id,
+                        exc_info=True,
+                    )
+                finally:
+                    if not settled:
+                        self._route_pool.release(lease)
 
         if last_error is not None:
             raise last_error
@@ -542,4 +598,7 @@ class MultiProviderFactory:
         )
 
     async def close(self) -> None:
-        await self._http_client.close()
+        try:
+            await self._http_client.close()
+        finally:
+            await asyncio.to_thread(self.close_credential_providers)

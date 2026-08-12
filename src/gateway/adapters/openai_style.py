@@ -61,8 +61,8 @@ class OpenAIStyleAdapter(ProviderAdapter):
         # The "-pro" tier is served only by /v1/responses and answers 400 on Chat
         # Completions, so it needs a different payload shape as well as a
         # different URL (see openai_responses and _openai_url). Keyed on
-        # request.model here; http_client overwrites payload["model"] with the
-        # mapping's id afterwards, and both are the same provider model id.
+        # request.model here; http_client resolves it to the mapping's provider
+        # model id before translation and enforces that id on the payload.
         if self._prefers_responses_api(request.model):
             return build_responses_payload(request, request.model)
 

@@ -142,6 +142,34 @@ class TestBuildStaletteApp:
             },
         }
 
+    def test_control_plane_sync_holds_the_live_model_registry(
+        self,
+        minimal_app_config: AppConfig,
+    ):
+        from src.gateway.admin.routes import AdminAPI
+        from src.gateway.middleware.auth import AuthMiddleware
+
+        app = build_starlette_app(minimal_app_config)
+        admin_api = next(
+            route.endpoint.__self__
+            for route in app.routes
+            if getattr(route, "path", None) == "/admin/models"
+            and isinstance(
+                getattr(route.endpoint, "__self__", None),
+                AdminAPI,
+            )
+        )
+        middleware_kwargs = next(
+            middleware.kwargs
+            for middleware in app.user_middleware
+            if middleware.cls is AuthMiddleware
+        )
+
+        assert (
+            middleware_kwargs["config_sync"]._model_registry
+            is admin_api.model_registry
+        )
+
 
 class TestPersistenceReadiness:
     @pytest.mark.asyncio

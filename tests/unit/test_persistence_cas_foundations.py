@@ -337,6 +337,44 @@ async def test_project_create_and_update_conflicts_are_revisioned() -> None:
     assert _counter(client) == 2
 
 
+async def test_tenant_project_update_is_atomic_with_config_version() -> None:
+    client = _CasDynamoClient()
+    first = _CasPersistence(client)
+    second = _CasPersistence(client)
+    project = Project(
+        project_id="shared",
+        tenant_id="tenant-a",
+        name="Original",
+        prompt_caching_enabled=False,
+    )
+
+    assert await first.create_project(project) == 1
+    loaded = await first.get_project("shared", "tenant-a")
+    assert loaded is not None
+    assert loaded.revision == 1
+
+    assert await first.save_project(
+        replace(
+            loaded,
+            name="Updated",
+            prompt_caching_enabled=True,
+        ),
+        expected_revision=1,
+    ) == 2
+    with pytest.raises(PersistenceConflictError):
+        await second.save_project(
+            replace(loaded, name="Stale"),
+            expected_revision=1,
+        )
+
+    stored = await first.get_project("shared", "tenant-a")
+    assert stored is not None
+    assert stored.name == "Updated"
+    assert stored.prompt_caching_enabled is True
+    assert stored.revision == 2
+    assert _counter(client) == 2
+
+
 async def test_revisionless_project_row_migrates_once_with_cas() -> None:
     client = _CasDynamoClient()
     persistence = _CasPersistence(client)

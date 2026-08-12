@@ -20,6 +20,15 @@ shared-state control-plane stack. These changes postdate `v0.2.4`; they do not
 yet have tagged release evidence, a deployed Athena canary, or a deployed
 control-plane canary.
 
+The protected AgentCore launch orchestrator now certifies isolated external
+OIDC and managed-Cognito qualification deployments, runs seven launch gates,
+records signed teardown evidence, and only then invokes the production leaf.
+That leaf deploys a separate candidate, starts and validates a backup plus
+restore, certifies every enabled provider and the identity/query contract,
+promotes the exact runtime version, and persists KMS-signed schema-v5
+deployment evidence under S3 Object Lock. This implemented path still requires
+a successful target-account run for the exact release before launch.
+
 `v0.2.4` is the first completed KMS-backed release. Release evidence
 [run 31434900128](https://github.com/AxonLLM/axonllm/actions/runs/31434900128)
 and publication
@@ -279,6 +288,9 @@ See [Features And Flows](FEATURES_AND_FLOWS.md) for request sequences.
 - immutable tags, scan-on-push, a retained rotation-enabled ECR KMS key, and
   retained P-256 asymmetric release-signing keys with version aliases named
   `alias/axonllm/release-signing-v*`;
+- a versioned, customer-KMS-encrypted, Object-Locked deployment-evidence bucket
+  with separate prerequisite, transition-intent, transition-terminal, and
+  storage keys;
 - an account-global GitHub Actions OIDC provider;
 - an `AxonLLMReleaseSigner` role trusted only by `v*` tag refs and permitted
   only to sign and verify with the release-signing key;
@@ -287,9 +299,20 @@ See [Features And Flows](FEATURES_AND_FLOWS.md) for request sequences.
 - an `AxonLLMReleaseVerifier` role trusted only by the protected GitHub
   `production` environment;
 - an `AxonLLMOperationsAudit` role that can read recovery, secret-version, and
-  key-rotation metadata but cannot read secret values or restore data; and
+  key-rotation metadata but cannot read secret values or restore data;
 - an `AxonLLMOperationsRecovery` role that can run PITR validation and remove
-  only temporary `*-restore-validation-*` tables.
+  only temporary `*-restore-validation-*` tables;
+- separate AgentCore qualification, external-certification, launch-gates,
+  rehearsal-evidence, production-deploy, and transition-watchdog roles;
+- a retained, versioned Step Functions launch coordinator with fenced leases,
+  a rehearsal-control ledger, a qualification-mutation authorization table,
+  action/cleanup activities and worker roles, service-generated runtime
+  identity, scheduled cleanup/watchdog invocations, KMS encryption, alarms,
+  and a scheduler DLQ;
+- retained numeric versions of qualification and production mutation brokers;
+  and
+- a retained terminal-record signing key that the watchdog uses independently
+  from the transition-intent key.
 
 The signer cannot access ECR. The publisher can verify evidence and upload and
 read image layers, but cannot sign or delete images or repositories. The
@@ -313,18 +336,34 @@ npx cdk deploy AxonLLMReleaseFoundationStack \
   -c deployment_target=release-foundation \
   -c region=us-east-1 \
   --parameters AxonLLMReleaseFoundationStack:FargateStateTableName=axonllm-state \
-  --parameters AxonLLMReleaseFoundationStack:AgentCoreStateTableName=axonllm-agentcore-state
+  --parameters AxonLLMReleaseFoundationStack:AgentCoreStateTableName=axonllm-agentcore-state \
+  --parameters AxonLLMReleaseFoundationStack:ProductionProviderSourceSecretArn="$PRODUCTION_PROVIDER_SOURCE_SECRET_ARN" \
+  --parameters AxonLLMReleaseFoundationStack:ProductionProviderSourceKmsKeyArn="$PRODUCTION_PROVIDER_SOURCE_KMS_KEY_ARN" \
+  --parameters AxonLLMReleaseFoundationStack:QualificationProviderSourceSecretArn="$QUALIFICATION_PROVIDER_SOURCE_SECRET_ARN" \
+  --parameters AxonLLMReleaseFoundationStack:QualificationProviderSourceKmsKeyArn="$QUALIFICATION_PROVIDER_SOURCE_KMS_KEY_ARN" \
+  --parameters AxonLLMReleaseFoundationStack:ExternalOidcProviderSourceSecretArn="$EXTERNAL_PROVIDER_SOURCE_SECRET_ARN" \
+  --parameters AxonLLMReleaseFoundationStack:ExternalOidcProviderSourceKmsKeyArn="$EXTERNAL_PROVIDER_SOURCE_KMS_KEY_ARN" \
+  --parameters AxonLLMReleaseFoundationStack:LaunchAlarmEmail="$LAUNCH_ALARM_EMAIL"
 ```
 
 If either runtime uses a nondefault physical table name, pass the same name to
 the foundation parameter. The operations IAM policies are generated from these
 parameters and will not reach a different table.
 
-Create two protected GitHub environments:
+Create eight protected GitHub environments:
 
 - `release`: require approval and restrict deployment refs to version tags;
 - `production`: require approval and restrict deployment refs to protected
-  production branches and tags.
+  production branches and tags;
+- `agentcore-qualification`: protect the isolated managed-Cognito staging and
+  teardown authority;
+- `agentcore-external-oidc-production-like`: protect the external fixture
+  broker and isolated external certification authority;
+- `agentcore-production-launch-gates`: protect coordinator execution;
+- `agentcore-production-evidence`: protect prerequisite evidence publication;
+- `agentcore-production-deploy`: protect production mutation; and
+- `agentcore-production-watchdog`: protect independent transition
+  reconciliation.
 
 Create an active repository tag ruleset targeting `refs/tags/v*`. Restrict tag
 creation to the release-manager bypass list and block tag updates and deletion.
@@ -354,8 +393,8 @@ Configure `release` with:
 | Variable | `AXON_FARGATE_ECR_REPOSITORY` | `FargateRepositoryUri` output |
 | Variable | `AXON_AGENTCORE_ECR_REPOSITORY` | `AgentCoreRepositoryUri` output |
 
-Configure `production` with `AXON_AWS_ACCOUNT_ID`. Set `AWS_ROLE_ARN` to the
-`ReleaseVerifierRoleArn` output,
+Configure `production` with `AXON_AWS_ACCOUNT_ID`. Set
+`AXON_RELEASE_VERIFY_ROLE_ARN` to the `ReleaseVerifierRoleArn` output,
 `AXON_OPERATIONS_AUDIT_ROLE_ARN` to
 `OperationsAuditRoleArn`, and `AXON_OPERATIONS_RECOVERY_ROLE_ARN` to
 `OperationsRecoveryRoleArn`. Also set `AXON_FARGATE_STATE_TABLE_NAME` and
@@ -363,6 +402,22 @@ Configure `production` with `AXON_AWS_ACCOUNT_ID`. Set `AWS_ROLE_ARN` to the
 foundation stack. The target data-key variables described in
 [Backup And Restore](#backup-and-restore) are additional production-environment
 settings.
+
+AgentCore launch additionally requires the qualification,
+external-certification, launch-gates, rehearsal-evidence, production-deploy,
+and transition-watchdog roles; reviewed S3 document locations; provider source
+secret; evidence bucket and prefixes; distinct deployment signing/storage KMS
+keys; external fixture broker settings; and self-hosted runner controls listed
+in
+[Protected Launch Prerequisites](AGENTCORE_RUNBOOK.md#protected-launch-prerequisites).
+Treat that list as part of the release foundation. The production runner must
+have Playwright Chromium system libraries and network access to the deployed
+control plane and Cognito; installing the Python package and browser binary
+alone is insufficient. Store the watchdog role ARN in the protected
+`agentcore-production-watchdog` secret
+`AXON_AGENTCORE_TRANSITION_WATCHDOG_ROLE_ARN`. Configure the exact intent key,
+terminal key, and numeric broker-version outputs as documented in
+[Protected Launch Prerequisites](AGENTCORE_RUNBOOK.md#protected-launch-prerequisites).
 
 `AXON_RELEASE_SIGNING_KEY_ARN` is a repository variable used only by the
 tag-producing signer. Publication and production do not read it. Their trust
@@ -479,12 +534,14 @@ creates a different generated secret and output.
 `AXON_ENABLED_PROVIDERS` is an optional comma-separated runtime allowlist.
 Providers outside it are neither advertised nor invoked. Leaving it unset adds
 no allowlist beyond provider configuration and credentials; setting it empty or
-including an unknown provider fails startup. AgentCore allowlists every
-supported provider but advertises direct HTTP providers only when their
-credentials load from its retained KMS-encrypted `ProviderSecretArn`. Its
-runtime egress prefix list must cover `bedrock-mantle.<region>.api.aws` and
-every credentialled provider hostname. Mantle authenticates with SigV4 and does
-not use a provider secret.
+including an unknown provider fails startup. AgentCore supports thirteen
+provider adapters but defaults to twelve: direct `ai21` must be explicitly
+enabled and supplied `AI21_API_KEY`, while AI21 Jamba 1.5 remains available
+through the default `bedrock` provider. Direct HTTP providers are advertised
+only when their credentials load from the retained KMS-encrypted
+`ProviderSecretArn`. Its runtime egress prefix list must cover
+`bedrock-mantle.<region>.api.aws` and every credentialled provider hostname.
+Mantle authenticates with SigV4 and does not use a provider secret.
 
 Google AI uses `x-goog-api-key`, never a URL key. Vertex ignores static
 `GCP_ACCESS_TOKEN`; use ADC or a `GCP_CREDENTIALS_JSON` service-account/AWS
@@ -499,8 +556,8 @@ AgentCore has two production identity choices and no unauthenticated mode:
 
 | Identity mode | Operator responsibility | Automated work |
 |---|---|---|
-| `managed-cognito` | Choose a hosted-UI prefix and callback, stable control-plane domain, regional ACM certificate, Route 53 public zone, verified ARM64 AgentCore and AMD64 control-plane digests, AgentCore/control-plane egress prefix lists, control-plane ingress prefix list, tenant/project/admin, Bedrock ARNs, optional exact Athena roles, optional complete SCIM secret ARN, protected SAML landing path, and any tenant-specific Cognito SAML IdP configuration | Deploy retained/deletion-protected Cognito, invite the user, deploy AgentCore, bootstrap canonical authority, and deploy the shared-state web control plane |
-| `external-oidc` | Provision the IdP user/client and supply exact issuer, discovery URL, client, audience, immutable subject, tenant/project claim names, runtime egress, Bedrock ARNs, and optional exact Athena roles | Deploy AgentCore and bootstrap canonical authority; no Cognito-authenticated web control plane |
+| `managed-cognito` | Choose a hosted-UI prefix and callback, stable control-plane domain, regional ACM certificate, Route 53 public zone, verified ARM64 AgentCore and AMD64 control-plane digests, AgentCore/control-plane egress prefix lists, control-plane ingress prefix list, tenant/project/admin, Bedrock ARNs, at least one exact Athena role and certification datasource/workgroup, optional complete SCIM secret ARN, protected SAML landing path, and any tenant-specific Cognito SAML IdP configuration | Deploy retained/deletion-protected Cognito, invite the user, deploy AgentCore, bootstrap canonical authority, and deploy the shared-state web control plane |
+| `external-oidc` | Provision the IdP user/client and supply exact issuer, discovery URL, client, audience, immutable subject, tenant/project claim names, runtime egress, Bedrock ARNs, and at least one exact Athena role plus certification datasource/workgroup | Deploy AgentCore and bootstrap canonical authority; expose read-only viewer and CAS administrator project-config actions, but no Cognito-authenticated web control plane |
 
 Generate the strict schema-v2 setup file with `uv run axon setup agentcore`,
 validate it with `./deploy-agentcore.sh --config FILE --validate-only`, then
@@ -510,6 +567,33 @@ deployment in an account/region and add `--yes` only in reviewed
 noninteractive automation. The setup rejects mutable image tags, wildcard
 Bedrock ARNs, non-HTTPS identity metadata, client secrets, and missing claim
 mappings.
+
+For the first account/region bootstrap, use a separate IAM bootstrap principal
+with permission to create/read the repository-owned
+`AxonLLMAgentCoreCloudFormationExecution-<region>` policy and create or update
+the standard CDK bootstrap stack resources. `--bootstrap-cdk` generates and
+verifies that exact bounded policy, supplies it as the sole CloudFormation
+execution policy, and enables bootstrap-stack termination protection. Routine
+deployment verifies the canonical policy document and rejects any extra
+managed or inline policy on the CDK execution role. Do not bootstrap AgentCore
+with `AdministratorAccess`, and do not give the one-time bootstrap principal to
+the routine deployment workflow.
+
+Before changing AWS resources, the wrapper resolves every supplied managed
+prefix list and requires a stable, nonempty, customer-owned IPv4 list in the
+deployment account. Entries must be strict globally routable CIDRs. Runtime and
+control-plane HTTPS egress allow `/16` or narrower CIDRs and no more than
+1,048,576 total addresses per list; control-plane ingress allows `/24` or
+narrower CIDRs and no more than 65,536 total addresses. AWS-owned lists, IPv6,
+private/reserved ranges, and broader entries are rejected. Re-resolve every
+hostname's A records after provider, IdP, Mantle, ALB-key, or Cognito DNS
+changes.
+
+The reusable schema and stack can omit Athena, but that configuration is not
+launchable through the current protected AgentCore workflow. Fixture
+preparation requires the certification datasource role to match a reviewed
+Athena binding, and certification always runs a governed `SELECT`; there is no
+query-disabled certification mode.
 
 The wrapper reads the deployed AgentCore stack's verified `StateTableName`
 output, passes it as the control plane's required `PrimaryStateTableName`
@@ -558,6 +642,12 @@ also configure alarm/event subscriptions, run authenticated and negative RBAC
 canaries, and retain restore evidence. Successful setup is not production
 certification.
 
+The AgentCore config actions cover runtime project settings only. They do not
+administer principals, project grants, datasources, API keys, Cedar policies,
+webhooks, provider secrets, or security-event destinations. Managed Cognito
+uses the shared web control plane for those resources; an external-OIDC adopter
+must provide a separately trusted operator/control-plane path where needed.
+
 ## Security Event Delivery
 
 Both CDK stacks inject four runtime controls:
@@ -590,8 +680,11 @@ only after queue readiness succeeds, and `/ready` reports
 cannot be reached. A DLQ depth of one or more raises
 `SecurityEventDeadLettersAlarm`.
 
-Neither the event topic nor the alarm topic has an automatic subscription. Add
-and confirm the required receivers before traffic.
+The Fargate alarm topic and both stacks' security-event topics require
+operator-configured receivers. The AgentCore stack automatically requests an
+email subscription for the reviewed administrator address, and its deployer
+fails until that exact subscription is confirmed. Configure and exercise tenant
+security-event destinations before traffic.
 
 ### DLQ Recovery
 
@@ -694,9 +787,67 @@ artifact hashes to a public transparency log.
 Never deploy a mutable tag or bypass a failing CI/evidence check. Record the
 commit, release tag, workflow run, ECR URI and digest, SBOMs, scan results,
 KMS signature verification, selected target, approvals, and canary results. The
-workflows publish and verify images but do not deploy either runtime. `v0.2.4`
-has retained KMS/private-ECR workflow evidence as listed in
-[Release Status](#release-status); repeat that flow for every promoted release.
+release, publication, and target-verification workflows do not deploy a
+runtime. AgentCore production promotion is a separate protected workflow with
+candidate certification and signed deployment evidence. `v0.2.4` has retained
+KMS/private-ECR workflow evidence as listed in [Release Status](#release-status);
+repeat the complete release and deployment-evidence flow for every promoted
+release.
+
+Dispatch `.github/workflows/launch-agentcore-production.yml` from protected
+`main`; it is the only manual production-launch entry point.
+`deploy-agentcore-production.yml` is `workflow_call` only. Before dispatch,
+pre-stage namespace `managed` with the exact release and setup, certify and
+promote its candidate, deploy its control plane, and collect its exact
+stack/runtime/resource bindings. An independent reviewer must put those values
+into the schema-v2 gate configuration, upload a versioned copy, and approve a
+review window no longer than 48 hours. Teardown deletes that namespace, so
+pre-stage and review must be repeated for every later launch. See
+[Reviewed Gate-Config Pre-Stage](AGENTCORE_RUNBOOK.md#reviewed-gate-config-pre-stage)
+for the complete procedure and example document.
+
+Before production mutation, the orchestrator produces three additive signed
+inputs. The detailed launch-rehearsal report must cover all seven gates:
+initialization replacement, query boundaries/reconciliation, recovery
+cutover/rollback, security-event delivery/DLQ, provider routing, provider
+fallback/recovery, and control-plane fault recovery. The external-OIDC
+schema-v3 report must prove issuer/JWKS validation, completion and streaming
+for every launch provider, tools for each provider that declares
+`tool_calling`, governed query, viewer write denial, and an administrator
+tenant-config mutate-confirm-rollback flow. The qualification-teardown receipt
+must prove both fixture sets existed, their identities were revoked, exactly
+two launch workers stopped, and all four `managed` qualification stacks are
+absent.
+
+A provider declaring tool support must separately prove automatic selection,
+required selection, tool-result continuation, `tool_choice=none`, and streamed
+tool calling. Cohere passes the required-selection gate only by AxonLLM
+rejecting its unsupported required/named selection before provider invocation
+with sanitized `400 unsupported_provider_feature`. Production consumes every
+report and KMS signature by exact S3 URI, VersionId, SHA-256, checksum, KMS
+identity, content metadata, encryption posture, and COMPLIANCE Object Lock
+retention; a compatibility projection or mutable/latest object is not accepted.
+Final schema-v5 deployment evidence embeds normalized references and content
+for all three prerequisite evidence sets.
+
+The candidate name contains 128 random bits and is a temporary bearer
+capability in addition to the shared runtime JWT. It limits discoverability but
+does not provide endpoint-specific authorization: any principal with an
+accepted runtime JWT can invoke the candidate after learning its qualifier.
+Keep candidates short-lived; use a separate runtime or qualifier-aware
+authorization when an independent candidate boundary is required.
+
+The independent
+`.github/workflows/reconcile-agentcore-production-transition.yml` watchdog must
+be enabled before promotion. It runs after deployment completion, every five
+minutes, and manually under the deployment concurrency lock. Using the separate
+`AXON_AGENTCORE_TRANSITION_WATCHDOG_ROLE_ARN`, it finds a single signed
+nonterminal journal, verifies deployment evidence with the intent key, invokes
+the exact numeric production mutation-broker version until the bounded
+transition is complete, then appends a terminal record signed by the distinct
+terminal key. The watchdog itself cannot mutate CloudFormation, pass roles, or
+change load-balancer attributes. This covers runner loss and cancellation paths
+in which the deployment job cannot execute cleanup.
 
 ## Readiness And Traffic Shift
 
@@ -713,16 +864,23 @@ Before shifting traffic:
 1. Require green CI and verified release evidence for the exact digest.
 2. Resolve every production-checklist `FAIL`; investigate every `UNKNOWN`.
 3. Confirm readiness on every target.
-4. Run authenticated model-list and completion canaries.
+4. Run authenticated model-list, completion, and stream canaries for every
+   configured launch provider. Run the five-part tool contract for each
+   provider that declares `tool_calling`.
 5. Run negative canaries for missing credentials, inactive membership,
    ungranted and cross-tenant project claims, and viewer writes.
-6. When query is configured, run HTTP and AgentCore `SELECT` canaries plus
+6. Through AgentCore, read the canonical tenant-project config as admin and
+   viewer, deny the viewer update, then perform and confirm an admin CAS
+   mutation and rollback. Require the original value after rollback.
+7. For AgentCore production launch, run AgentCore `SELECT` canaries plus
    mutation, cross-project, missing-scope, unbound-role, unsafe-workgroup,
    row/result/scan-limit, audit-record, interrupted-lifecycle reconciliation,
-   and missing-authority deferral checks.
-7. For managed Cognito, verify S256 PKCE, required TOTP enrollment, the exact
+   and missing-authority deferral checks. Also run the HTTP `SELECT` canary
+   when launching the normal Starlette data plane. AgentCore query
+   certification is mandatory, not an optional launch gate.
+8. For managed Cognito, verify S256 PKCE, required TOTP enrollment, the exact
    ID-token issuer/audience/tenant/project claims, and access-token rejection.
-8. Verify the shared control-plane hostname, Cognito ALB login, datasource RBAC,
+9. Verify the shared control-plane hostname, Cognito ALB login, datasource RBAC,
    shared state, suppressed execution routes, and lack of Athena/STS task
    authority. For SAML, exercise signed and invalid assertions at Cognito,
    issuer/audience/destination/recipient/time failures, request correlation,
@@ -730,16 +888,19 @@ Before shifting traffic:
    issuer/`sub` canonical lookup, the configured local landing path, direct ACS
    and metadata `410` responses, and the absence of `/saml/*` from the ALB bypass
    rule. Skip this only for external OIDC, which does not deploy it.
-9. Verify alarms, a confirmed SNS subscription, logs, tenant audit-chain
-   verification, and rollback.
+10. Verify alarms, a confirmed SNS subscription, logs, tenant audit-chain
+    verification, and rollback.
+11. Verify the independent transition watchdog can assume its protected role
+    and retain a signed terminal record for a rehearsal commit or compensation.
 
 AgentCore `/ready` does not enumerate datasource roles or validate Athena
 workgroups. Workgroup validation occurs immediately before each execution, so
 an authenticated query canary is required. The production validation tool's
 `query.mutate` policy check alone is not a remote query canary.
 
-Neither stack creates an SNS subscription. Add and confirm alarm and
-security-event receivers before launch.
+AgentCore creates and verifies its administrator-email alarm subscription.
+Fargate alarms and both stacks' tenant security-event topics still require
+configured and tested receivers before launch.
 
 ## Backup And Restore
 
@@ -917,10 +1078,12 @@ endpoint policies. Both planes remain stopped and explicitly denied state
 access during selection; resume is allowed only after they agree on the same
 table and recovery ownership.
 
-The scripts and schedule do not prove that AWS accepted a restore or that the
-application cutover succeeded. The first real AWS restore exercise and
-application recovery rehearsal remain externally unverified; retain their
-evidence before promotion.
+The protected AgentCore deployment fails unless AWS completes a fresh backup
+and PITR restore, up to 25 restored items match strongly consistent source
+reads, the temporary table is removed, and that proof is bound into signed
+deployment evidence. The scheduled exercises provide separate recurring
+coverage. A full application cutover to a retained restored table and back is a
+distinct recovery rehearsal; retain its evidence before launch.
 
 ## Rotation And Incident Response
 
@@ -941,6 +1104,16 @@ For a credential or authorization incident:
    tenant SCIM tokens when implicated.
 5. Verify and export the affected tenant audit chain.
 6. Re-run positive and negative authorization canaries before restoring traffic.
+
+For external-OIDC certification, rotate the broker bearer credential
+independently from IdP signing keys. Install the replacement at the broker,
+update `AXON_EXTERNAL_OIDC_FIXTURE_BROKER_TOKEN` in the protected environment,
+run certification through successful fixture cleanup, then revoke the old
+credential. During IdP signing-key rotation, publish both keys in JWKS for at
+least the maximum 15-minute fixture lifetime, verify fresh discovery/JWKS cache
+headers, and rerun external certification before removing the old key.
+Re-resolve and review both runner and AgentCore prefix-list destinations after
+an IdP, provider, Mantle, Cognito, or control-plane DNS change.
 
 Validate Fargate provider-secret posture with:
 

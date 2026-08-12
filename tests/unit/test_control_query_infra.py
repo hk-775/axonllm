@@ -111,6 +111,17 @@ def _interface_endpoint(template: dict, service_suffix: str) -> dict:
     return matches[0]
 
 
+def _service_endpoint(template: dict, service_suffix: str) -> dict:
+    matches = [
+        endpoint["Properties"]
+        for endpoint in _resources(template, "AWS::EC2::VPCEndpoint")
+        if service_suffix
+        in json.dumps(endpoint["Properties"]["ServiceName"])
+    ]
+    assert len(matches) == 1
+    return matches[0]
+
+
 def _bindings_with_json_length(target_length: int) -> list[dict[str, str]]:
     bindings = [
         {
@@ -196,6 +207,9 @@ def _synth(
         "agentcore": "AxonLLMAgentCoreStack",
         "control-plane": "AxonLLMControlPlaneStack",
     }[target]
+    namespace = (extra_context or {}).get("deployment_namespace", "")
+    if namespace:
+        stack_name = f"{stack_name}-{namespace}"
     return json.loads(
         (out_dir / f"{stack_name}.template.json").read_text(
             encoding="utf-8"
@@ -262,6 +276,24 @@ def control_template_with_scim_secret(
         work_dir=tmp_path_factory.mktemp("control-scim-secret"),
         extra_context={
             "scim_tenants_secret_arn": _SCIM_SECRET_ARN,
+        },
+    )
+
+
+@pytest.fixture(scope="module")
+def managed_control_template(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> dict:
+    if not _INFRA_PYTHON.is_file():
+        pytest.skip("infra/.venv is required for CDK synthesis tests")
+    return _synth(
+        target="control-plane",
+        work_dir=tmp_path_factory.mktemp(
+            "managed-control-launch-workers"
+        ),
+        extra_context={
+            "account": "123456789012",
+            "deployment_namespace": "managed",
         },
     )
 
@@ -440,6 +472,74 @@ def test_control_plane_imports_state_and_never_creates_another_table(
     )
 
 
+def test_control_plane_kms_access_is_service_and_context_bound(
+    query_templates,
+):
+    template = query_templates["control-plane"]
+    task_policy = next(
+        resource
+        for logical_id, resource in template["Resources"].items()
+        if logical_id.startswith("TaskRoleDefaultPolicy")
+    )
+    statements = task_policy["Properties"]["PolicyDocument"]["Statement"]
+    kms_statements = [
+        statement
+        for statement in statements
+        if any(action.startswith("kms:") for action in _actions(statement))
+    ]
+    assert len(kms_statements) == 2
+    assert all(
+        _actions(statement)
+        == {"kms:Decrypt", "kms:GenerateDataKey*"}
+        for statement in kms_statements
+    )
+    assert not any(
+        action in {"kms:Encrypt", "kms:ReEncrypt*"}
+        for statement in statements
+        for action in _actions(statement)
+    )
+    assert all(
+        statement["Resource"] != "*"
+        and "DataKeyArn" in json.dumps(statement["Resource"])
+        for statement in kms_statements
+    )
+
+    def for_service(service: str) -> dict:
+        matches = [
+            statement
+            for statement in kms_statements
+            if f"{service}." in json.dumps(
+                statement["Condition"]["StringEquals"][
+                    "kms:ViaService"
+                ]
+            )
+        ]
+        assert len(matches) == 1
+        return matches[0]
+
+    queue_condition = for_service("sqs")["Condition"]["StringEquals"]
+    assert queue_condition["kms:CallerAccount"] == {
+        "Ref": "AWS::AccountId"
+    }
+    assert "AWS::URLSuffix" in json.dumps(
+        queue_condition["kms:ViaService"]
+    )
+    assert set(queue_condition) == {
+        "kms:CallerAccount",
+        "kms:ViaService",
+    }
+    topic_condition = for_service("sns")["Condition"]["StringEquals"]
+    assert topic_condition["kms:CallerAccount"] == {
+        "Ref": "AWS::AccountId"
+    }
+    assert "AWS::URLSuffix" in json.dumps(
+        topic_condition["kms:ViaService"]
+    )
+    assert "SecurityEventTopicArn" in json.dumps(
+        topic_condition["kms:EncryptionContext:aws:sns:topicArn"]
+    )
+
+
 def test_control_plane_recovery_selector_is_fail_closed(
     query_templates,
 ):
@@ -459,6 +559,20 @@ def test_control_plane_recovery_selector_is_fail_closed(
         "selected",
     ]
     assert parameters["RecoveryApprovalId"]["Default"] == ""
+    assert parameters["DeploymentTransitionId"] == {
+        "Type": "String",
+        "Default": "",
+        "MaxLength": 64,
+        "AllowedPattern": r"^$|^[0-9a-f]{64}$",
+        "ConstraintDescription": (
+            "must be blank or the signed 64-character deployment "
+            "transition identifier"
+        ),
+        "Description": (
+            "Signed production transition that owns this exact "
+            "control-plane deployment"
+        ),
+    }
     assert template["Conditions"]["RecoveryAccessBlocked"] == {
         "Fn::Or": [
             {"Condition": "RecoveryQuiesced"},
@@ -586,6 +700,9 @@ def test_control_plane_recovery_selector_is_fail_closed(
     }
     assert outputs["RecoveryApprovalId"]["Value"] == {
         "Ref": "RecoveryApprovalId"
+    }
+    assert outputs["DeploymentTransitionId"]["Value"] == {
+        "Ref": "DeploymentTransitionId"
     }
 
     handler = next(
@@ -862,6 +979,14 @@ def test_control_tasks_are_private_and_alb_requires_https_cognito(
     ] == "true"
     assert attributes["routing.http.desync_mitigation_mode"] == "strictest"
     assert attributes["access_logs.s3.enabled"] == "true"
+    assert template["Outputs"]["TargetGroupArn"]["Value"] == {
+        "Ref": next(
+            logical_id
+            for logical_id, resource in template["Resources"].items()
+            if resource["Type"]
+            == "AWS::ElasticLoadBalancingV2::TargetGroup"
+        )
+    }
 
 
 def test_control_hostname_has_a_concrete_route53_alias(query_templates):
@@ -1025,6 +1150,343 @@ def test_control_plane_scim_secret_is_exact_and_private(
         _SCIM_SECRET_ARN
     )
     assert "SamlConfigSecretArn" not in template["Outputs"]
+
+
+def test_managed_control_plane_authorizes_exact_launch_worker_principals(
+    managed_control_template,
+):
+    template = managed_control_template
+    task_roles = {
+        "AxonLLMLaunchActionWorkerRole",
+        "AxonLLMLaunchCleanupWorkerRole",
+    }
+    execution_role_marker = "LaunchWorkerExecutionRole"
+
+    endpoints = _resources(template, "AWS::EC2::VPCEndpoint")
+    assert len(endpoints) == 14
+    interface_services = {
+        str(endpoint["Properties"]["ServiceName"])
+        for endpoint in endpoints
+        if endpoint["Properties"]["VpcEndpointType"] == "Interface"
+    }
+    for suffix in (
+        ".application-autoscaling",
+        ".bedrock-agentcore",
+        ".cloudformation",
+        ".ecs",
+        ".monitoring",
+        ".secretsmanager",
+        ".states",
+    ):
+        assert any(service.endswith(suffix) for service in interface_services)
+
+    worker_interfaces = [
+        endpoint["Properties"]
+        for endpoint in endpoints
+        if endpoint["Properties"]["VpcEndpointType"] == "Interface"
+        and any(
+            str(endpoint["Properties"]["ServiceName"]).endswith(suffix)
+            for suffix in (
+                ".application-autoscaling",
+                ".bedrock-agentcore",
+                ".cloudformation",
+                ".ecs",
+                ".monitoring",
+                ".secretsmanager",
+                ".states",
+            )
+        )
+    ]
+    assert len(worker_interfaces) == 7
+    endpoint_security_groups = {
+        json.dumps(endpoint["SecurityGroupIds"], sort_keys=True)
+        for endpoint in worker_interfaces
+    }
+    assert len(endpoint_security_groups) == 1
+    assert "EndpointSecurityGroup" in next(
+        iter(endpoint_security_groups)
+    )
+    assert all(
+        endpoint["PrivateDnsEnabled"] is True
+        and len(endpoint["SubnetIds"]) == 2
+        and all(
+            "ControlSubnet" in json.dumps(subnet)
+            for subnet in endpoint["SubnetIds"]
+        )
+        for endpoint in worker_interfaces
+    )
+    security_group_rules = [
+        resource
+        for resource in template["Resources"].values()
+        if resource["Type"]
+        in {
+            "AWS::EC2::SecurityGroupEgress",
+            "AWS::EC2::SecurityGroupIngress",
+        }
+        and resource["Properties"].get("FromPort") == 443
+        and resource["Properties"].get("ToPort") == 443
+    ]
+    task_endpoint_rules = [
+        rule
+        for rule in security_group_rules
+        if "TaskSecurityGroup" in json.dumps(rule)
+        and "EndpointSecurityGroup" in json.dumps(rule)
+    ]
+    assert {
+        rule["Type"] for rule in task_endpoint_rules
+    } == {
+        "AWS::EC2::SecurityGroupEgress",
+        "AWS::EC2::SecurityGroupIngress",
+    }
+
+    worker_statements: list[dict] = []
+    for endpoint in endpoints:
+        statements = endpoint["Properties"].get(
+            "PolicyDocument",
+            {},
+        ).get("Statement", [])
+        for statement in statements:
+            principal_text = json.dumps(statement.get("Principal", {}))
+            names = {
+                role_name
+                for role_name in (
+                    *task_roles,
+                    execution_role_marker,
+                )
+                if role_name in principal_text
+            }
+            if not names:
+                continue
+            worker_statements.append(statement)
+            assert statement["Effect"] == "Allow"
+            assert statement["Principal"]["AWS"] != "*"
+            if execution_role_marker in names:
+                assert names == {execution_role_marker}
+            else:
+                assert names == task_roles
+
+    assert worker_statements
+    worker_policy = json.dumps(worker_statements)
+    for role_name in (*task_roles, execution_role_marker):
+        assert role_name in worker_policy
+    assert ":iam::*:" not in worker_policy
+
+    execution_roles = [
+        role["Properties"]
+        for role in _resources(template, "AWS::IAM::Role")
+        if role["Properties"].get("RoleName")
+        == "AxonLLMLaunchWorkerExecutionRole-managed"
+    ]
+    assert len(execution_roles) == 1
+
+
+def test_managed_launch_worker_private_paths_match_domain_calls(
+    managed_control_template,
+):
+    template = managed_control_template
+    task_role_marker = "AxonLLMLaunchActionWorkerRole"
+
+    expected_actions = {
+        ".application-autoscaling": {
+            "application-autoscaling:DescribeScalableTargets",
+            "application-autoscaling:RegisterScalableTarget",
+        },
+        ".bedrock-agentcore": {
+            "bedrock-agentcore:GetAgentRuntime",
+            "bedrock-agentcore:GetAgentRuntimeEndpoint",
+            "bedrock-agentcore:InvokeAgentRuntime",
+        },
+        ".cloudformation": {
+            "cloudformation:DescribeStacks",
+            "cloudformation:UpdateStack",
+        },
+        ".dynamodb": {
+            "dynamodb:BatchWriteItem",
+            "dynamodb:DeleteItem",
+            "dynamodb:DeleteTable",
+            "dynamodb:DescribeContinuousBackups",
+            "dynamodb:DescribeTable",
+            "dynamodb:DescribeTimeToLive",
+            "dynamodb:GetItem",
+            "dynamodb:PutItem",
+            "dynamodb:Query",
+            "dynamodb:RestoreTableToPointInTime",
+            "dynamodb:Scan",
+            "dynamodb:UpdateContinuousBackups",
+            "dynamodb:UpdateItem",
+            "dynamodb:UpdateTable",
+            "dynamodb:UpdateTimeToLive",
+        },
+        ".ecs": {
+            "ecs:DescribeServices",
+            "ecs:UpdateService",
+        },
+        ".logs": {
+            "logs:CreateLogStream",
+            "logs:DeleteLogStream",
+            "logs:FilterLogEvents",
+        },
+        ".monitoring": {
+            "cloudwatch:DescribeAlarms",
+            "cloudwatch:PutMetricData",
+        },
+        ".secretsmanager": {
+            "secretsmanager:DescribeSecret",
+            "secretsmanager:GetSecretValue",
+        },
+        ".sqs": {
+            "sqs:ChangeMessageVisibility",
+            "sqs:DeleteMessage",
+            "sqs:GetQueueAttributes",
+            "sqs:ReceiveMessage",
+            "sqs:SendMessage",
+        },
+        ".states": {
+            "states:GetActivityTask",
+            "states:SendTaskFailure",
+            "states:SendTaskHeartbeat",
+            "states:SendTaskSuccess",
+        },
+    }
+    for service_suffix, actions in expected_actions.items():
+        endpoint = _service_endpoint(template, service_suffix)
+        worker_statements = [
+            statement
+            for statement in endpoint["PolicyDocument"]["Statement"]
+            if task_role_marker
+            in json.dumps(statement.get("Principal", {}))
+        ]
+        assert worker_statements
+        assert {
+            action
+            for statement in worker_statements
+            for action in _actions(statement)
+        } == actions
+
+    serialized = json.dumps(
+        [
+            statement
+            for endpoint in _resources(
+                template,
+                "AWS::EC2::VPCEndpoint",
+            )
+            for statement in endpoint["Properties"]
+            .get("PolicyDocument", {})
+            .get("Statement", [])
+            if task_role_marker
+            in json.dumps(statement.get("Principal", {}))
+        ]
+    )
+    for resource_fragment in (
+        "activity:axonllm-agentcore-launch-actions",
+        "activity:axonllm-agentcore-launch-cleanup",
+        "runtime/axonllm_managed-*",
+        "stack/AxonLLMAgentCoreStack-managed/*",
+        "stack/AxonLLMControlPlaneStack-managed/*",
+        "table/axonllm-agentcore-state-managed",
+        "table/axonllm-agentcore-state-managed-restore-validation-*",
+        "table/axonllm-launch-rehearsal-leases",
+        "RehearsalControlTableArn",
+        "AxonLLMAgentCoreStack-managed-SecurityEventOutboxQueue*",
+        "AxonLLMAgentCoreStack-managed-SecurityEventDeadLetterQueue*",
+        "AxonLLMAgentCoreStack-managed-SecurityEventLogGroup*",
+        "AxonLLMControlPlaneStack-managed-Service*",
+        "secret:axonllm/launch/runtime-identity-*",
+    ):
+        assert resource_fragment in serialized
+
+
+def test_managed_worker_execution_role_has_private_image_and_log_paths(
+    managed_control_template,
+):
+    template = managed_control_template
+    execution_role_marker = "LaunchWorkerExecutionRole"
+    expected_actions = {
+        ".ecr.api": {
+            "ecr:BatchCheckLayerAvailability",
+            "ecr:BatchGetImage",
+            "ecr:GetAuthorizationToken",
+            "ecr:GetDownloadUrlForLayer",
+        },
+        ".ecr.dkr": {
+            "ecr:BatchCheckLayerAvailability",
+            "ecr:BatchGetImage",
+            "ecr:GetDownloadUrlForLayer",
+        },
+        ".logs": {
+            "logs:CreateLogStream",
+            "logs:PutLogEvents",
+        },
+        ".s3": {"s3:GetObject"},
+    }
+    statements: list[dict] = []
+    for service_suffix, actions in expected_actions.items():
+        endpoint = _service_endpoint(template, service_suffix)
+        matches = [
+            statement
+            for statement in endpoint["PolicyDocument"]["Statement"]
+            if execution_role_marker
+            in json.dumps(statement.get("Principal", {}))
+        ]
+        assert matches
+        statements.extend(matches)
+        assert {
+            action
+            for statement in matches
+            for action in _actions(statement)
+        } == actions
+
+    serialized = json.dumps(statements)
+    assert "repository/axonllm/fargate" in serialized
+    assert "prod-us-east-1-starport-layer-bucket/*" in serialized
+    assert (
+        "/aws/ecs/axonllm/launch-workers/action-managed:"
+        "log-stream:*"
+    ) in serialized
+    assert (
+        "/aws/ecs/axonllm/launch-workers/cleanup-managed:"
+        "log-stream:*"
+    ) in serialized
+
+    execution_role_id, execution_role = next(
+        (logical_id, role["Properties"])
+        for logical_id, role in template["Resources"].items()
+        if role["Type"] == "AWS::IAM::Role"
+        and role["Properties"].get("RoleName")
+        == "AxonLLMLaunchWorkerExecutionRole-managed"
+    )
+    assert execution_role["MaxSessionDuration"] == 3600
+    execution_policy = next(
+        policy["Properties"]
+        for policy in _resources(template, "AWS::IAM::Policy")
+        if {"Ref": execution_role_id}
+        in policy["Properties"].get("Roles", [])
+    )
+    role_statements = execution_policy["PolicyDocument"]["Statement"]
+    by_sid = {
+        statement["Sid"]: statement for statement in role_statements
+    }
+    assert set(by_sid) == {
+        "AuthorizeLaunchWorkerImagePull",
+        "DeliverLaunchWorkerLogs",
+        "PullExactLaunchWorkerImage",
+    }
+    assert _actions(by_sid["AuthorizeLaunchWorkerImagePull"]) == {
+        "ecr:GetAuthorizationToken"
+    }
+    assert by_sid["AuthorizeLaunchWorkerImagePull"]["Resource"] == "*"
+    assert _actions(by_sid["PullExactLaunchWorkerImage"]) == {
+        "ecr:BatchCheckLayerAvailability",
+        "ecr:BatchGetImage",
+        "ecr:GetDownloadUrlForLayer",
+    }
+    assert "repository/axonllm/fargate" in json.dumps(
+        by_sid["PullExactLaunchWorkerImage"]["Resource"]
+    )
+    assert _actions(by_sid["DeliverLaunchWorkerLogs"]) == {
+        "logs:CreateLogStream",
+        "logs:PutLogEvents",
+    }
 
 
 def test_control_plane_retains_logs_and_access_log_bucket(

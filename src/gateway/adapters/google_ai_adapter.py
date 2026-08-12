@@ -4,8 +4,10 @@ import logging
 
 from src.gateway.adapters.base import ProviderAdapter
 from src.gateway.adapters.gemini_tools import (
+    gemini_token_usage,
     gemini_parts_to_tool_calls,
     openai_msg_to_gemini,
+    openai_tool_call_names,
     openai_tool_choice_to_gemini,
     openai_tools_to_gemini,
 )
@@ -20,6 +22,10 @@ from src.gateway.models import (
 logger = logging.getLogger(__name__)
 
 PROVIDER_NAME = "google_ai"
+_FINISH_REASONS = {
+    "STOP": "stop",
+    "MAX_TOKENS": "length",
+}
 
 _GOOGLE_AI_MODELS = [
     ModelInfo(model_id="gemini-2.5-pro", provider=PROVIDER_NAME, capabilities=["chat", "streaming", "function_calling"]),
@@ -45,13 +51,14 @@ class GoogleAIAdapter(ProviderAdapter):
     ) -> dict:
         contents = []
         system_text = request.system
+        tool_call_names = openai_tool_call_names(request.messages)
         for msg in request.messages:
             role = msg.get("role", "user")
             if role == "system":
                 if system_text is None:
                     system_text = msg.get("content", "")
                 continue
-            entry = openai_msg_to_gemini(msg)
+            entry = openai_msg_to_gemini(msg, tool_call_names)
             if entry is not None:
                 contents.append(entry)
 
@@ -95,7 +102,11 @@ class GoogleAIAdapter(ProviderAdapter):
             parts = first.get("content", {}).get("parts", [])
             text_parts = [p.get("text", "") for p in parts if "text" in p]
             combined_text = "".join(text_parts)
-            finish_reason = first.get("finishReason", "stop")
+            raw_finish_reason = first.get("finishReason", "STOP")
+            finish_reason = _FINISH_REASONS.get(
+                raw_finish_reason,
+                raw_finish_reason,
+            )
             tool_calls = gemini_parts_to_tool_calls(parts)
 
         message: dict = {"role": "assistant", "content": combined_text}
@@ -116,46 +127,71 @@ class GoogleAIAdapter(ProviderAdapter):
             }
         ]
 
-        usage_data = provider_response.get("usageMetadata", {})
-        prompt_tokens = usage_data.get("promptTokenCount", 0)
-        completion_tokens = usage_data.get("candidatesTokenCount", 0)
-
         return ChatCompletionResponse(
-            id=provider_response.get("id", ""),
-            choices=choices,
-            usage=TokenUsage(
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-                total_tokens=prompt_tokens + completion_tokens,
+            id=(
+                provider_response.get("responseId")
+                or provider_response.get("id", "")
             ),
-            model=provider_response.get("model", ""),
+            choices=choices,
+            usage=gemini_token_usage(
+                provider_response.get("usageMetadata")
+            ),
+            model=(
+                provider_response.get("modelVersion")
+                or provider_response.get("model", "")
+            ),
             provider=PROVIDER_NAME,
         )
 
     def translate_stream_chunk(self, chunk: dict) -> StreamChunk:
         candidates = chunk.get("candidates", [])
-        delta_content = ""
+        choices: list[dict] = []
         is_final = False
 
         if candidates:
             first = candidates[0]
             parts = first.get("content", {}).get("parts", [])
-            text_parts = [p.get("text", "") for p in parts]
-            delta_content = "".join(text_parts)
-            if first.get("finishReason") is not None:
-                is_final = True
-
-        choices = [
-            {
+            text = "".join(
+                part.get("text", "")
+                for part in parts
+                if "text" in part
+            )
+            tool_calls = gemini_parts_to_tool_calls(parts)
+            delta: dict = {}
+            if text:
+                delta["content"] = text
+            if tool_calls:
+                delta["tool_calls"] = [
+                    {"index": index, **tool_call}
+                    for index, tool_call in enumerate(tool_calls)
+                ]
+            raw_finish_reason = first.get("finishReason")
+            is_final = raw_finish_reason is not None
+            finish_reason = (
+                "tool_calls"
+                if tool_calls and is_final
+                else _FINISH_REASONS.get(
+                    raw_finish_reason,
+                    raw_finish_reason,
+                )
+            )
+            choices = [{
                 "index": 0,
-                "delta": {"content": delta_content} if delta_content else {},
-                "finish_reason": candidates[0].get("finishReason") if candidates else None,
-            }
-        ]
+                "delta": delta,
+                "finish_reason": finish_reason,
+            }]
 
         return StreamChunk(
-            id=chunk.get("id", ""),
+            id=chunk.get("responseId") or chunk.get("id", ""),
             choices=choices,
-            model=chunk.get("model", ""),
+            model=chunk.get("modelVersion") or chunk.get("model", ""),
             is_final=is_final,
+            usage=_google_stream_usage(chunk),
         )
+
+
+def _google_stream_usage(chunk: dict) -> TokenUsage | None:
+    usage = chunk.get("usageMetadata")
+    if not isinstance(usage, dict) or not usage:
+        return None
+    return gemini_token_usage(usage)

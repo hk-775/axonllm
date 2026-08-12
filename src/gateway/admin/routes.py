@@ -2511,6 +2511,7 @@ class AdminAPI:
 
     async def list_models(self, request: Request) -> JSONResponse:
         """List all models with usage stats."""
+        await self._refresh_config()
         models = self.model_registry.list_models()
         # No shared counter is keyed by model, so per-model cost has only the
         # record list as a source — the refresh is the whole fix here.
@@ -2538,7 +2539,161 @@ class AdminAPI:
                 "total_tokens": total_tokens,
                 "total_cost": total_cost,
             })
-        return JSONResponse(result)
+        return JSONResponse(
+            result,
+            headers=_revision_headers(self.model_registry.revision),
+        )
+
+    @staticmethod
+    def _model_store_unavailable() -> JSONResponse:
+        return JSONResponse(
+            {
+                "error": {
+                    "type": "service_unavailable",
+                    "code": "model_registry_unavailable",
+                    "message": "Model registry persistence is unavailable",
+                }
+            },
+            status_code=503,
+        )
+
+    @staticmethod
+    def _model_write_conflict(
+        revision: int | None = None,
+    ) -> JSONResponse:
+        error: dict[str, object] = {
+            "type": "write_conflict",
+            "code": "model_registry_write_conflict",
+            "message": "Model registry changed concurrently; reload and retry",
+        }
+        headers = None
+        if revision is not None:
+            error["revision"] = revision
+            headers = _revision_headers(revision)
+        return JSONResponse(
+            {"error": error},
+            status_code=409,
+            headers=headers,
+        )
+
+    def _publish_model_registry(
+        self,
+        config: dict,
+        revision: int,
+    ) -> None:
+        """Publish a complete committed snapshot to every local route reader."""
+        self.model_registry.replace_config(
+            config,
+            revision=revision,
+        )
+        note_revision = getattr(
+            self._config_sync,
+            "note_local_model_revision",
+            None,
+        )
+        if callable(note_revision):
+            note_revision(revision)
+
+    async def _reload_model_registry(self) -> int | None:
+        if self._persistence is None or not self._persistence.enabled:
+            return None
+        loader = getattr(
+            self._persistence,
+            "load_model_registry_snapshot",
+            None,
+        )
+        if not callable(loader):
+            return None
+        try:
+            snapshot = await loader()
+            if snapshot is None:
+                return None
+            config, revision = snapshot
+            self._publish_model_registry(config, revision)
+            return revision
+        except Exception:
+            logger.warning(
+                "Failed to reload the model registry after a conflict",
+                exc_info=True,
+            )
+            return None
+
+    async def _commit_model_registry(
+        self,
+        config: dict,
+        *,
+        expected_revision: int,
+    ) -> tuple[int | None, JSONResponse | None]:
+        """CAS a detached registry snapshot, then publish it locally."""
+        if self._persistence is not None and self._persistence.enabled:
+            saver = getattr(
+                self._persistence,
+                "save_model_registry",
+                None,
+            )
+            if not callable(saver):
+                return None, self._model_store_unavailable()
+            try:
+                revision = await saver(
+                    config,
+                    expected_revision=expected_revision,
+                )
+                revision = _next_revision(
+                    revision,
+                    expected_revision,
+                    "model registry",
+                )
+            except PersistenceConflictError:
+                latest_revision = await self._reload_model_registry()
+                return None, self._model_write_conflict(latest_revision)
+            except Exception:
+                logger.warning(
+                    "Failed to persist the model registry",
+                    exc_info=True,
+                )
+                return None, self._model_store_unavailable()
+        else:
+            # Local development keeps hot editing useful without ever mutating
+            # the checked-in bootstrap file. Production startup already
+            # requires durable persistence.
+            revision = expected_revision + 1
+
+        self._publish_model_registry(config, revision)
+        return revision, None
+
+    @staticmethod
+    def _invalid_model_candidate(
+        registry: ModelRegistry,
+        candidate: dict,
+    ) -> JSONResponse | None:
+        errors = registry.validate(candidate)
+        if errors:
+            return JSONResponse(
+                {
+                    "errors": [
+                        {"field": error.field, "message": error.message}
+                        for error in errors
+                    ]
+                },
+                status_code=400,
+            )
+        try:
+            # Parsing before persistence catches malformed numeric/pricing
+            # fields that structural validation alone cannot safely publish.
+            ModelRegistry.from_config(candidate)
+        except (KeyError, TypeError, ValueError) as exc:
+            return JSONResponse(
+                {
+                    "errors": [
+                        {
+                            "field": "models",
+                            "message": f"Invalid model configuration: {exc}",
+                        }
+                    ]
+                },
+                status_code=400,
+            )
+        return None
 
     # ------------------------------------------------------------------
     # POST /admin/models
@@ -2546,6 +2701,7 @@ class AdminAPI:
 
     async def create_model(self, request: Request) -> JSONResponse:
         """Create a new model."""
+        await self._refresh_config()
         body = await request.json()
 
         name = body.get("name")
@@ -2564,49 +2720,43 @@ class AdminAPI:
         capabilities = body.get("capabilities")
         if capabilities is not None:
             new_entry["capabilities"] = capabilities
+        if "max_context_tokens" in body:
+            new_entry["max_context_tokens"] = body[
+                "max_context_tokens"
+            ]
 
-        # Build candidate config with all existing models + new entry
-        existing_entries = []
-        for m in self.model_registry.models.values():
-            entry: dict = {
-                "name": m.name,
-                "description": m.description,
-                "routing_strategy": m.routing_strategy.value,
-                "providers": [
-                    {"provider": p.provider, "model_id": p.model_id, "weight": p.weight, "fallback_order": p.fallback_order}
-                    for p in m.providers
-                ],
-            }
-            if m.capabilities is not None:
-                entry["capabilities"] = m.capabilities
-            existing_entries.append(entry)
+        candidate = self.model_registry.to_config()
+        candidate["models"].append(new_entry)
+        error = self._invalid_model_candidate(
+            self.model_registry,
+            candidate,
+        )
+        if error is not None:
+            return error
 
-        candidate = {"models": existing_entries + [new_entry]}
-        errors = self.model_registry.validate(candidate)
-        if errors:
-            return JSONResponse(
-                {"errors": [{"field": e.field, "message": e.message} for e in errors]},
-                status_code=400,
-            )
-
-        # Parse and add to registry
-        parsed = self.model_registry._parse_entry(new_entry)
-        self.model_registry.models[name] = parsed
-
-        # Persist
-        try:
-            pathlib.Path(self._config_path).write_text(
-                self.model_registry.pretty_print(), encoding="utf-8"
-            )
-        except (IOError, OSError) as exc:
-            # Rollback: remove from registry
-            self.model_registry.models.pop(name, None)
-            return JSONResponse(
-                {"error": {"type": "server_error", "message": f"Failed to persist configuration: {exc}"}},
-                status_code=500,
-            )
-
-        return JSONResponse({"name": name, "status": "created"}, status_code=201)
+        expected_revision, error = _parse_if_match_revision(
+            request,
+            self.model_registry.revision,
+        )
+        if error is not None:
+            return error
+        assert expected_revision is not None
+        revision, error = await self._commit_model_registry(
+            candidate,
+            expected_revision=expected_revision,
+        )
+        if error is not None:
+            return error
+        assert revision is not None
+        return JSONResponse(
+            {
+                "name": name,
+                "revision": revision,
+                "status": "created",
+            },
+            status_code=201,
+            headers=_revision_headers(revision),
+        )
 
     # ------------------------------------------------------------------
     # PUT /admin/models/{name}
@@ -2614,6 +2764,7 @@ class AdminAPI:
 
     async def update_model(self, request: Request) -> JSONResponse:
         """Update a model's configuration."""
+        await self._refresh_config()
         model_name = request.path_params["name"]
         model_config = self.model_registry.models.get(model_name)
         if model_config is None:
@@ -2624,66 +2775,53 @@ class AdminAPI:
 
         body = await request.json()
 
-        # Build the updated entry dict from current config + body overrides
-        updated_entry: dict = {
-            "name": model_name,
-            "description": body.get("description", model_config.description),
-            "routing_strategy": body.get("routing_strategy", model_config.routing_strategy.value),
-            "providers": body.get("providers", [
-                {"provider": p.provider, "model_id": p.model_id, "weight": p.weight, "fallback_order": p.fallback_order}
-                for p in model_config.providers
-            ]),
-        }
-        capabilities = body.get("capabilities", model_config.capabilities)
-        if capabilities is not None:
-            updated_entry["capabilities"] = capabilities
-
-        # Build candidate config with all models, replacing the updated one
-        candidate_entries = []
-        for m in self.model_registry.models.values():
-            if m.name == model_name:
-                candidate_entries.append(updated_entry)
+        candidate = self.model_registry.to_config()
+        updated_entry = next(
+            entry
+            for entry in candidate["models"]
+            if entry["name"] == model_name
+        )
+        for field in ("description", "routing_strategy", "providers"):
+            if field in body:
+                updated_entry[field] = body[field]
+        for optional_field in ("capabilities", "max_context_tokens"):
+            if optional_field not in body:
+                continue
+            value = body[optional_field]
+            if value is None:
+                updated_entry.pop(optional_field, None)
             else:
-                entry: dict = {
-                    "name": m.name,
-                    "description": m.description,
-                    "routing_strategy": m.routing_strategy.value,
-                    "providers": [
-                        {"provider": p.provider, "model_id": p.model_id, "weight": p.weight, "fallback_order": p.fallback_order}
-                        for p in m.providers
-                    ],
-                }
-                if m.capabilities is not None:
-                    entry["capabilities"] = m.capabilities
-                candidate_entries.append(entry)
+                updated_entry[optional_field] = value
 
-        candidate = {"models": candidate_entries}
-        errors = self.model_registry.validate(candidate)
-        if errors:
-            return JSONResponse(
-                {"errors": [{"field": e.field, "message": e.message} for e in errors]},
-                status_code=400,
-            )
+        error = self._invalid_model_candidate(
+            self.model_registry,
+            candidate,
+        )
+        if error is not None:
+            return error
 
-        # Parse and replace in registry
-        old_config = self.model_registry.models[model_name]
-        parsed = self.model_registry._parse_entry(updated_entry)
-        self.model_registry.models[model_name] = parsed
-
-        # Persist
-        try:
-            pathlib.Path(self._config_path).write_text(
-                self.model_registry.pretty_print(), encoding="utf-8"
-            )
-        except (IOError, OSError) as exc:
-            # Rollback
-            self.model_registry.models[model_name] = old_config
-            return JSONResponse(
-                {"error": {"type": "server_error", "message": f"Failed to persist configuration: {exc}"}},
-                status_code=500,
-            )
-
-        return JSONResponse({"name": model_name, "status": "updated"})
+        expected_revision, error = _parse_if_match_revision(
+            request,
+            self.model_registry.revision,
+        )
+        if error is not None:
+            return error
+        assert expected_revision is not None
+        revision, error = await self._commit_model_registry(
+            candidate,
+            expected_revision=expected_revision,
+        )
+        if error is not None:
+            return error
+        assert revision is not None
+        return JSONResponse(
+            {
+                "name": model_name,
+                "revision": revision,
+                "status": "updated",
+            },
+            headers=_revision_headers(revision),
+        )
 
     # ------------------------------------------------------------------
     # DELETE /admin/models/{name}
@@ -2691,31 +2829,42 @@ class AdminAPI:
 
     async def delete_model(self, request: Request) -> JSONResponse:
         """Delete a model."""
+        await self._refresh_config()
         model_name = request.path_params["name"]
-        model_config = self.model_registry.models.get(model_name)
-        if model_config is None:
+        if model_name not in self.model_registry.models:
             return JSONResponse(
                 {"error": {"type": "not_found", "message": f"Model '{model_name}' not found"}},
                 status_code=404,
             )
 
-        # Remove from registry
-        del self.model_registry.models[model_name]
-
-        # Persist
-        try:
-            pathlib.Path(self._config_path).write_text(
-                self.model_registry.pretty_print(), encoding="utf-8"
-            )
-        except (IOError, OSError) as exc:
-            # Rollback: restore the model
-            self.model_registry.models[model_name] = model_config
-            return JSONResponse(
-                {"error": {"type": "server_error", "message": f"Failed to persist configuration: {exc}"}},
-                status_code=500,
-            )
-
-        return JSONResponse({"name": model_name, "status": "deleted"})
+        candidate = self.model_registry.to_config()
+        candidate["models"] = [
+            entry
+            for entry in candidate["models"]
+            if entry["name"] != model_name
+        ]
+        expected_revision, error = _parse_if_match_revision(
+            request,
+            self.model_registry.revision,
+        )
+        if error is not None:
+            return error
+        assert expected_revision is not None
+        revision, error = await self._commit_model_registry(
+            candidate,
+            expected_revision=expected_revision,
+        )
+        if error is not None:
+            return error
+        assert revision is not None
+        return JSONResponse(
+            {
+                "name": model_name,
+                "revision": revision,
+                "status": "deleted",
+            },
+            headers=_revision_headers(revision),
+        )
 
 
 

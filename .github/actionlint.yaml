@@ -1,0 +1,4 @@
+self-hosted-runner:
+  labels:
+    - axonllm-agentcore-allowlisted
+    - axonllm-production-allowlisted

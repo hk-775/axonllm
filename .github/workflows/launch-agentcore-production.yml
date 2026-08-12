@@ -1,0 +1,2161 @@
+name: Launch AgentCore production
+
+on:
+  workflow_dispatch:
+    inputs:
+      evidence_run_id:
+        description: Successful tagged release-security workflow run
+        required: true
+        type: string
+      release_commit_sha:
+        description: Full commit SHA recorded by the signed release
+        required: true
+        type: string
+      agentcore_image_reference:
+        description: Immutable private AgentCore ECR digest URI
+        required: true
+        type: string
+      control_plane_image_reference:
+        description: Immutable private Fargate ECR digest URI
+        required: true
+        type: string
+      external_oidc_setup_config_s3_version_id:
+        description: Immutable S3 VersionId for reviewed external-OIDC setup
+        required: true
+        type: string
+      external_oidc_setup_config_sha256:
+        description: Lowercase SHA-256 for reviewed external-OIDC setup
+        required: true
+        type: string
+      setup_config_s3_version_id:
+        description: Immutable S3 VersionId for reviewed managed setup
+        required: true
+        type: string
+      setup_config_sha256:
+        description: Lowercase SHA-256 for reviewed managed setup
+        required: true
+        type: string
+      certification_config_s3_version_id:
+        description: Immutable S3 VersionId for launch certification
+        required: true
+        type: string
+      certification_config_sha256:
+        description: Lowercase SHA-256 for launch certification
+        required: true
+        type: string
+      production_validation_config_s3_version_id:
+        description: Immutable S3 VersionId for control-plane validation
+        required: true
+        type: string
+      production_validation_config_sha256:
+        description: Lowercase SHA-256 for control-plane validation
+        required: true
+        type: string
+      gate_config_s3_version_id:
+        description: Immutable S3 VersionId for reviewed launch gates
+        required: true
+        type: string
+      gate_config_sha256:
+        description: Lowercase SHA-256 for reviewed launch gates
+        required: true
+        type: string
+      change_id:
+        description: Approved production change identifier
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+  id-token: write
+
+concurrency:
+  group: agentcore-production-launch
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-east-1
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  QUALIFICATION_NAMESPACE: managed
+  UV_VERSION: "0.10.7"
+
+jobs:
+  authorize:
+    name: Authorize protected-main launch
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    environment: agentcore-qualification
+    permissions:
+      contents: read
+    steps:
+      - name: Require workflow dispatch from protected main
+        env:
+          EXPECTED_WORKFLOW_REF: ${{ github.repository }}/.github/workflows/launch-agentcore-production.yml@refs/heads/main
+        run: |
+          set -euo pipefail
+          [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]
+          [[ "${GITHUB_REF}" == "refs/heads/main" ]]
+          [[ "${GITHUB_WORKFLOW_REF}" == "${EXPECTED_WORKFLOW_REF}" ]]
+          [[ "${GITHUB_SHA}" =~ ^[0-9a-f]{40}$ ]]
+
+  verify-agentcore:
+    name: Verify signed AgentCore image
+    needs:
+      - authorize
+    uses: ./.github/workflows/deploy-verification.yml
+    with:
+      evidence_run_id: ${{ inputs.evidence_run_id }}
+      commit_sha: ${{ inputs.release_commit_sha }}
+      image_reference: ${{ inputs.agentcore_image_reference }}
+      target: agentcore
+      aws_region: us-east-1
+
+  verify-control-plane:
+    name: Verify signed control-plane image
+    needs:
+      - authorize
+    uses: ./.github/workflows/deploy-verification.yml
+    with:
+      evidence_run_id: ${{ inputs.evidence_run_id }}
+      commit_sha: ${{ inputs.release_commit_sha }}
+      image_reference: ${{ inputs.control_plane_image_reference }}
+      target: fargate
+      aws_region: us-east-1
+
+  external-oidc:
+    name: Certify external OIDC
+    needs:
+      - verify-agentcore
+      - verify-control-plane
+    uses: ./.github/workflows/certify-agentcore-external-oidc.yml
+    with:
+      evidence_run_id: ${{ inputs.evidence_run_id }}
+      release_commit_sha: ${{ inputs.release_commit_sha }}
+      agentcore_image_reference: ${{ inputs.agentcore_image_reference }}
+      setup_config_s3_version_id: ${{ inputs.external_oidc_setup_config_s3_version_id }}
+      setup_config_sha256: ${{ inputs.external_oidc_setup_config_sha256 }}
+      certification_config_s3_version_id: ${{ inputs.certification_config_s3_version_id }}
+      certification_config_sha256: ${{ inputs.certification_config_sha256 }}
+      aws_region: us-east-1
+
+  stage-managed:
+    name: Stage isolated managed-Cognito qualification
+    needs:
+      - verify-agentcore
+      - verify-control-plane
+    runs-on:
+      group: axonllm-production
+      labels: axonllm-production-allowlisted
+    timeout-minutes: 180
+    environment: agentcore-qualification
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+    outputs:
+      ready: ${{ steps.ready.outputs.ready }}
+
+    steps:
+      - name: Check out protected launch tooling
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          clean: true
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.sha }}
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+
+      - name: Set up supported Node for CDK
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: "22"
+
+      - name: Validate protected immutable inputs
+        env:
+          AGENTCORE_IMAGE: ${{ inputs.agentcore_image_reference }}
+          AWS_ACCOUNT_ID: ${{ vars.AXON_AWS_ACCOUNT_ID }}
+          CERTIFICATION_CONFIG_SHA256: ${{ inputs.certification_config_sha256 }}
+          CERTIFICATION_CONFIG_URI: ${{ vars.AXON_AGENTCORE_CERTIFICATION_CONFIG_S3_URI }}
+          CERTIFICATION_CONFIG_VERSION_ID: ${{ inputs.certification_config_s3_version_id }}
+          CONTROL_PLANE_IMAGE: ${{ inputs.control_plane_image_reference }}
+          GATE_CONFIG_SHA256: ${{ inputs.gate_config_sha256 }}
+          GATE_CONFIG_URI: ${{ vars.AXON_AGENTCORE_LAUNCH_GATE_CONFIG_S3_URI }}
+          GATE_CONFIG_VERSION_ID: ${{ inputs.gate_config_s3_version_id }}
+          PRODUCTION_VALIDATION_CONFIG_SHA256: ${{ inputs.production_validation_config_sha256 }}
+          PRODUCTION_VALIDATION_CONFIG_URI: ${{ vars.AXON_AGENTCORE_PRODUCTION_VALIDATION_CONFIG_S3_URI }}
+          PRODUCTION_VALIDATION_CONFIG_VERSION_ID: ${{ inputs.production_validation_config_s3_version_id }}
+          PROVIDER_SOURCE_SECRET_ARN: ${{ vars.AXON_AGENTCORE_QUALIFICATION_PROVIDER_SOURCE_SECRET_ARN }}
+          QUALIFICATION_ROLE_ARN: ${{ secrets.AXON_AGENTCORE_QUALIFICATION_ROLE_ARN }}
+          RELEASE_COMMIT: ${{ inputs.release_commit_sha }}
+          RELEASE_RUN_ID: ${{ inputs.evidence_run_id }}
+          SETUP_CONFIG_SHA256: ${{ inputs.setup_config_sha256 }}
+          SETUP_CONFIG_URI: ${{ vars.AXON_AGENTCORE_SETUP_CONFIG_S3_URI }}
+          SETUP_CONFIG_VERSION_ID: ${{ inputs.setup_config_s3_version_id }}
+          VERIFIED_AGENTCORE_IMAGE: ${{ needs.verify-agentcore.outputs.verified_image }}
+          VERIFIED_CONTROL_PLANE_IMAGE: ${{ needs.verify-control-plane.outputs.verified_image }}
+        run: |
+          set -euo pipefail
+          [[ "${GITHUB_REF}" == "refs/heads/main" ]]
+          [[ "${GITHUB_WORKFLOW_REF}" == "${GITHUB_REPOSITORY}/.github/workflows/launch-agentcore-production.yml@refs/heads/main" ]]
+          [[ "$(git rev-parse HEAD)" == "${GITHUB_SHA}" ]]
+          [[ -z "$(git status --porcelain)" ]]
+          [[ "${QUALIFICATION_NAMESPACE}" == "managed" ]]
+          [[ "${AWS_REGION}" == "us-east-1" ]]
+          [[ "${AWS_ACCOUNT_ID}" =~ ^[0-9]{12}$ ]]
+          [[ "${RELEASE_RUN_ID}" =~ ^[1-9][0-9]{0,19}$ ]]
+          [[ "${RELEASE_COMMIT}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${AGENTCORE_IMAGE}" == "${VERIFIED_AGENTCORE_IMAGE}" ]]
+          [[ "${CONTROL_PLANE_IMAGE}" == "${VERIFIED_CONTROL_PLANE_IMAGE}" ]]
+          agentcore_prefix="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/axonllm/agentcore@sha256:"
+          control_prefix="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/axonllm/fargate@sha256:"
+          [[ "${AGENTCORE_IMAGE}" == "${agentcore_prefix}"* ]]
+          [[ "${CONTROL_PLANE_IMAGE}" == "${control_prefix}"* ]]
+          [[ "${AGENTCORE_IMAGE#"${agentcore_prefix}"}" =~ ^[0-9a-f]{64}$ ]]
+          [[ "${CONTROL_PLANE_IMAGE#"${control_prefix}"}" =~ ^[0-9a-f]{64}$ ]]
+          [[ "${QUALIFICATION_ROLE_ARN}" =~ ^arn:aws:iam::${AWS_ACCOUNT_ID}:role/[A-Za-z0-9+=,.@_/-]+$ ]]
+          [[ "${PROVIDER_SOURCE_SECRET_ARN}" =~ ^arn:aws:secretsmanager:${AWS_REGION}:${AWS_ACCOUNT_ID}:secret:.+ ]]
+          for uri in \
+            "${SETUP_CONFIG_URI}" \
+            "${CERTIFICATION_CONFIG_URI}" \
+            "${PRODUCTION_VALIDATION_CONFIG_URI}" \
+            "${GATE_CONFIG_URI}"
+          do
+            [[ "${uri}" =~ ^s3://[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]/.+[^/]$ ]]
+            [[ "${uri}" != *"?"* ]]
+            [[ "${uri}" != *"#"* ]]
+          done
+          for version_id in \
+            "${SETUP_CONFIG_VERSION_ID}" \
+            "${CERTIFICATION_CONFIG_VERSION_ID}" \
+            "${PRODUCTION_VALIDATION_CONFIG_VERSION_ID}" \
+            "${GATE_CONFIG_VERSION_ID}"
+          do
+            [[ "${version_id}" =~ ^[A-Za-z0-9._~+/=-]{1,1024}$ ]]
+            [[ "${version_id}" != "null" ]]
+          done
+          for digest in \
+            "${SETUP_CONFIG_SHA256}" \
+            "${CERTIFICATION_CONFIG_SHA256}" \
+            "${PRODUCTION_VALIDATION_CONFIG_SHA256}" \
+            "${GATE_CONFIG_SHA256}"
+          do
+            [[ "${digest}" =~ ^[0-9a-f]{64}$ ]]
+          done
+
+      - name: Install locked qualification dependencies
+        env:
+          UV_CACHE_DIR: ${{ runner.temp }}/axonllm-qualification-uv
+        run: |
+          set -euo pipefail
+          python -m pip install --no-deps "uv==${UV_VERSION}"
+          uv sync --frozen --extra agentcore --extra dev --extra oidc
+          uv run --frozen --no-sync playwright install chromium
+          npm ci \
+            --prefix src/gateway/deployment/infra \
+            --ignore-scripts \
+            --no-audit \
+            --no-fund
+          infra_python="${RUNNER_TEMP}/qualification-infra-venv/bin/python"
+          uv venv --python 3.12 "${RUNNER_TEMP}/qualification-infra-venv"
+          uv pip sync \
+            --python "${infra_python}" \
+            --require-hashes \
+            infra/requirements.txt
+          test -x "${infra_python}"
+          test -x src/gateway/deployment/infra/node_modules/.bin/cdk
+
+      - name: Configure qualification AWS credentials through OIDC
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with:
+          allowed-account-ids: ${{ vars.AXON_AWS_ACCOUNT_ID }}
+          aws-region: us-east-1
+          mask-aws-account-id: true
+          output-credentials: false
+          output-env-credentials: true
+          role-duration-seconds: 10800
+          role-session-name: AxonLLMQualification-${{ github.run_id }}-${{ github.run_attempt }}
+          role-to-assume: ${{ secrets.AXON_AGENTCORE_QUALIFICATION_ROLE_ARN }}
+          unset-current-credentials: true
+
+      - name: Verify exact qualification authority and release foundation
+        env:
+          AWS_ACCOUNT_ID: ${{ vars.AXON_AWS_ACCOUNT_ID }}
+          QUALIFICATION_ROLE_ARN: ${{ secrets.AXON_AGENTCORE_QUALIFICATION_ROLE_ARN }}
+        run: |
+          set -euo pipefail
+          session_name="AxonLLMQualification-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          role_prefix="arn:aws:iam::${AWS_ACCOUNT_ID}:role/"
+          role_name=${QUALIFICATION_ROLE_ARN#"${role_prefix}"}
+          caller=$(aws sts get-caller-identity --output json --no-cli-pager)
+          jq -e \
+            --arg account "${AWS_ACCOUNT_ID}" \
+            --arg arn "arn:aws:sts::${AWS_ACCOUNT_ID}:assumed-role/${role_name##*/}/${session_name}" \
+            --arg session "${session_name}" '
+            .Account == $account
+            and .Arn == $arn
+            and (.UserId | endswith(":" + $session))
+          ' <<<"${caller}" >/dev/null
+
+          work="${RUNNER_TEMP}/managed-qualification"
+          cleanup="${RUNNER_TEMP}/qualification-cleanup"
+          install -d -m 0700 "${work}" "${cleanup}"
+          foundation="${work}/release-foundation.json"
+          aws cloudformation describe-stacks \
+            --stack-name AxonLLMReleaseFoundationStack \
+            --query 'Stacks[0].Outputs' \
+            --output json \
+            --no-cli-pager \
+            >"${work}/release-foundation-outputs.json"
+          jq -e '
+            map({key: .OutputKey, value: .OutputValue}) | from_entries
+            | {
+                AgentCoreLaunchGatesRoleArn,
+                FargateRepositoryUri,
+                LaunchCoordinatorActionActivityArn,
+                LaunchCoordinatorActionWorkerRoleArn,
+                LaunchCoordinatorCleanupActivityArn,
+                LaunchCoordinatorCleanupWorkerRoleArn,
+                LaunchCoordinatorExecutionRoleArn,
+                LaunchCoordinatorKeyArn,
+                LaunchCoordinatorLeaseTableArn,
+                LaunchCoordinatorStateMachineVersionArn,
+                LaunchCoordinatorWatchdogAlarmArn,
+                LaunchRuntimeIdentitySecretArn,
+                QualificationMutationBrokerVersionArn,
+                RehearsalControlLedgerTableArn
+              }
+            | if any(.[]; type != "string" or length == 0)
+              then error("release foundation output is missing")
+              else .
+              end
+          ' "${work}/release-foundation-outputs.json" >"${foundation}"
+          chmod 0600 "${foundation}"
+          jq -e \
+            --arg account "${AWS_ACCOUNT_ID}" \
+            --arg region "${AWS_REGION}" '
+            .RehearsalControlLedgerTableArn
+              == "arn:aws:dynamodb:" + $region + ":" + $account
+                 + ":table/axonllm-rehearsal-control-ledger"
+            and (.LaunchRuntimeIdentitySecretArn
+              | startswith(
+                  "arn:aws:secretsmanager:" + $region + ":" + $account
+                  + ":secret:axonllm/launch/runtime-identity-"
+                ))
+            and .FargateRepositoryUri
+              == $account + ".dkr.ecr." + $region
+                 + ".amazonaws.com/axonllm/fargate"
+          ' "${foundation}" >/dev/null
+
+      - name: Fetch exact reviewed qualification contracts
+        env:
+          AWS_ACCOUNT_ID: ${{ vars.AXON_AWS_ACCOUNT_ID }}
+          CERTIFICATION_CONFIG_SHA256: ${{ inputs.certification_config_sha256 }}
+          CERTIFICATION_CONFIG_URI: ${{ vars.AXON_AGENTCORE_CERTIFICATION_CONFIG_S3_URI }}
+          CERTIFICATION_CONFIG_VERSION_ID: ${{ inputs.certification_config_s3_version_id }}
+          GATE_CONFIG_SHA256: ${{ inputs.gate_config_sha256 }}
+          GATE_CONFIG_URI: ${{ vars.AXON_AGENTCORE_LAUNCH_GATE_CONFIG_S3_URI }}
+          GATE_CONFIG_VERSION_ID: ${{ inputs.gate_config_s3_version_id }}
+          PRODUCTION_VALIDATION_CONFIG_SHA256: ${{ inputs.production_validation_config_sha256 }}
+          PRODUCTION_VALIDATION_CONFIG_URI: ${{ vars.AXON_AGENTCORE_PRODUCTION_VALIDATION_CONFIG_S3_URI }}
+          PRODUCTION_VALIDATION_CONFIG_VERSION_ID: ${{ inputs.production_validation_config_s3_version_id }}
+          SETUP_CONFIG_SHA256: ${{ inputs.setup_config_sha256 }}
+          SETUP_CONFIG_URI: ${{ vars.AXON_AGENTCORE_SETUP_CONFIG_S3_URI }}
+          SETUP_CONFIG_VERSION_ID: ${{ inputs.setup_config_s3_version_id }}
+        run: |
+          set -euo pipefail
+          work="${RUNNER_TEMP}/managed-qualification"
+          fetch_exact() {
+            local uri=$1
+            local version_id=$2
+            local sha256=$3
+            local destination=$4
+            local metadata="${destination}.metadata"
+            local location=${uri#s3://}
+            local bucket=${location%%/*}
+            local key=${location#*/}
+            [[ "${uri}" == s3://*/* ]]
+            [[ -n "${bucket}" && -n "${key}" ]]
+            aws s3api get-object \
+              --bucket "${bucket}" \
+              --key "${key}" \
+              --version-id "${version_id}" \
+              --expected-bucket-owner "${AWS_ACCOUNT_ID}" \
+              --checksum-mode ENABLED \
+              "${destination}" \
+              --output json \
+              --no-cli-pager \
+              >"${metadata}"
+            jq -e --arg version "${version_id}" \
+              '.VersionId == $version' "${metadata}" >/dev/null
+            printf '%s  %s\n' "${sha256}" "${destination}" \
+              | sha256sum --check --status
+            chmod 0600 "${destination}" "${metadata}"
+          }
+          fetch_exact \
+            "${SETUP_CONFIG_URI}" \
+            "${SETUP_CONFIG_VERSION_ID}" \
+            "${SETUP_CONFIG_SHA256}" \
+            "${work}/managed-setup.json"
+          fetch_exact \
+            "${CERTIFICATION_CONFIG_URI}" \
+            "${CERTIFICATION_CONFIG_VERSION_ID}" \
+            "${CERTIFICATION_CONFIG_SHA256}" \
+            "${work}/certification-reviewed.json"
+          fetch_exact \
+            "${PRODUCTION_VALIDATION_CONFIG_URI}" \
+            "${PRODUCTION_VALIDATION_CONFIG_VERSION_ID}" \
+            "${PRODUCTION_VALIDATION_CONFIG_SHA256}" \
+            "${work}/production-validation.json"
+          fetch_exact \
+            "${GATE_CONFIG_URI}" \
+            "${GATE_CONFIG_VERSION_ID}" \
+            "${GATE_CONFIG_SHA256}" \
+            "${work}/launch-gates.json"
+
+      - name: Bind reviewed configuration to verified release
+        env:
+          AGENTCORE_IMAGE: ${{ inputs.agentcore_image_reference }}
+          CONTROL_PLANE_IMAGE: ${{ inputs.control_plane_image_reference }}
+        run: |
+          set -euo pipefail
+          work="${RUNNER_TEMP}/managed-qualification"
+          uv run --frozen --no-sync python - \
+            "${work}/managed-setup.json" \
+            "${work}/certification-reviewed.json" \
+            "${work}/production-validation.json" \
+            "${AGENTCORE_IMAGE}" \
+            "${CONTROL_PLANE_IMAGE}" <<'PY'
+          import json
+          from pathlib import Path
+          import sys
+
+          setup = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          certification = json.loads(
+              Path(sys.argv[2]).read_text(encoding="utf-8")
+          )
+          validation = json.loads(
+              Path(sys.argv[3]).read_text(encoding="utf-8")
+          )
+          if (
+              setup.get("schema_version") != 2
+              or setup.get("target") != "agentcore"
+              or setup.get("identity_mode") != "managed-cognito"
+              or setup.get("aws_region") != "us-east-1"
+              or not isinstance(setup.get("runtime"), dict)
+              or setup["runtime"].get("verified_image_uri") != sys.argv[4]
+              or not isinstance(setup.get("control_plane"), dict)
+              or setup["control_plane"].get("verified_image_uri")
+              != sys.argv[5]
+          ):
+              raise SystemExit(
+                  "managed setup is not bound to both verified images"
+              )
+          if (
+              certification.get("schemaVersion") != 1
+              or certification.get("region") != "us-east-1"
+              or certification.get("profile") != "production-launch"
+          ):
+              raise SystemExit(
+                  "certification is not the production launch contract"
+              )
+          if validation.get("target") != "fargate":
+              raise SystemExit(
+                  "production validation is not bound to Fargate"
+              )
+          PY
+
+      - name: Read provider credentials into an owner-only file
+        env:
+          PROVIDER_SOURCE_SECRET_ARN: ${{ vars.AXON_AGENTCORE_QUALIFICATION_PROVIDER_SOURCE_SECRET_ARN }}
+        run: |
+          set -euo pipefail
+          work="${RUNNER_TEMP}/managed-qualification"
+          source_json="${work}/provider-source.json"
+          provider_env="${work}/provider.env"
+          umask 077
+          aws secretsmanager get-secret-value \
+            --secret-id "${PROVIDER_SOURCE_SECRET_ARN}" \
+            --query SecretString \
+            --output text \
+            --no-cli-pager \
+            >"${source_json}"
+          uv run --frozen --no-sync python - \
+            "${source_json}" "${provider_env}" <<'PY'
+          import json
+          from pathlib import Path
+          import shlex
+          import sys
+
+          from src.gateway.deployment.provider_secret import (
+              ALLOWED_SECRET_FIELDS,
+          )
+
+          source = Path(sys.argv[1])
+          output = Path(sys.argv[2])
+          value = json.loads(source.read_text(encoding="utf-8"))
+          if (
+              not isinstance(value, dict)
+              or not value
+              or not set(value).issubset(ALLOWED_SECRET_FIELDS)
+              or any(
+                  not isinstance(item, str)
+                  or not item
+                  or "\r" in item
+                  or "\n" in item
+                  for item in value.values()
+              )
+          ):
+              raise SystemExit("provider source secret is malformed")
+          if "GCP_CREDENTIALS_JSON" in value:
+              document = json.loads(value["GCP_CREDENTIALS_JSON"])
+              value["GCP_CREDENTIALS_JSON"] = json.dumps(
+                  document,
+                  separators=(",", ":"),
+                  sort_keys=True,
+              )
+          output.write_text(
+              "".join(
+                  f"{name}={shlex.quote(value[name])}\n"
+                  for name in sorted(value)
+              ),
+              encoding="utf-8",
+          )
+          output.chmod(0o600)
+          PY
+          rm -f "${source_json}"
+
+      - name: Deploy namespaced identity and runtime candidate
+        run: |
+          set -euo pipefail
+          work="${RUNNER_TEMP}/managed-qualification"
+          foundation="${work}/release-foundation.json"
+          ledger=$(jq -er '.RehearsalControlLedgerTableArn' "${foundation}")
+          qualification_arguments=(
+            --config "${work}/managed-setup.json"
+            --outputs-dir "${work}/deployment"
+            --deployment-namespace "${QUALIFICATION_NAMESPACE}"
+            --rehearsal-control-table-arn "${ledger}"
+            --yes
+          )
+          ./deploy-agentcore.sh \
+            "${qualification_arguments[@]}" \
+            --provider-env-file "${work}/provider.env"
+          jq -e \
+            --arg stack "AxonLLMIdentityStack-${QUALIFICATION_NAMESPACE}" '
+            .[$stack] | type == "object"
+          ' "${work}/deployment/identity-outputs.json" >/dev/null
+          jq -e \
+            --arg stack "AxonLLMAgentCoreStack-${QUALIFICATION_NAMESPACE}" '
+            .[$stack]
+            | .RuntimeArn != null
+            and .CandidateRuntimeVersion != null
+            and (.CandidateRuntimeEndpointName
+              | test("^candidate_[0-9a-f]{32}$"))
+          ' "${work}/deployment/agentcore-outputs.json" >/dev/null
+
+      - name: Prepare and certify managed qualification candidate
+        run: |
+          set -euo pipefail
+          work="${RUNNER_TEMP}/managed-qualification"
+          cleanup="${RUNNER_TEMP}/qualification-cleanup"
+          identity_stack="AxonLLMIdentityStack-${QUALIFICATION_NAMESPACE}"
+          runtime_stack="AxonLLMAgentCoreStack-${QUALIFICATION_NAMESPACE}"
+          jq -e --arg stack "${identity_stack}" \
+            '{"AxonLLMIdentityStack": .[$stack]}' \
+            "${work}/deployment/identity-outputs.json" \
+            >"${work}/identity-fixture-outputs.json"
+          jq -e --arg stack "${runtime_stack}" \
+            '{"AxonLLMAgentCoreStack": .[$stack]}' \
+            "${work}/deployment/agentcore-outputs.json" \
+            >"${work}/runtime-fixture-outputs.json"
+          runtime_arn=$(jq -er \
+            --arg stack "${runtime_stack}" \
+            '.[$stack].RuntimeArn' \
+            "${work}/deployment/agentcore-outputs.json")
+          qualifier=$(jq -er \
+            --arg stack "${runtime_stack}" \
+            '.[$stack].CandidateRuntimeEndpointName' \
+            "${work}/deployment/agentcore-outputs.json")
+          jq -e \
+            --arg runtime_arn "${runtime_arn}" \
+            --arg qualifier "${qualifier}" '
+            .runtimeArn = $runtime_arn
+            | .qualifier = $qualifier
+          ' "${work}/certification-reviewed.json" \
+            >"${work}/certification-bound.json"
+          chmod 0600 \
+            "${work}/identity-fixture-outputs.json" \
+            "${work}/runtime-fixture-outputs.json" \
+            "${work}/certification-bound.json"
+          uv run --frozen --no-sync python \
+            scripts/operations/prepare_agentcore_certification.py prepare \
+            --setup-config "${work}/managed-setup.json" \
+            --certification-config "${work}/certification-bound.json" \
+            --identity-outputs "${work}/identity-fixture-outputs.json" \
+            --runtime-outputs "${work}/runtime-fixture-outputs.json" \
+            --credentials-output "${work}/certification-credentials.json" \
+            --state-output "${cleanup}/certification-fixtures.json"
+          uv run --frozen --no-sync python - \
+            "${work}/certification-bound.json" \
+            "${work}/certification-credentials.json" \
+            "${work}/certification-report.json" <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import subprocess
+          import sys
+
+          config_path = Path(sys.argv[1])
+          credentials_path = Path(sys.argv[2])
+          report_path = Path(sys.argv[3])
+          config = json.loads(config_path.read_text(encoding="utf-8"))
+          credentials = json.loads(
+              credentials_path.read_text(encoding="utf-8")
+          )
+          identities = config.get("identities")
+          if not isinstance(identities, dict):
+              raise SystemExit("certification identities are malformed")
+          required = set(identities.values())
+          if (
+              not isinstance(credentials, dict)
+              or set(credentials) != required
+              or any(
+                  re.fullmatch(r"[A-Z_][A-Z0-9_]{0,127}", name)
+                  is None
+                  for name in required
+              )
+              or any(
+                  not isinstance(value, str) or not value
+                  for value in credentials.values()
+              )
+          ):
+              raise SystemExit(
+                  "certification credentials do not match the scenario"
+              )
+          environment = os.environ.copy()
+          environment.update(credentials)
+          completed = subprocess.run(
+              [
+                  sys.executable,
+                  "scripts/operations/certify_agentcore.py",
+                  "--config",
+                  str(config_path),
+                  "--output",
+                  str(report_path),
+              ],
+              check=False,
+              env=environment,
+          )
+          raise SystemExit(completed.returncode)
+          PY
+          jq -e '.overallStatus == "PASS"' \
+            "${work}/certification-report.json" >/dev/null
+
+      - name: Promote only the namespaced runtime and deploy control plane
+        run: |
+          set -euo pipefail
+          work="${RUNNER_TEMP}/managed-qualification"
+          foundation="${work}/release-foundation.json"
+          ledger=$(jq -er '.RehearsalControlLedgerTableArn' "${foundation}")
+          runtime_stack="AxonLLMAgentCoreStack-${QUALIFICATION_NAMESPACE}"
+          candidate_version=$(jq -er \
+            --arg stack "${runtime_stack}" \
+            '.[$stack].CandidateRuntimeVersion' \
+            "${work}/deployment/agentcore-outputs.json")
+          candidate_endpoint=$(jq -er \
+            --arg stack "${runtime_stack}" \
+            '.[$stack].CandidateRuntimeEndpointName' \
+            "${work}/deployment/agentcore-outputs.json")
+          qualification_arguments=(
+            --config "${work}/managed-setup.json"
+            --outputs-dir "${work}/deployment"
+            --deployment-namespace "${QUALIFICATION_NAMESPACE}"
+            --rehearsal-control-table-arn "${ledger}"
+            --yes
+          )
+          ./deploy-agentcore.sh \
+            "${qualification_arguments[@]}" \
+            --candidate-endpoint-name "${candidate_endpoint}" \
+            --prepare-candidate-promotion-version "${candidate_version}"
+          ./deploy-agentcore.sh \
+            "${qualification_arguments[@]}" \
+            --candidate-endpoint-name "${candidate_endpoint}" \
+            --promote-candidate-version "${candidate_version}"
+          jq -e \
+            --arg stack "${runtime_stack}" \
+            --arg version "${candidate_version}" '
+            .[$stack]
+            | .RuntimeVersion == $version
+            and .ProductionRuntimeVersion == $version
+            and .RuntimeEndpointName == "production"
+          ' "${work}/deployment/agentcore-outputs.json" >/dev/null
+          ./deploy-agentcore.sh \
+            "${qualification_arguments[@]}" \
+            --deploy-control-plane
+          jq -e \
+            --arg image "${{ inputs.control_plane_image_reference }}" \
+            --arg stack "AxonLLMControlPlaneStack-${QUALIFICATION_NAMESPACE}" '
+            .[$stack]
+            | .ControlPlaneImageUri == $image
+            and .QueryPlaneEnabled == "true"
+            and (.ClusterArn | type == "string" and length > 0)
+            and (.SubnetIds | type == "string" and length > 0)
+            and (.TaskSecurityGroupId | type == "string" and length > 0)
+          ' "${work}/deployment/control-plane-outputs.json" >/dev/null
+
+      - name: Prepare managed control-plane canary sessions
+        run: |
+          set -euo pipefail
+          work="${RUNNER_TEMP}/managed-qualification"
+          cleanup="${RUNNER_TEMP}/qualification-cleanup"
+          identity_stack="AxonLLMIdentityStack-${QUALIFICATION_NAMESPACE}"
+          control_stack="AxonLLMControlPlaneStack-${QUALIFICATION_NAMESPACE}"
+          jq -e --arg stack "${identity_stack}" \
+            '{"AxonLLMIdentityStack": .[$stack]}' \
+            "${work}/deployment/identity-outputs.json" \
+            >"${work}/control-plane-identity-outputs.json"
+          jq -e --arg stack "${control_stack}" \
+            '{"AxonLLMControlPlaneStack": .[$stack]}' \
+            "${work}/deployment/control-plane-outputs.json" \
+            >"${work}/control-plane-fixture-outputs.json"
+          chmod 0600 \
+            "${work}/control-plane-identity-outputs.json" \
+            "${work}/control-plane-fixture-outputs.json"
+          uv run --frozen --no-sync python - \
+            "${AWS_REGION}" \
+            "${work}/managed-setup.json" \
+            "${work}/production-validation.json" \
+            "${work}/control-plane-identity-outputs.json" \
+            "${work}/control-plane-fixture-outputs.json" \
+            "${work}/control-plane-canary-credentials.json" \
+            "${cleanup}/control-plane-canary-sessions.json" <<'PY'
+          import json
+          from pathlib import Path
+          import sys
+
+          from scripts.operations.prepare_control_plane_canary_sessions import (
+              prepare_sessions,
+          )
+          from scripts.operations.run_production_validation import parse_config
+          from src.gateway.agentcore_setup import AgentCoreSetupConfig
+
+          region = sys.argv[1]
+          setup = AgentCoreSetupConfig.from_mapping(
+              json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
+          )
+          validation = parse_config(
+              json.loads(Path(sys.argv[3]).read_text(encoding="utf-8"))
+          )
+          if validation.target != "fargate":
+              raise SystemExit(
+                  "qualification control-plane validation must target Fargate"
+              )
+
+          def request_for(category):
+              matches = [
+                  canary.request
+                  for canary in validation.canaries
+                  if canary.category == category
+              ]
+              if not matches:
+                  raise SystemExit(
+                      f"control-plane validation lacks {category}"
+                  )
+              credential_names = {
+                  request.credential_env for request in matches
+              }
+              if len(credential_names) != 1:
+                  raise SystemExit(
+                      f"control-plane validation has ambiguous {category}"
+                  )
+              return matches[0]
+
+          member = request_for("authenticated_read_allowed")
+          viewer = request_for("viewer_mutation_denied")
+          admin = request_for("tenant_admin_mutation_round_trip")
+          cross = request_for("cross_tenant_denied")
+          ungranted = request_for("ungranted_project_denied")
+          expected_path = f"/admin/projects/{setup.tenant.project_id}"
+          if (
+              any(
+                  request.path != expected_path
+                  for request in (
+                      member,
+                      viewer,
+                      admin,
+                      cross,
+                      ungranted,
+                      validation.load.request,
+                  )
+              )
+              or viewer.csrf_token_env is None
+              or admin.csrf_token_env is None
+          ):
+              raise SystemExit(
+                  "control-plane validation is not bound to the setup project"
+              )
+
+          prepare_sessions(
+              region=region,
+              identity_outputs=sys.argv[4],
+              control_plane_outputs=sys.argv[5],
+              tenant_id=setup.tenant.tenant_id,
+              project_id=setup.tenant.project_id,
+              credentials_output=sys.argv[6],
+              state_output=sys.argv[7],
+              member_cookie_env=member.credential_env,
+              viewer_cookie_env=viewer.credential_env,
+              viewer_csrf_env=viewer.csrf_token_env,
+              admin_cookie_env=admin.credential_env,
+              admin_csrf_env=admin.csrf_token_env,
+              cross_tenant_cookie_env=cross.credential_env,
+              ungranted_project_cookie_env=ungranted.credential_env,
+          )
+          PY
+
+      - name: Run managed control-plane RBAC and load validation
+        run: |
+          set -euo pipefail
+          work="${RUNNER_TEMP}/managed-qualification"
+          uv run --frozen --no-sync python - \
+            "${work}/production-validation.json" \
+            "${work}/managed-setup.json" \
+            "${work}/control-plane-canary-credentials.json" \
+            "${work}/production-validation-report.json" \
+            "${work}/control-plane-fixture-outputs.json" <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import subprocess
+          import sys
+
+          config_path = Path(sys.argv[1])
+          setup_path = Path(sys.argv[2])
+          credential_path = Path(sys.argv[3])
+          report_path = Path(sys.argv[4])
+          control_outputs_path = Path(sys.argv[5])
+          config = json.loads(config_path.read_text(encoding="utf-8"))
+          setup = json.loads(setup_path.read_text(encoding="utf-8"))
+          credentials = json.loads(
+              credential_path.read_text(encoding="utf-8")
+          )
+          control_outputs = json.loads(
+              control_outputs_path.read_text(encoding="utf-8")
+          )
+          canaries = config.get("canaries")
+          load = config.get("load")
+          control = setup.get("control_plane")
+          deployed_control = control_outputs.get(
+              "AxonLLMControlPlaneStack"
+          )
+          if (
+              config.get("target") != "fargate"
+              or not isinstance(canaries, list)
+              or not isinstance(load, dict)
+              or not isinstance(load.get("request"), dict)
+              or not isinstance(control, dict)
+              or not isinstance(deployed_control, dict)
+          ):
+              raise SystemExit(
+                  "managed control-plane validation is malformed"
+              )
+          requests = [*canaries, load["request"]]
+          if any(
+              item.get("credentialType") != "alb-session-cookie"
+              for item in requests
+          ):
+              raise SystemExit(
+                  "Fargate validation requires short-lived ALB session cookies"
+              )
+          required = {item.get("credentialEnv") for item in requests}
+          required.update(
+              item.get("csrfTokenEnv")
+              for item in requests
+              if item.get("csrfTokenEnv") is not None
+          )
+          if (
+              None in required
+              or any(
+                  not isinstance(name, str)
+                  or re.fullmatch(r"[A-Z_][A-Z0-9_]{0,127}", name) is None
+                  for name in required
+              )
+              or not isinstance(credentials, dict)
+              or set(credentials) != required
+              or any(
+                  not isinstance(value, str)
+                  or not value
+                  or "\r" in value
+                  or "\n" in value
+                  for value in credentials.values()
+              )
+          ):
+              raise SystemExit(
+                  "control-plane canary credentials do not match the scenario"
+              )
+          domain = control.get("domain_name")
+          target_group_arn = deployed_control.get("TargetGroupArn")
+          if (
+              not isinstance(domain, str)
+              or not domain
+              or not isinstance(target_group_arn, str)
+              or not target_group_arn
+          ):
+              raise SystemExit("control-plane target is missing")
+          environment = os.environ.copy()
+          environment.update(credentials)
+          completed = subprocess.run(
+              [
+                  sys.executable,
+                  "scripts/operations/run_production_validation.py",
+                  "--config",
+                  str(config_path),
+                  "--base-url",
+                  f"https://{domain}",
+                  "--output",
+                  str(report_path),
+                  "--target-group-arn",
+                  target_group_arn,
+              ],
+              check=False,
+              env=environment,
+          )
+          raise SystemExit(completed.returncode)
+          PY
+          jq -e '.overallStatus == "PASS"' \
+            "${work}/production-validation-report.json" >/dev/null
+
+      - name: Remove managed control-plane canary sessions
+        if: ${{ always() }}
+        run: |
+          set -euo pipefail
+          work="${RUNNER_TEMP}/managed-qualification"
+          cleanup="${RUNNER_TEMP}/qualification-cleanup"
+          uv run --frozen --no-sync python \
+            scripts/operations/prepare_control_plane_canary_sessions.py \
+            cleanup \
+            --state "${cleanup}/control-plane-canary-sessions.json" \
+            --credentials-output \
+            "${work}/control-plane-canary-credentials.json"
+
+      - name: Install live qualification identity
+        env:
+          AWS_ACCOUNT_ID: ${{ vars.AXON_AWS_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          work="${RUNNER_TEMP}/managed-qualification"
+          cleanup="${RUNNER_TEMP}/qualification-cleanup"
+          secret_arn=$(jq -er \
+            '.LaunchRuntimeIdentitySecretArn' \
+            "${work}/release-foundation.json")
+          uv run --frozen --no-sync python - \
+            "${work}/certification-bound.json" \
+            "${work}/certification-credentials.json" \
+            "${work}/runtime-identity.json" <<'PY'
+          import base64
+          import json
+          from pathlib import Path
+          import time
+          import sys
+
+          config = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          credentials = json.loads(
+              Path(sys.argv[2]).read_text(encoding="utf-8")
+          )
+          active_name = config["identities"]["activeCredentialEnv"]
+          token = credentials[active_name]
+          parts = token.split(".")
+          if len(parts) != 3:
+              raise SystemExit("qualification identity is not a JWT")
+          padding = "=" * (-len(parts[1]) % 4)
+          claims = json.loads(
+              base64.urlsafe_b64decode(parts[1] + padding)
+          )
+          expires_at = claims.get("exp")
+          if (
+              isinstance(expires_at, bool)
+              or not isinstance(expires_at, int)
+              or expires_at <= int(time.time()) + (4 * 60 * 60) + (15 * 60)
+          ):
+              raise SystemExit(
+                  "qualification JWT does not cover the 240-minute gate"
+              )
+          output = Path(sys.argv[3])
+          output.write_text(
+              json.dumps(
+                  {
+                      "token": token,
+                      "expiresAtEpoch": expires_at,
+                  },
+                  separators=(",", ":"),
+              ),
+              encoding="utf-8",
+          )
+          output.chmod(0o600)
+          PY
+          client_token=$(printf '%s' \
+            "${GITHUB_REPOSITORY}:${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}:managed" \
+            | sha256sum | cut -d ' ' -f 1)
+          aws secretsmanager put-secret-value \
+            --secret-id "${secret_arn}" \
+            --client-request-token "${client_token}" \
+            --secret-string "file://${work}/runtime-identity.json" \
+            --output json \
+            --no-cli-pager \
+            >"${cleanup}/runtime-identity-version.json"
+          jq -e \
+            --arg arn "${secret_arn}" '
+            .ARN == $arn
+            and (.VersionId | type == "string" and length >= 32)
+          ' "${cleanup}/runtime-identity-version.json" >/dev/null
+          chmod 0600 "${cleanup}/runtime-identity-version.json"
+          rm -f "${work}/runtime-identity.json"
+
+      - name: Deploy namespaced launch workers on control-plane networking
+        env:
+          AWS_ACCOUNT_ID: ${{ vars.AXON_AWS_ACCOUNT_ID }}
+          CONTROL_PLANE_IMAGE: ${{ inputs.control_plane_image_reference }}
+        run: |
+          set -euo pipefail
+          work="${RUNNER_TEMP}/managed-qualification"
+          cleanup="${RUNNER_TEMP}/qualification-cleanup"
+          foundation="${work}/release-foundation.json"
+          control_stack="AxonLLMControlPlaneStack-${QUALIFICATION_NAMESPACE}"
+          worker_stack="AxonLLMLaunchWorkersStack-${QUALIFICATION_NAMESPACE}"
+          cluster_arn=$(jq -er \
+            --arg stack "${control_stack}" \
+            '.[$stack].ClusterArn' \
+            "${work}/deployment/control-plane-outputs.json")
+          subnet_ids=$(jq -er \
+            --arg stack "${control_stack}" \
+            '.[$stack].SubnetIds' \
+            "${work}/deployment/control-plane-outputs.json")
+          security_group_id=$(jq -er \
+            --arg stack "${control_stack}" \
+            '.[$stack].TaskSecurityGroupId' \
+            "${work}/deployment/control-plane-outputs.json")
+          action_activity=$(jq -er \
+            '.LaunchCoordinatorActionActivityArn' "${foundation}")
+          cleanup_activity=$(jq -er \
+            '.LaunchCoordinatorCleanupActivityArn' "${foundation}")
+          action_role=$(jq -er \
+            '.LaunchCoordinatorActionWorkerRoleArn' "${foundation}")
+          cleanup_role=$(jq -er \
+            '.LaunchCoordinatorCleanupWorkerRoleArn' "${foundation}")
+          lease_table=$(jq -er \
+            '.LaunchCoordinatorLeaseTableArn' "${foundation}")
+          ledger=$(jq -er \
+            '.RehearsalControlLedgerTableArn' "${foundation}")
+          identity_secret=$(jq -er \
+            '.LaunchRuntimeIdentitySecretArn' "${foundation}")
+          mutation_broker=$(jq -er \
+            '.QualificationMutationBrokerVersionArn' "${foundation}")
+          repository_arn="arn:aws:ecr:${AWS_REGION}:${AWS_ACCOUNT_ID}:repository/axonllm/fargate"
+          cdk="${GITHUB_WORKSPACE}/src/gateway/deployment/infra/node_modules/.bin/cdk"
+          infra_python="${RUNNER_TEMP}/qualification-infra-venv/bin/python"
+          execution_role="arn:aws:iam::${AWS_ACCOUNT_ID}:role/cdk-axqual-cfn-exec-role-${AWS_ACCOUNT_ID}-${AWS_REGION}"
+          (
+            cd infra
+            "${cdk}" \
+              --app "${infra_python} app.py" \
+              --context "account=${AWS_ACCOUNT_ID}" \
+              --context "region=${AWS_REGION}" \
+              --context "deployment_target=launch-workers" \
+              --context "deployment_namespace=${QUALIFICATION_NAMESPACE}" \
+              deploy "${worker_stack}" \
+              --ci true \
+              --concurrency 1 \
+              --outputs-file "${work}/launch-workers-outputs.json" \
+              --require-approval never \
+              --role-arn "${execution_role}" \
+              --parameters "${worker_stack}:ClusterArn=${cluster_arn}" \
+              --parameters "${worker_stack}:PrivateSubnetIds=${subnet_ids}" \
+              --parameters "${worker_stack}:SecurityGroupIds=${security_group_id}" \
+              --parameters "${worker_stack}:ActionActivityArn=${action_activity}" \
+              --parameters "${worker_stack}:CleanupActivityArn=${cleanup_activity}" \
+              --parameters "${worker_stack}:LeaseTableArn=${lease_table}" \
+              --parameters "${worker_stack}:RehearsalControlTableArn=${ledger}" \
+              --parameters "${worker_stack}:RuntimeIdentitySecretArn=${identity_secret}" \
+              --parameters "${worker_stack}:QualificationMutationBrokerVersionArn=${mutation_broker}" \
+              --parameters "${worker_stack}:ActionTaskRoleArn=${action_role}" \
+              --parameters "${worker_stack}:CleanupTaskRoleArn=${cleanup_role}" \
+              --parameters "${worker_stack}:WorkerImageRepositoryArn=${repository_arn}" \
+              --parameters "${worker_stack}:WorkerImageUri=${CONTROL_PLANE_IMAGE}"
+          )
+          action_service=$(jq -er \
+            --arg stack "${worker_stack}" \
+            '.[$stack].LaunchActionWorkerServiceName' \
+            "${work}/launch-workers-outputs.json")
+          cleanup_service=$(jq -er \
+            --arg stack "${worker_stack}" \
+            '.[$stack].LaunchCleanupWorkerServiceName' \
+            "${work}/launch-workers-outputs.json")
+          aws ecs wait services-stable \
+            --cluster "${cluster_arn}" \
+            --services "${action_service}" "${cleanup_service}"
+          jq -n \
+            --arg clusterArn "${cluster_arn}" \
+            --arg actionService "${action_service}" \
+            --arg cleanupService "${cleanup_service}" \
+            --arg identitySecretArn "${identity_secret}" \
+            --arg namespace "${QUALIFICATION_NAMESPACE}" \
+            --arg workerStack "${worker_stack}" \
+            '{
+              namespace: $namespace,
+              workerStack: $workerStack,
+              clusterArn: $clusterArn,
+              actionService: $actionService,
+              cleanupService: $cleanupService,
+              identitySecretArn: $identitySecretArn
+            }' >"${cleanup}/qualification-state.json"
+          chmod 0600 "${cleanup}/qualification-state.json"
+
+      - name: Require reviewed gate bindings match staged resources
+        env:
+          AWS_ACCOUNT_ID: ${{ vars.AXON_AWS_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          work="${RUNNER_TEMP}/managed-qualification"
+          runtime_stack="AxonLLMAgentCoreStack-${QUALIFICATION_NAMESPACE}"
+          control_stack="AxonLLMControlPlaneStack-${QUALIFICATION_NAMESPACE}"
+          runtime_outputs="${work}/deployment/agentcore-outputs.json"
+          foundation="${work}/release-foundation.json"
+          runtime_output() {
+            local key=$1
+            jq -er \
+              --arg stack "${runtime_stack}" \
+              --arg key "${key}" \
+              '.[$stack][$key] | select(type == "string" and length > 0)' \
+              "${runtime_outputs}"
+          }
+          runtime_stack_arn=$(aws cloudformation describe-stacks \
+            --stack-name "${runtime_stack}" \
+            --query 'Stacks[0].StackId' \
+            --output text \
+            --no-cli-pager)
+          control_stack_arn=$(aws cloudformation describe-stacks \
+            --stack-name "${control_stack}" \
+            --query 'Stacks[0].StackId' \
+            --output text \
+            --no-cli-pager)
+          runtime_arn=$(runtime_output RuntimeArn)
+          endpoint_arn=$(runtime_output RuntimeEndpointArn)
+          state_table=$(runtime_output StateTableName)
+          state_table_arn="arn:aws:dynamodb:${AWS_REGION}:${AWS_ACCOUNT_ID}:table/${state_table}"
+          outbox_arn=$(runtime_output SecurityEventOutboxQueueArn)
+          outbox_url=$(runtime_output SecurityEventOutboxQueueUrl)
+          dead_letter_arn=$(runtime_output SecurityEventDeadLetterQueueArn)
+          dead_letter_url=$(runtime_output SecurityEventDeadLetterQueueUrl)
+          dead_letter_alarm=$(runtime_output \
+            SecurityEventDeadLettersAlarmArn)
+          security_log_group=$(runtime_output SecurityEventLogGroupArn)
+          coordinator_version=$(jq -er \
+            '.LaunchCoordinatorStateMachineVersionArn' \
+            "${foundation}")
+          coordinator_execution_role=$(jq -er \
+            '.LaunchCoordinatorExecutionRoleArn' \
+            "${foundation}")
+          launch_role=$(jq -er \
+            '.AgentCoreLaunchGatesRoleArn' \
+            "${foundation}")
+          lease_table=$(jq -er \
+            '.LaunchCoordinatorLeaseTableArn' \
+            "${foundation}")
+          watchdog_alarm=$(jq -er \
+            '.LaunchCoordinatorWatchdogAlarmArn' \
+            "${foundation}")
+          coordinator_key=$(jq -er \
+            '.LaunchCoordinatorKeyArn' \
+            "${foundation}")
+          jq -e \
+            --arg account_id "${AWS_ACCOUNT_ID}" \
+            --arg runtime_stack_arn "${runtime_stack_arn}" \
+            --arg control_stack_arn "${control_stack_arn}" \
+            --arg runtime_arn "${runtime_arn}" \
+            --arg endpoint_arn "${endpoint_arn}" \
+            --arg state_table_arn "${state_table_arn}" \
+            --arg outbox_arn "${outbox_arn}" \
+            --arg outbox_url "${outbox_url}" \
+            --arg dead_letter_arn "${dead_letter_arn}" \
+            --arg dead_letter_url "${dead_letter_url}" \
+            --arg dead_letter_alarm "${dead_letter_alarm}" \
+            --arg security_log_group "${security_log_group}" \
+            --arg coordinator_version "${coordinator_version}" \
+            --arg coordinator_execution_role \
+              "${coordinator_execution_role}" \
+            --arg launch_role "${launch_role}" \
+            --arg lease_table "${lease_table}" \
+            --arg watchdog_alarm "${watchdog_alarm}" \
+            --arg coordinator_key "${coordinator_key}" \
+            --slurpfile setup "${work}/managed-setup.json" \
+            --slurpfile certification \
+              "${work}/certification-reviewed.json" '
+            . as $gate
+            | .schema
+              == "axonllm.agentcore-launch-rehearsal-operation-config/v2"
+            and .accountId == $account_id
+            and .resources.agentcoreStackArn == $runtime_stack_arn
+            and .resources.controlPlaneStackArn == $control_stack_arn
+            and .resources.runtimeArn == $runtime_arn
+            and .resources.runtimeEndpointArn == $endpoint_arn
+            and .resources.runtimeEndpointName == "production"
+            and .resources.stateTableArn == $state_table_arn
+            and (
+              .resources.restoredStateTableArn
+              | startswith($state_table_arn + "-restore-validation-")
+            )
+            and .resources.outboxQueueArn == $outbox_arn
+            and .resources.outboxQueueUrl == $outbox_url
+            and .resources.deadLetterQueueArn == $dead_letter_arn
+            and .resources.deadLetterQueueUrl == $dead_letter_url
+            and .resources.deadLetterAlarmArn == $dead_letter_alarm
+            and .resources.securityEventLogGroupArn
+              == $security_log_group
+            and .coordinator.stateMachineVersionArn
+              == $coordinator_version
+            and .coordinator.executionRoleArn
+              == $coordinator_execution_role
+            and .coordinator.launchRoleArn == $launch_role
+            and .coordinator.leaseTableArn == $lease_table
+            and .coordinator.watchdogAlarmArn == $watchdog_alarm
+            and .coordinator.kmsKeyArn == $coordinator_key
+            and .scenario.tenantId == $setup[0].tenant.tenant_id
+            and .scenario.projectId == $setup[0].tenant.project_id
+            and .scenario.datasourceId
+              == $certification[0].query.datasourceId
+            and .scenario.selectSql == $certification[0].query.sql
+            and (
+              $certification[0].providers
+              | map(.provider)
+              | index($gate.scenario.primaryProvider)
+            ) != null
+            and (
+              $certification[0].providers
+              | map(.provider)
+              | index($gate.scenario.fallbackProvider)
+            ) != null
+            and (
+              $setup[0].runtime.enabled_providers
+              | index($gate.scenario.primaryProvider)
+            ) != null
+            and (
+              $setup[0].runtime.enabled_providers
+              | index($gate.scenario.fallbackProvider)
+            ) != null
+          ' "${work}/launch-gates.json" >/dev/null
+
+      - name: Mark managed qualification ready
+        id: ready
+        run: |
+          set -euo pipefail
+          printf 'ready=true\n' >>"${GITHUB_OUTPUT}"
+
+      - name: Preserve teardown state only
+        if: ${{ always() }}
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: agentcore-managed-qualification-state-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/qualification-cleanup
+          if-no-files-found: ignore
+          include-hidden-files: false
+          retention-days: 1
+
+      - name: Remove local qualification credentials
+        if: ${{ always() }}
+        run: |
+          set -euo pipefail
+          rm -f \
+            "${RUNNER_TEMP}/managed-qualification/provider.env" \
+            "${RUNNER_TEMP}/managed-qualification/provider-source.json" \
+            "${RUNNER_TEMP}/managed-qualification/certification-credentials.json" \
+            "${RUNNER_TEMP}/managed-qualification/control-plane-canary-credentials.json" \
+            "${RUNNER_TEMP}/managed-qualification/runtime-identity.json"
+
+  launch-gates:
+    name: Run protected launch gates
+    needs:
+      - external-oidc
+      - stage-managed
+    if: ${{ needs.stage-managed.outputs.ready == 'true' }}
+    uses: ./.github/workflows/agentcore-launch-gates.yml
+    with:
+      release_commit_sha: ${{ inputs.release_commit_sha }}
+      agentcore_image_reference: ${{ inputs.agentcore_image_reference }}
+      control_plane_image_reference: ${{ inputs.control_plane_image_reference }}
+      gate_config_s3_version_id: ${{ inputs.gate_config_s3_version_id }}
+      gate_config_sha256: ${{ inputs.gate_config_sha256 }}
+      aws_region: us-east-1
+
+  rehearsal-evidence:
+    name: Produce immutable launch rehearsal evidence
+    needs:
+      - launch-gates
+    uses: ./.github/workflows/agentcore-launch-rehearsal-evidence.yml
+    with:
+      release_commit_sha: ${{ inputs.release_commit_sha }}
+      agentcore_image_reference: ${{ inputs.agentcore_image_reference }}
+      control_plane_image_reference: ${{ inputs.control_plane_image_reference }}
+      gate_manifest_s3_version_id: ${{ needs.launch-gates.outputs.gate_manifest_version_id }}
+      gate_manifest_sha256: ${{ needs.launch-gates.outputs.gate_manifest_sha256 }}
+      gate_manifest_signature_s3_version_id: ${{ needs.launch-gates.outputs.gate_manifest_signature_version_id }}
+      gate_manifest_signature_sha256: ${{ needs.launch-gates.outputs.gate_manifest_signature_sha256 }}
+      aws_region: us-east-1
+
+  teardown:
+    name: Always tear down managed qualification
+    needs:
+      - authorize
+      - external-oidc
+      - stage-managed
+      - launch-gates
+      - rehearsal-evidence
+    if: >-
+      ${{
+        always()
+        && needs.authorize.result == 'success'
+        && needs.stage-managed.result != 'skipped'
+      }}
+    runs-on:
+      group: axonllm-production
+      labels: axonllm-production-allowlisted
+    timeout-minutes: 120
+    environment: agentcore-qualification
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+    outputs:
+      succeeded: ${{ steps.cleanup.outputs.succeeded }}
+
+    steps:
+      - name: Check out protected cleanup tooling
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          clean: true
+          fetch-depth: 1
+          persist-credentials: false
+          ref: ${{ github.sha }}
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+
+      - name: Download qualification cleanup state
+        id: state
+        continue-on-error: true
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: agentcore-managed-qualification-state-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/qualification-cleanup
+
+      - name: Configure qualification cleanup credentials through OIDC
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with:
+          allowed-account-ids: ${{ vars.AXON_AWS_ACCOUNT_ID }}
+          aws-region: us-east-1
+          mask-aws-account-id: true
+          output-credentials: false
+          output-env-credentials: true
+          role-duration-seconds: 7200
+          role-session-name: AxonLLMQualificationCleanup-${{ github.run_id }}-${{ github.run_attempt }}
+          role-to-assume: ${{ secrets.AXON_AGENTCORE_QUALIFICATION_ROLE_ARN }}
+          unset-current-credentials: true
+
+      - name: Scale down, revoke, remove fixtures, and destroy stacks
+        id: cleanup
+        env:
+          AWS_ACCOUNT_ID: ${{ vars.AXON_AWS_ACCOUNT_ID }}
+          RELEASE_COMMIT: ${{ inputs.release_commit_sha }}
+          UV_CACHE_DIR: ${{ runner.temp }}/axonllm-qualification-cleanup-uv
+        run: |
+          set -euo pipefail
+          failures=0
+          cleanup_dir="${RUNNER_TEMP}/qualification-cleanup"
+          teardown_dir="${RUNNER_TEMP}/qualification-teardown"
+          install -d -m 0700 "${teardown_dir}"
+          worker_stack="AxonLLMLaunchWorkersStack-${QUALIFICATION_NAMESPACE}"
+          control_stack="AxonLLMControlPlaneStack-${QUALIFICATION_NAMESPACE}"
+          runtime_stack="AxonLLMAgentCoreStack-${QUALIFICATION_NAMESPACE}"
+          identity_stack="AxonLLMIdentityStack-${QUALIFICATION_NAMESPACE}"
+          worker_shutdown='[]'
+          canary_state_present=false
+          fixture_state_present=false
+
+          stack_document() {
+            local stack=$1
+            local destination=$2
+            local error_file="${destination}.err"
+            if aws cloudformation describe-stacks \
+              --stack-name "${stack}" \
+              --output json \
+              --no-cli-pager \
+              >"${destination}" 2>"${error_file}"
+            then
+              rm -f "${error_file}"
+              return 0
+            fi
+            if grep -Fq "does not exist" "${error_file}"; then
+              rm -f "${destination}" "${error_file}"
+              return 1
+            fi
+            cat "${error_file}" >&2
+            rm -f "${destination}" "${error_file}"
+            failures=1
+            return 1
+          }
+
+          output_value() {
+            local document=$1
+            local key=$2
+            jq -er --arg key "${key}" '
+              .Stacks[0].Outputs
+              | map(select(.OutputKey == $key))
+              | if length == 1 then .[0].OutputValue
+                else error("stack output is missing")
+                end
+            ' "${document}"
+          }
+
+          delete_stack() {
+            local stack=$1
+            local document="${RUNNER_TEMP}/${stack}.json"
+            if ! stack_document "${stack}" "${document}"; then
+              return 0
+            fi
+            if ! aws cloudformation delete-stack \
+              --stack-name "${stack}" \
+              --no-cli-pager
+            then
+              failures=1
+              return 0
+            fi
+            if ! aws cloudformation wait stack-delete-complete \
+              --stack-name "${stack}"
+            then
+              failures=1
+            fi
+          }
+
+          worker_document="${RUNNER_TEMP}/launch-workers-stack.json"
+          control_document="${RUNNER_TEMP}/control-plane-stack.json"
+          worker_present=false
+          control_present=false
+          if stack_document "${worker_stack}" "${worker_document}"; then
+            worker_present=true
+          fi
+          if stack_document "${control_stack}" "${control_document}"; then
+            control_present=true
+          fi
+          if [[ "${worker_present}" == "true" ]]; then
+            if [[ "${control_present}" != "true" ]]; then
+              echo "launch workers exist without their control-plane cluster" >&2
+              failures=1
+            else
+              cluster_arn=$(output_value "${control_document}" ClusterArn) \
+                || failures=1
+              action_service=$(output_value \
+                "${worker_document}" LaunchActionWorkerServiceName) \
+                || failures=1
+              cleanup_service=$(output_value \
+                "${worker_document}" LaunchCleanupWorkerServiceName) \
+                || failures=1
+              if [[ -n "${cluster_arn:-}" && -n "${action_service:-}" && -n "${cleanup_service:-}" ]]; then
+                for service in "${action_service}" "${cleanup_service}"; do
+                  if ! aws ecs update-service \
+                    --cluster "${cluster_arn}" \
+                    --service "${service}" \
+                    --desired-count 0 \
+                    --output json \
+                    --no-cli-pager \
+                    >/dev/null
+                  then
+                    failures=1
+                  fi
+                done
+                if ! aws ecs wait services-stable \
+                  --cluster "${cluster_arn}" \
+                  --services "${action_service}" "${cleanup_service}"
+                then
+                  failures=1
+                fi
+                service_state="${teardown_dir}/worker-services.json"
+                if aws ecs describe-services \
+                  --cluster "${cluster_arn}" \
+                  --services "${action_service}" "${cleanup_service}" \
+                  --output json \
+                  --no-cli-pager >"${service_state}"
+                then
+                  if ! jq -e \
+                    --arg action "${action_service}" \
+                    --arg cleanup "${cleanup_service}" '
+                    (.failures | length) == 0
+                    and (.services | length) == 2
+                    and (
+                      [.services[].serviceName] | sort
+                    ) == ([$action, $cleanup] | sort)
+                    and all(
+                      .services[];
+                      .desiredCount == 0
+                      and .runningCount == 0
+                      and .pendingCount == 0
+                    )
+                  ' "${service_state}" >/dev/null
+                  then
+                    failures=1
+                  else
+                    worker_shutdown=$(jq -c '
+                      [.services[]
+                        | {
+                            serviceName,
+                            desiredCount,
+                            runningCount,
+                            pendingCount
+                          }
+                      ] | sort_by(.serviceName)
+                    ' "${service_state}")
+                  fi
+                else
+                  failures=1
+                fi
+              fi
+            fi
+          fi
+
+          foundation_document="${RUNNER_TEMP}/release-foundation-stack.json"
+          if stack_document \
+            AxonLLMReleaseFoundationStack "${foundation_document}"
+          then
+            identity_secret=$(output_value \
+              "${foundation_document}" LaunchRuntimeIdentitySecretArn) \
+              || failures=1
+            if [[ -n "${identity_secret:-}" ]]; then
+              revoked="${RUNNER_TEMP}/revoked-runtime-identity.json"
+              printf '%s\n' \
+                '{"token":"revoked","expiresAtEpoch":0}' >"${revoked}"
+              chmod 0600 "${revoked}"
+              revoke_token=$(printf '%s' \
+                "${GITHUB_REPOSITORY}:${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}:revoked" \
+                | sha256sum | cut -d ' ' -f 1)
+              revoke_result="${teardown_dir}/runtime-identity-revocation.json"
+              if ! aws secretsmanager put-secret-value \
+                --secret-id "${identity_secret}" \
+                --client-request-token "${revoke_token}" \
+                --secret-string "file://${revoked}" \
+                --output json \
+                --no-cli-pager \
+                >"${revoke_result}"
+              then
+                failures=1
+              else
+                revoked_version=$(jq -er '.VersionId' "${revoke_result}") \
+                  || failures=1
+                secret_metadata="${teardown_dir}/runtime-identity-metadata.json"
+                secret_value="${teardown_dir}/runtime-identity-current.json"
+                if [[ -n "${revoked_version:-}" ]] \
+                  && aws secretsmanager describe-secret \
+                    --secret-id "${identity_secret}" \
+                    --output json \
+                    --no-cli-pager >"${secret_metadata}" \
+                  && aws secretsmanager get-secret-value \
+                    --secret-id "${identity_secret}" \
+                    --version-id "${revoked_version}" \
+                    --version-stage AWSCURRENT \
+                    --output json \
+                    --no-cli-pager >"${secret_value}" \
+                  && jq -e --arg version "${revoked_version}" '
+                    .VersionIdsToStages[$version]
+                    | index("AWSCURRENT") != null
+                  ' "${secret_metadata}" >/dev/null \
+                  && jq -e \
+                    --arg version "${revoked_version}" \
+                    --rawfile expected "${revoked}" '
+                    .VersionId == $version
+                    and .VersionStages == ["AWSCURRENT"]
+                    and .SecretString == $expected
+                  ' "${secret_value}" >/dev/null
+                then
+                  revoked_payload_sha256=$(sha256sum "${revoked}" \
+                    | cut -d ' ' -f 1)
+                  identity_secret_sha256=$(printf '%s' "${identity_secret}" \
+                    | sha256sum | cut -d ' ' -f 1)
+                else
+                  failures=1
+                fi
+              fi
+              rm -f "${revoked}" "${secret_value:-}"
+            fi
+          else
+            failures=1
+          fi
+
+          canary_state="${cleanup_dir}/control-plane-canary-sessions.json"
+          fixture_state="${cleanup_dir}/certification-fixtures.json"
+          [[ -f "${canary_state}" ]] && canary_state_present=true
+          [[ -f "${fixture_state}" ]] && fixture_state_present=true
+          if [[ -f "${canary_state}" || -f "${fixture_state}" ]]; then
+            dependencies_ready=true
+            if ! (
+              python -m pip install --no-deps "uv==${UV_VERSION}"
+              uv sync --frozen --extra agentcore --extra oidc
+            )
+            then
+              dependencies_ready=false
+              failures=1
+            fi
+            if [[ "${dependencies_ready}" == "true" && -f "${canary_state}" ]]; then
+              if ! uv run --frozen --no-sync python \
+                scripts/operations/prepare_control_plane_canary_sessions.py \
+                cleanup \
+                --state "${canary_state}"
+              then
+                failures=1
+              fi
+            fi
+            if [[ "${dependencies_ready}" == "true" && -f "${fixture_state}" ]]; then
+              if ! uv run --frozen --no-sync python \
+                scripts/operations/prepare_agentcore_certification.py \
+                cleanup \
+                --state "${fixture_state}"
+              then
+                failures=1
+              fi
+            fi
+          fi
+          if [[ -e "${canary_state}" || -e "${fixture_state}" ]]; then
+            failures=1
+          fi
+
+          delete_stack "${worker_stack}"
+          delete_stack "${control_stack}"
+          delete_stack "${runtime_stack}"
+          delete_stack "${identity_stack}"
+
+          if ((failures == 0)); then
+            for stack in \
+              "${worker_stack}" \
+              "${control_stack}" \
+              "${runtime_stack}" \
+              "${identity_stack}"
+            do
+              if stack_document \
+                "${stack}" "${teardown_dir}/${stack}-unexpected.json"
+              then
+                failures=1
+              fi
+            done
+          fi
+
+          if ((failures == 0)); then
+            generated_at=$(date -u "+%Y-%m-%dT%H:%M:%SZ")
+            jq -n \
+              --arg schema \
+                "axonllm.agentcore-qualification-teardown/v1" \
+              --arg generatedAt "${generated_at}" \
+              --arg repository "${GITHUB_REPOSITORY}" \
+              --arg workflowRef "${GITHUB_WORKFLOW_REF}" \
+              --arg workflowCommit "${GITHUB_SHA}" \
+              --arg releaseCommit "${RELEASE_COMMIT}" \
+              --arg runId "${GITHUB_RUN_ID}" \
+              --arg runAttempt "${GITHUB_RUN_ATTEMPT}" \
+              --arg accountId "${AWS_ACCOUNT_ID}" \
+              --arg region "${AWS_REGION}" \
+              --arg namespace "${QUALIFICATION_NAMESPACE}" \
+              --arg secretArnSha256 "${identity_secret_sha256}" \
+              --arg versionId "${revoked_version}" \
+              --arg revokedPayloadSha256 \
+                "${revoked_payload_sha256}" \
+              --argjson workers "${worker_shutdown}" \
+              --argjson canaryStatePresent \
+                "${canary_state_present}" \
+              --argjson fixtureStatePresent \
+                "${fixture_state_present}" \
+              --arg workerStack "${worker_stack}" \
+              --arg controlStack "${control_stack}" \
+              --arg runtimeStack "${runtime_stack}" \
+              --arg identityStack "${identity_stack}" '
+              {
+                schema: $schema,
+                generatedAt: $generatedAt,
+                source: {
+                  repository: $repository,
+                  workflowRef: $workflowRef,
+                  workflowCommit: $workflowCommit,
+                  releaseCommit: $releaseCommit,
+                  runId: $runId,
+                  runAttempt: $runAttempt
+                },
+                accountId: $accountId,
+                region: $region,
+                namespace: $namespace,
+                runtimeIdentity: {
+                  secretArnSha256: $secretArnSha256,
+                  versionId: $versionId,
+                  currentStageVerified: true,
+                  revokedPayloadSha256: $revokedPayloadSha256
+                },
+                fixtures: {
+                  controlPlaneStatePresent: $canaryStatePresent,
+                  certificationStatePresent: $fixtureStatePresent,
+                  stateAbsentAfterCleanup: true
+                },
+                workers: $workers,
+                stacks: [
+                  $workerStack,
+                  $controlStack,
+                  $runtimeStack,
+                  $identityStack
+                ] | map({name: ., absent: true})
+              }
+            ' >"${teardown_dir}/qualification-teardown-receipt.json"
+            chmod 0400 \
+              "${teardown_dir}/qualification-teardown-receipt.json"
+            printf 'succeeded=true\n' >>"${GITHUB_OUTPUT}"
+          else
+            printf 'succeeded=false\n' >>"${GITHUB_OUTPUT}"
+            exit 1
+          fi
+          rm -rf \
+            "${cleanup_dir}" \
+            "${RUNNER_TEMP}/managed-qualification"
+
+      - name: Preserve verified qualification teardown receipt
+        if: ${{ success() }}
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: agentcore-managed-teardown-receipt-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/qualification-teardown/qualification-teardown-receipt.json
+          if-no-files-found: error
+          include-hidden-files: false
+          retention-days: 1
+
+  teardown-evidence:
+    name: Publish immutable qualification teardown evidence
+    needs:
+      - teardown
+    if: >-
+      ${{
+        needs.teardown.result == 'success'
+        && needs.teardown.outputs.succeeded == 'true'
+      }}
+    runs-on:
+      group: axonllm-production
+      labels: axonllm-production-allowlisted
+    timeout-minutes: 30
+    environment: agentcore-production-evidence
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+    outputs:
+      receipt_uri: ${{ steps.persist.outputs.receipt_uri }}
+      receipt_version_id: ${{ steps.persist.outputs.receipt_version_id }}
+      receipt_sha256: ${{ steps.persist.outputs.receipt_sha256 }}
+      signature_uri: ${{ steps.persist.outputs.signature_uri }}
+      signature_version_id: ${{ steps.persist.outputs.signature_version_id }}
+      signature_sha256: ${{ steps.persist.outputs.signature_sha256 }}
+
+    steps:
+      - name: Check out protected teardown verifier
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          clean: true
+          fetch-depth: 1
+          persist-credentials: false
+          ref: ${{ github.sha }}
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+
+      - name: Download verified teardown receipt
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: agentcore-managed-teardown-receipt-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/qualification-teardown-evidence
+
+      - name: Validate exact teardown receipt
+        env:
+          AWS_ACCOUNT_ID: ${{ vars.AXON_AWS_ACCOUNT_ID }}
+          RELEASE_COMMIT: ${{ inputs.release_commit_sha }}
+        run: |
+          set -euo pipefail
+          receipt="${RUNNER_TEMP}/qualification-teardown-evidence/qualification-teardown-receipt.json"
+          python - "${receipt}" <<'PY'
+          from datetime import datetime, timezone
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import sys
+
+          value = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          if set(value) != {
+              "schema",
+              "generatedAt",
+              "source",
+              "accountId",
+              "region",
+              "namespace",
+              "runtimeIdentity",
+              "fixtures",
+              "workers",
+              "stacks",
+          }:
+              raise SystemExit("teardown receipt fields are invalid")
+          generated = datetime.fromisoformat(
+              value["generatedAt"].replace("Z", "+00:00")
+          )
+          age = datetime.now(timezone.utc) - generated
+          if age.total_seconds() < -60 or age.total_seconds() > 3600:
+              raise SystemExit("teardown receipt timestamp is stale")
+          source = value["source"]
+          expected_source = {
+              "repository": os.environ["GITHUB_REPOSITORY"],
+              "workflowRef": os.environ["GITHUB_WORKFLOW_REF"],
+              "workflowCommit": os.environ["GITHUB_SHA"],
+              "releaseCommit": os.environ["RELEASE_COMMIT"],
+              "runId": os.environ["GITHUB_RUN_ID"],
+              "runAttempt": os.environ["GITHUB_RUN_ATTEMPT"],
+          }
+          if (
+              value["schema"]
+              != "axonllm.agentcore-qualification-teardown/v1"
+              or source != expected_source
+              or value["accountId"] != os.environ["AWS_ACCOUNT_ID"]
+              or value["region"] != "us-east-1"
+              or value["namespace"] != "managed"
+          ):
+              raise SystemExit("teardown receipt binding is invalid")
+          identity = value["runtimeIdentity"]
+          expected_revoked_hash = hashlib.sha256(
+              b'{"token":"revoked","expiresAtEpoch":0}\n'
+          ).hexdigest()
+          if (
+              set(identity)
+              != {
+                  "secretArnSha256",
+                  "versionId",
+                  "currentStageVerified",
+                  "revokedPayloadSha256",
+              }
+              or re.fullmatch(
+                  r"[0-9a-f]{64}",
+                  str(identity["secretArnSha256"]),
+              )
+              is None
+              or not isinstance(identity["versionId"], str)
+              or len(identity["versionId"]) < 32
+              or identity["currentStageVerified"] is not True
+              or identity["revokedPayloadSha256"]
+              != expected_revoked_hash
+          ):
+              raise SystemExit("runtime identity revocation is unverified")
+          fixtures = value["fixtures"]
+          if (
+              set(fixtures)
+              != {
+                  "controlPlaneStatePresent",
+                  "certificationStatePresent",
+                  "stateAbsentAfterCleanup",
+              }
+              or fixtures["controlPlaneStatePresent"] is not True
+              or fixtures["certificationStatePresent"] is not True
+              or fixtures["stateAbsentAfterCleanup"] is not True
+          ):
+              raise SystemExit("fixture cleanup is unverified")
+          workers = value["workers"]
+          worker_names = {
+              "axonllm-launch-action-worker-managed",
+              "axonllm-launch-cleanup-worker-managed",
+          }
+          if (
+              not isinstance(workers, list)
+              or len(workers) != len(worker_names)
+              or {
+                  item.get("serviceName")
+                  for item in workers
+                  if isinstance(item, dict)
+              }
+              != worker_names
+              or any(
+                  set(item)
+                  != {
+                      "serviceName",
+                      "desiredCount",
+                      "runningCount",
+                      "pendingCount",
+                  }
+                  or any(
+                      item[name] != 0
+                      for name in (
+                          "desiredCount",
+                          "runningCount",
+                          "pendingCount",
+                      )
+                  )
+                  for item in workers
+              )
+          ):
+              raise SystemExit("worker shutdown is unverified")
+          expected_stacks = {
+              "AxonLLMLaunchWorkersStack-managed",
+              "AxonLLMControlPlaneStack-managed",
+              "AxonLLMAgentCoreStack-managed",
+              "AxonLLMIdentityStack-managed",
+          }
+          stacks = value["stacks"]
+          if (
+              not isinstance(stacks, list)
+              or {
+                  item.get("name")
+                  for item in stacks
+                  if isinstance(item, dict)
+                  and item.get("absent") is True
+              }
+              != expected_stacks
+              or len(stacks) != len(expected_stacks)
+          ):
+              raise SystemExit("qualification stack absence is unverified")
+          PY
+
+      - name: Install locked evidence tooling
+        env:
+          UV_CACHE_DIR: ${{ runner.temp }}/axonllm-teardown-evidence-uv
+        run: |
+          set -euo pipefail
+          python -m pip install --no-deps "uv==${UV_VERSION}"
+          uv sync --frozen --no-dev
+
+      - name: Configure immutable evidence credentials
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with:
+          allowed-account-ids: ${{ vars.AXON_AWS_ACCOUNT_ID }}
+          aws-region: us-east-1
+          mask-aws-account-id: true
+          output-credentials: false
+          output-env-credentials: true
+          role-duration-seconds: 3600
+          role-session-name: AxonLLMTeardownEvidence-${{ github.run_id }}-${{ github.run_attempt }}
+          role-to-assume: ${{ secrets.AXON_AGENTCORE_REHEARSAL_EVIDENCE_ROLE_ARN }}
+          unset-current-credentials: true
+
+      - name: Sign, persist, and reverify teardown evidence
+        id: persist
+        env:
+          EVIDENCE_BUCKET: ${{ vars.AXON_DEPLOYMENT_EVIDENCE_BUCKET }}
+          EVIDENCE_PREFIX: ${{ vars.AXON_AGENTCORE_QUALIFICATION_TEARDOWN_EVIDENCE_PREFIX }}
+          RELEASE_COMMIT: ${{ inputs.release_commit_sha }}
+          SIGNING_KEY_ARN: ${{ vars.AXON_AGENTCORE_PREREQUISITE_SIGNING_KEY_ARN }}
+          STORAGE_KEY_ARN: ${{ vars.AXON_DEPLOYMENT_EVIDENCE_KMS_KEY_ARN }}
+          UV_CACHE_DIR: ${{ runner.temp }}/axonllm-teardown-evidence-uv
+        run: |
+          set -euo pipefail
+          work="${RUNNER_TEMP}/qualification-teardown-evidence"
+          receipt="${work}/qualification-teardown-receipt.json"
+          signature="${work}/qualification-teardown-signature.json"
+          uv run --frozen --no-sync python \
+            scripts/release/kms_evidence.py sign \
+            --artifact "${receipt}" \
+            --bundle "${signature}" \
+            --key-arn "${SIGNING_KEY_ARN}"
+          uv run --frozen --no-sync python \
+            scripts/release/kms_evidence.py verify \
+            --artifact "${receipt}" \
+            --bundle "${signature}" \
+            --key-arn "${SIGNING_KEY_ARN}"
+          receipt_sha256=$(sha256sum "${receipt}" | cut -d ' ' -f 1)
+          signature_sha256=$(sha256sum "${signature}" | cut -d ' ' -f 1)
+          base="${EVIDENCE_PREFIX}/${GITHUB_REPOSITORY}/${RELEASE_COMMIT}/${GITHUB_RUN_ID}/${GITHUB_RUN_ATTEMPT}"
+          receipt_key="${base}/qualification-teardown-receipt.json"
+          signature_key="${base}/qualification-teardown-signature.json"
+          retain_until=$(date -u -d "+2555 days" "+%Y-%m-%dT%H:%M:%SZ")
+          put_locked() {
+            local source=$1
+            local key=$2
+            local result=$3
+            aws s3api put-object \
+              --bucket "${EVIDENCE_BUCKET}" \
+              --key "${key}" \
+              --body "${source}" \
+              --content-type application/json \
+              --checksum-algorithm SHA256 \
+              --server-side-encryption aws:kms \
+              --ssekms-key-id "${STORAGE_KEY_ARN}" \
+              --bucket-key-enabled \
+              --object-lock-mode COMPLIANCE \
+              --object-lock-retain-until-date "${retain_until}" \
+              --if-none-match '*' \
+              --output json \
+              --no-cli-pager >"${result}"
+          }
+          receipt_put="${work}/receipt-put.json"
+          signature_put="${work}/signature-put.json"
+          put_locked "${receipt}" "${receipt_key}" "${receipt_put}"
+          put_locked "${signature}" "${signature_key}" "${signature_put}"
+          receipt_version=$(jq -er '.VersionId' "${receipt_put}")
+          signature_version=$(jq -er '.VersionId' "${signature_put}")
+          receipt_head="${work}/receipt-head.json"
+          signature_head="${work}/signature-head.json"
+          aws s3api head-object \
+            --bucket "${EVIDENCE_BUCKET}" \
+            --key "${receipt_key}" \
+            --version-id "${receipt_version}" \
+            --expected-bucket-owner "${{ vars.AXON_AWS_ACCOUNT_ID }}" \
+            --checksum-mode ENABLED \
+            --output json \
+            --no-cli-pager >"${receipt_head}"
+          aws s3api head-object \
+            --bucket "${EVIDENCE_BUCKET}" \
+            --key "${signature_key}" \
+            --version-id "${signature_version}" \
+            --expected-bucket-owner "${{ vars.AXON_AWS_ACCOUNT_ID }}" \
+            --checksum-mode ENABLED \
+            --output json \
+            --no-cli-pager >"${signature_head}"
+          python - \
+            "${receipt_head}" "${receipt}" "${receipt_version}" \
+            "${signature_head}" "${signature}" "${signature_version}" \
+            "${STORAGE_KEY_ARN}" "${retain_until}" <<'PY'
+          import base64
+          from datetime import datetime, timezone
+          import hashlib
+          import json
+          from pathlib import Path
+          import sys
+
+          storage_key = sys.argv[7]
+          required_retention = datetime.fromisoformat(
+              sys.argv[8].replace("Z", "+00:00")
+          ).astimezone(timezone.utc)
+          for metadata_name, artifact_name, version_id in (
+              (sys.argv[1], sys.argv[2], sys.argv[3]),
+              (sys.argv[4], sys.argv[5], sys.argv[6]),
+          ):
+              metadata = json.loads(
+                  Path(metadata_name).read_text(encoding="utf-8")
+              )
+              artifact = Path(artifact_name).read_bytes()
+              retained = datetime.fromisoformat(
+                  str(metadata.get("ObjectLockRetainUntilDate", "")).replace(
+                      "Z", "+00:00"
+                  )
+              ).astimezone(timezone.utc)
+              checksum = base64.b64encode(
+                  hashlib.sha256(artifact).digest()
+              ).decode("ascii")
+              if not (
+                  metadata.get("VersionId") == version_id
+                  and metadata.get("ServerSideEncryption") == "aws:kms"
+                  and metadata.get("SSEKMSKeyId") == storage_key
+                  and metadata.get("BucketKeyEnabled") is True
+                  and metadata.get("ObjectLockMode") == "COMPLIANCE"
+                  and retained >= required_retention
+                  and metadata.get("ContentType") == "application/json"
+                  and metadata.get("ContentLength") == len(artifact)
+                  and metadata.get("ChecksumSHA256") == checksum
+              ):
+                  raise SystemExit(
+                      "teardown evidence Object Lock metadata is invalid"
+                  )
+          PY
+          remote="${work}/remote"
+          install -d -m 0700 "${remote}"
+          aws s3api get-object \
+            --bucket "${EVIDENCE_BUCKET}" \
+            --key "${receipt_key}" \
+            --version-id "${receipt_version}" \
+            --expected-bucket-owner "${{ vars.AXON_AWS_ACCOUNT_ID }}" \
+            --checksum-mode ENABLED \
+            "${remote}/receipt.json" >/dev/null
+          aws s3api get-object \
+            --bucket "${EVIDENCE_BUCKET}" \
+            --key "${signature_key}" \
+            --version-id "${signature_version}" \
+            --expected-bucket-owner "${{ vars.AXON_AWS_ACCOUNT_ID }}" \
+            --checksum-mode ENABLED \
+            "${remote}/signature.json" >/dev/null
+          [[ "$(sha256sum "${remote}/receipt.json" | cut -d ' ' -f 1)" == "${receipt_sha256}" ]]
+          [[ "$(sha256sum "${remote}/signature.json" | cut -d ' ' -f 1)" == "${signature_sha256}" ]]
+          uv run --frozen --no-sync python \
+            scripts/release/kms_evidence.py verify \
+            --artifact "${remote}/receipt.json" \
+            --bundle "${remote}/signature.json" \
+            --key-arn "${SIGNING_KEY_ARN}"
+          {
+            printf 'receipt_uri=s3://%s/%s\n' \
+              "${EVIDENCE_BUCKET}" "${receipt_key}"
+            printf 'receipt_version_id=%s\n' "${receipt_version}"
+            printf 'receipt_sha256=%s\n' "${receipt_sha256}"
+            printf 'signature_uri=s3://%s/%s\n' \
+              "${EVIDENCE_BUCKET}" "${signature_key}"
+            printf 'signature_version_id=%s\n' "${signature_version}"
+            printf 'signature_sha256=%s\n' "${signature_sha256}"
+          } >>"${GITHUB_OUTPUT}"
+
+  production:
+    name: Deploy production after successful teardown
+    needs:
+      - external-oidc
+      - launch-gates
+      - rehearsal-evidence
+      - teardown
+      - teardown-evidence
+    if: >-
+      ${{
+        needs.external-oidc.result == 'success'
+        && needs.launch-gates.result == 'success'
+        && needs.rehearsal-evidence.result == 'success'
+        && needs.teardown.result == 'success'
+        && needs.teardown.outputs.succeeded == 'true'
+        && needs.teardown-evidence.result == 'success'
+        && needs.teardown-evidence.outputs.receipt_uri != ''
+        && needs.teardown-evidence.outputs.receipt_version_id != ''
+        && needs.teardown-evidence.outputs.receipt_sha256 != ''
+        && needs.teardown-evidence.outputs.signature_uri != ''
+        && needs.teardown-evidence.outputs.signature_version_id != ''
+        && needs.teardown-evidence.outputs.signature_sha256 != ''
+        && needs.launch-gates.outputs.gate_manifest_version_id != ''
+        && needs.launch-gates.outputs.gate_manifest_sha256 != ''
+      }}
+    uses: ./.github/workflows/deploy-agentcore-production.yml
+    with:
+      evidence_run_id: ${{ inputs.evidence_run_id }}
+      release_commit_sha: ${{ inputs.release_commit_sha }}
+      agentcore_image_reference: ${{ inputs.agentcore_image_reference }}
+      control_plane_image_reference: ${{ inputs.control_plane_image_reference }}
+      setup_config_s3_version_id: ${{ inputs.setup_config_s3_version_id }}
+      setup_config_sha256: ${{ inputs.setup_config_sha256 }}
+      certification_config_s3_version_id: ${{ inputs.certification_config_s3_version_id }}
+      certification_config_sha256: ${{ inputs.certification_config_sha256 }}
+      production_validation_config_s3_version_id: ${{ inputs.production_validation_config_s3_version_id }}
+      production_validation_config_sha256: ${{ inputs.production_validation_config_sha256 }}
+      launch_rehearsal_detailed_report_s3_uri: ${{ needs.rehearsal-evidence.outputs.detailed_report_uri }}
+      launch_rehearsal_detailed_report_s3_version_id: ${{ needs.rehearsal-evidence.outputs.detailed_report_version_id }}
+      launch_rehearsal_detailed_report_sha256: ${{ needs.rehearsal-evidence.outputs.detailed_report_sha256 }}
+      launch_rehearsal_detailed_signature_s3_uri: ${{ needs.rehearsal-evidence.outputs.detailed_signature_uri }}
+      launch_rehearsal_detailed_signature_s3_version_id: ${{ needs.rehearsal-evidence.outputs.detailed_signature_version_id }}
+      launch_rehearsal_detailed_signature_sha256: ${{ needs.rehearsal-evidence.outputs.detailed_signature_sha256 }}
+      external_oidc_report_s3_uri: ${{ needs.external-oidc.outputs.report_s3_uri }}
+      external_oidc_report_s3_version_id: ${{ needs.external-oidc.outputs.report_s3_version_id }}
+      external_oidc_report_sha256: ${{ needs.external-oidc.outputs.report_sha256 }}
+      external_oidc_signature_s3_uri: ${{ needs.external-oidc.outputs.signature_s3_uri }}
+      external_oidc_signature_s3_version_id: ${{ needs.external-oidc.outputs.signature_s3_version_id }}
+      external_oidc_signature_sha256: ${{ needs.external-oidc.outputs.signature_sha256 }}
+      qualification_teardown_receipt_s3_uri: ${{ needs.teardown-evidence.outputs.receipt_uri }}
+      qualification_teardown_receipt_s3_version_id: ${{ needs.teardown-evidence.outputs.receipt_version_id }}
+      qualification_teardown_receipt_sha256: ${{ needs.teardown-evidence.outputs.receipt_sha256 }}
+      qualification_teardown_signature_s3_uri: ${{ needs.teardown-evidence.outputs.signature_uri }}
+      qualification_teardown_signature_s3_version_id: ${{ needs.teardown-evidence.outputs.signature_version_id }}
+      qualification_teardown_signature_sha256: ${{ needs.teardown-evidence.outputs.signature_sha256 }}
+      operation: deploy
+      rollback_provider_secret_version: ""
+      change_id: ${{ inputs.change_id }}

@@ -222,6 +222,12 @@ def test_deployment_gate_selects_only_signed_target_identity() -> None:
     )
     assert '--platform "${VERIFIED_PLATFORM}"' in workflow
     assert "VERIFIED_TARGET: ${{ steps.evidence.outputs.target }}" in workflow
+    assert "environment: production" in workflow
+    assert (
+        "role-to-assume: "
+        "${{ secrets.AXON_RELEASE_VERIFY_ROLE_ARN }}"
+    ) in workflow
+    assert "secrets.AWS_ROLE_ARN" not in workflow
 
 
 def test_publication_preserves_signed_digests_in_private_ecr() -> None:

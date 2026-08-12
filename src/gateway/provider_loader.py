@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -34,6 +36,8 @@ _ENV_KEY_MAP = {
 }
 
 _PROVIDER_SECRET_ARN_ENV = "AXON_PROVIDER_SECRET_ARN"
+_PROVIDER_SECRET_VERSION_ENV = "AXON_PROVIDER_SECRET_VERSION"
+_PROVIDER_SECRET_BOOTSTRAP_VERSION = "bootstrap"
 _GCP_CREDENTIALS_JSON_ENV = "GCP_CREDENTIALS_JSON"
 _GOOGLE_CLOUD_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
 _GOOGLE_REFRESH_MARGIN_SECONDS = 300.0
@@ -85,14 +89,23 @@ class GoogleCredentialProvider:
         self._state_lock = threading.Lock()
         self._refreshing = False
         self._timer: threading.Timer | None = None
+        self._workers: set[threading.Thread] = set()
+        self._closed = False
         self._auto_refresh = auto_refresh
         self.project_id = project_id
-        if not self._valid_token():
-            self._refresh_credentials()
-        elif self._auto_refresh:
-            self._schedule_refresh()
+        try:
+            if not self._valid_token():
+                self._refresh_credentials()
+            elif self._auto_refresh:
+                self._schedule_refresh()
+        except BaseException:
+            self.close()
+            raise
 
     def get_token(self) -> str:
+        with self._state_lock:
+            if self._closed:
+                raise RuntimeError("Google credential provider is closed")
         token = getattr(self._credentials, "token", None)
         if getattr(self._credentials, "valid", False) and isinstance(
             token,
@@ -140,27 +153,37 @@ class GoogleCredentialProvider:
         )
         timer.daemon = True
         with self._state_lock:
+            if self._closed:
+                return
             previous = self._timer
             self._timer = timer
-        if previous is not None:
-            previous.cancel()
-        timer.start()
+            if previous is not None:
+                previous.cancel()
+            timer.start()
 
     def _start_background_refresh(self) -> None:
         with self._state_lock:
             pending = self._timer
             self._timer = None
-            if self._refreshing:
+            if self._closed or self._refreshing:
+                if pending is not None:
+                    pending.cancel()
                 return
             self._refreshing = True
-        if pending is not None:
-            pending.cancel()
-        worker = threading.Thread(
-            target=self._background_refresh,
-            name="axon-vertex-credential-refresh",
-            daemon=True,
-        )
-        worker.start()
+            if pending is not None:
+                pending.cancel()
+            worker = threading.Thread(
+                target=self._background_refresh,
+                name="axon-vertex-credential-refresh",
+                daemon=True,
+            )
+            self._workers.add(worker)
+            try:
+                worker.start()
+            except BaseException:
+                self._workers.discard(worker)
+                self._refreshing = False
+                raise
 
     def _background_refresh(self) -> None:
         retry = False
@@ -179,10 +202,47 @@ class GoogleCredentialProvider:
         finally:
             with self._state_lock:
                 self._refreshing = False
-        if self._auto_refresh:
+                self._workers.discard(threading.current_thread())
+                should_reschedule = self._auto_refresh and not self._closed
+        if should_reschedule:
             self._schedule_refresh(
                 _GOOGLE_REFRESH_RETRY_SECONDS if retry else None
             )
+
+    def start_auto_refresh(self) -> None:
+        """Start timer ownership only after provider loading has succeeded."""
+        with self._state_lock:
+            if self._closed:
+                raise RuntimeError("Google credential provider is closed")
+            if self._auto_refresh:
+                return
+            self._auto_refresh = True
+        self._schedule_refresh()
+
+    def close(self, timeout_seconds: float = 10.0) -> None:
+        """Stop future refreshes and briefly join any bounded refresh worker."""
+        if (
+            isinstance(timeout_seconds, bool)
+            or not isinstance(timeout_seconds, (int, float))
+            or not math.isfinite(timeout_seconds)
+            or timeout_seconds < 0
+        ):
+            raise ValueError("timeout_seconds must be non-negative")
+        with self._state_lock:
+            if self._closed:
+                return
+            self._closed = True
+            timer = self._timer
+            self._timer = None
+            workers = tuple(self._workers)
+        if timer is not None:
+            timer.cancel()
+        deadline = time.monotonic() + float(timeout_seconds)
+        current = threading.current_thread()
+        for worker in workers:
+            if worker is current:
+                continue
+            worker.join(timeout=max(0.0, deadline - time.monotonic()))
 
 
 class _BoundedGoogleRequest:
@@ -271,6 +331,7 @@ def _load_google_credential_provider(
         return GoogleCredentialProvider(
             credentials,
             project_id=project_id,
+            auto_refresh=False,
         )
     except Exception as exc:
         raise RuntimeError(
@@ -292,10 +353,12 @@ def load_provider_configs(config_path: str = "config/providers.yaml") -> dict[st
     return configs
 
 
-def load_provider_routes(
+def _load_provider_routes_unowned(
     config_path: str = "config/providers.yaml",
+    *,
+    google_refreshers: dict[int, Any],
 ) -> list[ProviderRoute]:
-    """Load concrete provider routes from YAML and environment variables.
+    """Build routes while exposing refreshers to the ownership wrapper.
 
     A legacy provider document without ``routes`` becomes one
     ``<provider>:default`` route. A provider with ``routes`` can declare multiple
@@ -342,6 +405,10 @@ def load_provider_routes(
                     google_credential_provider = (
                         _load_google_credential_provider(secret_values)
                     )
+                    if google_credential_provider is not None:
+                        google_refreshers[id(google_credential_provider)] = (
+                            google_credential_provider
+                        )
                     google_credentials_loaded = True
                 credential_provider = google_credential_provider
                 credentials = (
@@ -445,6 +512,40 @@ def load_provider_routes(
     return routes
 
 
+def _close_google_refreshers(refreshers: dict[int, Any]) -> None:
+    for provider in refreshers.values():
+        close = getattr(provider, "close", None)
+        if not callable(close):
+            continue
+        try:
+            close()
+        except Exception:
+            logger.warning(
+                "Vertex AI credential refresher cleanup failed",
+                exc_info=True,
+            )
+
+
+def load_provider_routes(
+    config_path: str = "config/providers.yaml",
+) -> list[ProviderRoute]:
+    """Load provider routes and transfer ownership only after full validation."""
+    google_refreshers: dict[int, Any] = {}
+    try:
+        routes = _load_provider_routes_unowned(
+            config_path,
+            google_refreshers=google_refreshers,
+        )
+        for provider in google_refreshers.values():
+            start = getattr(provider, "start_auto_refresh", None)
+            if callable(start):
+                start()
+    except BaseException:
+        _close_google_refreshers(google_refreshers)
+        raise
+    return routes
+
+
 def _merged_route_document(
     provider_data: dict[str, Any],
     route_data: dict[str, Any],
@@ -467,13 +568,27 @@ def _load_provider_secret() -> dict[str, str]:
     secret_arn = os.environ.get(_PROVIDER_SECRET_ARN_ENV, "").strip()
     if not secret_arn:
         return {}
+    requested_version = os.environ.get(
+        _PROVIDER_SECRET_VERSION_ENV,
+        "",
+    ).strip()
+    request: dict[str, str] = {"SecretId": secret_arn}
+    if (
+        requested_version
+        and requested_version != _PROVIDER_SECRET_BOOTSTRAP_VERSION
+    ):
+        request["VersionId"] = requested_version
     try:
         response = boto3.client(
             "secretsmanager",
             config=_SECRETS_MANAGER_CONFIG,
-        ).get_secret_value(
-            SecretId=secret_arn
-        )
+        ).get_secret_value(**request)
+        if "VersionId" in request and (
+            response.get("VersionId") != request["VersionId"]
+        ):
+            raise ValueError(
+                "provider secret version does not match the runtime revision"
+            )
         secret_string = response.get("SecretString")
         if not isinstance(secret_string, str):
             raise ValueError("provider secret must use SecretString")
