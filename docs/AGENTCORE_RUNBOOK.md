@@ -149,7 +149,8 @@ The AgentCore stack provides:
 - private STS and Athena endpoints when exact query-role bindings are
   configured; those bindings are mandatory for the current production-launch
   certification even though the reusable stack can omit query;
-- IAM restricted to supplied concrete Bedrock model/profile ARNs;
+- IAM restricted to supplied concrete Bedrock model/profile ARNs, including
+  every regional foundation-model destination behind an inference profile;
 - query IAM restricted to the exact datasource role ARNs and
   `sts:AssumeRole`, `sts:TagSession`, and `sts:SetSourceIdentity`;
 - a private regional ECR image identified by `@sha256`;
@@ -1027,8 +1028,13 @@ npx cdk deploy AxonLLMAgentCoreStack \
 
 `OIDC_CLIENT_IDS` and `OIDC_AUDIENCES` are comma-separated lists whose entries
 cannot contain whitespace or commas. `BEDROCK_INVOKE_RESOURCE_ARNS` is a
-comma-separated list of concrete ARNs and rejects wildcards. The image must be
-a private ECR digest in the deployment region. Include the OIDC origin,
+comma-separated list of concrete ARNs and rejects wildcards. For each
+cross-region inference profile, include both its inference-profile ARN and
+every `models[].modelArn` returned by `GetInferenceProfile`; Bedrock authorizes
+the profile and the selected destination model separately. Profile and
+account-scoped resource ARNs must be in the deployment region, while those
+foundation-model destinations may be in other regions. The image must be a
+private ECR digest in the deployment region. Include the OIDC origin,
 `bedrock-mantle.<region>.api.aws`, and every deliberately enabled external
 HTTPS destination in the approved prefix list. Because an EC2 managed prefix
 list stores CIDRs rather than hostnames, verify that every current A record for

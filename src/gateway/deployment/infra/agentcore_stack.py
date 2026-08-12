@@ -992,7 +992,8 @@ class AxonLLMAgentCoreStack(Stack):
             ),
             description=(
                 "Comma-separated Bedrock model or inference-profile ARNs "
-                "that AxonLLM may invoke"
+                "that AxonLLM may invoke. Cross-region inference profiles "
+                "must include every concrete destination foundation-model ARN."
             ),
         )
         verified_image_uri = CfnParameter(

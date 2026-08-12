@@ -28,11 +28,8 @@ _FINISH_REASONS = {
 }
 
 _GOOGLE_AI_MODELS = [
-    ModelInfo(model_id="gemini-2.5-pro", provider=PROVIDER_NAME, capabilities=["chat", "streaming", "function_calling"]),
-    ModelInfo(model_id="gemini-2.5-flash", provider=PROVIDER_NAME, capabilities=["chat", "streaming", "function_calling"]),
-    ModelInfo(model_id="gemini-2.0-flash", provider=PROVIDER_NAME, capabilities=["chat", "streaming", "function_calling"]),
-    ModelInfo(model_id="gemini-1.5-pro", provider=PROVIDER_NAME, capabilities=["chat", "streaming", "function_calling"]),
-    ModelInfo(model_id="gemini-1.5-flash", provider=PROVIDER_NAME, capabilities=["chat", "streaming", "function_calling"]),
+    ModelInfo(model_id="gemini-3.5-flash", provider=PROVIDER_NAME, capabilities=["chat", "streaming", "function_calling"]),
+    ModelInfo(model_id="gemini-3.1-pro-preview", provider=PROVIDER_NAME, capabilities=["chat", "streaming", "function_calling"]),
 ]
 
 
@@ -40,7 +37,7 @@ class GoogleAIAdapter(ProviderAdapter):
     """Translates between the unified Gateway format and Google AI Studio's Generative Language API.
 
     Uses the same request/response format as Vertex AI (contents + generationConfig)
-    but authenticates with a simple API key passed as a query parameter.
+    but authenticates with a simple API key passed in the x-goog-api-key header.
     """
 
     PROVIDER_NAME = PROVIDER_NAME

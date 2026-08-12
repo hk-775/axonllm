@@ -1,5 +1,5 @@
 {
-  "_comment": "Customer-facing narration, v2. Numbers here must match what the seeded gateway actually renders — 66 requests, $1.26, 1.4s average latency, 9 models with traffic, 51 configured models across 56 mappings, 5 unpriced mappings, and 46 production-price-ready models. Checked against the live API before recording, not written from memory.",
+  "_comment": "Customer-facing narration, v2. Numbers here must match what the seeded gateway actually renders — 66 requests, $1.26, 1.4s average latency, 9 models with traffic, 51 configured models across 55 mappings, 5 unpriced mappings, and 46 production-price-ready models. Checked against the live API before recording, not written from memory.",
   "voice": "Matthew",
   "engine": "neural",
   "_engine_note": "<emphasis> is unsupported on the neural engine (InvalidSsmlException); phrasing comes from <break> and sentence shape instead.",
@@ -64,8 +64,8 @@
     {
       "id": "09-pricing",
       "surface": "dashboard",
-      "ssml": "<speak>And this page is the one worth showing a sceptic. <break time=\"450ms\"/>Five of fifty-six provider mappings have no verified price attached. Production excludes them from routing, leaving forty-six of fifty-one configured models production-price-ready with shipped pricing. <break time=\"400ms\"/>The gateway makes the gap visible instead of serving an unpriced model.</speak>",
-      "text": "And this page is the one worth showing a sceptic. Five of 56 provider mappings have no verified price attached. Production excludes them from routing, leaving 46 of 51 configured models production-price-ready with shipped pricing. The gateway makes the gap visible instead of serving an unpriced model.",
+      "ssml": "<speak>And this page is the one worth showing a sceptic. <break time=\"450ms\"/>Five of fifty-five provider mappings have no verified price attached. Production excludes them from routing, leaving forty-six of fifty-one configured models production-price-ready with shipped pricing. <break time=\"400ms\"/>The gateway makes the gap visible instead of serving an unpriced model.</speak>",
+      "text": "And this page is the one worth showing a sceptic. Five of 55 provider mappings have no verified price attached. Production excludes them from routing, leaving 46 of 51 configured models production-price-ready with shipped pricing. The gateway makes the gap visible instead of serving an unpriced model.",
       "duration": 15.94
     },
     {

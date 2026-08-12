@@ -301,7 +301,7 @@ models:
     fallback_order: 0
 - name: gemini-3.5-flash
   description: Gemini 3.5 Flash
-  capabilities: [chat, vision, streaming]
+  capabilities: [chat, vision, streaming, tools]
   routing_strategy: round-robin
   providers:
   - provider: google_ai
@@ -318,18 +318,14 @@ models:
     weight: 1.0
     fallback_order: 0
 - name: gemini-2.5-pro
-  description: Gemini 2.5 Pro
+  description: Gemini 2.5 Pro (Vertex AI)
   capabilities: [chat, vision, streaming, tools]
   routing_strategy: round-robin
   providers:
-  - provider: google_ai
-    model_id: gemini-2.5-pro
-    weight: 1.0
-    fallback_order: 0
   - provider: vertex_ai
     model_id: gemini-2.5-pro
     weight: 1.0
-    fallback_order: 1
+    fallback_order: 0
 - name: gemini-2.5-flash
   description: Gemini 2.5 Flash (Vertex AI)
   capabilities: [chat, vision, streaming, tools]

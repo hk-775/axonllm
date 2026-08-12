@@ -69,7 +69,7 @@ _SECRETS_MANAGER_ARN_PATTERN = re.compile(
 _BEDROCK_ARN_PATTERN = re.compile(
     r"^arn:(?:aws|aws-us-gov|aws-cn):bedrock:"
     r"(?P<region>[a-z0-9-]+):(?:[0-9]{12})?:"
-    r"(?:foundation-model|inference-profile|"
+    r"(?P<resource_type>foundation-model|inference-profile|"
     r"application-inference-profile|custom-model|provisioned-model|"
     r"imported-model)/[A-Za-z0-9][A-Za-z0-9._:/+-]*$"
 )
@@ -630,9 +630,19 @@ class RuntimeSetup:
                 f"runtime.bedrock_invoke_resource_arns[{index}]",
             )
             arn_match = _BEDROCK_ARN_PATTERN.fullmatch(arn)
-            if arn_match is None or arn_match.group("region") != aws_region or "*" in arn:
+            if arn_match is None or "*" in arn:
                 raise AgentCoreSetupError(
-                    f"each Bedrock resource must be a concrete model or inference-profile ARN in {aws_region}"
+                    "each Bedrock resource must be a concrete model or "
+                    "inference-profile ARN"
+                )
+            if (
+                arn_match.group("resource_type") != "foundation-model"
+                and arn_match.group("region") != aws_region
+            ):
+                raise AgentCoreSetupError(
+                    "Bedrock inference profiles and account-scoped resources "
+                    f"must be in {aws_region}; cross-region foundation-model "
+                    "destinations are allowed"
                 )
             if arn in arns:
                 raise AgentCoreSetupError("runtime.bedrock_invoke_resource_arns must not contain duplicates")

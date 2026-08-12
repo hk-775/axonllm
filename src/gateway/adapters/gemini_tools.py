@@ -19,6 +19,7 @@ synthesized for them.
 
 from __future__ import annotations
 
+import base64
 import json
 from typing import Any
 
@@ -30,6 +31,8 @@ _ALLOWED_SCHEMA_KEYS = frozenset({
     "type", "format", "description", "nullable", "enum", "maxItems", "minItems",
     "properties", "required", "items", "example",
 })
+_GEMINI_CALL_ID_PREFIX = "call_gemini_"
+_MAX_GEMINI_CALL_ID_PAYLOAD_BYTES = 16_384
 
 
 def _clean_schema(node: Any) -> Any:
@@ -103,6 +106,58 @@ def _parse_args(raw: Any) -> dict:
     return raw or {}
 
 
+def _gemini_tool_call_id(
+    function_call: dict,
+    part: dict,
+    index: int,
+) -> str:
+    """Carry Gemini 3 continuation metadata in the standard tool-call id."""
+    raw_provider_id = function_call.get("id")
+    provider_id = raw_provider_id if isinstance(raw_provider_id, str) else ""
+    raw_signature = part.get("thoughtSignature")
+    if not isinstance(raw_signature, str) or not raw_signature:
+        return provider_id or (
+            f"call_{function_call.get('name', 'fn')}_{index}"
+        )
+
+    metadata = json.dumps(
+        [provider_id, raw_signature],
+        ensure_ascii=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    encoded = base64.urlsafe_b64encode(metadata).rstrip(b"=").decode("ascii")
+    return f"{_GEMINI_CALL_ID_PREFIX}{encoded}"
+
+
+def _gemini_call_metadata(call_id: object) -> tuple[str | None, str | None]:
+    """Recover a bounded Gemini call id and thought signature capsule."""
+    if not isinstance(call_id, str) or not call_id.startswith(
+        _GEMINI_CALL_ID_PREFIX
+    ):
+        return None, None
+    encoded = call_id.removeprefix(_GEMINI_CALL_ID_PREFIX)
+    if not encoded or len(encoded) > _MAX_GEMINI_CALL_ID_PAYLOAD_BYTES:
+        return None, None
+    padded = encoded + ("=" * (-len(encoded) % 4))
+    try:
+        decoded = base64.b64decode(
+            padded,
+            altchars=b"-_",
+            validate=True,
+        )
+        metadata = json.loads(decoded)
+    except (ValueError, UnicodeDecodeError, json.JSONDecodeError):
+        return None, None
+    if (
+        not isinstance(metadata, list)
+        or len(metadata) != 2
+        or not all(isinstance(value, str) for value in metadata)
+        or not metadata[1]
+    ):
+        return None, None
+    return metadata[0] or None, metadata[1]
+
+
 def openai_tool_call_names(messages: list[dict]) -> dict[str, str]:
     """Index assistant tool calls so standard tool results can recover names."""
     names: dict[str, str] = {}
@@ -169,10 +224,19 @@ def openai_msg_to_gemini(
             parts.append({"text": text})
         for tc in tool_calls:
             fn = tc.get("function") or {}
-            parts.append({"functionCall": {
+            function_call = {
                 "name": fn.get("name", tc.get("name", "")),
                 "args": _parse_args(fn.get("arguments", tc.get("arguments", {}))),
-            }})
+            }
+            provider_id, thought_signature = _gemini_call_metadata(
+                tc.get("id")
+            )
+            if provider_id is not None:
+                function_call["id"] = provider_id
+            part = {"functionCall": function_call}
+            if thought_signature is not None:
+                part["thoughtSignature"] = thought_signature
+            parts.append(part)
         return {"role": "model", "parts": parts}
 
     content = msg.get("content")
@@ -201,9 +265,10 @@ def gemini_token_usage(metadata: object) -> TokenUsage:
 def gemini_parts_to_tool_calls(parts: list[dict]) -> list[dict]:
     """Extract OpenAI-shaped tool_calls from Gemini response parts.
 
-    Gemini returns no call id, so one is synthesized. The id only has to be
-    stable within the one round-trip — the caller echoes it back in the tool
-    result, and Gemini matches on function name anyway.
+    Older Gemini responses have no call id, so one is synthesized. Gemini 3
+    requires its opaque thought signature on the continuation request. The
+    standard OpenAI tool-call id carries that metadata through stateless
+    clients, which already must echo the id with the tool result.
     """
     calls = []
     for i, part in enumerate(parts):
@@ -211,7 +276,7 @@ def gemini_parts_to_tool_calls(parts: list[dict]) -> list[dict]:
         if not fc:
             continue
         calls.append({
-            "id": f"call_{fc.get('name', 'fn')}_{i}",
+            "id": _gemini_tool_call_id(fc, part, i),
             "type": "function",
             "function": {
                 "name": fc.get("name", ""),

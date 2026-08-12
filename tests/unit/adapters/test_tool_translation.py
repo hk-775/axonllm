@@ -332,6 +332,50 @@ class TestGeminiTools:
         assert json.loads(tc["function"]["arguments"]) == {"sql": "select 1"}
         assert res.choices[0]["message"]["content"] is None
 
+    @pytest.mark.asyncio
+    async def test_gemini_3_thought_signature_survives_tool_round_trip(
+        self,
+        adapter,
+    ):
+        response = adapter.translate_response({
+            "model": "gemini-3.5-flash",
+            "candidates": [{
+                "finishReason": "STOP",
+                "content": {"parts": [{
+                    "functionCall": {
+                        "id": "provider-call-1",
+                        "name": "db_query",
+                        "args": {"sql": "select 1"},
+                    },
+                    "thoughtSignature": "opaque-provider-signature",
+                }]},
+            }],
+            "usageMetadata": {},
+        })
+        message = response.choices[0]["message"]
+        tool_call = message["tool_calls"][0]
+
+        payload = await adapter.translate_request(_req(
+            messages=[
+                {"role": "user", "content": "Run the query"},
+                message,
+                {
+                    "role": "tool",
+                    "tool_call_id": tool_call["id"],
+                    "content": '{"row_count": 1}',
+                },
+            ],
+            tools=[TOOL],
+        ))
+
+        part = payload["contents"][1]["parts"][0]
+        assert part["functionCall"]["id"] == "provider-call-1"
+        assert part["functionCall"]["name"] == "db_query"
+        assert part["thoughtSignature"] == "opaque-provider-signature"
+        assert payload["contents"][2]["parts"][0]["functionResponse"][
+            "name"
+        ] == "db_query"
+
     def test_plain_text_response_is_untouched(self, adapter):
         res = adapter.translate_response({
             "model": "m",

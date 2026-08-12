@@ -144,13 +144,10 @@ providers:
     models:
       - model_id: gemini-3.5-flash
         name: Gemini 3.5 Flash
-        capabilities: [chat, vision, streaming]
+        capabilities: [chat, vision, streaming, tools]
       - model_id: gemini-3.1-pro-preview
         name: Gemini 3.1 Pro Preview
         capabilities: [chat, vision, streaming]
-      - model_id: gemini-2.5-pro
-        name: Gemini 2.5 Pro
-        capabilities: [chat, vision, streaming, tools]
 
   vertex_ai:
     display_name: Google Vertex AI

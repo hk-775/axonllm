@@ -304,6 +304,9 @@ Tool calling and the built-in query plane are separate. AxonLLM transports a
 caller-defined `db_query` tool and its model-generated arguments, but does not
 automatically execute that tool. A caller invokes `/v1/query` or the AgentCore
 `query` action explicitly when it wants the governed Athena flow.
+For a multi-round tool loop, the caller returns the complete assistant
+`tool_calls` object and echoes each opaque tool-call ID unchanged; this carries
+provider continuation state without adding provider-specific request fields.
 
 ## Audit And Outbox Flow
 

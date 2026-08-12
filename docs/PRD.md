@@ -306,7 +306,7 @@ Stakeholders who need visibility into LLM spend and assurance that usage complie
 | FR-AD8 | **API key management** | Issue, list, revoke and rotate keys. The plaintext appears once, in the issue response. |
 | FR-AD9 | **Audit and PII views** | Browse audit records, verify the hash chain, and inspect PII redaction activity. |
 | FR-AD10 | **Production readiness checklist** | `/admin/production-checklist` runs eight checks over the live configuration and reports PASS/WARN/FAIL, including canonical identity and the API-key caveat in FR-AC6. |
-| FR-AD11 | **Drift detection** | Catalogue drift compares `config/catalog.yaml` against `models.yaml`; pricing drift reports provider mappings without usable rates. The shipped registry has 51 configured logical models across 56 mappings; 5 mappings lack usable shipped rates, leaving 46 models production-price-ready. |
+| FR-AD11 | **Drift detection** | Catalogue drift compares `config/catalog.yaml` against `models.yaml`; pricing drift reports provider mappings without usable rates. The shipped registry has 51 configured logical models across 55 mappings; 5 mappings lack usable shipped rates, leaving 46 models production-price-ready. |
 | FR-AD12 | **Runtime configuration surface** | What is *not* runtime-editable is provider credentials. Projects, users, models, Cedar policies, the policy hierarchy, quotas, regions, webhooks and guardrail rules all take effect without a restart. |
 | FR-AD13 | **Datasource administration** | `/admin/datasources` stores tenant/project Athena metadata without credentials. `tenant_admin` may create/update/delete; `tenant_member` and `tenant_auditor` may read with the role ARN concealed; `service` is denied. Lists use bounded opaque-cursor pages, creates enforce a transactional tenant quota, writes use revision compare-and-swap, and mutations emit durable redacted audit records. |
 
@@ -320,7 +320,7 @@ Stakeholders who need visibility into LLM spend and assurance that usage complie
 | FR-T4 | **Arguments encoding** | OpenAI carries tool arguments as a JSON string, every other dialect as an object; the value is re-encoded at each boundary. Malformed model output yields `{}` rather than failing the request, so the tool reports the bad call. |
 | FR-T5 | **Schema compatibility** | Gemini rejects unknown JSON Schema keys (`additionalProperties`, `$schema`, `title`, `default`) rather than ignoring them, so schemas are filtered recursively before dispatch. |
 | FR-T6 | **Unsupported-parameter reporting** | Where a provider has no equivalent for required or named tool selection, AxonLLM rejects the request before provider invocation with sanitized `400 unsupported_provider_feature` rather than dropping the instruction silently. |
-| FR-T7 | **Multi-round tool loops** | A full loop is supported: tool spec → tool call → tool result → final answer. Governance applies to every round (cost, quota, audit, guardrails), and smart routing classifies the last real user text rather than the intervening tool result, so all rounds of one loop route consistently. |
+| FR-T7 | **Multi-round tool loops** | A full loop is supported: tool spec → tool call → tool result → final answer. The caller echoes opaque tool-call IDs unchanged so provider continuation state, including Gemini 3 thought signatures, survives without a provider-specific public field. Governance applies to every round, and smart routing classifies the last real user text rather than the intervening tool result, so all rounds of one loop route consistently. |
 
 ### 6.11 Persistence
 
@@ -1571,7 +1571,7 @@ call. With no URL and no registered sink, the forwarder is inert.
 
 ### Appendix A: Configured Models (Current Configuration)
 
-Generated from `config/models.yaml` — 51 configured models across 56 provider
+Generated from `config/models.yaml` — 51 configured models across 55 provider
 mappings. Of those models, 46 are production-price-ready with the shipped
 pricing. Regenerate rather than hand-edit, since a table maintained by hand is
 what left this appendix 17 rows long and one routing strategy wrong.
@@ -1611,7 +1611,7 @@ what left this appendix 17 rows long and one routing strategy wrong.
 | `qwen3-235b` | Qwen3 VL 235B A22B (multimodal, open weight) | round-robin | bedrock |
 | `gemini-3.5-flash` | Gemini 3.5 Flash | round-robin | google_ai |
 | `gemini-3.1-pro` | Gemini 3.1 Pro | round-robin | google_ai |
-| `gemini-2.5-pro` | Gemini 2.5 Pro | round-robin | google_ai |
+| `gemini-2.5-pro` | Gemini 2.5 Pro (Vertex AI) | round-robin | vertex_ai |
 | `grok-4.3` | Grok 4.3 | round-robin | xai |
 | `grok-4.5` | Grok 4.5 | round-robin | xai |
 | `groq-llama-3.3-70b` | Llama 3.3 70B (Groq) | round-robin | groq |
