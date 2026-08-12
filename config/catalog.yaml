@@ -92,3 +92,14 @@ providers:
       - model_id: gemini-2.0-flash
         name: Gemini 2.0 Flash
         capabilities: [chat, vision, streaming]
+
+  cohere:
+    display_name: Cohere
+    auth_type: api_key
+    models:
+      - model_id: command-r-08-2024
+        name: Command R 08-2024
+        capabilities: [chat, streaming]
+      - model_id: command-r-plus-08-2024
+        name: Command R+ 08-2024
+        capabilities: [chat, streaming]

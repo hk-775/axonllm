@@ -149,6 +149,13 @@ models:
     model_id: gpt-4o
     weight: 1.0
     fallback_order: 0
+  # Azure model_id is the deployment name. The shipped price assumes this
+  # deployment is Global Standard GPT-4o 2024-08-06; use a tenant override for
+  # any differently named, versioned, regional, or provisioned deployment.
+  - provider: azure_openai
+    model_id: gpt-4o
+    weight: 1.0
+    fallback_order: 1
 - name: gpt-4o-mini
   description: GPT-4o Mini
   routing_strategy: round-robin
@@ -285,6 +292,18 @@ models:
     model_id: gemini-2.5-pro
     weight: 1.0
     fallback_order: 0
+  - provider: vertex_ai
+    model_id: gemini-2.5-pro
+    weight: 1.0
+    fallback_order: 1
+- name: gemini-2.5-flash
+  description: Gemini 2.5 Flash (Vertex AI)
+  routing_strategy: round-robin
+  providers:
+  - provider: vertex_ai
+    model_id: gemini-2.5-flash
+    weight: 1.0
+    fallback_order: 0
 # --- xAI (Grok) ---
 # grok-3 and grok-3-mini both still answer 200, so nothing looked broken — but
 # xAI resolves both to grok-4.3 and says so in the response's `model` field.
@@ -399,6 +418,25 @@ models:
   providers:
   - provider: fireworks
     model_id: accounts/fireworks/models/gpt-oss-120b
+    weight: 1.0
+    fallback_order: 0
+# --- Cohere ---
+# Use the live, version-pinned Command R releases. Cohere deprecated the
+# command-r, command-r-plus, and command-light aliases on 2025-09-15.
+- name: cohere-command-r
+  description: Cohere Command R 08-2024
+  routing_strategy: round-robin
+  providers:
+  - provider: cohere
+    model_id: command-r-08-2024
+    weight: 1.0
+    fallback_order: 0
+- name: cohere-command-r-plus
+  description: Cohere Command R+ 08-2024
+  routing_strategy: round-robin
+  providers:
+  - provider: cohere
+    model_id: command-r-plus-08-2024
     weight: 1.0
     fallback_order: 0
 # --- AI21 Labs ---
