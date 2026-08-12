@@ -7,14 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.6] - 2026-08-12
+
+### Added
+
+- **Protected AgentCore production launch orchestration.** Added isolated
+  external-OIDC and managed-Cognito qualification, seven-domain launch
+  rehearsals, bounded Activity workers, immutable KMS-signed evidence,
+  qualification teardown proof, candidate promotion, and independent
+  transition reconciliation.
+- **Enterprise runtime administration.** Added managed identity lifecycle,
+  durable model-registry administration, shared-state control-plane canaries,
+  governed Athena query certification, and revision-checked tenant
+  configuration validation.
+- **Complete launch provider routing.** Added adaptive route pools, provider
+  capacity controls, full launch catalog coverage, and packaged runtime assets
+  for AgentCore and Fargate deployments.
+
 ### Fixed
 
+- **Launch failure handling now fails closed.** Runtime lifecycle timeouts,
+  recovery selectors, control-plane transitions, scheduler KMS authorization,
+  state-machine log destinations, and worker cleanup now preserve bounded,
+  auditable terminal state.
+- **Wheel deployment launchers are self-contained.** Packaged deployments now
+  carry the required infrastructure modules, locked CDK inputs, runtime
+  configuration, and operational tooling.
 - **The Google AI launch catalog no longer advertises a retired preview.**
   Google's live model list no longer contains `gemini-3-pro-preview`; AxonLLM
   now offers the listed, priced `gemini-2.5-pro` tier instead.
 
 ### Security
 
+- **Production changes require signed prerequisite and deployment evidence.**
+  Exact release images, reviewed configuration versions, launch receipts,
+  teardown state, backup/restore checks, and promotion transitions are bound
+  to separate least-privilege IAM and KMS trust domains.
 - **All pinned workflow actions now run natively on Node 24.** Artifact
   upload/download, AWS credential configuration, and Docker QEMU/Buildx setup
   actions were upgraded to their Node 24 majors, removing GitHub's forced
