@@ -104,6 +104,22 @@ def test_ci_compiles_production_and_release_python_syntax() -> None:
     assert "compileall" not in command
 
 
+def test_supply_chain_installs_and_runs_release_security_tests() -> None:
+    install = _workflow_step("supply-chain", "Install locked audit dependencies")
+    validate = _workflow_step(
+        "supply-chain",
+        "Validate workflow and operational tooling",
+    )
+
+    assert install["run"] == "uv sync --frozen --extra security --extra dev"
+    assert (
+        "uv run --frozen --no-sync pytest "
+        "tests/release_security -q --tb=short"
+        in validate["run"]
+    )
+    assert "unittest discover" not in validate["run"]
+
+
 def test_ci_validates_every_tracked_shell_script() -> None:
     step = _workflow_step("supply-chain", "Validate tracked shell syntax")
     command = step["run"]

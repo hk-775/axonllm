@@ -90,7 +90,7 @@ jobs:
         run: python -m pip install --no-deps "uv==${UV_VERSION}"
 
       - name: Install locked audit dependencies
-        run: uv sync --frozen --extra security
+        run: uv sync --frozen --extra security --extra dev
 
       - name: Compile production and release Python
         env:
@@ -104,7 +104,7 @@ jobs:
       - name: Validate workflow and operational tooling
         run: |
           uv run --frozen --no-sync python scripts/ci/validate_workflows.py
-          uv run --frozen --no-sync python -m unittest discover -s tests/release_security -p 'test_*.py' -v
+          uv run --frozen --no-sync pytest tests/release_security -q --tb=short
 
       - name: Validate tracked shell syntax
         run: |
