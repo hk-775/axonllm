@@ -1,0 +1,676 @@
+name: Deploy AgentCore production
+
+on:
+  workflow_dispatch:
+    inputs:
+      evidence_run_id:
+        description: Successful tagged release-security workflow run
+        required: true
+        type: string
+      release_commit_sha:
+        description: Full commit SHA recorded by the signed release
+        required: true
+        type: string
+      agentcore_image_reference:
+        description: Immutable private AgentCore ECR digest URI
+        required: true
+        type: string
+      control_plane_image_reference:
+        description: Immutable private Fargate ECR digest URI
+        required: true
+        type: string
+      operation:
+        description: Deploy or restore a previously signed image and secret version
+        required: true
+        default: deploy
+        type: choice
+        options:
+          - deploy
+          - rollback
+      rollback_provider_secret_version:
+        description: Existing reviewed AWSCURRENT target; required only for rollback
+        required: false
+        type: string
+      change_id:
+        description: Approved change or incident identifier
+        required: true
+        type: string
+      aws_region:
+        description: Production AWS region
+        required: true
+        default: us-east-1
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: agentcore-production-deployment
+  cancel-in-progress: false
+
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  UV_CACHE_DIR: /tmp/axonllm-uv-cache
+  UV_VERSION: "0.10.7"
+
+jobs:
+  verify-agentcore:
+    name: Verify AgentCore release target
+    uses: ./.github/workflows/deploy-verification.yml
+    with:
+      evidence_run_id: ${{ inputs.evidence_run_id }}
+      commit_sha: ${{ inputs.release_commit_sha }}
+      image_reference: ${{ inputs.agentcore_image_reference }}
+      target: agentcore
+      aws_region: ${{ inputs.aws_region }}
+    secrets:
+      AWS_ROLE_ARN: ${{ secrets.AXON_RELEASE_VERIFY_ROLE_ARN }}
+
+  verify-control-plane:
+    name: Verify control-plane release target
+    uses: ./.github/workflows/deploy-verification.yml
+    with:
+      evidence_run_id: ${{ inputs.evidence_run_id }}
+      commit_sha: ${{ inputs.release_commit_sha }}
+      image_reference: ${{ inputs.control_plane_image_reference }}
+      target: fargate
+      aws_region: ${{ inputs.aws_region }}
+    secrets:
+      AWS_ROLE_ARN: ${{ secrets.AXON_RELEASE_VERIFY_ROLE_ARN }}
+
+  deploy:
+    name: Deploy, certify, and record production
+    needs:
+      - verify-agentcore
+      - verify-control-plane
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    environment: production
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Check out reviewed deployment tooling
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.sha }}
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+
+      - name: Set up supported Node for CDK
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: "22"
+
+      - name: Validate immutable production inputs
+        env:
+          AGENTCORE_IMAGE: ${{ inputs.agentcore_image_reference }}
+          AWS_ACCOUNT_ID: ${{ vars.AXON_AWS_ACCOUNT_ID }}
+          AWS_REGION: ${{ inputs.aws_region }}
+          CDK_CLI_VERSION: ${{ vars.AXON_CDK_CLI_VERSION }}
+          CERTIFICATION_CONFIG_URI: ${{ vars.AXON_AGENTCORE_CERTIFICATION_CONFIG_S3_URI }}
+          CERTIFICATION_SECRET_ARN: ${{ vars.AXON_AGENTCORE_CERTIFICATION_SECRET_ARN }}
+          CONTROL_PLANE_IMAGE: ${{ inputs.control_plane_image_reference }}
+          DEPLOY_ROLE_ARN: ${{ secrets.AXON_AGENTCORE_DEPLOY_ROLE_ARN }}
+          EVIDENCE_BUCKET: ${{ vars.AXON_DEPLOYMENT_EVIDENCE_BUCKET }}
+          EVIDENCE_PREFIX: ${{ vars.AXON_DEPLOYMENT_EVIDENCE_PREFIX }}
+          OPERATION: ${{ inputs.operation }}
+          PROVIDER_SOURCE_SECRET_ARN: ${{ vars.AXON_AGENTCORE_PROVIDER_SOURCE_SECRET_ARN }}
+          RELEASE_COMMIT: ${{ inputs.release_commit_sha }}
+          RELEASE_RUN_ID: ${{ inputs.evidence_run_id }}
+          ROLLBACK_SECRET_VERSION: ${{ inputs.rollback_provider_secret_version }}
+          SETUP_CONFIG_URI: ${{ vars.AXON_AGENTCORE_SETUP_CONFIG_S3_URI }}
+          SIGNING_KEY_ARN: ${{ vars.AXON_DEPLOYMENT_SIGNING_KEY_ARN }}
+          VERIFIED_AGENTCORE: ${{ needs.verify-agentcore.outputs.verified_image }}
+          VERIFIED_CONTROL_PLANE: ${{ needs.verify-control-plane.outputs.verified_image }}
+        run: |
+          set -euo pipefail
+          [[ "${GITHUB_REF}" == "refs/heads/main" ]]
+          [[ "${GITHUB_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${RELEASE_COMMIT}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${RELEASE_RUN_ID}" =~ ^[1-9][0-9]*$ ]]
+          [[ "${AWS_ACCOUNT_ID}" =~ ^[0-9]{12}$ ]]
+          [[ "${AWS_REGION}" == "us-east-1" ]]
+          [[ "${CDK_CLI_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "${SETUP_CONFIG_URI}" =~ ^s3://[a-z0-9.-]+/.+[^/]$ ]]
+          [[ "${CERTIFICATION_CONFIG_URI}" =~ ^s3://[a-z0-9.-]+/.+[^/]$ ]]
+          [[ "${PROVIDER_SOURCE_SECRET_ARN}" =~ ^arn:aws:secretsmanager:us-east-1:${AWS_ACCOUNT_ID}:secret:.+ ]]
+          [[ "${CERTIFICATION_SECRET_ARN}" =~ ^arn:aws:secretsmanager:us-east-1:${AWS_ACCOUNT_ID}:secret:.+ ]]
+          [[ "${DEPLOY_ROLE_ARN}" =~ ^arn:aws:iam::${AWS_ACCOUNT_ID}:role/.+ ]]
+          [[ "${SIGNING_KEY_ARN}" =~ ^arn:aws:kms:us-east-1:${AWS_ACCOUNT_ID}:key/[A-Za-z0-9-]+$ ]]
+          [[ "${EVIDENCE_BUCKET}" =~ ^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$ ]]
+          [[ "${EVIDENCE_PREFIX}" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$ ]]
+          [[ "${AGENTCORE_IMAGE}" == "${VERIFIED_AGENTCORE}" ]]
+          [[ "${CONTROL_PLANE_IMAGE}" == "${VERIFIED_CONTROL_PLANE}" ]]
+          if [[ "${OPERATION}" == "rollback" ]]; then
+            [[ "${ROLLBACK_SECRET_VERSION}" =~ ^[A-Za-z0-9._-]{1,256}$ ]]
+          else
+            [[ "${OPERATION}" == "deploy" ]]
+            [[ -z "${ROLLBACK_SECRET_VERSION}" ]]
+          fi
+
+      - name: Require successful CI for deployment tooling
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          response="${RUNNER_TEMP}/deployment-tooling-ci.json"
+          gh api \
+            --method GET \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs" \
+            -f "head_sha=${GITHUB_SHA}" \
+            -f status=completed \
+            -f per_page=100 >"${response}"
+          jq -e --arg commit "${GITHUB_SHA}" '
+            [.workflow_runs[] | select(
+              .head_sha == $commit
+              and .status == "completed"
+              and .conclusion == "success"
+            )] | length > 0
+          ' "${response}" >/dev/null
+
+      - name: Install locked deployment dependencies
+        env:
+          CDK_CLI_VERSION: ${{ vars.AXON_CDK_CLI_VERSION }}
+        run: |
+          set -euo pipefail
+          python -m pip install --no-deps "uv==${UV_VERSION}"
+          uv sync --frozen --extra agentcore --extra dev --extra security
+          npm install \
+            --prefix infra \
+            --no-save \
+            --package-lock=false \
+            --ignore-scripts \
+            "aws-cdk@${CDK_CLI_VERSION}"
+          (
+            cd infra
+            npx --no-install cdk --version
+          )
+
+      - name: Install checksum-verified security tools
+        run: |
+          scripts/ci/install_security_tools.sh "${RUNNER_TEMP}/bin"
+          printf '%s\n' "${RUNNER_TEMP}/bin" >>"${GITHUB_PATH}"
+
+      - name: Synthesize and validate production infrastructure
+        env:
+          CDK_CI_OUTDIR: ${{ runner.temp }}/cdk.out
+          JSII_RUNTIME_PACKAGE_CACHE_ROOT: ${{ runner.temp }}/jsii-cache
+        run: |
+          set -euo pipefail
+          scripts/ci/synthesize_and_verify_cdk.sh "${CDK_CI_OUTDIR}"
+          for template in \
+            "${CDK_CI_OUTDIR}/identity/AxonLLMIdentityStack.template.json" \
+            "${CDK_CI_OUTDIR}/agentcore/AxonLLMAgentCoreStack.template.json" \
+            "${CDK_CI_OUTDIR}/control-plane/AxonLLMControlPlaneStack.template.json"
+          do
+            trivy config \
+              --disable-telemetry \
+              --skip-check-update \
+              --ignorefile .github/trivyignore.yaml \
+              --severity HIGH,CRITICAL \
+              --exit-code 1 \
+              "${template}"
+          done
+
+      - name: Download signed release evidence
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: axonllm-release-evidence-${{ inputs.release_commit_sha }}
+          path: ${{ runner.temp }}/release-evidence
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.evidence_run_id }}
+
+      - name: Configure production AWS credentials through OIDC
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with:
+          aws-region: ${{ inputs.aws_region }}
+          role-to-assume: ${{ secrets.AXON_AGENTCORE_DEPLOY_ROLE_ARN }}
+          role-session-name: AxonLLMAgentCoreProduction
+          role-duration-seconds: 10800
+          allowed-account-ids: ${{ vars.AXON_AWS_ACCOUNT_ID }}
+          mask-aws-account-id: true
+
+      - name: Reverify release evidence under deployment authority
+        id: release
+        env:
+          AGENTCORE_IMAGE: ${{ inputs.agentcore_image_reference }}
+          CONTROL_PLANE_IMAGE: ${{ inputs.control_plane_image_reference }}
+          EVIDENCE_DIR: ${{ runner.temp }}/release-evidence
+          RELEASE_COMMIT: ${{ inputs.release_commit_sha }}
+          RELEASE_RUN_ID: ${{ inputs.evidence_run_id }}
+        run: |
+          set -euo pipefail
+          agentcore_digest=${AGENTCORE_IMAGE##*@}
+          fargate_digest=${CONTROL_PLANE_IMAGE##*@}
+          output="${RUNNER_TEMP}/release-output"
+          uv run --frozen --no-sync python scripts/release/release_evidence.py verify \
+            --directory "${EVIDENCE_DIR}" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --commit "${RELEASE_COMMIT}" \
+            --image-digest "${agentcore_digest}" \
+            --signing-account-id "${{ vars.AXON_AWS_ACCOUNT_ID }}" \
+            --require-release-tag \
+            --target agentcore \
+            --run-id "${RELEASE_RUN_ID}" \
+            --github-output "${output}"
+          uv run --frozen --no-sync python scripts/release/release_evidence.py verify \
+            --directory "${EVIDENCE_DIR}" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --commit "${RELEASE_COMMIT}" \
+            --image-digest "${fargate_digest}" \
+            --signing-account-id "${{ vars.AXON_AWS_ACCOUNT_ID }}" \
+            --require-release-tag \
+            --target fargate \
+            --run-id "${RELEASE_RUN_ID}"
+          signing_key_arn=$(sed -n 's/^signing_key_arn=//p' "${output}")
+          [[ "${signing_key_arn}" =~ ^arn:aws:kms:us-east-1:${{ vars.AXON_AWS_ACCOUNT_ID }}:key/[A-Za-z0-9-]+$ ]]
+          uv run --frozen --no-sync python scripts/release/kms_evidence.py verify \
+            --artifact "${EVIDENCE_DIR}/provenance.intoto.json" \
+            --bundle "${EVIDENCE_DIR}/provenance-kms-signature.json" \
+            --key-arn "${signing_key_arn}"
+          uv run --frozen --no-sync python scripts/release/kms_evidence.py verify \
+            --artifact "${EVIDENCE_DIR}/release-manifest.json" \
+            --bundle "${EVIDENCE_DIR}/manifest-kms-signature.json" \
+            --key-arn "${signing_key_arn}"
+
+      - name: Fetch and bind reviewed deployment configuration
+        env:
+          AGENTCORE_IMAGE: ${{ inputs.agentcore_image_reference }}
+          CERTIFICATION_CONFIG_URI: ${{ vars.AXON_AGENTCORE_CERTIFICATION_CONFIG_S3_URI }}
+          CONTROL_PLANE_IMAGE: ${{ inputs.control_plane_image_reference }}
+          SETUP_CONFIG_URI: ${{ vars.AXON_AGENTCORE_SETUP_CONFIG_S3_URI }}
+        run: |
+          set -euo pipefail
+          setup="${RUNNER_TEMP}/agentcore-setup.json"
+          certification="${RUNNER_TEMP}/agentcore-certification.json"
+          aws s3 cp --only-show-errors "${SETUP_CONFIG_URI}" "${setup}"
+          aws s3 cp --only-show-errors "${CERTIFICATION_CONFIG_URI}" "${certification}"
+          chmod 0600 "${setup}" "${certification}"
+          uv run --frozen --no-sync python - \
+            "${setup}" "${AGENTCORE_IMAGE}" "${CONTROL_PLANE_IMAGE}" <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import sys
+
+          path = Path(sys.argv[1])
+          value = json.loads(path.read_text(encoding="utf-8"))
+          if not isinstance(value, dict) or value.get("identity_mode") != "managed-cognito":
+              raise SystemExit("production setup must use managed-cognito")
+          runtime = value.get("runtime")
+          control = value.get("control_plane")
+          if not isinstance(runtime, dict) or not isinstance(control, dict):
+              raise SystemExit("production setup lacks runtime or control plane")
+          runtime["verified_image_uri"] = sys.argv[2]
+          control["verified_image_uri"] = sys.argv[3]
+          temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+          temporary.write_text(
+              json.dumps(value, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          temporary.chmod(0o600)
+          temporary.replace(path)
+          PY
+          ./deploy-agentcore.sh \
+            --config "${setup}" \
+            --validate-only
+
+      - name: Read provider credentials into an owner-only temporary file
+        if: ${{ inputs.operation == 'deploy' }}
+        env:
+          PROVIDER_SOURCE_SECRET_ARN: ${{ vars.AXON_AGENTCORE_PROVIDER_SOURCE_SECRET_ARN }}
+        run: |
+          set -euo pipefail
+          source_json="${RUNNER_TEMP}/provider-source.json"
+          provider_env="${RUNNER_TEMP}/provider.env"
+          umask 077
+          aws secretsmanager get-secret-value \
+            --secret-id "${PROVIDER_SOURCE_SECRET_ARN}" \
+            --query SecretString \
+            --output text >"${source_json}"
+          uv run --frozen --no-sync python - \
+            "${source_json}" "${provider_env}" <<'PY'
+          import json
+          from pathlib import Path
+          import shlex
+          import sys
+
+          from scripts.operations.agentcore_provider_secret import (
+              ALLOWED_SECRET_FIELDS,
+          )
+
+          source = Path(sys.argv[1])
+          output = Path(sys.argv[2])
+          value = json.loads(source.read_text(encoding="utf-8"))
+          if (
+              not isinstance(value, dict)
+              or not value
+              or not set(value).issubset(ALLOWED_SECRET_FIELDS)
+              or any(not isinstance(item, str) for item in value.values())
+          ):
+              raise SystemExit("provider source secret is malformed")
+          normalized = dict(value)
+          if "GCP_CREDENTIALS_JSON" in normalized:
+              document = json.loads(normalized["GCP_CREDENTIALS_JSON"])
+              normalized["GCP_CREDENTIALS_JSON"] = json.dumps(
+                  document,
+                  separators=(",", ":"),
+                  sort_keys=True,
+              )
+          if any(
+              "\r" in item or "\n" in item
+              for item in normalized.values()
+          ):
+              raise SystemExit("provider source secret contains multiline values")
+          output.write_text(
+              "".join(
+                  f"{name}={shlex.quote(normalized[name])}\n"
+                  for name in sorted(normalized)
+              ),
+              encoding="utf-8",
+          )
+          output.chmod(0o600)
+          PY
+          rm -f "${source_json}"
+
+      - name: Deploy identity, runtime, and control plane in order
+        env:
+          OPERATION: ${{ inputs.operation }}
+          ROLLBACK_SECRET_VERSION: ${{ inputs.rollback_provider_secret_version }}
+        run: |
+          set -euo pipefail
+          arguments=(
+            --config "${RUNNER_TEMP}/agentcore-setup.json"
+            --outputs-dir "${RUNNER_TEMP}/agentcore-deployment"
+            --yes
+          )
+          if [[ "${OPERATION}" == "rollback" ]]; then
+            arguments+=(
+              --rollback-provider-secret-version
+              "${ROLLBACK_SECRET_VERSION}"
+            )
+          else
+            arguments+=(
+              --provider-env-file
+              "${RUNNER_TEMP}/provider.env"
+            )
+          fi
+          ./deploy-agentcore.sh "${arguments[@]}"
+
+      - name: Require stable recovery and backup posture
+        env:
+          RECOVERY_REPORT: ${{ runner.temp }}/recovery-validation.json
+          TRANSITION_REPORT: ${{ runner.temp }}/recovery-transition.json
+        run: |
+          set -euo pipefail
+          uv run --frozen --no-sync python \
+            scripts/operations/validate_state_recovery.py \
+            --region "${{ inputs.aws_region }}" \
+            --stack-name AxonLLMAgentCoreStack \
+            --require-vault-lock >"${RECOVERY_REPORT}"
+          uv run --frozen --no-sync python \
+            scripts/operations/agentcore_recovery.py \
+            --region "${{ inputs.aws_region }}" \
+            --stack-name AxonLLMAgentCoreStack \
+            status >"${TRANSITION_REPORT}"
+          jq -e '
+            .phase == "status"
+            and .mode == "normal"
+            and .endpoint.name == "production"
+            and .endpoint.status == "READY"
+            and .controlPlane.recoveryMode == "normal"
+            and .controlPlane.selectedTable == .selectedTable
+            and .controlPlane.pendingCount == 0
+            and .controlPlane.desiredCount >= 1
+            and .controlPlane.runningCount == .controlPlane.desiredCount
+          ' "${TRANSITION_REPORT}" >/dev/null
+
+      - name: Bind and run direct AgentCore certification
+        env:
+          CERTIFICATION_SECRET_ARN: ${{ vars.AXON_AGENTCORE_CERTIFICATION_SECRET_ARN }}
+        run: |
+          set -euo pipefail
+          config="${RUNNER_TEMP}/agentcore-certification.json"
+          credentials="${RUNNER_TEMP}/certification-credentials.json"
+          report="${RUNNER_TEMP}/agentcore-certification-report.json"
+          runtime_outputs="${RUNNER_TEMP}/agentcore-deployment/agentcore-outputs.json"
+          umask 077
+          runtime_arn=$(jq -er '.AxonLLMAgentCoreStack.RuntimeArn' "${runtime_outputs}")
+          qualifier=$(jq -er '.AxonLLMAgentCoreStack.RuntimeEndpointName' "${runtime_outputs}")
+          uv run --frozen --no-sync python - \
+            "${config}" "${runtime_arn}" "${qualifier}" <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import sys
+
+          path = Path(sys.argv[1])
+          value = json.loads(path.read_text(encoding="utf-8"))
+          if not isinstance(value, dict):
+              raise SystemExit("certification configuration is malformed")
+          value["runtimeArn"] = sys.argv[2]
+          value["qualifier"] = sys.argv[3]
+          temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+          temporary.write_text(
+              json.dumps(value, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          temporary.chmod(0o600)
+          temporary.replace(path)
+          PY
+          aws secretsmanager get-secret-value \
+            --secret-id "${CERTIFICATION_SECRET_ARN}" \
+            --query SecretString \
+            --output text >"${credentials}"
+          chmod 0600 "${credentials}"
+          uv run --frozen --no-sync python - \
+            "${config}" "${credentials}" "${report}" <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import subprocess
+          import sys
+
+          config_path = Path(sys.argv[1])
+          credential_path = Path(sys.argv[2])
+          report_path = Path(sys.argv[3])
+          config = json.loads(config_path.read_text(encoding="utf-8"))
+          credentials = json.loads(credential_path.read_text(encoding="utf-8"))
+          identities = config.get("identities")
+          if not isinstance(identities, dict) or not isinstance(credentials, dict):
+              raise SystemExit("certification credentials are malformed")
+          required = set(identities.values())
+          if (
+              set(credentials) != required
+              or any(re.fullmatch(r"[A-Z_][A-Z0-9_]{0,127}", name) is None for name in required)
+              or any(not isinstance(value, str) or not value for value in credentials.values())
+          ):
+              raise SystemExit("certification credentials do not match the scenario")
+          environment = os.environ.copy()
+          environment.update(credentials)
+          completed = subprocess.run(
+              [
+                  sys.executable,
+                  "scripts/operations/certify_agentcore.py",
+                  "--config",
+                  str(config_path),
+                  "--output",
+                  str(report_path),
+              ],
+              check=False,
+              env=environment,
+          )
+          raise SystemExit(completed.returncode)
+          PY
+          rm -f "${credentials}"
+
+      - name: Create and KMS-sign deployment evidence
+        env:
+          AGENTCORE_IMAGE: ${{ inputs.agentcore_image_reference }}
+          CHANGE_ID: ${{ inputs.change_id }}
+          CONTROL_PLANE_IMAGE: ${{ inputs.control_plane_image_reference }}
+          EVIDENCE_DIR: ${{ runner.temp }}/deployment-evidence
+          OPERATION: ${{ inputs.operation }}
+          RELEASE_COMMIT: ${{ inputs.release_commit_sha }}
+          RELEASE_EVIDENCE_DIR: ${{ runner.temp }}/release-evidence
+          RELEASE_RUN_ID: ${{ inputs.evidence_run_id }}
+          SIGNING_KEY_ARN: ${{ vars.AXON_DEPLOYMENT_SIGNING_KEY_ARN }}
+        run: |
+          set -euo pipefail
+          install -d -m 0700 "${EVIDENCE_DIR}"
+          evidence="${EVIDENCE_DIR}/agentcore-deployment.json"
+          bundle="${EVIDENCE_DIR}/agentcore-deployment-kms-signature.json"
+          uv run --frozen --no-sync python \
+            scripts/release/deployment_evidence.py create \
+            --output "${evidence}" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --deployment-commit "${GITHUB_SHA}" \
+            --release-commit "${RELEASE_COMMIT}" \
+            --release-run-id "${RELEASE_RUN_ID}" \
+            --release-manifest "${RELEASE_EVIDENCE_DIR}/release-manifest.json" \
+            --workflow-ref "${GITHUB_WORKFLOW_REF}" \
+            --run-id "${GITHUB_RUN_ID}" \
+            --run-attempt "${GITHUB_RUN_ATTEMPT}" \
+            --actor "${GITHUB_ACTOR}" \
+            --actor-id "${GITHUB_ACTOR_ID}" \
+            --triggering-actor "${GITHUB_TRIGGERING_ACTOR}" \
+            --change-id "${CHANGE_ID}" \
+            --operation "${OPERATION}" \
+            --region "${{ inputs.aws_region }}" \
+            --agentcore-image "${AGENTCORE_IMAGE}" \
+            --fargate-image "${CONTROL_PLANE_IMAGE}" \
+            --setup-config "${RUNNER_TEMP}/agentcore-setup.json" \
+            --certification-config "${RUNNER_TEMP}/agentcore-certification.json" \
+            --identity-outputs "${RUNNER_TEMP}/agentcore-deployment/identity-outputs.json" \
+            --runtime-outputs "${RUNNER_TEMP}/agentcore-deployment/agentcore-outputs.json" \
+            --control-outputs "${RUNNER_TEMP}/agentcore-deployment/control-plane-outputs.json" \
+            --provider-secret "${RUNNER_TEMP}/agentcore-deployment/provider-secret-version.json" \
+            --recovery-report "${RUNNER_TEMP}/recovery-validation.json" \
+            --transition-report "${RUNNER_TEMP}/recovery-transition.json" \
+            --certification-report "${RUNNER_TEMP}/agentcore-certification-report.json"
+          uv run --frozen --no-sync python scripts/release/kms_evidence.py sign \
+            --artifact "${evidence}" \
+            --bundle "${bundle}" \
+            --key-arn "${SIGNING_KEY_ARN}"
+          uv run --frozen --no-sync python scripts/release/kms_evidence.py verify \
+            --artifact "${evidence}" \
+            --bundle "${bundle}" \
+            --key-arn "${SIGNING_KEY_ARN}"
+          uv run --frozen --no-sync python \
+            scripts/release/deployment_evidence.py verify \
+            --evidence "${evidence}" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --deployment-commit "${GITHUB_SHA}" \
+            --release-commit "${RELEASE_COMMIT}" \
+            --run-id "${GITHUB_RUN_ID}" \
+            --run-attempt "${GITHUB_RUN_ATTEMPT}" \
+            --agentcore-image "${AGENTCORE_IMAGE}" \
+            --fargate-image "${CONTROL_PLANE_IMAGE}"
+
+      - name: Persist immutable deployment evidence
+        env:
+          EVIDENCE_BUCKET: ${{ vars.AXON_DEPLOYMENT_EVIDENCE_BUCKET }}
+          EVIDENCE_DIR: ${{ runner.temp }}/deployment-evidence
+          EVIDENCE_PREFIX: ${{ vars.AXON_DEPLOYMENT_EVIDENCE_PREFIX }}
+          SIGNING_KEY_ARN: ${{ vars.AXON_DEPLOYMENT_SIGNING_KEY_ARN }}
+        run: |
+          set -euo pipefail
+          versioning=$(aws s3api get-bucket-versioning --bucket "${EVIDENCE_BUCKET}")
+          jq -e '.Status == "Enabled"' <<<"${versioning}" >/dev/null
+          locking=$(aws s3api get-object-lock-configuration --bucket "${EVIDENCE_BUCKET}")
+          jq -e '.ObjectLockConfiguration.ObjectLockEnabled == "Enabled"' \
+            <<<"${locking}" >/dev/null
+          encryption=$(aws s3api get-bucket-encryption --bucket "${EVIDENCE_BUCKET}")
+          jq -e '
+            [.ServerSideEncryptionConfiguration.Rules[]
+             | select(
+                 .ApplyServerSideEncryptionByDefault.SSEAlgorithm == "aws:kms"
+                 or .ApplyServerSideEncryptionByDefault.SSEAlgorithm == "aws:kms:dsse"
+               )
+             | select(.BucketKeyEnabled == true)]
+            | length > 0
+          ' <<<"${encryption}" >/dev/null
+
+          retain_until=$(date -u -d "+2555 days" "+%Y-%m-%dT%H:%M:%SZ")
+          base_key="${EVIDENCE_PREFIX}/${GITHUB_REPOSITORY}/${GITHUB_RUN_ID}/${GITHUB_RUN_ATTEMPT}"
+          evidence="${EVIDENCE_DIR}/agentcore-deployment.json"
+          bundle="${EVIDENCE_DIR}/agentcore-deployment-kms-signature.json"
+          evidence_key="${base_key}/agentcore-deployment.json"
+          bundle_key="${base_key}/agentcore-deployment-kms-signature.json"
+          for pair in "${evidence}:${evidence_key}" "${bundle}:${bundle_key}"; do
+            path=${pair%%:*}
+            key=${pair#*:}
+            aws s3api put-object \
+              --bucket "${EVIDENCE_BUCKET}" \
+              --key "${key}" \
+              --body "${path}" \
+              --checksum-algorithm SHA256 \
+              --object-lock-mode COMPLIANCE \
+              --object-lock-retain-until-date "${retain_until}" \
+              --if-none-match '*' >/dev/null
+            metadata=$(aws s3api head-object \
+              --bucket "${EVIDENCE_BUCKET}" \
+              --key "${key}" \
+              --checksum-mode ENABLED)
+            jq -e \
+              '.ObjectLockMode == "COMPLIANCE"
+               and (.ObjectLockRetainUntilDate | type == "string" and length > 0)
+               and (.ChecksumSHA256 | type == "string" and length > 0)' \
+              <<<"${metadata}" >/dev/null
+          done
+
+          remote="${RUNNER_TEMP}/remote-deployment-evidence"
+          install -d -m 0700 "${remote}"
+          aws s3api get-object \
+            --bucket "${EVIDENCE_BUCKET}" \
+            --key "${evidence_key}" \
+            "${remote}/agentcore-deployment.json" >/dev/null
+          aws s3api get-object \
+            --bucket "${EVIDENCE_BUCKET}" \
+            --key "${bundle_key}" \
+            "${remote}/agentcore-deployment-kms-signature.json" >/dev/null
+          uv run --frozen --no-sync python scripts/release/kms_evidence.py verify \
+            --artifact "${remote}/agentcore-deployment.json" \
+            --bundle "${remote}/agentcore-deployment-kms-signature.json" \
+            --key-arn "${SIGNING_KEY_ARN}"
+          {
+            printf '### Production deployment evidence\n\n'
+            printf -- '- S3 key: `%s`\n' "${evidence_key}"
+            printf -- '- Retained in COMPLIANCE mode until: `%s`\n' "${retain_until}"
+            printf -- '- Runtime version: `%s`\n' \
+              "$(jq -er '.stacks.runtime.RuntimeVersion' "${evidence}")"
+            printf -- '- Endpoint: `%s`\n' \
+              "$(jq -er '.stacks.runtime.RuntimeEndpointName' "${evidence}")"
+            printf -- '- Certification: `%s`\n' \
+              "$(jq -er '.certification.overallStatus' "${evidence}")"
+          } >>"${GITHUB_STEP_SUMMARY}"
+
+      - name: Retain signed evidence with the workflow run
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: axonllm-agentcore-deployment-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/deployment-evidence/agentcore-deployment.json
+            ${{ runner.temp }}/deployment-evidence/agentcore-deployment-kms-signature.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Remove temporary credentials and configuration
+        if: ${{ always() }}
+        run: |
+          rm -f \
+            "${RUNNER_TEMP}/provider.env" \
+            "${RUNNER_TEMP}/provider-source.json" \
+            "${RUNNER_TEMP}/certification-credentials.json" \
+            "${RUNNER_TEMP}/agentcore-setup.json" \
+            "${RUNNER_TEMP}/agentcore-certification.json"
