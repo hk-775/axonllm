@@ -51,6 +51,7 @@ install paths — local or AWS, seeded or clean — and which flag decides.
 
 ### Routing & Providers
 - **Multi-provider routing** — 13 provider adapters: Bedrock, Bedrock Mantle, Anthropic, OpenAI, Azure, Vertex AI, Google AI, Cohere, AI21, Fireworks, Groq, Together, xAI
+- **Adaptive provider route pools** — balance multiple credentials and endpoints per provider using route-level health, token-adjusted latency, capacity, priority, and recovery probes; reuse TCP/TLS pools by transport identity
 - **Tool calling (function calling)** — send OpenAI-shaped `tools`/`tool_choice`; each adapter translates into its provider's own dialect (Anthropic `input_schema`, Bedrock `toolSpec`, Gemini `functionDeclarations`, Cohere `parameter_definitions`) and translates the call back. One tool definition works across every provider.
 - **5 routing strategies** — round-robin, weighted, least-latency, cost-optimized, smart (intent-aware)
 - **Ensemble routing** — scatter-gather-synthesize across a panel of models with configurable quorum
@@ -841,6 +842,14 @@ the request event loop.
 > it presents as *"that model has no providers."* If a model looks unreachable,
 > check the key before the model id. `/admin/production-checklist` reports this
 > as **"Every routed provider has credentials."**
+
+A provider may have multiple concrete routes. Put a `routes` list under the
+provider in `config/providers.yaml`, give each route a stable `route_id`, and
+select its secret with `api_key_env` (or the corresponding cloud credential
+environment fields). Legacy single-key provider documents continue to become
+one `<provider>:default` route. See
+[Provider Route Pools](docs/PROVIDER_ROUTES.md) for adaptive scoring, endpoint
+balancing, shared-account capacity, connection pooling, and failure behavior.
 
 **Locally:**
 

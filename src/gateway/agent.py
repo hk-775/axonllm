@@ -1821,20 +1821,38 @@ class GatewayAgent:
             if not self.router.health_tracker.is_healthy(mapping.provider):
                 open_errors.append({"provider": mapping.provider, "message": "skipped (unhealthy)"})
                 continue
-            adapter = factory._adapter_registry.get(mapping.provider)
-            config = factory.config_for(mapping.provider, spoke)  # region override
-            if adapter is None or config is None:
-                open_errors.append({"provider": mapping.provider, "message": "no adapter/config"})
-                continue
             # google_ai uses a distinct SSE shape not handled by execute_streaming.
             if mapping.provider == "google_ai":
                 open_errors.append({"provider": mapping.provider, "message": "streaming unsupported"})
                 continue
             try:
-                candidate = factory._http_client.execute_streaming(
-                    request, mapping, adapter, config,
-                    prompt_caching_enabled=prompt_caching_enabled,
-                )
+                if callable(getattr(type(factory), "execute_streaming", None)):
+                    candidate = factory.execute_streaming(
+                        request,
+                        mapping,
+                        prompt_caching_enabled=prompt_caching_enabled,
+                        spoke=spoke,
+                    )
+                else:
+                    adapter = factory._adapter_registry.get(mapping.provider)
+                    config = factory.config_for(
+                        mapping.provider, spoke
+                    )  # region override
+                    if adapter is None or config is None:
+                        open_errors.append(
+                            {
+                                "provider": mapping.provider,
+                                "message": "no adapter/config",
+                            }
+                        )
+                        continue
+                    candidate = factory._http_client.execute_streaming(
+                        request,
+                        mapping,
+                        adapter,
+                        config,
+                        prompt_caching_enabled=prompt_caching_enabled,
+                    )
                 # Prime the generator to surface a pre-stream provider error
                 # (non-2xx) here, so we can still fall back to the next provider.
                 first_chunk = await candidate.__anext__()
@@ -1852,8 +1870,11 @@ class GatewayAgent:
                 if isinstance(status_code, int):
                     diagnostic["status_code"] = status_code
                 open_errors.append(diagnostic)
-                self.router.health_tracker.mark_unhealthy(
-                    mapping.provider, getattr(self.router, "cooldown_seconds", 60))
+                if getattr(exc, "provider_unavailable", None) is not False:
+                    self.router.health_tracker.mark_unhealthy(
+                        mapping.provider,
+                        getattr(self.router, "cooldown_seconds", 60),
+                    )
                 continue
 
         if chosen is None:

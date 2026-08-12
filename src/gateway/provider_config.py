@@ -38,6 +38,10 @@ class ProviderConfig:
         repr=False,
         compare=False,
     )
+    route_id: str = ""
+    max_connections: int = 100
+    max_connections_per_host: int = 100
+    keepalive_timeout: float = 30.0
 
     def __post_init__(self) -> None:
         if self.auth_type not in SUPPORTED_AUTH_TYPES:
@@ -49,6 +53,10 @@ class ProviderConfig:
                     f"Must be one of: {', '.join(sorted(SUPPORTED_AUTH_TYPES))}"
                 ),
             )
+        if self.max_connections <= 0 or self.max_connections_per_host <= 0:
+            raise ValueError("provider connection limits must be greater than zero")
+        if self.keepalive_timeout <= 0:
+            raise ValueError("provider keepalive_timeout must be greater than zero")
 
 # ---------------------------------------------------------------------------
 # Authentication header generation

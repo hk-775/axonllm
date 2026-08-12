@@ -5,9 +5,9 @@ from __future__ import annotations
 import json
 import logging
 import os
-from pathlib import Path
 import threading
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import boto3
@@ -15,6 +15,7 @@ from botocore.config import Config
 import yaml
 
 from src.gateway.provider_config import ProviderConfig
+from src.gateway.provider_routes import ProviderRoute
 
 # Environment variable names for API keys per provider. Env vars take
 # precedence over any api_key in providers.yaml, so secrets stay out of config
@@ -284,7 +285,24 @@ def load_provider_configs(config_path: str = "config/providers.yaml") -> dict[st
     have valid credentials (either from the YAML file or env vars).
     Providers without credentials are silently skipped.
     """
+    routes = load_provider_routes(config_path)
     configs: dict[str, ProviderConfig] = {}
+    for route in routes:
+        configs.setdefault(route.provider, route.to_provider_config())
+    return configs
+
+
+def load_provider_routes(
+    config_path: str = "config/providers.yaml",
+) -> list[ProviderRoute]:
+    """Load concrete provider routes from YAML and environment variables.
+
+    A legacy provider document without ``routes`` becomes one
+    ``<provider>:default`` route. A provider with ``routes`` can declare multiple
+    independently weighted credentials/endpoints while inheriting provider-level
+    defaults.
+    """
+    routes: list[ProviderRoute] = []
     secret_values = _load_provider_secret()
 
     # Production images intentionally exclude providers.yaml because operators
@@ -304,90 +322,145 @@ def load_provider_configs(config_path: str = "config/providers.yaml") -> dict[st
         if not isinstance(provider_data, dict):
             continue
 
-        base_url = _configuration_value(
-            _BASE_URL_ENV_MAP.get(provider_name),
-            secret_values,
-            provider_data.get("base_url", ""),
-        )
-        auth_type = provider_data.get("auth_type", "api_key")
-
-        # Build credentials from YAML + env var override
-        credential_provider = None
-        if auth_type == "gcp_service_account":
-            credential_provider = _load_google_credential_provider(
-                secret_values
-            )
-            credentials = (
-                {"credential_source": "google-auth"}
-                if credential_provider is not None
-                else {}
-            )
-        else:
-            credentials = _build_credentials(
-                provider_name,
-                provider_data,
-                secret_values,
-            )
-        if not credentials:
-            continue  # Skip providers without credentials
-        if not isinstance(base_url, str) or not base_url.strip():
-            raise ValueError(
-                f"{provider_name} is credentialled but has no base_url"
-            )
-
-        extra_headers = provider_data.get("extra_headers", {})
-        extra_params = dict(provider_data.get("extra_params", {}))
-        for field_name, env_name in _EXTRA_PARAM_ENV_MAP.get(
-            provider_name,
-            {},
-        ).items():
-            configured = _configuration_value(
-                env_name,
-                secret_values,
-                extra_params.get(field_name, ""),
-            )
-            if configured:
-                extra_params[field_name] = configured
-        if provider_name == "vertex_ai":
-            missing = [
-                field
-                for field in ("project", "location")
-                if not extra_params.get(field)
+        declared_routes = provider_data.get("routes")
+        if isinstance(declared_routes, list):
+            candidates = [
+                _merged_route_document(provider_data, route_data)
+                for route_data in declared_routes
+                if isinstance(route_data, dict)
             ]
-            if missing:
-                raise ValueError(
-                    "vertex_ai is credentialled but is missing "
-                    + ", ".join(missing)
+        else:
+            candidates = [dict(provider_data)]
+
+        google_credential_provider: GoogleCredentialProvider | None = None
+        google_credentials_loaded = False
+        for index, route_data in enumerate(candidates):
+            auth_type = route_data.get("auth_type", "api_key")
+            credential_provider = None
+            if auth_type == "gcp_service_account":
+                if not google_credentials_loaded:
+                    google_credential_provider = (
+                        _load_google_credential_provider(secret_values)
+                    )
+                    google_credentials_loaded = True
+                credential_provider = google_credential_provider
+                credentials = (
+                    {"credential_source": "google-auth"}
+                    if credential_provider is not None
+                    else {}
                 )
-            credential_project = getattr(
-                credential_provider,
-                "project_id",
-                None,
+            else:
+                credentials = _build_credentials(
+                    provider_name,
+                    route_data,
+                    secret_values,
+                )
+            if not credentials:
+                continue
+
+            endpoint_fallback = (
+                route_data.get("endpoint")
+                or route_data.get("base_url", "")
             )
-            if (
-                credential_project
-                and credential_project != extra_params["project"]
-            ):
-                raise ValueError(
-                    "vertex_ai project does not match the Google credential "
-                    "project"
+            endpoint_env = route_data.get("endpoint_env")
+            if endpoint_env:
+                base_url = _configuration_value(
+                    str(endpoint_env),
+                    secret_values,
+                    endpoint_fallback,
                 )
-        connect_timeout = float(provider_data.get("connect_timeout", 30.0))
-        read_timeout = float(provider_data.get("read_timeout", 120.0))
+            elif route_data.get("endpoint"):
+                base_url = endpoint_fallback
+            else:
+                base_url = _configuration_value(
+                    _BASE_URL_ENV_MAP.get(provider_name),
+                    secret_values,
+                    endpoint_fallback,
+                )
+            if not isinstance(base_url, str) or not base_url.strip():
+                raise ValueError(
+                    f"{provider_name} is credentialled but has no base_url"
+                )
 
-        configs[provider_name] = ProviderConfig(
-            provider_name=provider_name,
-            base_url=base_url,
-            auth_type=auth_type,
-            credentials=credentials,
-            connect_timeout=connect_timeout,
-            read_timeout=read_timeout,
-            extra_headers=extra_headers,
-            extra_params=extra_params,
-            credential_provider=credential_provider,
-        )
+            extra_params = dict(route_data.get("extra_params", {}))
+            for field_name, env_name in _EXTRA_PARAM_ENV_MAP.get(
+                provider_name,
+                {},
+            ).items():
+                configured = _configuration_value(
+                    env_name,
+                    secret_values,
+                    extra_params.get(field_name, ""),
+                )
+                if configured:
+                    extra_params[field_name] = configured
+            if provider_name == "vertex_ai":
+                missing = [
+                    field
+                    for field in ("project", "location")
+                    if not extra_params.get(field)
+                ]
+                if missing:
+                    raise ValueError(
+                        "vertex_ai is credentialled but is missing "
+                        + ", ".join(missing)
+                    )
+                credential_project = getattr(
+                    credential_provider,
+                    "project_id",
+                    None,
+                )
+                if (
+                    credential_project
+                    and credential_project != extra_params["project"]
+                ):
+                    raise ValueError(
+                        "vertex_ai project does not match the Google credential "
+                        "project"
+                    )
 
-    return configs
+            route_id = str(
+                route_data.get("route_id")
+                or route_data.get("id")
+                or (
+                    f"{provider_name}:default"
+                    if len(candidates) == 1
+                    else f"{provider_name}:route-{index + 1}"
+                )
+            )
+            routes.append(
+                ProviderRoute.from_dict(
+                    {
+                        **route_data,
+                        "route_id": route_id,
+                        "provider": provider_name,
+                        "endpoint": base_url,
+                        "credentials": credentials,
+                        "extra_params": extra_params,
+                        "credential_provider": credential_provider,
+                    }
+                )
+            )
+
+    return routes
+
+
+def _merged_route_document(
+    provider_data: dict[str, Any],
+    route_data: dict[str, Any],
+) -> dict[str, Any]:
+    """Merge provider defaults with one route, excluding the routes collection."""
+    base = {key: value for key, value in provider_data.items() if key != "routes"}
+    merged = {**base, **route_data}
+    merged["extra_headers"] = {
+        **(base.get("extra_headers") or {}),
+        **(route_data.get("extra_headers") or {}),
+    }
+    merged["extra_params"] = {
+        **(base.get("extra_params") or {}),
+        **(route_data.get("extra_params") or {}),
+    }
+    return merged
 
 
 def _load_provider_secret() -> dict[str, str]:
@@ -448,7 +521,9 @@ def _build_credentials(
     auth_type = provider_data.get("auth_type", "api_key")
 
     if auth_type == "api_key":
-        env_var = _ENV_KEY_MAP.get(provider_name, "")
+        env_var = provider_data.get("api_key_env") or _ENV_KEY_MAP.get(
+            provider_name, ""
+        )
         api_key = (
             os.environ.get(env_var, "")
             or secret_values.get(env_var, "")
@@ -459,7 +534,9 @@ def _build_credentials(
         return {}
 
     if auth_type == "azure_key":
-        env_var = _ENV_KEY_MAP.get(provider_name, "")
+        env_var = provider_data.get("api_key_env") or _ENV_KEY_MAP.get(
+            provider_name, ""
+        )
         api_key = (
             os.environ.get(env_var, "")
             or secret_values.get(env_var, "")
@@ -471,9 +548,22 @@ def _build_credentials(
 
     if auth_type == "aws_credentials":
         return {
-            "access_key": os.environ.get("AWS_ACCESS_KEY_ID", provider_data.get("access_key", "")),
-            "secret_key": os.environ.get("AWS_SECRET_ACCESS_KEY", provider_data.get("secret_key", "")),
-            "region": os.environ.get("AWS_DEFAULT_REGION", provider_data.get("region", "us-east-1")),
+            "access_key": os.environ.get(
+                provider_data.get("access_key_env", "AWS_ACCESS_KEY_ID"),
+                provider_data.get("access_key", ""),
+            ),
+            "secret_key": os.environ.get(
+                provider_data.get("secret_key_env", "AWS_SECRET_ACCESS_KEY"),
+                provider_data.get("secret_key", ""),
+            ),
+            "session_token": os.environ.get(
+                provider_data.get("session_token_env", "AWS_SESSION_TOKEN"),
+                provider_data.get("session_token", ""),
+            ),
+            "region": os.environ.get(
+                provider_data.get("region_env", "AWS_DEFAULT_REGION"),
+                provider_data.get("region", "us-east-1"),
+            ),
         }
 
     if auth_type == "gcp_service_account":
