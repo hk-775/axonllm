@@ -136,6 +136,25 @@ def test_ci_validates_every_tracked_shell_script() -> None:
         assert (ROOT / path).is_file()
 
 
+@pytest.mark.parametrize(
+    "installer",
+    (
+        "scripts/ci/install_registry_tools.sh",
+        "scripts/ci/install_security_tools.sh",
+    ),
+)
+def test_ci_tool_downloads_tolerate_transient_release_outages(
+    installer: str,
+) -> None:
+    script = (ROOT / installer).read_text(encoding="utf-8")
+
+    assert "--connect-timeout 15" in script
+    assert "--max-time 180" in script
+    assert "--retry 8 --retry-all-errors --retry-max-time 120" in script
+    assert "sha256sum --check" in script
+    assert "shasum -a 256 --check" in script
+
+
 def test_ci_checks_worktree_and_event_patch_whitespace() -> None:
     step = _workflow_step("supply-chain", "Check patch whitespace")
     command = step["run"]

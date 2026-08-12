@@ -62,7 +62,9 @@ download_and_verify() {
   local sha256=$3
 
   curl --fail --silent --show-error --location \
-    --retry 3 --retry-all-errors \
+    --connect-timeout 15 \
+    --max-time 180 \
+    --retry 8 --retry-all-errors --retry-max-time 120 \
     --output "${work_dir}/${archive}" \
     "${url}/${archive}"
   if command -v sha256sum >/dev/null 2>&1; then
