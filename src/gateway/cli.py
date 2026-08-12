@@ -4,9 +4,6 @@ import argparse
 import json
 import os
 import sys
-from pathlib import Path
-
-ROOT = Path(__file__).resolve().parent.parent.parent
 
 
 def _failure_hint(exc: Exception, port: int) -> str:
@@ -29,19 +26,19 @@ def _failure_hint(exc: Exception, port: int) -> str:
 
 def cmd_demo(args):
     """Start the server and generate real traffic for a live demo."""
-    script = ROOT / "scripts" / "demo.sh"
-    os.execvp("bash", ["bash", str(script)])
+    os.execv(
+        sys.executable,
+        [sys.executable, "-m", "src.gateway.local_demo"],
+    )
 
 
 def cmd_serve(args):
     """Start the AxonLLM gateway server."""
     os.environ["AXON_LOAD_DEMO_DATA"] = "true" if args.demo_data else ""
-    os.chdir(ROOT)
-    import shutil
-    if shutil.which("uv"):
-        os.execvp("uv", ["uv", "run", "python", "serve_dashboard.py"])
-    else:
-        os.execvp(sys.executable, [sys.executable, "serve_dashboard.py"])
+    os.execv(
+        sys.executable,
+        [sys.executable, "-m", "src.gateway.local_server"],
+    )
 
 
 def cmd_issue_key(args):
@@ -58,7 +55,6 @@ def cmd_issue_key(args):
     """
     import asyncio
 
-    os.chdir(ROOT)
     from src.gateway.auth.api_key_service import APIKeyService
     from src.gateway.persistence import DynamoPersistence
 
@@ -140,7 +136,6 @@ def cmd_bootstrap_tenant(args):
     """Provision the first canonical tenant administrator and project."""
     import asyncio
 
-    os.chdir(ROOT)
     from src.gateway.auth.tenant_bootstrap import bootstrap_tenant
     from src.gateway.persistence import DynamoPersistence
 
