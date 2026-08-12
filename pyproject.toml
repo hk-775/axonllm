@@ -59,8 +59,12 @@ dev = [
     "opentelemetry-exporter-otlp-proto-http>=1.20",
     # so CI exercises OIDC JWT signature verification
     "python-jose[cryptography]>=3.3",
+    # Production control-plane launch canaries acquire real ALB/Cognito sessions.
+    "playwright>=1.55.0,<2",
     # CI tooling is resolved through uv.lock rather than downloaded by uvx.
     "ruff==0.16.2",
+    # Clean-wheel tests use the same backend pin as isolated release builds.
+    "setuptools==83.0.0",
 ]
 security = [
     "pip-audit==2.10.1",

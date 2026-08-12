@@ -83,19 +83,21 @@ class TestProjectRoundTrip:
         assert project.alert_threshold == 0.8
         assert project.allowed_models == ["claude-sonnet"]
 
-    def test_the_semantic_cache_flags_survive(self):
+    def test_the_cache_flags_survive(self):
         from src.gateway.models import Project
 
         project = Project(
             project_id="p1", name="P1",
             cache_enabled=True, cache_ttl_seconds=900,
             semantic_cache_enabled=True, semantic_cache_threshold=0.97,
+            prompt_caching_enabled=True,
         )
         back = self._round_trip(project)
         assert back.cache_enabled is True
         assert back.cache_ttl_seconds == 900
         assert back.semantic_cache_enabled is True
         assert back.semantic_cache_threshold == 0.97
+        assert back.prompt_caching_enabled is True
 
     def test_an_unset_threshold_stays_none_rather_than_becoming_zero(self):
         """0.0 would mean "match everything" — the one value that must not appear

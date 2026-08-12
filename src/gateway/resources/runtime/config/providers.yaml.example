@@ -10,14 +10,14 @@ providers:
   anthropic:
     base_url: https://api.anthropic.com
     auth_type: api_key
-    # api_key: replace-with-anthropic-key
+    # api_key: replace-with-anthropic-api-key
 
   # OpenAI
   # Set OPENAI_API_KEY env var or add api_key below
   openai:
     base_url: https://api.openai.com
     auth_type: api_key
-    # api_key: replace-with-openai-key
+    # api_key: sk-your-key-here
     # Multiple independently balanced routes may replace the single key:
     # routes:
     #   - route_id: openai:primary

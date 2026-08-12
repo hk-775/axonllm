@@ -7,7 +7,7 @@
 # Development reports those gaps; production routing excludes the affected
 # mappings until this table contains a finite, non-zero usable rate.
 #
-# Sources, all fetched 2026-07-30:
+# Sources, fetched 2026-07-30 unless noted:
 #   openai          developers.openai.com/api/docs/pricing
 #   anthropic       platform.claude.com/docs/en/about-claude/pricing
 #   google_ai       ai.google.dev/gemini-api/docs/pricing
@@ -17,6 +17,11 @@
 #                   aggregate /pricing page — that one covers embeddings only)
 #   bedrock         AWS Price List API, us-east-1, on-demand standard tier
 #   bedrock-mantle  same, Mantle SKUs (see the note on that section)
+#   azure_openai    prices.azure.com/api/retail/prices, East US (2026-08-11)
+#   vertex_ai       cloud.google.com/vertex-ai/generative-ai/pricing
+#                   (2026-08-11)
+#   cohere          cohere.com/pricing and docs.cohere.com/docs/models
+#                   (2026-08-11)
 #
 # Rates are the standard on-demand, non-batch, non-cached, short-context tier.
 # Where a provider charges more above a context threshold, the sub-threshold
@@ -54,6 +59,18 @@ providers:
     gpt-5.5-pro:
       prompt_token_cost: 0.03
       completion_token_cost: 0.18
+
+  # Azure's provider-side id is a deployment name, not a model SKU. This rate
+  # is valid only for an East US deployment named gpt-4o that targets Global
+  # Standard GPT-4o 2024-08-06. Microsoft's Retail Prices API reports
+  # gpt-4o-0806-Inp-glbl / Outp-glbl at $2.50 / $10.00 per MTok and cached
+  # input at $1.25 per MTok. Regional, Data Zone, provisioned, other-version,
+  # and custom-named deployments must use tenant-specific mappings and rates.
+  azure_openai:
+    gpt-4o:
+      prompt_token_cost: 0.0025
+      completion_token_cost: 0.01
+      cached_token_cost: 0.00125
 
   anthropic:
     claude-3:
@@ -219,9 +236,14 @@ providers:
     gemini-2.5-pro:
       prompt_token_cost: 0.00125
       completion_token_cost: 0.01
+      cached_token_cost: 0.000125
+    # Standard on-demand text/image/video input and text output. Audio input
+    # has a separate $1/MTok rate that the current token accounting cannot
+    # distinguish, so this launch mapping is for non-audio requests.
     gemini-2.5-flash:
-      prompt_token_cost: 0.00015
-      completion_token_cost: 0.0006
+      prompt_token_cost: 0.0003
+      completion_token_cost: 0.0025
+      cached_token_cost: 0.00003
     gemini-2.0-flash:
       prompt_token_cost: 0.0001
       completion_token_cost: 0.0004
@@ -247,6 +269,17 @@ providers:
     llama-3.3-70b-versatile:
       prompt_token_cost: 0.00059
       completion_token_cost: 0.00079
+
+  # Cohere's pricing page lists Command R at $0.15/$0.60 per MTok and Command
+  # R+ 08-2024 at $2.50/$10.00. The model documentation marks these versioned
+  # ids live and the old unversioned aliases deprecated.
+  cohere:
+    command-r-08-2024:
+      prompt_token_cost: 0.00015
+      completion_token_cost: 0.0006
+    command-r-plus-08-2024:
+      prompt_token_cost: 0.0025
+      completion_token_cost: 0.01
 
   ai21:
     # AI21 publishes one rate per Jamba tier rather than per point release, so

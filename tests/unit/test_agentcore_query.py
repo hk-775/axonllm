@@ -265,6 +265,7 @@ def test_runtime_builder_reuses_bootstrap_query_service(
         user_configs={},
         cost_tracker=SimpleNamespace(),
         persistence=SimpleNamespace(),
+        audit_trail=SimpleNamespace(durable_enabled=True),
         policy_resolver=SimpleNamespace(),
         region_router=SimpleNamespace(config=SimpleNamespace()),
         health_monitor=SimpleNamespace(stop=_stop),
@@ -384,6 +385,9 @@ async def test_query_dispatch_uses_canonical_identity_and_policy_target() -> Non
         "sql": "SELECT order_id FROM orders",
         "max_rows": 50,
         "request_id": "request-123",
+        "rehearsal": None,
+        "rehearsal_binding": None,
+        "rehearsal_ledger": None,
     }
     assert gateway.chat_calls == []
     assert gateway.list_calls == []

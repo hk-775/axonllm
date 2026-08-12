@@ -653,6 +653,8 @@ async def test_success_authorizes_audits_and_forwards_canonical_query() -> None:
     query, datasource, execution_context = executor.calls[0]
     assert query.sql == "SELECT order_id, total FROM orders"
     assert datasource.datasource_id == "warehouse"
+    on_started = execution_context.pop("on_started")
+    assert callable(on_started)
     assert execution_context == {
         "tenant_id": "tenant-a",
         "project_id": "project-a",

@@ -10,7 +10,7 @@ providers:
   anthropic:
     base_url: https://api.anthropic.com
     auth_type: api_key
-    # api_key: sk-ant-your-key-here
+    # api_key: replace-with-anthropic-api-key
 
   # OpenAI
   # Set OPENAI_API_KEY env var or add api_key below

@@ -11,6 +11,7 @@ from src.gateway.models import (
     StreamChunk,
     TokenUsage,
 )
+from src.gateway.router import ProviderError
 
 
 @pytest.fixture
@@ -121,15 +122,15 @@ class TestTranslateRequest:
         assert result["max_tokens"] == 100
 
     @pytest.mark.asyncio
-    async def test_stream_param_produces_warning(self, adapter):
+    async def test_stream_param_enables_native_streaming(self, adapter):
         req = ChatCompletionRequest(
             messages=[{"role": "user", "content": "Hi"}],
             model="command-r-plus",
             stream=True,
         )
         result = await adapter.translate_request(req)
-        assert "_warnings" in result
-        assert any("stream" in w.lower() for w in result["_warnings"])
+        assert result["stream"] is True
+        assert "_warnings" not in result
 
     @pytest.mark.asyncio
     async def test_no_preamble_when_no_system(self, adapter):
@@ -164,7 +165,7 @@ class TestTranslateResponse:
         assert isinstance(resp, ChatCompletionResponse)
         assert resp.id == "cohere_123"
         assert resp.choices[0]["message"]["content"] == "Hello there!"
-        assert resp.choices[0]["finish_reason"] == "COMPLETE"
+        assert resp.choices[0]["finish_reason"] == "stop"
         assert resp.usage == TokenUsage(prompt_tokens=12, completion_tokens=5, total_tokens=17)
         assert resp.provider == "cohere"
 
@@ -172,6 +173,30 @@ class TestTranslateResponse:
         raw = {"id": "x", "text": "Hi", "model": "command-r"}
         resp = adapter.translate_response(raw)
         assert resp.usage == TokenUsage(prompt_tokens=0, completion_tokens=0, total_tokens=0)
+
+    def test_provider_billed_units_drive_accounting(self, adapter):
+        raw = {
+            "id": "cohere_123",
+            "text": "Hello",
+            "meta": {
+                "tokens": {
+                    "input_tokens": 120,
+                    "output_tokens": 50,
+                },
+                "billed_units": {
+                    "input_tokens": 12,
+                    "output_tokens": 5,
+                },
+            },
+        }
+
+        resp = adapter.translate_response(raw)
+
+        assert resp.usage == TokenUsage(
+            prompt_tokens=12,
+            completion_tokens=5,
+            total_tokens=17,
+        )
 
     def test_empty_response(self, adapter):
         resp = adapter.translate_response({})
@@ -197,6 +222,78 @@ class TestTranslateStreamChunk:
         chunk = adapter.translate_stream_chunk(raw)
         assert chunk.is_final is True
         assert chunk.choices[0]["finish_reason"] == "stop"
+
+    @pytest.mark.parametrize(
+        ("raw_reason", "expected"),
+        [
+            ("COMPLETE", "stop"),
+            ("MAX_TOKENS", "length"),
+            ("MAX_TOKENS_REACHED", "length"),
+            ("ERROR_TOXIC", "content_filter"),
+        ],
+    )
+    def test_stream_end_preserves_terminal_reason(
+        self,
+        adapter,
+        raw_reason,
+        expected,
+    ):
+        chunk = adapter.translate_stream_chunk({
+            "event_type": "stream-end",
+            "response": {"finish_reason": raw_reason},
+        })
+
+        assert chunk.choices[0]["finish_reason"] == expected
+
+    def test_stream_end_provider_error_is_not_a_normal_completion(
+        self,
+        adapter,
+    ):
+        with pytest.raises(ProviderError, match="generation failed"):
+            adapter.translate_stream_chunk({
+                "event_type": "stream-end",
+                "response": {"finish_reason": "ERROR"},
+            })
+
+    def test_stream_end_carries_tool_call_usage_and_request_id(self, adapter):
+        raw = {
+            "event_type": "stream-end",
+            "response": {
+                "response_id": "cohere-response-1",
+                "generation_id": "cohere-generation-1",
+                "model": "command-r-plus",
+                "finish_reason": "COMPLETE",
+                "tool_calls": [{
+                    "name": "lookup",
+                    "parameters": {"city": "Paris"},
+                }],
+                "meta": {
+                    "tokens": {
+                        "input_tokens": 110,
+                        "output_tokens": 70,
+                    },
+                    "billed_units": {
+                        "input_tokens": 11,
+                        "output_tokens": 7,
+                    },
+                },
+            },
+        }
+
+        chunk = adapter.translate_stream_chunk(raw)
+
+        call = chunk.choices[0]["delta"]["tool_calls"][0]
+        assert chunk.id == "cohere-response-1"
+        assert chunk.model == "command-r-plus"
+        assert chunk.choices[0]["finish_reason"] == "tool_calls"
+        assert call["index"] == 0
+        assert call["function"]["name"] == "lookup"
+        assert call["function"]["arguments"] == '{"city": "Paris"}'
+        assert chunk.usage == TokenUsage(
+            prompt_tokens=11,
+            completion_tokens=7,
+            total_tokens=18,
+        )
 
     def test_unknown_event_type(self, adapter):
         raw = {"event_type": "search-results"}

@@ -9,6 +9,7 @@ import logging
 import time
 import uuid
 import warnings
+from collections.abc import Iterator
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, AsyncIterator
 
@@ -39,6 +40,7 @@ from src.gateway.router import (
     EnsembleNoSurvivorsError,
     EnsembleQuorumError,
     EnsembleSynthesisError,
+    ProviderError,
     Router,
 )
 from src.gateway.session_manager import SessionManager
@@ -63,6 +65,7 @@ logger = logging.getLogger("gateway.agent")
 # Complete-output inspection must be bounded. The normal request validator caps
 # requested output tokens, but providers can ignore that cap or omit usage.
 _MAX_POLICY_BUFFER_BYTES = 8 * 1024 * 1024
+_MAX_STREAM_OUTPUT_BYTES = 8 * 1024 * 1024
 _PROVIDER_FAILURE_MESSAGE = "The provider request failed."
 
 
@@ -521,7 +524,7 @@ class GatewayAgent:
 
         # 8. Request guardrails
         if project and project.guardrail_rules:
-            guard_result = self.guardrail_engine.evaluate_request(
+            guard_result = await self.guardrail_engine.evaluate_request(
                 request, project.guardrail_rules
             )
             if not guard_result.passed:
@@ -650,6 +653,12 @@ class GatewayAgent:
                 )
             else:
                 provider_fn = self._make_provider_fn()
+            provider_fn = self._rehearsal_provider_fn(
+                provider_fn,
+                context=context,
+                request=request,
+                request_id=request_id,
+            )
 
             # Compute effective allowed models from project + user access lists
             effective_allowed = self._compute_effective_allowed_models(
@@ -1435,7 +1444,7 @@ class GatewayAgent:
         raised so streaming callers can withhold the entire buffered response.
         """
         if project and project.guardrail_rules:
-            result = self.guardrail_engine.evaluate_response(
+            result = await self.guardrail_engine.evaluate_response(
                 self._guardrail_inspection_response(response),
                 project.guardrail_rules,
             )
@@ -1651,6 +1660,74 @@ class GatewayAgent:
             ).encode("utf-8")
         )
 
+    @classmethod
+    def _bounded_simulated_streaming(
+        cls,
+        response: ChatCompletionResponse,
+    ) -> Iterator[StreamChunk]:
+        response_bytes = len(
+            json.dumps(
+                response.choices,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                default=str,
+            ).encode("utf-8")
+        )
+        if response_bytes > _MAX_STREAM_OUTPUT_BYTES:
+            raise RuntimeError("buffered stream output limit exceeded")
+        emitted_bytes = 0
+        for chunk in simulate_streaming(response):
+            emitted_bytes += cls._stream_chunk_size(chunk)
+            if emitted_bytes > _MAX_STREAM_OUTPUT_BYTES:
+                raise RuntimeError("buffered stream output limit exceeded")
+            yield chunk
+
+    @staticmethod
+    def _stream_chunk_accounting_text(chunk: StreamChunk) -> str:
+        """Return visible text plus tool-call tokens for usage estimation."""
+        parts: list[str] = []
+        for choice in chunk.choices:
+            delta = choice.get("delta")
+            if not isinstance(delta, dict):
+                continue
+            content = delta.get("content")
+            if isinstance(content, str) and content:
+                parts.append(content)
+            raw_calls = delta.get("tool_calls")
+            if not isinstance(raw_calls, list):
+                continue
+            for raw_call in raw_calls:
+                if not isinstance(raw_call, dict):
+                    continue
+                function = raw_call.get("function")
+                if not isinstance(function, dict):
+                    continue
+                name = function.get("name")
+                arguments = function.get("arguments")
+                if isinstance(name, str) and name:
+                    parts.append(name)
+                if isinstance(arguments, str) and arguments:
+                    parts.append(arguments)
+        return "".join(parts)
+
+    @staticmethod
+    def _stream_prompt_accounting_text(
+        request: ChatCompletionRequest,
+    ) -> str:
+        payload: dict[str, Any] = {"messages": request.messages or []}
+        if request.system is not None:
+            payload["system"] = request.system
+        if request.tools is not None:
+            payload["tools"] = request.tools
+        if request.tool_choice is not None:
+            payload["tool_choice"] = request.tool_choice
+        return json.dumps(
+            payload,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            default=str,
+        )
+
     @staticmethod
     def _merge_tool_call_delta(
         calls: dict[int, dict], raw_call: dict, position: int
@@ -1821,10 +1898,6 @@ class GatewayAgent:
             if not self.router.health_tracker.is_healthy(mapping.provider):
                 open_errors.append({"provider": mapping.provider, "message": "skipped (unhealthy)"})
                 continue
-            # google_ai uses a distinct SSE shape not handled by execute_streaming.
-            if mapping.provider == "google_ai":
-                open_errors.append({"provider": mapping.provider, "message": "streaming unsupported"})
-                continue
             try:
                 if callable(getattr(type(factory), "execute_streaming", None)):
                     candidate = factory.execute_streaming(
@@ -1965,8 +2038,13 @@ class GatewayAgent:
             try:
                 if rate_limit_headers:
                     yield {"_rate_limit_headers": rate_limit_headers}
-                for chunk in simulate_streaming(response):
-                    yield {"data": self._chunk_to_dict(chunk)}
+                for chunk in self._bounded_simulated_streaming(response):
+                    yield {
+                        "data": self._chunk_to_dict(
+                            chunk,
+                            provider=response.provider,
+                        )
+                    }
             except asyncio.CancelledError:
                 stream_status = "cancelled"
                 raise
@@ -2023,6 +2101,7 @@ class GatewayAgent:
         pii_buffer: dict = {"pending": ""}
         buffered_chunks: list[StreamChunk] = []
         buffered_bytes = 0
+        stream_output_bytes = 0
         accumulated: list[str] = []
         final_usage: TokenUsage | None = None
         stream_status = "success"
@@ -2031,16 +2110,21 @@ class GatewayAgent:
         failure_type = "provider"
         client_error_emitted = False
         finalization_ok = True
+        provider_request_id = ""
 
         def _consume(chunk: StreamChunk) -> dict | None:
-            nonlocal final_usage, buffered_bytes
+            nonlocal final_usage, buffered_bytes, provider_request_id
+            nonlocal stream_output_bytes
+            stream_output_bytes += self._stream_chunk_size(chunk)
+            if stream_output_bytes > _MAX_STREAM_OUTPUT_BYTES:
+                raise RuntimeError("provider stream output limit exceeded")
+            if chunk.id and (not provider_request_id or chunk.is_final):
+                provider_request_id = chunk.id
             if chunk.usage is not None:
                 final_usage = self._merge_stream_usage(final_usage, chunk.usage)
-            for ch in chunk.choices:
-                delta = ch.get("delta", {})
-                c = delta.get("content", "")
-                if isinstance(c, str) and c:
-                    accumulated.append(c)
+            accounting_text = self._stream_chunk_accounting_text(chunk)
+            if accounting_text:
+                accumulated.append(accounting_text)
 
             if buffer_for_policy:
                 buffered_bytes += self._stream_chunk_size(chunk)
@@ -2053,7 +2137,10 @@ class GatewayAgent:
             # choices — capture its usage above but don't emit an empty SSE chunk.
             if not chunk.choices:
                 return None
-            chunk_dict = self._chunk_to_dict(chunk)
+            chunk_dict = self._chunk_to_dict(
+                chunk,
+                provider=chosen.provider,
+            )
             chunk_dict["model"] = request.model
             if pii_mapping and pii_mapping.redacted_count > 0:
                 chunk_dict = self._reinject_chunk_pii(chunk_dict, pii_mapping, pii_buffer)
@@ -2103,8 +2190,15 @@ class GatewayAgent:
                     count=output_pii_count,
                     redacted_types=output_pii_types,
                 )
-                for approved_chunk in simulate_streaming(buffered_response):
-                    yield {"data": self._chunk_to_dict(approved_chunk)}
+                for approved_chunk in self._bounded_simulated_streaming(
+                    buffered_response
+                ):
+                    yield {
+                        "data": self._chunk_to_dict(
+                            approved_chunk,
+                            provider=chosen.provider,
+                        )
+                    }
         except asyncio.CancelledError:
             stream_status = "cancelled"
             raise
@@ -2150,6 +2244,7 @@ class GatewayAgent:
                 model=request.model, response_model=response_model,
                 text="".join(accumulated), usage=final_usage, status=stream_status,
                 task_type=task_type,
+                provider_request_id=provider_request_id,
                 output_pii_count=output_pii_count,
                 budget_reservation=budget_reservation,
             )
@@ -2198,10 +2293,7 @@ class GatewayAgent:
         """
         approximate = usage is None
         if usage is None:
-            prompt_text = " ".join(
-                m.get("content", "") for m in (request.messages or [])
-                if isinstance(m, dict) and isinstance(m.get("content"), str)
-            )
+            prompt_text = self._stream_prompt_accounting_text(request)
             try:
                 prompt_tokens = await self.cost_tracker.estimate_tokens(
                     prompt_text,
@@ -2336,9 +2428,12 @@ class GatewayAgent:
             yield {"_rate_limit_headers": rate_limit_headers}
         try:
             pii_buffer: dict = {"pending": ""}
-            chunks = simulate_streaming(response)
+            chunks = self._bounded_simulated_streaming(response)
             for chunk in chunks:
-                chunk_dict = self._chunk_to_dict(chunk)
+                chunk_dict = self._chunk_to_dict(
+                    chunk,
+                    provider=response.provider,
+                )
                 if pii_mapping and pii_mapping.redacted_count > 0:
                     chunk_dict = self._reinject_chunk_pii(chunk_dict, pii_mapping, pii_buffer)
                 yield {"data": chunk_dict}
@@ -2541,9 +2636,14 @@ class GatewayAgent:
         # final response incrementally via simulated streaming. Panel/survivor
         # responses are never streamed (Req 10.2, 10.3).
         try:
-            chunks = simulate_streaming(response)
+            chunks = self._bounded_simulated_streaming(response)
             for chunk in chunks:
-                yield {"data": self._chunk_to_dict(chunk)}
+                yield {
+                    "data": self._chunk_to_dict(
+                        chunk,
+                        provider=response.provider,
+                    )
+                }
         except (asyncio.CancelledError, GeneratorExit):
             raise
         except Exception:
@@ -3168,6 +3268,126 @@ class GatewayAgent:
             raise NotImplementedError("provider_fn must be supplied by caller")
         return _noop
 
+    def _rehearsal_provider_fn(
+        self,
+        provider_fn,
+        *,
+        context: dict[str, Any],
+        request: ChatCompletionRequest,
+        request_id: str,
+    ):
+        rehearsal = context.get("rehearsal")
+        binding = context.get("rehearsal_binding")
+        ledger = context.get("rehearsal_ledger")
+        operation = getattr(rehearsal, "operation", None)
+        if (
+            binding is None
+            or ledger is None
+            or operation
+            not in {
+                "exercise-routing-strategies",
+                "verify-routing-decisions",
+                "inject-primary-provider-fault",
+                "verify-provider-fallback",
+                "verify-primary-provider-recovery",
+            }
+        ):
+            return provider_fn
+
+        attempts: dict[str, int] = {}
+
+        async def observed(mapping: ProviderModelMapping):
+            attempt = attempts.get(mapping.provider, 0) + 1
+            attempts[mapping.provider] = attempt
+            fault = await asyncio.to_thread(
+                ledger.read_active_fault,
+                binding,
+                "provider-unavailable",
+            )
+            if (
+                fault is not None
+                and fault.parameters.get("provider") == mapping.provider
+            ):
+                status_code = fault.parameters.get("status_code")
+                if isinstance(status_code, int) and not isinstance(
+                    status_code,
+                    bool,
+                ):
+                    await asyncio.to_thread(
+                        ledger.append_observation,
+                        binding,
+                        "provider-attempt",
+                        {
+                            "attempt": attempt,
+                            "outcome": "retryable-failure",
+                            "provider": mapping.provider,
+                            "request_id": request_id,
+                            "status_code": status_code,
+                        },
+                    )
+                    raise ProviderError(
+                        status_code,
+                        mapping.provider,
+                        "Provider is temporarily unavailable.",
+                        retryable=False,
+                        provider_unavailable=False,
+                    )
+            try:
+                response = await provider_fn(mapping)
+            except ProviderError as exc:
+                await asyncio.to_thread(
+                    ledger.append_observation,
+                    binding,
+                    "provider-attempt",
+                    {
+                        "attempt": attempt,
+                        "outcome": (
+                            "retryable-failure"
+                            if exc.retryable is not False
+                            else "non-retryable-failure"
+                        ),
+                        "provider": mapping.provider,
+                        "request_id": request_id,
+                        "status_code": exc.status_code,
+                    },
+                )
+                raise
+            await asyncio.to_thread(
+                ledger.append_observation,
+                binding,
+                "provider-attempt",
+                {
+                    "attempt": attempt,
+                    "outcome": "success",
+                    "provider": mapping.provider,
+                    "request_id": request_id,
+                    "status_code": 200,
+                },
+            )
+            strategy = getattr(rehearsal, "routing_strategy", None)
+            if strategy is not None:
+                try:
+                    candidate_count = len(
+                        self.router.available_mappings(request.model)
+                    )
+                except Exception:
+                    candidate_count = 0
+                if candidate_count > 0:
+                    await asyncio.to_thread(
+                        ledger.append_observation,
+                        binding,
+                        "routing-decision",
+                        {
+                            "candidate_count": candidate_count,
+                            "provider": mapping.provider,
+                            "request_id": request_id,
+                            "strategy": strategy,
+                        },
+                    )
+            return response
+
+        return observed
+
     def _router_model_is_available(self, model: str) -> bool:
         """Use runtime availability when supported by the injected router.
 
@@ -3208,14 +3428,22 @@ class GatewayAgent:
             d["is_cached"] = True
         return d
 
-    def _chunk_to_dict(self, chunk: StreamChunk) -> dict:
+    def _chunk_to_dict(
+        self,
+        chunk: StreamChunk,
+        *,
+        provider: str | None = None,
+    ) -> dict:
         """Convert StreamChunk to a plain dict."""
-        return {
+        result = {
             "id": chunk.id,
             "choices": chunk.choices,
             "model": chunk.model,
             "is_final": chunk.is_final,
         }
+        if provider:
+            result["provider"] = provider
+        return result
 
     def _reinject_chunk_pii(
         self, chunk_dict: dict, mapping: RedactionMapping, buffer: dict

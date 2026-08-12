@@ -49,6 +49,29 @@ _TENANT_DATASOURCE_DOCUMENT_FIELDS = frozenset(
     }
 )
 _MODEL_REGISTRY_MAX_DOCUMENT_BYTES = 350 * 1024
+_DYNAMODB_MAX_ITEM_BYTES = 400 * 1024
+
+
+def _validate_project_item_size(item: dict) -> None:
+    """Reject project documents that cannot fit in one DynamoDB item."""
+    try:
+        encoded = json.dumps(
+            item,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise ValueError("project contains values that cannot be persisted") from exc
+    # JSON adds structural bytes and escapes stored strings, so this is a
+    # conservative upper bound for this flat scalar DynamoDB item.
+    if len(encoded) > _DYNAMODB_MAX_ITEM_BYTES:
+        raise ValueError("project exceeds the DynamoDB item size limit")
+
+
+def validate_project_storage_size(project: Project) -> None:
+    """Validate the complete serialized project before a storage write."""
+    DynamoPersistence.serialize_project(project)
 
 
 class CanonicalMembershipNotFoundError(RuntimeError):
@@ -367,6 +390,7 @@ class DynamoPersistence:
             "semantic_cache_threshold": project.semantic_cache_threshold,
             "log_level": project.log_level,
             "log_destination": project.log_destination,
+            "prompt_caching_enabled": project.prompt_caching_enabled,
             "ltm_enabled": project.ltm_enabled,
             "retention_period_hours": project.retention_period_hours,
             "rate_limit_rpm": project.rate_limit_rpm,
@@ -376,6 +400,7 @@ class DynamoPersistence:
         }
         if project.tenant_id is not None:
             item["tenant_id"] = project.tenant_id
+        _validate_project_item_size(item)
         return item
 
     @staticmethod
@@ -431,6 +456,9 @@ class DynamoPersistence:
             ),
             log_level=item.get("log_level", "INFO"),
             log_destination=item.get("log_destination"),
+            prompt_caching_enabled=bool(
+                item.get("prompt_caching_enabled", False)
+            ),
             ltm_enabled=bool(item.get("ltm_enabled", False)),
             retention_period_hours=int(item.get("retention_period_hours", 24)),
             rate_limit_rpm=int(item["rate_limit_rpm"]) if item.get("rate_limit_rpm") is not None else None,
@@ -1069,14 +1097,6 @@ class DynamoPersistence:
 
         def _put() -> None:
             table = self._get_table()
-            if project.tenant_id is not None:
-                table.put_item(
-                    Item=item,
-                    ConditionExpression=condition,
-                    ExpressionAttributeNames=names,
-                    ExpressionAttributeValues=values,
-                )
-                return
             client = getattr(getattr(table, "meta", None), "client", None)
             if client is None:
                 raise RuntimeError(
@@ -1125,12 +1145,6 @@ class DynamoPersistence:
 
         def _put() -> None:
             table = self._get_table()
-            if project.tenant_id is not None:
-                table.put_item(
-                    Item=item,
-                    ConditionExpression=condition,
-                )
-                return
             client = getattr(getattr(table, "meta", None), "client", None)
             if client is None:
                 raise RuntimeError(

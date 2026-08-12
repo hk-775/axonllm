@@ -19,7 +19,7 @@ See also:
 | Surface | Purpose | Query behavior |
 |---|---|---|
 | Normal Starlette process | Chat, OpenAI-compatible APIs, admin APIs, managed-SAML handoff, SCIM, and web interfaces | Registers `POST /v1/query` when Athena query configuration is enabled |
-| AgentCore runtime | Authenticated action API for all enabled providers, including Bedrock and Mantle | Exposes the `query` action when the shared `QueryService` is configured |
+| AgentCore runtime | Authenticated chat/model, viewer-readable and admin-writable project configuration, readiness, and health actions for all enabled providers | Exposes the `query` action when the shared `QueryService` is configured |
 | Shared-state control plane | Managed-Cognito HTTPS Fargate service for tenant administration | Exposes admin and datasource routes; `AXON_CONTROL_PLANE_ONLY=true` suppresses chat, model, and query execution routes |
 | Local seeded demo | Anonymous fictional-data evaluation | Development only; not a production or AgentCore deployment input |
 
@@ -36,7 +36,7 @@ executor through that task.
 | Identity | OIDC/JWKS, ALB OIDC, API keys, Cognito-managed SAML federation, SCIM 2.0, managed Cognito first-adopter identity |
 | Tenant RBAC | Canonical DynamoDB principals, project grants, service scopes, viewer/admin roles, audited platform break glass |
 | Query | Bounded Athena `SELECT`, HTTP and AgentCore entry points, deployment-bound IAM roles, datasource metadata administration |
-| Routing | Thirteen provider adapters, retry/fallback, round-robin, weighted, least-latency, cost-optimized, smart, and ensemble paths |
+| Routing | Thirteen provider adapters; AgentCore defaults to twelve, with direct `ai21` opt-in and AI21 Jamba 1.5 available through Bedrock; retry/fallback, round-robin, weighted, least-latency, cost-optimized, smart, and ensemble paths |
 | Chat | Native and OpenAI-compatible APIs, streaming, tool translation, model/project access checks |
 | Governance | Policy hierarchy, Cedar restrictions, project/user budgets, quotas, shared rate and budget admission |
 | Safety | PII redaction and re-injection, optional Comprehend entities, prompt-injection detection, request/response guardrails |
@@ -44,7 +44,7 @@ executor through that task.
 | Administration | Projects, users, keys, policies, quotas, regions, webhooks, audit, usage, datasource metadata, readiness and drift views |
 | Durability | Tenant-qualified DynamoDB state, compare-and-swap updates, audit hash chains, API-key epochs, SCIM convergence |
 | Events | FIFO outbox, bounded retries, DLQ, HTTPS/SNS/CloudWatch destinations, deterministic delivery identities |
-| Operations | Fargate and AgentCore CDK, managed-Cognito shared control plane, immutable image inputs, backups, alarms, release evidence |
+| Operations | Fargate and AgentCore CDK, managed-Cognito shared control plane, immutable image inputs, backups, alarms, signed release/launch/rehearsal/teardown/deployment evidence |
 
 ## Identity And RBAC Flow
 
@@ -253,6 +253,38 @@ The AgentCore payload selects the `query` action:
 The two entry points therefore share datasource lookup, SQL policy, role
 binding, Athena limits, and durable audit behavior.
 
+## AgentCore Tenant Configuration Flow
+
+Canonical viewers read the selected tenant-project runtime configuration with:
+
+```json
+{"action": "get_tenant_config"}
+```
+
+A tenant administrator updates only supplied fields with compare-and-swap:
+
+```json
+{
+  "action": "update_tenant_config",
+  "expected_revision": 7,
+  "config": {"name": "Production", "rate_limit_rpm": 600}
+}
+```
+
+1. The JWT and canonical principal/project are resolved exactly as for query.
+2. Baseline RBAC allows tenant roles to read and only `tenant_admin` to write;
+   Cedar may narrow either decision.
+3. Payload tenant/project/member/revision authority cannot override the
+   canonical resource.
+4. The write condition requires the strongly read revision. A stale writer
+   receives `409`.
+5. DynamoDB replaces the project and advances the fleet configuration version
+   in one transaction; other instances converge through config sync.
+6. The response returns the committed revision and complete detached config.
+
+This action covers project runtime settings, not membership, datasource,
+API-key, policy, webhook, provider-secret, or event-destination administration.
+
 ## Chat And Routing Flow
 
 1. Authenticate and resolve canonical tenant/project authority.
@@ -305,8 +337,10 @@ Required inputs include:
 - verified AMD64 control-plane image digest;
 - exact Bedrock model/profile ARNs;
 - AgentCore HTTPS egress prefix list;
+- administrator email for the automatically requested production-alarm
+  subscription;
 - control-plane ingress and HTTPS egress prefix lists;
-- optional exact Athena role ARNs and query limits;
+- at least one exact Athena role ARN and query limits for production launch;
 - an optional protected SAML landing path, defaulting to
   `/admin/dashboard`.
 
@@ -315,7 +349,9 @@ Required inputs include:
 1. Deploy retained managed Cognito identity, including the AgentCore public
    client and confidential ALB client.
 2. Invite or verify the first Cognito administrator.
-3. Deploy AgentCore with the immutable ARM64 image and exact runtime authority.
+3. Deploy AgentCore with the immutable ARM64 image and exact runtime authority
+   behind a fresh high-entropy candidate endpoint. Preserve an existing
+   production endpoint on its certified runtime version.
 4. Bootstrap and strongly verify the canonical tenant, project,
    `tenant_admin`, and project grant in the AgentCore table.
 5. Deploy the HTTPS AMD64 `AxonLLMControlPlaneStack`, importing that same table
@@ -327,6 +363,55 @@ second data plane. Tenant-specific SAML IdP metadata, app-client provider
 enablement, and canonical Cognito-subject provisioning are operator inputs and
 are not generated by the first-adopter deployer.
 
+The schema can represent a query-disabled runtime, but the current protected
+production workflow cannot certify one. Launch requires a matching Athena role
+binding, datasource/workgroup fixture, and successful governed `SELECT`.
+
+### Production Promotion
+
+The protected `launch-agentcore-production.yml` orchestrator:
+
+1. Verifies the signed AgentCore and control-plane images for the exact release.
+2. Deploys and certifies external OIDC only in
+   `AxonLLMAgentCoreStack-external`, then always deletes that stack.
+3. Updates the independently pre-staged and reviewed `managed` qualification
+   namespace, certifies its candidate, promotes it within that namespace,
+   validates its shared control plane, and starts two launch workers.
+4. Executes initialization, query, recovery, event-delivery, routing,
+   provider-recovery, and control-plane-fault gates through the immutable launch
+   coordinator and publishes signed detailed rehearsal evidence.
+5. Revokes qualification identities/sessions, stops both workers, deletes all
+   four `managed` stacks, and publishes a signed immutable teardown receipt.
+6. Invokes the production-only reusable leaf after every prerequisite succeeds.
+   The leaf re-verifies release signatures, exact image digests, CDK inputs,
+   all three prerequisite evidence sets, and target-account prerequisites.
+7. Synchronizes only allowlisted credentials, deploys a fresh production
+   candidate without changing the certified endpoint, and requires the exact
+   alarm-email subscription to be confirmed.
+8. Starts a retained backup, restores state, compares up to 25 restored items,
+   certifies identity/RBAC, governed query, model listing, completion and
+   streaming for every launch provider, plus tools for each provider that
+   declares `tool_calling`, promotes the exact version, and writes KMS-signed
+   schema-v5 deployment evidence under S3 Object Lock.
+
+A failure before promotion discards only the candidate. A later failure before
+immutable evidence persistence restores the previous production version from
+trusted promotion metadata and removes the candidate.
+
+The launch-gate configuration contains exact physical bindings and therefore
+requires a separate pre-stage and review of namespace `managed`. The review
+window is at most 48 hours. Because orchestrator teardown deletes that
+namespace, the pre-stage and review are required again for every launch.
+`scripts/operations/agentcore_launch_gates.example.json` is the canonical
+non-secret template.
+
+The candidate qualifier contains 128 random bits and is a temporary bearer
+capability layered on the shared runtime JWT authorizer. It reduces discovery,
+but does not isolate authorization from production: a principal with an
+accepted runtime JWT can invoke the candidate if it learns the qualifier. True
+endpoint isolation requires a separate runtime or qualifier-aware
+authorization.
+
 ### External OIDC
 
 The external-IdP path verifies the supplied issuer, discovery URL, client,
@@ -334,9 +419,10 @@ audience, tenant/project claim names, and immutable first-admin subject. It
 deploys AgentCore and bootstraps canonical authority.
 
 It currently does **not** deploy the Cognito-authenticated shared web control
-plane. Tenant configuration must be managed through another trusted Starlette
-control plane sharing the state table, or the adopter must choose managed
-Cognito.
+plane. Viewers can read project runtime configuration through AgentCore and a
+canonical `tenant_admin` can apply revision-checked updates. Broader
+administration still requires another trusted control plane sharing the state
+table or a reviewed operator path.
 
 ## Known Boundaries
 
@@ -344,8 +430,11 @@ Cognito.
   durably remembered by AgentCore.
 - The shared control plane has no query execution route or Athena/STS authority.
 - The external-OIDC first-adopter path has no automated web control plane.
+- Candidate and production qualifiers share one runtime JWT authorizer; the
+  random candidate name is not an independent authorization boundary.
 - The existing `v0.2.4` evidence predates the query/control-plane work and does
   not certify it.
-- No repository implementation substitutes for authenticated canaries,
-  datasource-role trust validation, alarm delivery, load evidence, or a real
-  AWS recovery rehearsal.
+- Implemented workflows are not deployment evidence until they succeed in the
+  target account. A launch claim still requires the retained schema-v5
+  deployment record, confirmed alarm/event delivery, exact datasource-role
+  trust, load evidence, and a full application cutover rehearsal.

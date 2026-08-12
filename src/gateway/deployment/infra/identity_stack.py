@@ -23,9 +23,20 @@ class AxonLLMIdentityStack(Stack):
         self,
         scope: Construct,
         construct_id: str,
+        *,
+        deployment_namespace: str = "",
         **kwargs,
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
+        physical_suffix = (
+            f"-{deployment_namespace}" if deployment_namespace else ""
+        )
+        removal_policy = (
+            RemovalPolicy.DESTROY
+            if deployment_namespace
+            else RemovalPolicy.RETAIN
+        )
+        deletion_protection = not bool(deployment_namespace)
 
         hosted_ui_domain_prefix = CfnParameter(
             self,
@@ -120,7 +131,7 @@ class AxonLLMIdentityStack(Stack):
         user_pool = cognito.UserPool(
             self,
             "UserPool",
-            user_pool_name="axonllm-agentcore-users",
+            user_pool_name=f"axonllm-agentcore-users{physical_suffix}",
             self_sign_up_enabled=False,
             sign_in_aliases=cognito.SignInAliases(email=True),
             sign_in_case_sensitive=False,
@@ -169,8 +180,8 @@ class AxonLLMIdentityStack(Stack):
                     "using the AgentCore runtime."
                 ),
             ),
-            deletion_protection=True,
-            removal_policy=RemovalPolicy.RETAIN,
+            deletion_protection=deletion_protection,
+            removal_policy=removal_policy,
         )
         user_pool.node.default_child.add_property_override(
             "EmailConfiguration.SourceArn",
@@ -194,7 +205,9 @@ class AxonLLMIdentityStack(Stack):
         )
         app_client = user_pool.add_client(
             "PublicPkceClient",
-            user_pool_client_name="axonllm-agentcore-pkce",
+            user_pool_client_name=(
+                f"axonllm-agentcore-pkce{physical_suffix}"
+            ),
             generate_secret=False,
             prevent_user_existence_errors=True,
             enable_token_revocation=True,
@@ -224,10 +237,44 @@ class AxonLLMIdentityStack(Stack):
                 ],
             ),
         )
-        app_client.apply_removal_policy(RemovalPolicy.RETAIN)
+        app_client.apply_removal_policy(removal_policy)
+        certification_client = user_pool.add_client(
+            "ConfidentialCertificationClient",
+            user_pool_client_name=(
+                f"axonllm-agentcore-certification{physical_suffix}"
+            ),
+            generate_secret=True,
+            prevent_user_existence_errors=True,
+            enable_token_revocation=True,
+            disable_o_auth=True,
+            # This confidential client is restricted to deployment automation.
+            # Workforce clients retain authorization-code plus PKCE only.
+            auth_flows=cognito.AuthFlow(
+                admin_user_password=True,
+            ),
+            access_token_validity=(
+                Duration.hours(6)
+                if deployment_namespace
+                else Duration.minutes(15)
+            ),
+            id_token_validity=(
+                Duration.hours(6)
+                if deployment_namespace
+                else Duration.minutes(15)
+            ),
+            refresh_token_validity=(
+                Duration.hours(6)
+                if deployment_namespace
+                else Duration.hours(1)
+            ),
+            read_attributes=readable_attributes,
+        )
+        certification_client.apply_removal_policy(removal_policy)
         alb_client = user_pool.add_client(
             "ConfidentialAlbClient",
-            user_pool_client_name="axonllm-control-plane-alb",
+            user_pool_client_name=(
+                f"axonllm-control-plane-alb{physical_suffix}"
+            ),
             generate_secret=True,
             prevent_user_existence_errors=True,
             enable_token_revocation=True,
@@ -256,7 +303,7 @@ class AxonLLMIdentityStack(Stack):
                 ],
             ),
         )
-        alb_client.apply_removal_policy(RemovalPolicy.RETAIN)
+        alb_client.apply_removal_policy(removal_policy)
 
         hosted_ui_domain = user_pool.add_domain(
             "HostedUiDomain",
@@ -267,7 +314,7 @@ class AxonLLMIdentityStack(Stack):
                 cognito.ManagedLoginVersion.CLASSIC_HOSTED_UI
             ),
         )
-        hosted_ui_domain.apply_removal_policy(RemovalPolicy.RETAIN)
+        hosted_ui_domain.apply_removal_policy(removal_policy)
 
         issuer = Fn.join(
             "",
@@ -340,6 +387,15 @@ class AxonLLMIdentityStack(Stack):
             export_name=Fn.join(
                 ":",
                 [self.stack_name, "AlbClientId"],
+            ),
+        )
+        CfnOutput(
+            self,
+            "CertificationClientId",
+            value=certification_client.user_pool_client_id,
+            description=(
+                "Confidential client used only for fresh launch-certification "
+                "tokens"
             ),
         )
         CfnOutput(

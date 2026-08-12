@@ -14,14 +14,23 @@ import pytest
 
 _REPO = Path(__file__).resolve().parents[2]
 _INFRA = _REPO / "infra"
-_STACK = _INFRA / "agentcore_stack.py"
+_STACK = (
+    _REPO
+    / "src"
+    / "gateway"
+    / "deployment"
+    / "infra"
+    / "agentcore_stack.py"
+)
 _INFRA_PYTHON = _INFRA / ".venv" / "bin" / "python"
 _DOCKERFILE = _INFRA / "agentcore-image" / "Dockerfile"
 _REQUIRED_PARAMETERS = {
+    "AlarmNotificationEmail",
+    "CandidateEndpointName",
     "OidcIssuer",
     "OidcDiscoveryUrl",
-    "OidcClientId",
-    "OidcAudience",
+    "OidcClientIds",
+    "OidcAudiences",
     "OidcTenantClaim",
     "OidcProjectClaim",
     "ApprovedHttpsPrefixListId",
@@ -208,6 +217,9 @@ def test_deployment_inputs_are_required_and_bedrock_arns_are_concrete(
     assert "foundation-model" in bedrock["AllowedPattern"]
     assert "inference-profile" in bedrock["AllowedPattern"]
     assert "without wildcards" in bedrock["ConstraintDescription"]
+    candidate = parameters["CandidateEndpointName"]
+    assert candidate["AllowedPattern"] == "^candidate_[0-9a-f]{32}$"
+    assert candidate["MinLength"] == candidate["MaxLength"] == 42
 
 
 def test_recovery_parameters_are_scoped_and_phase_gated(
@@ -469,17 +481,17 @@ def test_runtime_enforces_jwt_identity_and_bounded_lifecycle(
         "CustomJWTAuthorizer"
     ]
     assert authorizer["DiscoveryUrl"] == {"Ref": "OidcDiscoveryUrl"}
-    assert authorizer["AllowedAudience"][0]["Fn::If"][0] == (
+    assert authorizer["AllowedAudience"]["Fn::If"][0] == (
         "RecoveryAccessBlocked"
     )
-    assert authorizer["AllowedAudience"][0]["Fn::If"][2] == {
-        "Ref": "OidcAudience"
+    assert authorizer["AllowedAudience"]["Fn::If"][2] == {
+        "Ref": "OidcAudiences"
     }
-    assert authorizer["AllowedClients"][0]["Fn::If"][0] == (
+    assert authorizer["AllowedClients"]["Fn::If"][0] == (
         "RecoveryAccessBlocked"
     )
-    assert authorizer["AllowedClients"][0]["Fn::If"][2] == {
-        "Ref": "OidcClientId"
+    assert authorizer["AllowedClients"]["Fn::If"][2] == {
+        "Ref": "OidcClientIds"
     }
     assert runtime["RequestHeaderConfiguration"] == {
         "RequestHeaderAllowlist": ["Authorization"]
@@ -495,7 +507,9 @@ def test_runtime_enforces_jwt_identity_and_bounded_lifecycle(
     assert environment["AXON_DEPLOYMENT_PROFILE"] == "production"
     assert environment["AXON_LOAD_DEMO_DATA"] == "false"
     assert environment["AXON_OIDC_ISSUER"] == {"Ref": "OidcIssuer"}
-    assert environment["AXON_OIDC_AUDIENCE"] == {"Ref": "OidcAudience"}
+    assert environment["AXON_OIDC_AUDIENCE"] == {
+        "Fn::Join": [",", {"Ref": "OidcAudiences"}]
+    }
     assert environment["AXON_OIDC_TENANT_CLAIM"] == {
         "Ref": "OidcTenantClaim"
     }
@@ -503,12 +517,23 @@ def test_runtime_enforces_jwt_identity_and_bounded_lifecycle(
         "Ref": "OidcProjectClaim"
     }
     assert environment["AXON_REQUIRE_CANONICAL_IDENTITY"] == "true"
-    assert set(environment["AXON_ENABLED_PROVIDERS"].split(",")) == (
-        _ENABLED_PROVIDERS
-    )
+    assert environment["AXON_ENABLED_PROVIDERS"] == {
+        "Ref": "EnabledProviders"
+    }
+    assert set(
+        synthesized_template["Parameters"]["EnabledProviders"][
+            "Default"
+        ].split(",")
+    ) == _ENABLED_PROVIDERS - {"ai21"}
+    assert "ai21" in synthesized_template["Parameters"][
+        "EnabledProviders"
+    ]["AllowedPattern"]
     assert environment["AXON_PROVIDER_SECRET_ARN"]["Ref"].startswith(
         "ProviderCredentials"
     )
+    assert environment["AXON_PROVIDER_SECRET_VERSION"] == {
+        "Ref": "ProviderSecretVersion"
+    }
     assert environment["LLM_ROUTER_DYNAMODB_ENABLED"] == "true"
     assert environment["AXON_DYNAMODB_TABLE"]["Fn::If"][:2] == [
         "UseRecoveredState",
@@ -531,16 +556,39 @@ def test_runtime_enforces_jwt_identity_and_bounded_lifecycle(
         synthesized_template,
         "AWS::BedrockAgentCore::RuntimeEndpoint",
     )
-    assert len(endpoints) == 2
-    by_name = {
-        endpoint["Properties"]["Name"]: endpoint for endpoint in endpoints
-    }
-    assert by_name["production"]["Condition"] == "RecoveryNormal"
-    assert by_name["recovery"]["Condition"] == "RecoveryValidation"
-    assert all(
-        endpoint["Properties"]["AgentRuntimeVersion"]["Fn::GetAtt"][1]
-        == "AgentRuntimeVersion"
+    assert len(endpoints) == 3
+    production = next(
+        endpoint
         for endpoint in endpoints
+        if endpoint["Properties"]["Name"] == "production"
+    )
+    candidate = next(
+        endpoint
+        for endpoint in endpoints
+        if endpoint["Properties"]["Name"]
+        == {"Ref": "CandidateEndpointName"}
+    )
+    recovery = next(
+        endpoint
+        for endpoint in endpoints
+        if endpoint["Properties"]["Name"] == "recovery"
+    )
+    assert production["Condition"] == (
+        "ProductionEndpointEnabled"
+    )
+    assert candidate["Condition"] == (
+        "CandidateEndpointEnabled"
+    )
+    assert recovery["Condition"] == "RecoveryValidation"
+    assert production["Properties"][
+        "AgentRuntimeVersion"
+    ] == {"Ref": "ProductionRuntimeVersion"}
+    assert all(
+        endpoint["Properties"]["AgentRuntimeVersion"][
+            "Fn::GetAtt"
+        ][1]
+        == "AgentRuntimeVersion"
+        for endpoint in (candidate, recovery)
     )
     assert all(
         any(
@@ -588,6 +636,7 @@ def test_runtime_role_is_scoped_and_supports_state_transactions(
     assert secret_read["Resource"]["Ref"].startswith(
         "ProviderCredentials"
     )
+    assert secret_read["Sid"] == "ReadProviderCredentials"
 
     state_access = next(
         statement
@@ -639,24 +688,91 @@ def test_runtime_role_is_scoped_and_supports_state_transactions(
         for statement in statements
         if any(action.startswith("sqs:") for action in _actions(statement))
     ]
-    assert len(queue_statements) == 2
-    assert _SQS_ACTIONS <= {
-        action
-        for statement in queue_statements
-        for action in _actions(statement)
-    }
-    assert all(
-        statement["Resource"]["Fn::GetAtt"][0].startswith(
-            "SecurityEventOutboxQueue"
-        )
-        for statement in queue_statements
+    assert len(queue_statements) == 1
+    queue_access = queue_statements[0]
+    assert _actions(queue_access) == _SQS_ACTIONS
+    assert queue_access["Sid"] == "UseSecurityEventOutbox"
+    assert queue_access["Resource"]["Fn::GetAtt"][0].startswith(
+        "SecurityEventOutboxQueue"
     )
     publish = next(
         statement
         for statement in statements
         if _actions(statement) == {"sns:Publish"}
     )
+    assert publish["Sid"] == "PublishSecurityEvents"
     assert publish["Resource"]["Ref"].startswith("SecurityEventTopic")
+
+    kms_statements = [
+        statement
+        for statement in statements
+        if any(action.startswith("kms:") for action in _actions(statement))
+    ]
+    assert len(kms_statements) == 3
+
+    def kms_statement(sid: str) -> dict:
+        return next(
+            statement
+            for statement in kms_statements
+            if statement["Sid"] == sid
+        )
+
+    secret_key = kms_statement("DecryptProviderCredentials")
+    assert _actions(secret_key) == {"kms:Decrypt"}
+    secret_condition = secret_key["Condition"]["StringEquals"]
+    assert set(secret_condition) == {
+        "kms:CallerAccount",
+        "kms:ViaService",
+    }
+    assert secret_condition["kms:CallerAccount"] == {
+        "Ref": "AWS::AccountId"
+    }
+    assert "secretsmanager." in json.dumps(
+        secret_condition["kms:ViaService"]
+    )
+    assert "AWS::URLSuffix" in json.dumps(
+        secret_condition["kms:ViaService"]
+    )
+
+    queue_key = kms_statement("UseSecurityEventOutboxKey")
+    assert _actions(queue_key) == {
+        "kms:Decrypt",
+        "kms:GenerateDataKey*",
+    }
+    queue_condition = queue_key["Condition"]["StringEquals"]
+    assert set(queue_condition) == {
+        "kms:CallerAccount",
+        "kms:ViaService",
+    }
+    assert queue_condition["kms:CallerAccount"] == {
+        "Ref": "AWS::AccountId"
+    }
+    assert "sqs." in json.dumps(queue_condition["kms:ViaService"])
+    assert "AWS::URLSuffix" in json.dumps(
+        queue_condition["kms:ViaService"]
+    )
+
+    topic_key = kms_statement("UseSecurityEventTopicKey")
+    assert _actions(topic_key) == {
+        "kms:Decrypt",
+        "kms:GenerateDataKey*",
+    }
+    topic_condition = topic_key["Condition"]["StringEquals"]
+    assert topic_condition["kms:CallerAccount"] == {
+        "Ref": "AWS::AccountId"
+    }
+    assert "sns." in json.dumps(topic_condition["kms:ViaService"])
+    assert "AWS::URLSuffix" in json.dumps(
+        topic_condition["kms:ViaService"]
+    )
+    assert "SecurityEventTopic" in json.dumps(
+        topic_condition["kms:EncryptionContext:aws:sns:topicArn"]
+    )
+    assert all(
+        "DataKey" in json.dumps(statement["Resource"])
+        for statement in kms_statements
+    )
+
     security_log_write = next(
         statement
         for statement in statements
@@ -768,6 +884,7 @@ def test_recovery_guard_blocks_access_and_checks_runtime_and_control_plane(
     )
     code = handler["Properties"]["Code"]["ZipFile"]
     assert '("quiesced", "selected")' in code
+    assert '("validation", "normal")' in code
     assert "_assert_no_runtime_endpoints" in code
     assert "_assert_control_plane_quiesced" in code
     assert "MinimumQuiescenceSeconds" in code
@@ -795,7 +912,37 @@ def test_recovery_guard_blocks_access_and_checks_runtime_and_control_plane(
     }
 
     outputs = synthesized_template["Outputs"]
-    assert outputs["RuntimeEndpointArn"]["Condition"] == "RecoveryNormal"
+    assert outputs["RuntimeEndpointArn"]["Condition"] == (
+        "ProductionEndpointEnabled"
+    )
+    assert outputs["RuntimeEndpointName"]["Condition"] == (
+        "ProductionEndpointEnabled"
+    )
+    assert outputs["ProductionRuntimeVersion"]["Condition"] == (
+        "ProductionEndpointEnabled"
+    )
+    assert outputs["CandidateRuntimeEndpointArn"]["Condition"] == (
+        "CandidateEndpointEnabled"
+    )
+    assert outputs["CandidateRuntimeEndpointName"]["Condition"] == (
+        "CandidateEndpointEnabled"
+    )
+    assert outputs["CandidateRuntimeVersion"]["Condition"] == (
+        "CandidateEndpointEnabled"
+    )
+    assert outputs["CandidateRuntimeEndpointName"]["Value"] == {
+        "Ref": "CandidateEndpointName"
+    }
+    assert outputs["ApprovedHttpsPrefixListId"]["Value"] == {
+        "Ref": "ApprovedHttpsPrefixListId"
+    }
+    assert outputs["BedrockInvokeResourceArns"]["Value"] == {
+        "Fn::Join": [",", {"Ref": "BedrockInvokeResourceArns"}]
+    }
+    assert len(outputs["AthenaConfigurationFingerprint"]["Value"]) == 64
+    assert outputs["AlarmNotificationEmail"]["Value"] == {
+        "Ref": "AlarmNotificationEmail"
+    }
     assert outputs["RecoveryRuntimeEndpointArn"]["Condition"] == (
         "RecoveryValidation"
     )
@@ -1031,6 +1178,71 @@ def test_state_and_backups_are_encrypted_retained_and_recoverable(
     )
 
 
+def test_backup_service_role_is_scoped_to_state_tables_and_key(
+    synthesized_template,
+):
+    role_id, role = next(
+        (logical_id, resource)
+        for logical_id, resource in synthesized_template[
+            "Resources"
+        ].items()
+        if resource["Type"] == "AWS::IAM::Role"
+        and resource["Properties"].get("Description")
+        == "AWS Backup service role scoped to AxonLLM AgentCore state"
+    )
+    assert "ManagedPolicyArns" not in role["Properties"]
+    trust = role["Properties"]["AssumeRolePolicyDocument"]["Statement"][0]
+    assert trust["Principal"] == {"Service": "backup.amazonaws.com"}
+    assert trust["Condition"] == {
+        "StringEquals": {"aws:SourceAccount": {"Ref": "AWS::AccountId"}}
+    }
+
+    policy = next(
+        resource
+        for resource in _resources(
+            synthesized_template,
+            "AWS::IAM::Policy",
+        )
+        if {"Ref": role_id} in resource["Properties"]["Roles"]
+        and "dynamodb:StartAwsBackupJob"
+        in json.dumps(resource["Properties"]["PolicyDocument"])
+    )
+    statements = policy["Properties"]["PolicyDocument"]["Statement"]
+    table_access = next(
+        statement
+        for statement in statements
+        if "dynamodb:StartAwsBackupJob" in _actions(statement)
+    )
+    assert _actions(table_access) == {
+        "dynamodb:DescribeContinuousBackups",
+        "dynamodb:DescribeTable",
+        "dynamodb:ListTagsOfResource",
+        "dynamodb:StartAwsBackupJob",
+    }
+    serialized_resources = json.dumps(table_access["Resource"])
+    assert "StateTable" in serialized_resources
+    assert "restore-validation-*" in serialized_resources
+
+    key_access = next(
+        statement
+        for statement in statements
+        if "kms:GenerateDataKey*" in _actions(statement)
+    )
+    assert _actions(key_access) == {
+        "kms:Decrypt",
+        "kms:GenerateDataKey*",
+    }
+    key_condition = key_access["Condition"]["StringEquals"]
+    assert key_condition["kms:CallerAccount"] == {
+        "Ref": "AWS::AccountId"
+    }
+    assert "dynamodb." in json.dumps(key_condition["kms:ViaService"])
+    assert "AWS::URLSuffix" in json.dumps(
+        key_condition["kms:ViaService"]
+    )
+    assert "DataKey" in json.dumps(key_access["Resource"])
+
+
 def test_security_event_outbox_is_fifo_encrypted_and_redriven(
     synthesized_template,
 ):
@@ -1102,6 +1314,12 @@ def test_security_event_outbox_is_fifo_encrypted_and_redriven(
     assert outputs["SecurityEventDeadLetterQueueUrl"]["Value"][
         "Ref"
     ].startswith("SecurityEventDeadLetterQueue")
+    assert outputs["SecurityEventDeadLetterQueueArn"]["Value"][
+        "Fn::GetAtt"
+    ][0].startswith("SecurityEventDeadLetterQueue")
+    assert outputs["SecurityEventDeadLettersAlarmArn"]["Value"][
+        "Fn::GetAtt"
+    ][0].startswith("SecurityEventDeadLettersAlarm")
     assert outputs["SecurityEventTopicArn"]["Value"]["Ref"].startswith(
         "SecurityEventTopic"
     )
@@ -1212,6 +1430,17 @@ def test_encrypted_logs_and_alarm_delivery_have_service_permissions(
     assert topic_policy["Condition"]["StringEquals"][
         "aws:SourceAccount"
     ] == {"Ref": "AWS::AccountId"}
+    subscription = _one_resource(
+        synthesized_template,
+        "AWS::SNS::Subscription",
+    )
+    assert subscription["Properties"]["Protocol"] == "email"
+    assert subscription["Properties"]["Endpoint"] == {
+        "Ref": "AlarmNotificationEmail"
+    }
+    assert subscription["Properties"]["TopicArn"]["Ref"].startswith(
+        "AlarmTopic"
+    )
 
     alarms = _resources(synthesized_template, "AWS::CloudWatch::Alarm")
     assert len(alarms) == 4

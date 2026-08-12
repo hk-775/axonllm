@@ -412,6 +412,9 @@ class QueryService:
         sql: object,
         max_rows: int | None = None,
         request_id: str | None = None,
+        rehearsal: Any | None = None,
+        rehearsal_binding: Any | None = None,
+        rehearsal_ledger: Any | None = None,
     ) -> dict[str, Any]:
         tenant_id = self._identity(tenant_id, "tenant_id")
         project_id = self._identity(project_id, "project_id")
@@ -471,6 +474,23 @@ class QueryService:
             project_id,
             datasource.role_arn,
         ):
+            if (
+                getattr(rehearsal, "operation", None)
+                == "verify-deferred-accounting"
+                and rehearsal_binding is not None
+                and rehearsal_ledger is not None
+            ):
+                await asyncio.to_thread(
+                    rehearsal_ledger.append_observation,
+                    rehearsal_binding,
+                    "query-lifecycle",
+                    {
+                        "phase": "deferred",
+                        "request_id": resolved_request_id,
+                        "reservation_units": 0,
+                        "terminal_state": "DEFERRED",
+                    },
+                )
             raise QueryServiceError(
                 503,
                 "datasource_binding_invalid",
@@ -515,6 +535,7 @@ class QueryService:
         self._require_admission()
         lease: QueryAdmissionLease | None = None
         execution_id: str | None = None
+        checkpoint_hold_seconds: int | None = None
         if self.admission is not None:
             try:
                 lease = await self.admission.acquire(
@@ -542,6 +563,33 @@ class QueryService:
                     exc.code,
                     exc.message,
                 ) from exc
+            if (
+                getattr(rehearsal, "operation", None) == "interrupt-query"
+                and rehearsal_binding is not None
+                and rehearsal_ledger is not None
+            ):
+                await asyncio.to_thread(
+                    rehearsal_ledger.append_observation,
+                    rehearsal_binding,
+                    "query-lifecycle",
+                    {
+                        "phase": "reserved",
+                        "request_id": resolved_request_id,
+                        "reservation_units": lease.reserved_scan_bytes,
+                    },
+                )
+                checkpoint = await asyncio.to_thread(
+                    rehearsal_ledger.read_active_checkpoint,
+                    rehearsal_binding,
+                    "query-after-reservation",
+                )
+                if checkpoint is not None:
+                    hold_seconds = checkpoint.parameters.get("hold_seconds")
+                    if (
+                        isinstance(hold_seconds, int)
+                        and not isinstance(hold_seconds, bool)
+                    ):
+                        checkpoint_hold_seconds = hold_seconds
 
         async def _mark_started(value: str) -> None:
             nonlocal execution_id
@@ -550,6 +598,8 @@ class QueryService:
                 await self.admission.mark_started(lease, value)
 
         try:
+            if checkpoint_hold_seconds is not None:
+                await asyncio.sleep(checkpoint_hold_seconds)
             execution_kwargs: dict[str, Any] = {
                 "tenant_id": tenant_id,
                 "project_id": project_id,
@@ -557,14 +607,28 @@ class QueryService:
                 "request_id": resolved_request_id,
                 "max_rows": max_rows,
             }
-            if lease is not None:
-                execution_kwargs["on_started"] = _mark_started
+            execution_kwargs["on_started"] = _mark_started
             result = await self.executor.execute(
                 validated,
                 datasource,
                 **execution_kwargs,
             )
         except asyncio.CancelledError:
+            if (
+                getattr(rehearsal, "operation", None) == "interrupt-query"
+                and rehearsal_binding is not None
+                and rehearsal_ledger is not None
+            ):
+                await asyncio.to_thread(
+                    rehearsal_ledger.append_observation,
+                    rehearsal_binding,
+                    "query-lifecycle",
+                    {
+                        "phase": "interrupted",
+                        "request_id": resolved_request_id,
+                    },
+                )
+
             async def _finish_cancellation() -> None:
                 termination = await self._cancel_observed_execution(
                     datasource=datasource,
@@ -586,6 +650,23 @@ class QueryService:
                     execution_id=execution_id,
                     termination=termination,
                 )
+                if (
+                    getattr(rehearsal, "operation", None)
+                    == "interrupt-query"
+                    and rehearsal_binding is not None
+                    and rehearsal_ledger is not None
+                ):
+                    await asyncio.to_thread(
+                        rehearsal_ledger.append_observation,
+                        rehearsal_binding,
+                        "query-lifecycle",
+                        {
+                            "phase": "reconciled",
+                            "request_id": resolved_request_id,
+                            "reservation_units": 0,
+                            "terminal_state": "CANCELLED",
+                        },
+                    )
 
             try:
                 await asyncio.shield(_finish_cancellation())

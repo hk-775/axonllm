@@ -1,6 +1,7 @@
 models:
 - name: claude-opus
   description: Claude Opus 4
+  capabilities: [chat, vision, tools]
   routing_strategy: least-latency
   providers:
   - provider: bedrock
@@ -13,6 +14,7 @@ models:
     fallback_order: 1
 - name: claude-sonnet
   description: Claude Sonnet 4
+  capabilities: [chat, vision, tools]
   routing_strategy: cost-optimized
   providers:
   - provider: anthropic
@@ -25,6 +27,7 @@ models:
     fallback_order: 0
 - name: claude-haiku
   description: Claude Haiku 4.5
+  capabilities: [chat, vision, tools]
   routing_strategy: round-robin
   providers:
   - provider: anthropic
@@ -37,6 +40,7 @@ models:
     fallback_order: 0
 - name: gpt-5.5
   description: GPT-5.5
+  capabilities: [chat, streaming, tools]
   routing_strategy: round-robin
   providers:
   - provider: bedrock-mantle
@@ -47,6 +51,7 @@ models:
 # not a chat model". The openai adapter routes the -pro tier there automatically.
 - name: gpt-5.5-pro
   description: GPT-5.5 Pro (Responses API)
+  capabilities: [chat, streaming, tools, reasoning]
   routing_strategy: round-robin
   providers:
   - provider: openai
@@ -55,6 +60,7 @@ models:
     fallback_order: 0
 - name: gpt-5.4
   description: GPT-5.4
+  capabilities: [chat, streaming, tools]
   routing_strategy: round-robin
   providers:
   - provider: bedrock-mantle
@@ -63,6 +69,7 @@ models:
     fallback_order: 0
 - name: gpt-oss-120b-mantle
   description: GPT-OSS 120B (Mantle)
+  capabilities: [chat, streaming, tools]
   routing_strategy: round-robin
   providers:
   - provider: bedrock-mantle
@@ -71,6 +78,7 @@ models:
     fallback_order: 0
 - name: deepseek-v3-mantle
   description: DeepSeek V3.1 (Mantle)
+  capabilities: [chat, streaming]
   routing_strategy: round-robin
   providers:
   - provider: bedrock-mantle
@@ -79,6 +87,7 @@ models:
     fallback_order: 0
 - name: qwen3-32b-mantle
   description: Qwen3 32B (Mantle)
+  capabilities: [chat, streaming]
   routing_strategy: round-robin
   providers:
   - provider: bedrock-mantle
@@ -87,6 +96,7 @@ models:
     fallback_order: 0
 - name: gpt-5.6-sol
   description: GPT-5.6 Sol (Mantle)
+  capabilities: [chat, streaming, tools]
   routing_strategy: round-robin
   providers:
   - provider: bedrock-mantle
@@ -95,6 +105,7 @@ models:
     fallback_order: 0
 - name: gpt-5.6-terra
   description: GPT-5.6 Terra (Mantle)
+  capabilities: [chat, streaming, tools]
   routing_strategy: round-robin
   providers:
   - provider: bedrock-mantle
@@ -103,6 +114,7 @@ models:
     fallback_order: 0
 - name: gpt-5.6-luna
   description: GPT-5.6 Luna (Mantle)
+  capabilities: [chat, streaming, tools]
   routing_strategy: round-robin
   providers:
   - provider: bedrock-mantle
@@ -111,6 +123,7 @@ models:
     fallback_order: 0
 - name: claude-sonnet-5
   description: Claude Sonnet 5 (Mantle)
+  capabilities: [chat, vision, streaming, tools]
   routing_strategy: round-robin
   providers:
   - provider: bedrock-mantle
@@ -119,6 +132,7 @@ models:
     fallback_order: 0
 - name: claude-opus-4-8
   description: Claude Opus 4.8 (Mantle)
+  capabilities: [chat, vision, streaming, tools]
   routing_strategy: round-robin
   providers:
   - provider: bedrock-mantle
@@ -127,6 +141,7 @@ models:
     fallback_order: 0
 - name: claude-haiku-4-5-mantle
   description: Claude Haiku 4.5 (Mantle)
+  capabilities: [chat, vision, streaming]
   routing_strategy: round-robin
   providers:
   - provider: bedrock-mantle
@@ -135,6 +150,7 @@ models:
     fallback_order: 0
 - name: gpt-4.1
   description: GPT-4.1
+  capabilities: [chat, vision, streaming, tools]
   routing_strategy: round-robin
   providers:
   - provider: openai
@@ -143,6 +159,7 @@ models:
     fallback_order: 0
 - name: gpt-4o
   description: GPT-4o
+  capabilities: [chat, vision, streaming, tools]
   routing_strategy: least-latency
   providers:
   - provider: openai
@@ -158,6 +175,7 @@ models:
     fallback_order: 1
 - name: gpt-4o-mini
   description: GPT-4o Mini
+  capabilities: [chat, vision, streaming, tools]
   routing_strategy: round-robin
   providers:
   - provider: openai
@@ -166,6 +184,7 @@ models:
     fallback_order: 0
 - name: o4-mini
   description: o4 Mini (Reasoning)
+  capabilities: [chat, reasoning]
   routing_strategy: weighted
   providers:
   - provider: openai
@@ -174,6 +193,7 @@ models:
     fallback_order: 0
 - name: o3
   description: o3 (Reasoning)
+  capabilities: [chat, reasoning]
   routing_strategy: round-robin
   providers:
   - provider: openai
@@ -182,6 +202,7 @@ models:
     fallback_order: 0
 - name: nova-pro
   description: Amazon Nova Pro
+  capabilities: [chat, vision]
   routing_strategy: round-robin
   providers:
   - provider: bedrock
@@ -190,6 +211,7 @@ models:
     fallback_order: 0
 - name: nova-lite
   description: Amazon Nova Lite
+  capabilities: [chat]
   routing_strategy: round-robin
   providers:
   - provider: bedrock
@@ -198,6 +220,7 @@ models:
     fallback_order: 0
 - name: nova-micro
   description: Amazon Nova Micro
+  capabilities: [chat]
   routing_strategy: round-robin
   providers:
   - provider: bedrock
@@ -206,6 +229,7 @@ models:
     fallback_order: 0
 - name: deepseek-r1
   description: DeepSeek R1
+  capabilities: [chat, reasoning]
   routing_strategy: round-robin
   providers:
   - provider: bedrock
@@ -214,6 +238,7 @@ models:
     fallback_order: 0
 - name: llama-3.3-70b
   description: Meta Llama 3.3 70B Instruct
+  capabilities: [chat]
   routing_strategy: round-robin
   providers:
   - provider: bedrock
@@ -222,6 +247,7 @@ models:
     fallback_order: 0
 - name: llama-4-maverick
   description: Meta Llama 4 Maverick 17B Instruct
+  capabilities: [chat, vision]
   routing_strategy: round-robin
   providers:
   - provider: bedrock
@@ -230,6 +256,7 @@ models:
     fallback_order: 0
 - name: llama-4-scout
   description: Meta Llama 4 Scout 17B Instruct
+  capabilities: [chat, vision]
   routing_strategy: round-robin
   providers:
   - provider: bedrock
@@ -238,6 +265,7 @@ models:
     fallback_order: 0
 - name: mistral-large
   description: Mistral Large (24.02)
+  capabilities: [chat]
   routing_strategy: round-robin
   providers:
   - provider: bedrock
@@ -246,6 +274,7 @@ models:
     fallback_order: 0
 - name: pixtral-large
   description: Mistral Pixtral Large 25.02 (multimodal)
+  capabilities: [chat, vision]
   routing_strategy: round-robin
   providers:
   - provider: bedrock
@@ -254,6 +283,7 @@ models:
     fallback_order: 0
 - name: gpt-oss-120b
   description: OpenAI GPT-OSS 120B (open weight)
+  capabilities: [chat]
   routing_strategy: round-robin
   providers:
   - provider: bedrock
@@ -262,6 +292,7 @@ models:
     fallback_order: 0
 - name: qwen3-235b
   description: Qwen3 VL 235B A22B (multimodal, open weight)
+  capabilities: [chat, vision]
   routing_strategy: round-robin
   providers:
   - provider: bedrock
@@ -270,6 +301,7 @@ models:
     fallback_order: 0
 - name: gemini-3.5-flash
   description: Gemini 3.5 Flash
+  capabilities: [chat, vision, streaming]
   routing_strategy: round-robin
   providers:
   - provider: google_ai
@@ -278,6 +310,7 @@ models:
     fallback_order: 0
 - name: gemini-3.1-pro
   description: Gemini 3.1 Pro
+  capabilities: [chat, vision, streaming]
   routing_strategy: round-robin
   providers:
   - provider: google_ai
@@ -286,6 +319,7 @@ models:
     fallback_order: 0
 - name: gemini-2.5-pro
   description: Gemini 2.5 Pro
+  capabilities: [chat, vision, streaming, tools]
   routing_strategy: round-robin
   providers:
   - provider: google_ai
@@ -298,6 +332,7 @@ models:
     fallback_order: 1
 - name: gemini-2.5-flash
   description: Gemini 2.5 Flash (Vertex AI)
+  capabilities: [chat, vision, streaming, tools]
   routing_strategy: round-robin
   providers:
   - provider: vertex_ai
@@ -314,6 +349,7 @@ models:
 # 4.x line; 4.3 is the cheaper of the two.
 - name: grok-4.3
   description: Grok 4.3
+  capabilities: [chat, streaming, tools]
   routing_strategy: round-robin
   providers:
   - provider: xai
@@ -322,6 +358,7 @@ models:
     fallback_order: 0
 - name: grok-4.5
   description: Grok 4.5
+  capabilities: [chat, streaming, tools]
   routing_strategy: round-robin
   providers:
   - provider: xai
@@ -331,6 +368,7 @@ models:
 # --- Groq (fast inference) ---
 - name: groq-llama-3.3-70b
   description: Llama 3.3 70B (Groq)
+  capabilities: [chat, streaming, tools]
   routing_strategy: round-robin
   providers:
   - provider: groq
@@ -339,6 +377,7 @@ models:
     fallback_order: 0
 - name: groq-llama-3.1-8b
   description: Llama 3.1 8B Instant (Groq)
+  capabilities: [chat, streaming]
   routing_strategy: round-robin
   providers:
   - provider: groq
@@ -354,6 +393,7 @@ models:
 # confirmed with a live non-streaming completion.
 - name: together-llama-3.3-70b
   description: Llama 3.3 70B Turbo (Together)
+  capabilities: [chat, streaming, tools]
   routing_strategy: round-robin
   providers:
   - provider: together
@@ -364,6 +404,7 @@ models:
 # V3.1. V4 Pro is the DeepSeek generation Together serves on demand.
 - name: together-deepseek-v4
   description: DeepSeek V4 Pro (Together)
+  capabilities: [chat, streaming, tools]
   routing_strategy: round-robin
   providers:
   - provider: together
@@ -377,6 +418,7 @@ models:
 # so the largest usable Qwen is 3.5-9B.
 - name: together-qwen-3.5-9b
   description: Qwen 3.5 9B (Together)
+  capabilities: [chat, streaming]
   routing_strategy: round-robin
   providers:
   - provider: together
@@ -388,6 +430,7 @@ models:
 # it rather than a duplicate, and the adapter already advertised it.
 - name: together-gpt-oss-120b
   description: GPT-OSS 120B (Together)
+  capabilities: [chat, streaming]
   routing_strategy: round-robin
   providers:
   - provider: together
@@ -406,6 +449,7 @@ models:
 # fireworks section in pricing.yaml.
 - name: fireworks-deepseek-v4
   description: DeepSeek V4 Pro (Fireworks)
+  capabilities: [chat, streaming]
   routing_strategy: round-robin
   providers:
   - provider: fireworks
@@ -414,6 +458,7 @@ models:
     fallback_order: 0
 - name: fireworks-gpt-oss-120b
   description: GPT-OSS 120B (Fireworks)
+  capabilities: [chat, streaming]
   routing_strategy: round-robin
   providers:
   - provider: fireworks
@@ -425,6 +470,7 @@ models:
 # command-r, command-r-plus, and command-light aliases on 2025-09-15.
 - name: cohere-command-r
   description: Cohere Command R 08-2024
+  capabilities: [chat, streaming, tools]
   routing_strategy: round-robin
   providers:
   - provider: cohere
@@ -433,6 +479,7 @@ models:
     fallback_order: 0
 - name: cohere-command-r-plus
   description: Cohere Command R+ 08-2024
+  capabilities: [chat, streaming, tools]
   routing_strategy: round-robin
   providers:
   - provider: cohere
@@ -445,6 +492,7 @@ models:
 # a caller's requested model version.
 - name: jamba-1.5-large-bedrock
   description: AI21 Jamba 1.5 Large (Bedrock)
+  capabilities: [chat]
   routing_strategy: round-robin
   providers:
   - provider: bedrock
@@ -453,6 +501,7 @@ models:
     fallback_order: 0
 - name: jamba-1.5-mini-bedrock
   description: AI21 Jamba 1.5 Mini (Bedrock)
+  capabilities: [chat]
   routing_strategy: round-robin
   providers:
   - provider: bedrock
@@ -461,6 +510,7 @@ models:
     fallback_order: 0
 - name: jamba-large
   description: AI21 Jamba 1.6 Large
+  capabilities: [chat, streaming, tools]
   routing_strategy: round-robin
   providers:
   - provider: ai21
@@ -469,6 +519,7 @@ models:
     fallback_order: 0
 - name: jamba-mini
   description: AI21 Jamba 1.6 Mini
+  capabilities: [chat, streaming, tools]
   routing_strategy: round-robin
   providers:
   - provider: ai21

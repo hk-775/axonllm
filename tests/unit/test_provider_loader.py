@@ -149,6 +149,49 @@ providers:
     }
 
 
+def test_provider_secret_is_bound_to_the_runtime_version(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    requested: dict[str, str] = {}
+
+    class _VersionedSecrets:
+        def get_secret_value(self, **kwargs) -> dict:
+            requested.update(kwargs)
+            return {
+                "VersionId": "version-7",
+                "SecretString": json.dumps(
+                    {"OPENAI_API_KEY": "secret-openai"}
+                ),
+            }
+
+    config = tmp_path / "providers.yaml"
+    config.write_text(
+        "providers:\n"
+        "  openai:\n"
+        "    base_url: https://api.openai.com\n"
+        "    auth_type: api_key\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("AXON_PROVIDER_SECRET_ARN", "arn:provider-secret")
+    monkeypatch.setenv("AXON_PROVIDER_SECRET_VERSION", "version-7")
+    monkeypatch.setattr(
+        provider_loader.boto3,
+        "client",
+        lambda *_args, **_kwargs: _VersionedSecrets(),
+    )
+
+    configs = load_provider_configs(str(config))
+
+    assert configs["openai"].credentials == {
+        "api_key": "secret-openai"
+    }
+    assert requested == {
+        "SecretId": "arn:provider-secret",
+        "VersionId": "version-7",
+    }
+
+
 def test_environment_credentials_override_secret_values(
     tmp_path: Path,
     monkeypatch,
@@ -254,6 +297,35 @@ def test_google_ai_key_is_header_only_for_completion_and_streaming() -> None:
     assert streaming_url.endswith("?alt=sse")
 
 
+def test_vertex_streaming_uses_stream_generate_content_endpoint() -> None:
+    config = ProviderConfig(
+        provider_name="vertex_ai",
+        base_url="https://us-central1-aiplatform.googleapis.com",
+        auth_type="gcp_service_account",
+        credentials={"credential_source": "google-auth"},
+        credential_provider=type(
+            "_Credentials",
+            (),
+            {"get_token": lambda self: "short-lived-token"},
+        )(),
+        extra_params={
+            "project": "project-a",
+            "location": "us-central1",
+        },
+    )
+    mapping = ProviderModelMapping(
+        provider="vertex_ai",
+        model_id="gemini-2.5-pro",
+    )
+
+    assert build_provider_url(config, mapping).endswith(
+        "/models/gemini-2.5-pro:generateContent"
+    )
+    assert build_provider_stream_url(config, mapping).endswith(
+        "/models/gemini-2.5-pro:streamGenerateContent?alt=sse"
+    )
+
+
 def test_vertex_credentials_are_refreshed_during_initialization() -> None:
     class _Credentials:
         valid = False
@@ -339,6 +411,7 @@ async def test_vertex_expiry_refresh_never_blocks_the_event_loop() -> None:
     assert get_auth_headers(config) == {
         "Authorization": "Bearer refreshed-token"
     }
+    provider.close()
 
 
 def test_vertex_external_account_json_uses_google_auth(
@@ -381,6 +454,205 @@ def test_vertex_external_account_json_uses_google_auth(
     assert provider.project_id == "project-a"
     assert captured["payload"]["type"] == "external_account"
     assert captured["scopes"] == [provider_loader._GOOGLE_CLOUD_SCOPE]
+    provider.close()
+
+
+@pytest.mark.asyncio
+async def test_vertex_refresher_close_prevents_worker_reschedule() -> None:
+    refresh_started = threading.Event()
+    allow_refresh = threading.Event()
+    refresh_finished = threading.Event()
+
+    class _Credentials:
+        valid = True
+        token = "initial-token"
+
+        def refresh(self, _request) -> None:
+            refresh_started.set()
+            assert allow_refresh.wait(timeout=2)
+            self.token = "refreshed-token"
+            self.valid = True
+            refresh_finished.set()
+
+    credentials = _Credentials()
+    provider = provider_loader.GoogleCredentialProvider(
+        credentials,
+        request="bounded-request",
+    )
+    credentials.valid = False
+    credentials.token = None
+
+    with pytest.raises(RuntimeError, match="refresh is pending"):
+        provider.get_token()
+    assert await asyncio.to_thread(refresh_started.wait, 1)
+    provider.close(timeout_seconds=0)
+    allow_refresh.set()
+    assert await asyncio.to_thread(refresh_finished.wait, 1)
+    await asyncio.sleep(0)
+
+    assert provider._timer is None
+    assert provider._workers == set()
+    with pytest.raises(RuntimeError, match="closed"):
+        provider.get_token()
+
+
+@pytest.mark.asyncio
+async def test_factory_closes_shared_refresher_once() -> None:
+    class _Refresher:
+        def __init__(self) -> None:
+            self.close_calls = 0
+
+        def get_token(self) -> str:
+            return "token"
+
+        def close(self) -> None:
+            self.close_calls += 1
+
+    refresher = _Refresher()
+    routes = [
+        provider_loader.ProviderRoute(
+            route_id=f"vertex_ai:{index}",
+            provider="vertex_ai",
+            endpoint="https://vertex.example",
+            auth_type="gcp_service_account",
+            credentials={"credential_source": "google-auth"},
+            credential_provider=refresher,
+            extra_params={
+                "project": "project-a",
+                "location": "us-central1",
+            },
+        )
+        for index in range(2)
+    ]
+    factory = MultiProviderFactory(provider_routes=routes)
+
+    await factory.close()
+    await factory.close()
+
+    assert refresher.close_calls == 1
+
+
+def test_factory_initialization_failure_closes_refresher() -> None:
+    class _Refresher:
+        def __init__(self) -> None:
+            self.close_calls = 0
+
+        def get_token(self) -> str:
+            return "token"
+
+        def close(self) -> None:
+            self.close_calls += 1
+
+    refresher = _Refresher()
+    route = provider_loader.ProviderRoute(
+        route_id="vertex_ai:duplicate",
+        provider="vertex_ai",
+        endpoint="https://vertex.example",
+        auth_type="gcp_service_account",
+        credentials={"credential_source": "google-auth"},
+        credential_provider=refresher,
+        extra_params={
+            "project": "project-a",
+            "location": "us-central1",
+        },
+    )
+
+    with pytest.raises(ValueError, match="duplicate"):
+        MultiProviderFactory(provider_routes=[route, route])
+
+    assert refresher.close_calls == 1
+
+
+def test_provider_load_start_failure_closes_refresher(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    class _Refresher:
+        project_id = "project-a"
+
+        def __init__(self) -> None:
+            self.close_calls = 0
+
+        def get_token(self) -> str:
+            return "token"
+
+        def start_auto_refresh(self) -> None:
+            raise RuntimeError("timer unavailable")
+
+        def close(self) -> None:
+            self.close_calls += 1
+
+    refresher = _Refresher()
+    config = tmp_path / "providers.yaml"
+    config.write_text(
+        """
+providers:
+  vertex_ai:
+    base_url: https://us-central1-aiplatform.googleapis.com
+    auth_type: gcp_service_account
+    extra_params:
+      project: project-a
+      location: us-central1
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        provider_loader,
+        "_load_google_credential_provider",
+        lambda _values: refresher,
+    )
+
+    with pytest.raises(RuntimeError, match="timer unavailable"):
+        load_provider_routes(str(config))
+
+    assert refresher.close_calls == 1
+
+
+def test_provider_route_validation_failure_closes_refresher(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    class _Refresher:
+        project_id = "credential-project"
+
+        def __init__(self) -> None:
+            self.close_calls = 0
+            self.start_calls = 0
+
+        def get_token(self) -> str:
+            return "token"
+
+        def start_auto_refresh(self) -> None:
+            self.start_calls += 1
+
+        def close(self) -> None:
+            self.close_calls += 1
+
+    refresher = _Refresher()
+    config = tmp_path / "providers.yaml"
+    config.write_text(
+        """
+providers:
+  vertex_ai:
+    base_url: https://us-central1-aiplatform.googleapis.com
+    auth_type: gcp_service_account
+    extra_params:
+      project: configured-project
+      location: us-central1
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        provider_loader,
+        "_load_google_credential_provider",
+        lambda _values: refresher,
+    )
+
+    with pytest.raises(ValueError, match="does not match"):
+        load_provider_routes(str(config))
+
+    assert refresher.start_calls == 0
+    assert refresher.close_calls == 1
 
 
 def test_vertex_static_access_token_is_not_accepted(

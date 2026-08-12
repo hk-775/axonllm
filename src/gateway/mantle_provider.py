@@ -37,13 +37,16 @@ Auth: SigV4 (bedrock service). All billing flows through the AWS account.
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 import json
-import urllib.request
+import math
+import ssl
 from typing import Awaitable, Callable
 
 import boto3
 from botocore.auth import SigV4Auth
 from botocore.awsrequest import AWSRequest
+import urllib3
 
 from src.gateway.adapters.anthropic_style import (
     openai_msg_to_anthropic,
@@ -59,11 +62,20 @@ from src.gateway.models import (
 from src.gateway.router import ProviderError
 
 _MANTLE_SERVICE = "bedrock"
+_MANTLE_HTTP = urllib3.PoolManager(
+    num_pools=10,
+    maxsize=100,
+    block=True,
+    ssl_context=ssl.create_default_context(),
+)
 
 _ANTHROPIC_PREFIXES = ("anthropic.",)
 # openai.* models split across two APIs: the frontier gpt-5.x line uses the
 # Responses API; open-weight openai.gpt-oss-* uses Chat Completions.
 _RESPONSES_PREFIXES = ("openai.gpt-5", "openai.gpt-4", "openai.o1", "openai.o3", "openai.o4")
+_MAX_MANTLE_RESPONSE_BYTES = 10 * 1024 * 1024
+_MANTLE_READ_CHUNK_BYTES = 64 * 1024
+_UNSUPPORTED_ROUTE_MESSAGE = "Mantle model is not supported on this route"
 
 
 def _is_anthropic_model(model_id: str) -> bool:
@@ -78,8 +90,37 @@ def _is_unsupported_route_error(exc: ProviderError) -> bool:
     """True when Mantle rejects a model for the chosen API path (not a real failure)."""
     msg = exc.message.lower()
     return exc.status_code == 400 and (
-        "does not support" in msg or "isn't supported on this route" in msg
+        msg == _UNSUPPORTED_ROUTE_MESSAGE.lower()
+        or "does not support" in msg
+        or "isn't supported on this route" in msg
     )
+
+
+def _mantle_http_error(status: int, data: object) -> ProviderError:
+    raw = data if isinstance(data, bytes) else str(data).encode(
+        "utf-8",
+        errors="replace",
+    )
+    bounded = raw[:64 * 1024].decode("utf-8", errors="replace").casefold()
+    if status == 400 and (
+        "does not support" in bounded
+        or "isn't supported on this route" in bounded
+    ):
+        message = _UNSUPPORTED_ROUTE_MESSAGE
+    else:
+        message = f"Mantle HTTP request failed with status {status}"
+    return ProviderError(status, "bedrock-mantle", message)
+
+
+def _validate_timeout(value: float, name: str) -> float:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        or value <= 0
+    ):
+        raise ValueError(f"{name} must be finite and greater than zero")
+    return float(value)
 
 
 # --- OpenAI ⇄ Responses API tool translation --------------------------------
@@ -212,8 +253,13 @@ def create_mantle_provider_fn(
     *,
     endpoint_url: str = "",
     credentials_config: dict[str, str] | None = None,
+    connect_timeout: float = 30.0,
+    read_timeout: float = 120.0,
 ) -> Callable[[ChatCompletionRequest], Callable[[ProviderModelMapping], Awaitable[ChatCompletionResponse]]]:
     """Return a factory that creates provider_fn callables for Bedrock Mantle."""
+    connect_timeout = _validate_timeout(connect_timeout, "connect_timeout")
+    read_timeout = _validate_timeout(read_timeout, "read_timeout")
+    request_deadline = connect_timeout + read_timeout
     credentials_config = credentials_config or {}
     session_kwargs: dict = {}
     if credentials_config.get("access_key") and credentials_config.get("secret_key"):
@@ -231,39 +277,122 @@ def create_mantle_provider_fn(
     def create(
         request: ChatCompletionRequest, prompt_caching_enabled: bool = False
     ) -> Callable[[ProviderModelMapping], Awaitable[ChatCompletionResponse]]:
-        async def provider_fn(mapping: ProviderModelMapping) -> ChatCompletionResponse:
+        async def _invoke(
+            mapping: ProviderModelMapping,
+        ) -> ChatCompletionResponse:
             model_id = mapping.model_id
-            try:
-                # Anthropic models always use the Messages API.
-                if _is_anthropic_model(model_id):
-                    return await _invoke_messages_api(
-                        credentials, endpoint, region, request, mapping,
-                    )
-                # Frontier GPT models use the Responses API; if Mantle reports
-                # the model isn't supported there, fall back to Chat Completions.
-                if _prefers_responses_api(model_id):
-                    try:
-                        return await _invoke_responses_api(
-                            credentials, endpoint, region, request, mapping,
-                        )
-                    except ProviderError as exc:
-                        if not _is_unsupported_route_error(exc):
-                            raise
-                # Everything else (gpt-oss, DeepSeek, Qwen, ...) uses Chat Completions.
-                return await _invoke_chat_completions_api(
-                    credentials, endpoint, region, request, mapping,
+            # Anthropic models always use the Messages API.
+            if _is_anthropic_model(model_id):
+                return await _invoke_messages_api(
+                    credentials,
+                    endpoint,
+                    region,
+                    request,
+                    mapping,
+                    connect_timeout=connect_timeout,
+                    read_timeout=read_timeout,
                 )
+            # Frontier GPT models use the Responses API; if Mantle reports
+            # the model isn't supported there, fall back to Chat Completions.
+            if _prefers_responses_api(model_id):
+                try:
+                    return await _invoke_responses_api(
+                        credentials,
+                        endpoint,
+                        region,
+                        request,
+                        mapping,
+                        connect_timeout=connect_timeout,
+                        read_timeout=read_timeout,
+                    )
+                except ProviderError as exc:
+                    if not _is_unsupported_route_error(exc):
+                        raise
+            # Everything else uses Chat Completions.
+            return await _invoke_chat_completions_api(
+                credentials,
+                endpoint,
+                region,
+                request,
+                mapping,
+                connect_timeout=connect_timeout,
+                read_timeout=read_timeout,
+            )
+
+        async def provider_fn(mapping: ProviderModelMapping) -> ChatCompletionResponse:
+            try:
+                async with asyncio.timeout(request_deadline):
+                    return await _invoke(mapping)
             except ProviderError:
                 raise
+            except TimeoutError as exc:
+                raise ProviderError(
+                    504,
+                    mapping.provider,
+                    "Bedrock Mantle request timed out",
+                ) from exc
+            except (
+                urllib3.exceptions.TimeoutError,
+                urllib3.exceptions.EmptyPoolError,
+            ) as exc:
+                raise ProviderError(
+                    504,
+                    mapping.provider,
+                    "Bedrock Mantle request timed out",
+                ) from exc
             except Exception as exc:
-                raise ProviderError(502, mapping.provider, f"Bedrock Mantle error: {exc}") from exc
+                raise ProviderError(
+                    502,
+                    mapping.provider,
+                    "Bedrock Mantle request failed",
+                ) from exc
 
         return provider_fn
 
     return create
 
 
-def _sigv4_request(credentials, region: str, url: str, body: str) -> dict:
+def _read_mantle_body(response: object) -> bytes:
+    body = bytearray()
+    read = getattr(response, "read", None)
+    if not callable(read):
+        raise ProviderError(
+            502,
+            "bedrock-mantle",
+            "Mantle returned an unreadable response",
+        )
+    while True:
+        chunk = read(
+            amt=_MANTLE_READ_CHUNK_BYTES,
+            decode_content=True,
+        )
+        if not chunk:
+            break
+        if not isinstance(chunk, bytes):
+            raise ProviderError(
+                502,
+                "bedrock-mantle",
+                "Mantle returned an unreadable response",
+            )
+        if len(body) + len(chunk) > _MAX_MANTLE_RESPONSE_BYTES:
+            raise ProviderError(
+                502,
+                "bedrock-mantle",
+                "Mantle response exceeded the maximum size",
+            )
+        body.extend(chunk)
+    return bytes(body)
+
+
+def _sigv4_request(
+    credentials,
+    region: str,
+    url: str,
+    body: str,
+    *,
+    connect_timeout: float = 30.0,
+    read_timeout: float = 120.0,
+) -> dict:
     """Make a SigV4-signed POST request and return parsed JSON."""
     aws_request = AWSRequest(method="POST", url=url, data=body, headers={
         "Content-Type": "application/json",
@@ -271,18 +400,47 @@ def _sigv4_request(credentials, region: str, url: str, body: str) -> dict:
     resolved_creds = credentials.get_frozen_credentials()
     SigV4Auth(resolved_creds, _MANTLE_SERVICE, region).add_auth(aws_request)
 
-    req = urllib.request.Request(
+    response = _MANTLE_HTTP.request(
+        "POST",
         url,
-        data=body.encode(),
+        body=body.encode(),
         headers=dict(aws_request.headers),
-        method="POST",
+        timeout=urllib3.Timeout(
+            connect=connect_timeout,
+            read=read_timeout,
+        ),
+        pool_timeout=connect_timeout,
+        retries=False,
+        preload_content=False,
     )
     try:
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            return json.loads(resp.read())
-    except urllib.error.HTTPError as e:
-        error_body = e.read().decode()
-        raise ProviderError(e.code, "bedrock-mantle", f"Mantle HTTP {e.code}: {error_body[:200]}") from None
+        response_data = _read_mantle_body(response)
+        if not 200 <= response.status < 300:
+            raise _mantle_http_error(response.status, response_data)
+        try:
+            value = json.loads(response_data)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ProviderError(
+                502,
+                "bedrock-mantle",
+                "Mantle returned malformed JSON",
+            ) from exc
+    finally:
+        release = getattr(response, "release_conn", None)
+        if callable(release):
+            with suppress(Exception):
+                release()
+        close = getattr(response, "close", None)
+        if callable(close):
+            with suppress(Exception):
+                close()
+    if not isinstance(value, dict):
+        raise ProviderError(
+            502,
+            "bedrock-mantle",
+            "Mantle returned a non-object response",
+        )
+    return value
 
 
 async def _invoke_responses_api(
@@ -291,6 +449,9 @@ async def _invoke_responses_api(
     region: str,
     request: ChatCompletionRequest,
     mapping: ProviderModelMapping,
+    *,
+    connect_timeout: float = 30.0,
+    read_timeout: float = 120.0,
 ) -> ChatCompletionResponse:
     """Call the OpenAI Responses API on Mantle for GPT models."""
     messages = list(request.messages)
@@ -337,7 +498,15 @@ async def _invoke_responses_api(
     url = f"{endpoint}/openai/v1/responses"
     body = json.dumps(payload)
 
-    response_data = await asyncio.to_thread(_sigv4_request, credentials, region, url, body)
+    response_data = await asyncio.to_thread(
+        _sigv4_request,
+        credentials,
+        region,
+        url,
+        body,
+        connect_timeout=connect_timeout,
+        read_timeout=read_timeout,
+    )
 
     output = response_data.get("output", [])
     text = ""
@@ -391,6 +560,9 @@ async def _invoke_messages_api(
     region: str,
     request: ChatCompletionRequest,
     mapping: ProviderModelMapping,
+    *,
+    connect_timeout: float = 30.0,
+    read_timeout: float = 120.0,
 ) -> ChatCompletionResponse:
     """Call the Anthropic Messages API on Mantle for Claude models."""
     messages = []
@@ -416,7 +588,7 @@ async def _invoke_messages_api(
         payload["temperature"] = request.temperature
     if request.top_p is not None:
         payload["top_p"] = request.top_p
-    if request.tools:
+    if request.tools and request.tool_choice != "none":
         payload["tools"] = [openai_tool_to_anthropic(t) for t in request.tools]
         tc = openai_tool_choice_to_anthropic(request.tool_choice)
         if tc is not None:
@@ -427,7 +599,15 @@ async def _invoke_messages_api(
     url = f"{endpoint}/anthropic/v1/messages"
     body = json.dumps(payload)
 
-    response_data = await asyncio.to_thread(_sigv4_request, credentials, region, url, body)
+    response_data = await asyncio.to_thread(
+        _sigv4_request,
+        credentials,
+        region,
+        url,
+        body,
+        connect_timeout=connect_timeout,
+        read_timeout=read_timeout,
+    )
 
     content_blocks = response_data.get("content", [])
     text = "".join(b.get("text", "") for b in content_blocks if b.get("type") == "text")
@@ -483,6 +663,9 @@ async def _invoke_chat_completions_api(
     region: str,
     request: ChatCompletionRequest,
     mapping: ProviderModelMapping,
+    *,
+    connect_timeout: float = 30.0,
+    read_timeout: float = 120.0,
 ) -> ChatCompletionResponse:
     """Call the OpenAI-compatible Chat Completions API on Mantle.
 
@@ -514,7 +697,15 @@ async def _invoke_chat_completions_api(
     url = f"{endpoint}/v1/chat/completions"
     body = json.dumps(payload)
 
-    response_data = await asyncio.to_thread(_sigv4_request, credentials, region, url, body)
+    response_data = await asyncio.to_thread(
+        _sigv4_request,
+        credentials,
+        region,
+        url,
+        body,
+        connect_timeout=connect_timeout,
+        read_timeout=read_timeout,
+    )
 
     choices = response_data.get("choices", [])
     first = choices[0] if choices else {}

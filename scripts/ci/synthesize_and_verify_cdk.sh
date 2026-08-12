@@ -33,10 +33,15 @@ mkdir -m 0700 "${out_dir}"
 verify_target() {
   local target=$1
   local stack_name=$2
+  local namespace=${3:-}
   local target_out="${out_dir}/${target}"
+  local context="{\"deployment_target\":\"${target}\",\"region\":\"us-east-1\"}"
+  if [[ -n "${namespace}" ]]; then
+    context="${context%?},\"deployment_namespace\":\"${namespace}\"}"
+  fi
 
   (
-    export CDK_CONTEXT_JSON="{\"deployment_target\":\"${target}\",\"region\":\"us-east-1\"}"
+    export CDK_CONTEXT_JSON="${context}"
     export CDK_OUTDIR="${target_out}"
     export JSII_RUNTIME_PACKAGE_CACHE_ROOT="${JSII_RUNTIME_PACKAGE_CACHE_ROOT:-${work_dir}/jsii-cache}"
     cd "${repo_root}/infra"
@@ -72,3 +77,4 @@ verify_target "agentcore" "AxonLLMAgentCoreStack"
 verify_target "identity" "AxonLLMIdentityStack"
 verify_target "control-plane" "AxonLLMControlPlaneStack"
 verify_target "release-foundation" "AxonLLMReleaseFoundationStack"
+verify_target "launch-workers" "AxonLLMLaunchWorkersStack-managed" "managed"

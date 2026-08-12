@@ -195,6 +195,16 @@ class _ExecutionTracker:
     start_attempted: bool = False
 
 
+async def _finish_shielded_task(task: asyncio.Task[Any]) -> Any:
+    """Wait for an owned thread/callback task despite caller cancellation."""
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            continue
+    return task.result()
+
+
 class AthenaClientFactory(Protocol):
     def __call__(
         self,
@@ -718,26 +728,60 @@ class AthenaExecutor:
         execution_id: str | None = None
         terminal = False
         try:
+            start_task: asyncio.Task[Any] | None = None
             try:
                 if tracker is not None:
                     tracker.start_attempted = True
-                started = await asyncio.to_thread(
-                    client.start_query_execution,
-                    QueryString=query.sql,
-                    QueryExecutionContext={
-                        "Catalog": datasource.catalog,
-                        "Database": datasource.database,
-                    },
-                    WorkGroup=datasource.workgroup,
-                    ClientRequestToken=_client_request_token(
-                        query,
-                        datasource,
-                        tenant_id=tenant_id,
-                        project_id=project_id,
-                        principal_id=principal_id,
-                        request_id=request_id,
-                    ),
+                start_task = asyncio.create_task(
+                    asyncio.to_thread(
+                        client.start_query_execution,
+                        QueryString=query.sql,
+                        QueryExecutionContext={
+                            "Catalog": datasource.catalog,
+                            "Database": datasource.database,
+                        },
+                        WorkGroup=datasource.workgroup,
+                        ClientRequestToken=_client_request_token(
+                            query,
+                            datasource,
+                            tenant_id=tenant_id,
+                            project_id=project_id,
+                            principal_id=principal_id,
+                            request_id=request_id,
+                        ),
+                    )
                 )
+                try:
+                    started = await asyncio.shield(start_task)
+                except asyncio.CancelledError:
+                    # The SDK thread cannot be cancelled. Keep ownership until it
+                    # returns so a created execution is identified, persisted,
+                    # and stopped before cancellation leaves this method.
+                    try:
+                        started = await _finish_shielded_task(start_task)
+                        execution_id = (
+                            started.get("QueryExecutionId")
+                            if isinstance(started, dict)
+                            else None
+                        )
+                        if (
+                            isinstance(execution_id, str)
+                            and execution_id
+                        ):
+                            if tracker is not None:
+                                tracker.query_execution_id = execution_id
+                            if on_started is not None:
+                                callback_task = asyncio.create_task(
+                                    on_started(execution_id)
+                                )
+                                await _finish_shielded_task(callback_task)
+                    except Exception:
+                        logger.warning(
+                            "Athena start result could not be captured during "
+                            "cancellation",
+                            exc_info=True,
+                        )
+                    raise
             except Exception as exc:
                 raise AthenaExecutionError(
                     "athena_start_failed",

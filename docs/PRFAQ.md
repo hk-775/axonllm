@@ -1,6 +1,6 @@
 # PRFAQ: AxonLLM Production and AgentCore
 
-> Working-backwards draft reconciled with the repository on 2026-08-11. This
+> Working-backwards draft reconciled with the repository on 2026-08-12. This
 > document describes implemented behavior; it is not a production certification.
 
 ## Press Release
@@ -12,8 +12,8 @@ configured LLM providers while applying model access, rate and budget controls,
 guardrails, caching, audit, and cost attribution. Its Starlette application
 includes chat, bounded Athena query, and an administrative control plane. A
 separate Amazon Bedrock AgentCore entrypoint exposes governed chat, model-list,
-and query actions through the same canonical query service. Managed-Cognito
-adopters also receive a dedicated shared-state Fargate control plane for tenant
+query, and tenant-project configuration actions. Managed-Cognito adopters also
+receive a dedicated shared-state Fargate control plane for broader tenant
 administration; it suppresses execution routes and has no Athena/STS authority.
 
 For shared deployments, canonical identity replaces token-supplied authority
@@ -55,10 +55,12 @@ A: The Starlette application exposes:
 - public `/health` liveness and `/ready` persistence/outbox readiness.
 
 The AgentCore application is separate. It exposes `chat`, `list_models`,
-optional `query`, and `health` invocation actions plus `GET /ready`. It does
-not mount the Starlette admin console or HTTP API. The managed-Cognito
-shared-state control plane is a separate Starlette Fargate process with
-`AXON_CONTROL_PLANE_ONLY=true`.
+optional `query`, `get_tenant_config`, `update_tenant_config`, `health`, and
+authenticated `readiness` invocation actions plus `GET /ready`. Tenant viewers
+can read project runtime settings; only `tenant_admin` can apply a
+revision-checked partial update. It does not mount the Starlette admin console
+or HTTP API. The managed-Cognito shared-state control plane is a separate
+Starlette Fargate process with `AXON_CONTROL_PLANE_ONLY=true`.
 
 **Q: What is the difference between single-user and multi-tenant mode?**
 
@@ -235,7 +237,7 @@ A:
 | Path | Current role |
 |---|---|
 | ECS Fargate CDK | Full Starlette surface; production mode adds ALB OIDC and canonical identity |
-| AgentCore CDK | Governed `chat`/`list_models`/optional `query` actions with private runtime infrastructure |
+| AgentCore CDK | Governed chat, model-list, optional query, tenant-project configuration, health, and readiness actions with private runtime infrastructure |
 | Managed-Cognito control-plane CDK | Shared-state tenant administration on private Fargate behind a Cognito HTTPS ALB; no execution routes or Athena/STS authority |
 | App Runner `deploy.sh` | Legacy reference path; lacks the canonical, private-network, digest-gate, backup, and readiness controls of the CDK stacks |
 | Docker / local | Development, testing, or a separately hardened self-hosted deployment |
@@ -355,16 +357,20 @@ A:
 - no wired `SessionManager` or AgentCore Memory;
 - no bootstrap action on the AgentCore invocation surface; the repository CLI
   can provision its DynamoDB table out of band;
-- external OIDC does not deploy the Cognito-authenticated web control plane;
+- external OIDC can manage project runtime configuration through AgentCore but
+  does not deploy the Cognito-authenticated web control plane needed for
+  broader tenant administration;
 - `/ready` does not validate datasource roles or Athena workgroups;
 - restored-table cutover requires the reviewed four-phase AgentCore selector,
   a separate recovery endpoint, full-session quiescence, coordinated
   control-plane shutdown, and authenticated canaries;
-- no automatic SNS alarm or security-event topic subscription;
+- AgentCore automatically requests and launch-verifies its administrator-email
+  alarm subscription; Fargate alarms and both stacks' tenant security-event
+  topics still require configured and tested receivers;
 - a synchronous bootstrap worker cannot be forcibly canceled by Python;
-- no image publication or deployment step in the evidence and verification
-  workflows; publication is a separate protected workflow and no workflow
-  deploys a runtime.
+- no image publication or runtime mutation in the release-evidence and
+  deployment-verification workflows; publication and the AgentCore production
+  launch are separate protected workflows.
 
 The checked-in `.bedrock_agentcore.yaml` is generated local state with public
 networking and no production JWT/header contract. `infra/agentcore_stack.py` is
@@ -382,19 +388,40 @@ private-ECR/KMS-signature run for both targets. It predates the query and
 shared control-plane implementation; a newer tagged run and deployed canaries
 are required before those capabilities can rely on release evidence.
 
+**Q: How is an AgentCore production launch gated?**
+
+A: `launch-agentcore-production.yml` is the only manual launch entry point. It
+binds the protected-main dispatch, release commit, release-evidence run, and
+both immutable images; certifies external OIDC in a disposable `external`
+namespace; updates and exercises an independently reviewed `managed`
+qualification namespace; runs seven launch domains through a versioned
+coordinator; and publishes signed rehearsal evidence. It then revokes
+qualification identities, stops exactly two workers, deletes all qualification
+stacks, and publishes a signed teardown receipt.
+
+Only after those steps succeed does the `workflow_call`-only production leaf
+verify the external schema-v3 report, detailed rehearsal report, and teardown
+receipt by exact S3 URI, VersionId, SHA-256, checksum, KMS signature,
+encryption, and COMPLIANCE retention. Final schema-v5 deployment evidence
+embeds the normalized prerequisite evidence. The managed gate config contains
+physical ARNs, so every launch requires a fresh pre-stage and independent
+review no more than 48 hours before rehearsal; teardown prevents reusing it.
+
 ### Release Governance
 
 **Q: What evidence is required for a release?**
 
 A: Green CI for the exact commit, a `v*` release ref, source/image scans, SBOMs,
 immutable image digests, verified KMS signatures, private ECR publication, a
-fresh remote scan, deployment approval, readiness, authorization canaries, alarm
-delivery, and recovery evidence. The release workflow creates evidence but does
-not publish or deploy. The separate protected publication workflow copies the
-verified OCI archives to immutable private ECR without rebuilding; no workflow
-deploys a runtime. `v0.2.4` completed the first tagged
-private-ECR/KMS-signature flow. A real hardened deployment and AWS restore
-exercise remain externally unverified.
+fresh remote scan, deployment approval, readiness, authorization canaries,
+alarm delivery, recovery evidence, external-OIDC certification, detailed
+launch-rehearsal evidence, and qualification-teardown evidence. The release
+workflow creates evidence but does not publish or deploy. The separate
+protected publication workflow copies the verified OCI archives to immutable
+private ECR without rebuilding. The protected AgentCore launch workflow is the
+only runtime deployment path. `v0.2.4` completed the first tagged
+private-ECR/KMS-signature flow; it does not contain the newer launch evidence. A
+real hardened deployment and AWS restore exercise remain externally unverified.
 
 **Q: How is release-signing key rotation kept rollback-safe?**
 

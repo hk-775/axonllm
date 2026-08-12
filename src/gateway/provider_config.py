@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Protocol
 
@@ -53,10 +54,22 @@ class ProviderConfig:
                     f"Must be one of: {', '.join(sorted(SUPPORTED_AUTH_TYPES))}"
                 ),
             )
+        for name, value in (
+            ("connect_timeout", self.connect_timeout),
+            ("read_timeout", self.read_timeout),
+            ("keepalive_timeout", self.keepalive_timeout),
+        ):
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+                or value <= 0
+            ):
+                raise ValueError(
+                    f"provider {name} must be finite and greater than zero"
+                )
         if self.max_connections <= 0 or self.max_connections_per_host <= 0:
             raise ValueError("provider connection limits must be greater than zero")
-        if self.keepalive_timeout <= 0:
-            raise ValueError("provider keepalive_timeout must be greater than zero")
 
 # ---------------------------------------------------------------------------
 # Authentication header generation
@@ -213,6 +226,19 @@ def _vertex_ai_url(config: ProviderConfig, mapping: ProviderModelMapping) -> str
     )
 
 
+def _vertex_ai_stream_url(
+    config: ProviderConfig,
+    mapping: ProviderModelMapping,
+) -> str:
+    project = config.extra_params.get("project", "")
+    location = config.extra_params.get("location", "")
+    return (
+        f"{config.base_url}/v1/projects/{project}/locations/{location}"
+        f"/publishers/google/models/{mapping.model_id}:streamGenerateContent"
+        "?alt=sse"
+    )
+
+
 def _cohere_url(config: ProviderConfig, mapping: ProviderModelMapping) -> str:
     return f"{config.base_url}/v1/chat"
 
@@ -266,6 +292,7 @@ def build_provider_url(config: ProviderConfig, mapping: ProviderModelMapping) ->
 
 _STREAM_URL_DISPATCH: dict[str, callable] = {
     "google_ai": _google_ai_stream_url,
+    "vertex_ai": _vertex_ai_stream_url,
 }
 
 

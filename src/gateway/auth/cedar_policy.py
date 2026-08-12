@@ -375,7 +375,7 @@ class CedarPolicyService:
                 self._tenant_sync_successes.get(tenant_id, 0)
                 > previous_successes
             )
-            if not initialized or (require_fresh and not synchronized):
+            if not initialized or not synchronized:
                 raise PolicyStoreUnavailable(
                     f"Policy authority is unavailable for tenant {tenant_id!r}"
                 )

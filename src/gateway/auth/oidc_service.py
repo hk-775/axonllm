@@ -277,7 +277,7 @@ class OIDCService:
         key: Any,
         algorithms: list[str],
         *,
-        audience: str | None = None,
+        audience: str | tuple[str, ...] | None = None,
         issuer: str | None = None,
         required_claims: tuple[str, ...] = (),
     ) -> dict | None:
@@ -296,20 +296,55 @@ class OIDCService:
             return None
 
         try:
+            multiple_audiences = (
+                audience if isinstance(audience, tuple) else None
+            )
             options = {
-                "verify_aud": audience is not None,
+                "verify_aud": (
+                    audience is not None
+                    and multiple_audiences is None
+                ),
                 "verify_iss": issuer is not None,
                 "verify_exp": True,
             }
-            options.update({f"require_{claim}": True for claim in required_claims})
-            return jose_jwt.decode(
+            options.update(
+                {
+                    f"require_{claim}": True
+                    for claim in required_claims
+                    if not (
+                        multiple_audiences is not None
+                        and claim == "aud"
+                    )
+                }
+            )
+            claims = jose_jwt.decode(
                 token,
                 key,
                 algorithms=algorithms,
-                audience=audience,
+                audience=(
+                    audience
+                    if isinstance(audience, str)
+                    else None
+                ),
                 issuer=issuer,
                 options=options,
             )
+            if multiple_audiences is not None:
+                token_audiences = claims.get("aud")
+                if isinstance(token_audiences, str):
+                    token_audiences = [token_audiences]
+                if (
+                    not isinstance(token_audiences, list)
+                    or any(
+                        not isinstance(value, str)
+                        for value in token_audiences
+                    )
+                    or set(token_audiences).isdisjoint(
+                        multiple_audiences
+                    )
+                ):
+                    return None
+            return claims
         except Exception:
             return None
 
@@ -675,7 +710,9 @@ class OIDCService:
         issuer = self._config.issuer
         return issuer if self._parse_safe_https_url(issuer) is not None else None
 
-    def _validated_oidc_audience(self) -> str | None:
+    def _validated_oidc_audience(
+        self,
+    ) -> str | tuple[str, ...] | None:
         audience = self._config.audience
         try:
             encoded_audience = audience.encode("utf-8")
@@ -689,7 +726,14 @@ class OIDCService:
             or any(not character.isprintable() or character.isspace() for character in audience)
         ):
             return None
-        return audience
+        audiences = tuple(audience.split(","))
+        if (
+            len(audiences) > 8
+            or any(not value for value in audiences)
+            or len(set(audiences)) != len(audiences)
+        ):
+            return None
+        return audiences[0] if len(audiences) == 1 else audiences
 
     @staticmethod
     def _valid_direct_oidc_token(token: Any) -> bool:

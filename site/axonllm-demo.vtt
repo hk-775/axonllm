@@ -10,11 +10,11 @@ AxonLLM is a control plane for that problem.
 
 3
 00:00:10.540 --> 00:00:16.048
-It fronts thirteen providers and forty-six models behind a single OpenAI-compatible endpoint.
+AxonLLM configures 51 models across thirteen provider adapters.
 
 4
 00:00:16.048 --> 00:00:19.010
-One wire format, whatever is answering underneath.
+Forty-six are production-price-ready with shipped pricing, all behind one OpenAI-compatible wire format.
 
 5
 00:00:19.010 --> 00:00:32.019
@@ -74,11 +74,11 @@ And this page is the one worth showing a sceptic.
 
 19
 00:01:49.803 --> 00:01:58.068
-Eight of 49 provider mappings have no price attached; requests routed to them bill at zero, so budgets and quota alerts quietly under-count.
+Five of 56 provider mappings lack verified prices, so production excludes them from routing.
 
 20
 00:01:58.068 --> 00:02:02.850
-Nothing errors — the gateway simply tells you, instead of letting it stay hidden.
+That leaves 46 of 51 configured models production-price-ready, and makes the gap visible.
 
 21
 00:02:02.850 --> 00:02:05.973

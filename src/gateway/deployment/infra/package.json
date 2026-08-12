@@ -1,0 +1,8 @@
+{
+  "name": "axonllm-agentcore-deployment",
+  "private": true,
+  "version": "0.2.5",
+  "dependencies": {
+    "aws-cdk": "2.1135.1"
+  }
+}

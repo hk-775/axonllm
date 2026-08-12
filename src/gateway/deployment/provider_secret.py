@@ -70,6 +70,17 @@ PROVIDER_REQUIRED_FIELDS = {
     ),
     "xai": ("XAI_API_KEY",),
 }
+PROVIDER_SECRET_FIELDS = {
+    **PROVIDER_REQUIRED_FIELDS,
+    "bedrock": (),
+    "bedrock-mantle": (),
+    "vertex_ai": (
+        "GCP_CREDENTIALS_JSON",
+        "GCP_LOCATION",
+        "GCP_PROJECT_ID",
+        "VERTEX_AI_ENDPOINT",
+    ),
+}
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _ENV_ASSIGNMENT = re.compile(r"^[A-Z_][A-Z0-9_]{0,127}$")
 
@@ -246,8 +257,13 @@ def collect_provider_secret(
 ) -> dict[str, str]:
     """Collect only approved fields and require credentials for enabled HTTP providers."""
     enabled = normalize_enabled_providers(enabled_providers)
+    selected_fields = {
+        field_name
+        for provider in enabled
+        for field_name in PROVIDER_SECRET_FIELDS[provider]
+    }
     values: dict[str, str] = {}
-    for field_name in ALLOWED_SECRET_FIELDS:
+    for field_name in sorted(selected_fields):
         value = environ.get(field_name)
         if value is None or value == "":
             continue
@@ -270,7 +286,11 @@ def collect_provider_secret(
     return values
 
 
-def _parse_current_secret(response: Mapping[str, Any]) -> tuple[dict[str, str], str]:
+def _parse_current_secret(
+    response: Mapping[str, Any],
+    *,
+    allow_bootstrap_placeholder: bool = False,
+) -> tuple[dict[str, str], str, bool]:
     version_id = response.get("VersionId")
     secret_string = response.get("SecretString")
     if not isinstance(version_id, str) or not version_id:
@@ -283,6 +303,14 @@ def _parse_current_secret(response: Mapping[str, Any]) -> tuple[dict[str, str], 
         raise ProviderSecretError("provider secret does not contain valid JSON") from exc
     if not isinstance(payload, dict):
         raise ProviderSecretError("provider secret must contain a JSON object")
+    unexpected = set(payload).difference(ALLOWED_SECRET_FIELDS)
+    bootstrap_placeholder = unexpected == {"placeholder"}
+    if unexpected and not (
+        allow_bootstrap_placeholder and bootstrap_placeholder
+    ):
+        raise ProviderSecretError(
+            "provider secret contains unsupported fields"
+        )
     current: dict[str, str] = {}
     for field_name in ALLOWED_SECRET_FIELDS:
         value = payload.get(field_name)
@@ -292,8 +320,8 @@ def _parse_current_secret(response: Mapping[str, Any]) -> tuple[dict[str, str], 
             raise ProviderSecretError(
                 f"provider secret field {field_name} is malformed"
             )
-        current[field_name] = value
-    return current, version_id
+        current[field_name] = _validated_value(field_name, value)
+    return current, version_id, bootstrap_placeholder
 
 
 def _serialized(values: Mapping[str, str]) -> str:
@@ -326,7 +354,14 @@ def synchronize_provider_secret(
             SecretId=secret_arn,
             VersionStage="AWSCURRENT",
         )
-        current, current_version = _parse_current_secret(current_response)
+        (
+            current,
+            current_version,
+            bootstrap_placeholder,
+        ) = _parse_current_secret(
+            current_response,
+            allow_bootstrap_placeholder=True,
+        )
     except ProviderSecretError:
         raise
     except Exception as exc:
@@ -335,7 +370,10 @@ def synchronize_provider_secret(
         ) from exc
 
     current_json = _serialized(current)
-    if hmac.compare_digest(current_json, desired_json):
+    if (
+        not bootstrap_placeholder
+        and hmac.compare_digest(current_json, desired_json)
+    ):
         return ProviderSecretVersion(
             secret_arn=secret_arn,
             version_id=current_version,
@@ -376,8 +414,12 @@ def rollback_provider_secret(
     *,
     secret_arn: str,
     version_id: str,
+    enabled_providers: tuple[str, ...] | list[str],
 ) -> ProviderSecretVersion:
     """Move AWSCURRENT to a reviewed prior version without reading its values."""
+    if not isinstance(secret_arn, str) or not secret_arn.startswith("arn:"):
+        raise ProviderSecretError("provider secret ARN is invalid")
+    enabled = normalize_enabled_providers(enabled_providers)
     if (
         not isinstance(version_id, str)
         or not version_id
@@ -406,6 +448,22 @@ def rollback_provider_secret(
                 "provider secret rollback version does not exist"
             )
         current_version = current_versions[0]
+        selected = client.get_secret_value(
+            SecretId=secret_arn,
+            VersionId=version_id,
+        )
+        values, selected_version, _ = _parse_current_secret(selected)
+        if selected_version != version_id:
+            raise ProviderSecretError(
+                "provider secret rollback version does not match the request"
+            )
+        selected_values = collect_provider_secret(values, enabled)
+        if selected_values != values:
+            raise ProviderSecretError(
+                "provider secret rollback version contains fields for "
+                "disabled providers"
+            )
+        values = selected_values
         if current_version != version_id:
             client.update_secret_version_stage(
                 SecretId=secret_arn,
@@ -413,11 +471,6 @@ def rollback_provider_secret(
                 MoveToVersionId=version_id,
                 RemoveFromVersionId=current_version,
             )
-        selected = client.get_secret_value(
-            SecretId=secret_arn,
-            VersionId=version_id,
-        )
-        values, selected_version = _parse_current_secret(selected)
     except ProviderSecretError:
         raise
     except Exception as exc:

@@ -7,6 +7,7 @@ import copy
 import hashlib
 import json
 import re
+import threading
 import time
 from collections.abc import Callable
 from typing import Any
@@ -373,6 +374,47 @@ async def test_lifecycle_start_failure_cancels_started_query() -> None:
     assert client.stop_calls == [
         {"QueryExecutionId": "execution-123"}
     ]
+
+
+async def test_cancellation_during_start_captures_and_stops_execution() -> None:
+    start_entered = threading.Event()
+    allow_start_return = threading.Event()
+    callback_ids: list[str] = []
+
+    class _BlockingStartClient(_AthenaClient):
+        def start_query_execution(
+            self,
+            **kwargs: Any,
+        ) -> dict[str, str]:
+            self.start_calls.append(kwargs)
+            start_entered.set()
+            assert allow_start_return.wait(timeout=2)
+            return {"QueryExecutionId": "execution-after-cancel"}
+
+        def stop_query_execution(self, **kwargs: Any) -> None:
+            assert callback_ids == ["execution-after-cancel"]
+            super().stop_query_execution(**kwargs)
+
+    async def on_started(execution_id: str) -> None:
+        callback_ids.append(execution_id)
+
+    client = _BlockingStartClient()
+    executor = AthenaExecutor(client_factory=_ClientFactory(client))
+    task = asyncio.create_task(
+        _execute(executor, on_started=on_started)
+    )
+    assert await asyncio.to_thread(start_entered.wait, 1)
+
+    task.cancel()
+    allow_start_return.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert callback_ids == ["execution-after-cancel"]
+    assert client.stop_calls == [
+        {"QueryExecutionId": "execution-after-cancel"}
+    ]
+    assert client.status_calls == []
 
 
 async def test_start_transport_failure_is_marked_accounting_ambiguous() -> None:

@@ -209,12 +209,9 @@ def _verify_vertex(payload: dict, request: ChatCompletionRequest) -> None:
     else:
         assert "stopSequences" not in gen_config
 
-    # stream is unsupported — should produce a warning
-    if request.stream:
-        warnings = payload.get("_warnings", [])
-        assert any("stream" in w.lower() for w in warnings), (
-            f"Expected stream warning for Vertex AI, got: {warnings}"
-        )
+    # Vertex selects streaming through the endpoint, not a body parameter.
+    assert "stream" not in payload
+    assert "_warnings" not in payload
 
 
 def _verify_cohere(payload: dict, request: ChatCompletionRequest) -> None:
@@ -247,12 +244,10 @@ def _verify_cohere(payload: dict, request: ChatCompletionRequest) -> None:
     else:
         assert "stop_sequences" not in payload
 
-    # stream is unsupported — should produce a warning
     if request.stream:
-        warnings = payload.get("_warnings", [])
-        assert any("stream" in w.lower() for w in warnings), (
-            f"Expected stream warning for Cohere, got: {warnings}"
-        )
+        assert payload["stream"] is True
+    else:
+        assert "stream" not in payload
 
 
 # Map adapter class to its verification function
@@ -289,11 +284,15 @@ def test_request_normalization_preserves_parameters(request):
         for adapter in ALL_ADAPTERS:
             payload = loop.run_until_complete(adapter.translate_request(request))
 
-            # The model field should always be present
-            assert payload.get("model") == request.model, (
-                f"{type(adapter).__name__}: model mismatch — "
-                f"expected '{request.model}', got '{payload.get('model')}'"
-            )
+            # Vertex carries the model in the endpoint URL. Other adapters put
+            # it in the body.
+            if isinstance(adapter, VertexAIAdapter):
+                assert "model" not in payload
+            else:
+                assert payload.get("model") == request.model, (
+                    f"{type(adapter).__name__}: model mismatch - "
+                    f"expected '{request.model}', got '{payload.get('model')}'"
+                )
 
             # Run adapter-specific verification
             verifier = _VERIFIERS[type(adapter)]

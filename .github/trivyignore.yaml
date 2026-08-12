@@ -14,8 +14,14 @@ misconfigurations:
     paths:
       - AxonLLMStack.template.json
       - AxonLLMControlPlaneStack.template.json
+      - AxonLLMLaunchWorkersStack-managed.template.json
     statement: The task volume is ephemeral Fargate scratch storage mounted at /tmp; no EFSVolumeConfiguration exists, so EFS transit encryption does not apply.
     expired_at: "2027-08-07T00:00:00Z"
+  - id: AWS-0036
+    paths:
+      - AxonLLMLaunchWorkersStack-managed.template.json
+    statement: The environment value is an exact Secrets Manager ARN used to fetch credentials at runtime; secret material is never placed in the task environment.
+    expired_at: "2027-08-12T00:00:00Z"
   - id: AWS-0053
     paths:
       - AxonLLMControlPlaneStack.template.json

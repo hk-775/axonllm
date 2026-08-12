@@ -672,3 +672,32 @@ class TestTenantQualifiedPolicyRefresh:
             )
         assert persistence.version_reads == ["tenant-a"]
         assert "tenant-a" not in svc._initialized_tenants
+
+    def test_due_version_read_failure_after_initial_sync_is_unavailable(self):
+        persistence = _TenantPolicyPersistence()
+        svc = CedarPolicyService([], persistence=persistence)
+        tenant_a = _ctx(roles=["junior"], tenant="tenant-a")
+
+        assert _run(svc.evaluate(tenant_a, "post", "/api/chat")) == "DENY"
+        persistence.versions["tenant-a"] = None
+        svc.invalidate_scope("tenant-a")
+
+        with pytest.raises(PolicyStoreUnavailable):
+            _run(svc.evaluate(tenant_a, "post", "/api/chat"))
+        assert persistence.version_reads == ["tenant-a", "tenant-a"]
+        assert persistence.policy_loads == ["tenant-a"]
+
+    def test_due_policy_load_failure_after_initial_sync_is_unavailable(self):
+        persistence = _TenantPolicyPersistence()
+        svc = CedarPolicyService([], persistence=persistence)
+        tenant_a = _ctx(roles=["junior"], tenant="tenant-a")
+
+        assert _run(svc.evaluate(tenant_a, "post", "/api/chat")) == "DENY"
+        persistence.versions["tenant-a"] = 2
+        persistence.policies["tenant-a"] = None
+        svc.invalidate_scope("tenant-a")
+
+        with pytest.raises(PolicyStoreUnavailable):
+            _run(svc.evaluate(tenant_a, "post", "/api/chat"))
+        assert persistence.version_reads == ["tenant-a", "tenant-a"]
+        assert persistence.policy_loads == ["tenant-a", "tenant-a"]

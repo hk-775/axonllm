@@ -1,5 +1,6 @@
 """Production Bedrock AgentCore deployment for the AxonLLM agent entrypoint."""
 
+import hashlib
 import json
 import math
 import re
@@ -30,6 +31,7 @@ from aws_cdk import (
     aws_logs as logs,
     aws_secretsmanager as secretsmanager,
     aws_sns as sns,
+    aws_sns_subscriptions as sns_subscriptions,
     aws_sqs as sqs,
 )
 from constructs import Construct
@@ -78,6 +80,13 @@ _RUNTIME_DYNAMODB_ACTIONS = [
     *_RUNTIME_DYNAMODB_STANDARD_ACTIONS,
     *_RUNTIME_DYNAMODB_TRANSACTION_ACTIONS,
 ]
+_RUNTIME_SQS_ACTIONS = [
+    "sqs:ChangeMessageVisibility",
+    "sqs:DeleteMessage",
+    "sqs:GetQueueAttributes",
+    "sqs:ReceiveMessage",
+    "sqs:SendMessage",
+]
 _AGENTCORE_ENABLED_PROVIDERS = ",".join(
     (
         "bedrock",
@@ -92,7 +101,6 @@ _AGENTCORE_ENABLED_PROVIDERS = ",".join(
         "groq",
         "together",
         "fireworks",
-        "ai21",
     )
 )
 _PROVIDER_SECRET_FIELDS = (
@@ -318,6 +326,12 @@ def _assert_control_plane_recovery_state(
             previous["SelectedTable"],
             previous["ApprovalId"],
         )
+    elif transition == ("validation", "normal"):
+        expected = (
+            "selected",
+            selected,
+            approval,
+        )
     elif transition == ("quiesced", "normal"):
         expected = (
             "quiesced",
@@ -518,6 +532,46 @@ class AthenaInfrastructureConfig:
     @property
     def enabled(self) -> bool:
         return bool(self.role_arns)
+
+    def fingerprint(self) -> str:
+        """Bind shared Athena IAM, endpoint, and runtime configuration."""
+        values: dict[str, object] = {"enabled": self.enabled}
+        if self.enabled:
+            values.update(
+                {
+                    "athena_query_bindings": self.bindings_json,
+                    "athena_query_max_bytes_scanned": self.max_bytes_scanned,
+                    "athena_query_max_datasources_per_tenant": (
+                        self.max_datasources_per_tenant
+                    ),
+                    "athena_query_max_result_bytes": self.max_result_bytes,
+                    "athena_query_max_rows": self.max_rows,
+                    "athena_query_poll_interval_seconds": (
+                        self.poll_interval_seconds
+                    ),
+                    "athena_query_principal_concurrency": (
+                        self.principal_concurrency
+                    ),
+                    "athena_query_principal_rpm": self.principal_rpm,
+                    "athena_query_principal_scan_bytes_per_minute": (
+                        self.principal_scan_bytes_per_minute
+                    ),
+                    "athena_query_project_concurrency": (
+                        self.project_concurrency
+                    ),
+                    "athena_query_project_rpm": self.project_rpm,
+                    "athena_query_project_scan_bytes_per_minute": (
+                        self.project_scan_bytes_per_minute
+                    ),
+                    "athena_query_timeout_seconds": self.timeout_seconds,
+                }
+            )
+        encoded = json.dumps(
+            values,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
 
     def environment(self) -> dict[str, str]:
         return {
@@ -809,10 +863,52 @@ class AxonLLMAgentCoreStack(Stack):
         self,
         scope: Construct,
         construct_id: str,
+        *,
+        deployment_namespace: str = "",
         **kwargs,
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
+        physical_suffix = (
+            f"-{deployment_namespace}" if deployment_namespace else ""
+        )
+        removal_policy = (
+            RemovalPolicy.DESTROY
+            if deployment_namespace
+            else RemovalPolicy.RETAIN
+        )
+        deletion_protection = not bool(deployment_namespace)
+        runtime_suffix = deployment_namespace.replace("-", "_")
+        runtime_name = (
+            f"axonllm_{runtime_suffix}"
+            if runtime_suffix
+            else "axonllm"
+        )
+        control_plane_stack_name = (
+            f"AxonLLMControlPlaneStack{physical_suffix}"
+        )
         query_config = load_athena_infrastructure_config(self)
+        rehearsal_control_table_arn = (
+            CfnParameter(
+                self,
+                "RehearsalControlTableArn",
+                type="String",
+                allowed_pattern=(
+                    rf"^arn:aws:dynamodb:{re.escape(self.region)}:"
+                    rf"{('[0-9]{12}' if Token.is_unresolved(self.account) else re.escape(self.account))}:"
+                    r"table/axonllm-rehearsal-control-ledger$"
+                ),
+                constraint_description=(
+                    "must be the retained rehearsal-control ledger ARN in "
+                    "this stack's AWS region and account"
+                ),
+                description=(
+                    "Exact retained rehearsal-control ledger ARN used only "
+                    "by an isolated qualification runtime"
+                ),
+            )
+            if deployment_namespace
+            else None
+        )
 
         oidc_issuer = CfnParameter(
             self,
@@ -832,19 +928,19 @@ class AxonLLMAgentCoreStack(Stack):
             ),
             description="OIDC discovery URL used by the AgentCore JWT authorizer",
         )
-        oidc_client_id = CfnParameter(
+        oidc_client_ids = CfnParameter(
             self,
-            "OidcClientId",
-            type="String",
-            min_length=1,
-            description="OIDC client ID allowed to invoke the runtime",
+            "OidcClientIds",
+            type="CommaDelimitedList",
+            allowed_pattern=r"^[^\s,]+$",
+            description="OIDC client IDs allowed to invoke the runtime",
         )
-        oidc_audience = CfnParameter(
+        oidc_audiences = CfnParameter(
             self,
-            "OidcAudience",
-            type="String",
-            min_length=1,
-            description="OIDC audience allowed to invoke the runtime",
+            "OidcAudiences",
+            type="CommaDelimitedList",
+            allowed_pattern=r"^[^\s,]+$",
+            description="OIDC audiences allowed to invoke the runtime",
         )
         oidc_tenant_claim = CfnParameter(
             self,
@@ -948,15 +1044,67 @@ class AxonLLMAgentCoreStack(Stack):
                 "revision; changing it forces a fresh runtime version"
             ),
         )
-        publish_runtime_endpoint = CfnParameter(
+        alarm_notification_email = CfnParameter(
             self,
-            "PublishRuntimeEndpoint",
+            "AlarmNotificationEmail",
+            type="String",
+            min_length=3,
+            max_length=320,
+            allowed_pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$",
+            constraint_description="must be a valid notification email",
+            description=(
+                "Required confirmed destination for production alarms"
+            ),
+        )
+        candidate_endpoint_name = CfnParameter(
+            self,
+            "CandidateEndpointName",
+            type="String",
+            min_length=42,
+            max_length=42,
+            allowed_pattern=r"^candidate_[0-9a-f]{32}$",
+            constraint_description=(
+                "must be a fresh high-entropy candidate endpoint name"
+            ),
+            description=(
+                "Unpredictable endpoint qualifier generated for this "
+                "certification deployment"
+            ),
+        )
+        publish_candidate_endpoint = CfnParameter(
+            self,
+            "PublishCandidateEndpoint",
             type="String",
             default="true",
             allowed_values=["true", "false"],
             description=(
-                "Publish the production endpoint only after provider "
-                "credentials have been synchronized"
+                "Publish the candidate endpoint for the current runtime "
+                "version after provider credentials have been synchronized"
+            ),
+        )
+        publish_production_endpoint = CfnParameter(
+            self,
+            "PublishProductionEndpoint",
+            type="String",
+            default="false",
+            allowed_values=["true", "false"],
+            description=(
+                "Publish the production endpoint only for an explicitly "
+                "certified runtime version"
+            ),
+        )
+        production_runtime_version = CfnParameter(
+            self,
+            "ProductionRuntimeVersion",
+            type="String",
+            default="",
+            max_length=32,
+            allowed_pattern=r"^$|^[1-9][0-9]{0,31}$",
+            constraint_description=(
+                "must be empty or an exact positive AgentCore runtime version"
+            ),
+            description=(
+                "Exact certified runtime version targeted by production"
             ),
         )
         image_account_id = Fn.select(
@@ -1141,10 +1289,10 @@ class AxonLLMAgentCoreStack(Stack):
         data_key = kms.Key(
             self,
             "DataKey",
-            alias="alias/axonllm/agentcore-data",
+            alias=f"alias/axonllm/agentcore-data{physical_suffix}",
             description="Encrypts AxonLLM AgentCore state and logs",
             enable_key_rotation=True,
-            removal_policy=RemovalPolicy.RETAIN,
+            removal_policy=removal_policy,
             pending_window=Duration.days(30),
         )
         data_key.add_to_resource_policy(
@@ -1196,7 +1344,7 @@ class AxonLLMAgentCoreStack(Stack):
                 ),
                 generate_string_key="placeholder",
             ),
-            removal_policy=RemovalPolicy.RETAIN,
+            removal_policy=removal_policy,
         )
         secrets_endpoint = vpc.add_interface_endpoint(
             "SecretsManagerEndpoint",
@@ -1220,7 +1368,7 @@ class AxonLLMAgentCoreStack(Stack):
         )
         state_table_name = (
             self.node.try_get_context("agentcore_table_name")
-            or "axonllm-agentcore-state"
+            or f"axonllm-agentcore-state{physical_suffix}"
         )
         restore_table_marker = "-restore-validation-"
         restore_table_suffix_limit = (
@@ -1303,7 +1451,27 @@ class AxonLLMAgentCoreStack(Stack):
                     "normal",
                 ),
                 Fn.condition_equals(
-                    publish_runtime_endpoint.value_as_string,
+                    publish_production_endpoint.value_as_string,
+                    "true",
+                ),
+                Fn.condition_not(
+                    Fn.condition_equals(
+                        production_runtime_version.value_as_string,
+                        "",
+                    )
+                ),
+            ),
+        )
+        candidate_endpoint_enabled = CfnCondition(
+            self,
+            "CandidateEndpointEnabled",
+            expression=Fn.condition_and(
+                Fn.condition_equals(
+                    recovery_cutover_mode.value_as_string,
+                    "normal",
+                ),
+                Fn.condition_equals(
+                    publish_candidate_endpoint.value_as_string,
                     "true",
                 ),
             ),
@@ -1355,14 +1523,14 @@ class AxonLLMAgentCoreStack(Stack):
             billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
             encryption=dynamodb.TableEncryption.CUSTOMER_MANAGED,
             encryption_key=data_key,
-            deletion_protection=True,
+            deletion_protection=deletion_protection,
             point_in_time_recovery_specification=(
                 dynamodb.PointInTimeRecoverySpecification(
                     point_in_time_recovery_enabled=True
                 )
             ),
             time_to_live_attribute="expires_at",
-            removal_policy=RemovalPolicy.RETAIN,
+            removal_policy=removal_policy,
         )
         selected_state_table_name = Token.as_string(
             Fn.condition_if(
@@ -1385,7 +1553,7 @@ class AxonLLMAgentCoreStack(Stack):
             encryption_master_key=data_key,
             enforce_ssl=True,
             retention_period=Duration.days(14),
-            removal_policy=RemovalPolicy.RETAIN,
+            removal_policy=removal_policy,
         )
         event_outbox_queue = sqs.Queue(
             self,
@@ -1402,7 +1570,7 @@ class AxonLLMAgentCoreStack(Stack):
                 max_receive_count=5,
                 queue=event_dead_letter_queue,
             ),
-            removal_policy=RemovalPolicy.RETAIN,
+            removal_policy=removal_policy,
         )
         security_event_topic = sns.Topic(
             self,
@@ -1418,14 +1586,15 @@ class AxonLLMAgentCoreStack(Stack):
             "SecurityEventLogGroup",
             encryption_key=data_key,
             retention=logs.RetentionDays.ONE_YEAR,
-            removal_policy=RemovalPolicy.RETAIN,
+            removal_policy=removal_policy,
         )
-        logs.LogStream(
+        security_event_log_stream = logs.LogStream(
             self,
             "SecurityEventLogStream",
             log_group=security_event_log_group,
             log_stream_name="events",
         )
+        security_event_log_stream.apply_removal_policy(removal_policy)
         sqs_endpoint = vpc.add_interface_endpoint(
             "SqsEndpoint",
             service=ec2.InterfaceVpcEndpointAwsService.SQS,
@@ -1525,10 +1694,10 @@ class AxonLLMAgentCoreStack(Stack):
         backup_key = kms.Key(
             self,
             "BackupKey",
-            alias="alias/axonllm/agentcore-backups",
+            alias=f"alias/axonllm/agentcore-backups{physical_suffix}",
             description="Encrypts scheduled AxonLLM AgentCore backups",
             enable_key_rotation=True,
-            removal_policy=RemovalPolicy.RETAIN,
+            removal_policy=removal_policy,
             pending_window=Duration.days(30),
         )
         backup_vault = backup.BackupVault(
@@ -1542,11 +1711,73 @@ class AxonLLMAgentCoreStack(Stack):
                 ],
             ),
             encryption_key=backup_key,
-            lock_configuration=backup.LockConfiguration(
-                min_retention=Duration.days(30),
-                max_retention=Duration.days(365),
+            block_recovery_point_deletion=(
+                False if deployment_namespace else None
             ),
-            removal_policy=RemovalPolicy.RETAIN,
+            lock_configuration=(
+                None
+                if deployment_namespace
+                else backup.LockConfiguration(
+                    min_retention=Duration.days(30),
+                    max_retention=Duration.days(365),
+                )
+            ),
+            removal_policy=removal_policy,
+        )
+        backup_service_role = iam.Role(
+            self,
+            "StateBackupServiceRole",
+            assumed_by=iam.ServicePrincipal(
+                "backup.amazonaws.com",
+                conditions={
+                    "StringEquals": {
+                        "aws:SourceAccount": self.account,
+                    }
+                },
+            ),
+            description=(
+                "AWS Backup service role scoped to AxonLLM AgentCore state"
+            ),
+        )
+        backup_table_arns = [
+            state_table.table_arn,
+            self.format_arn(
+                service="dynamodb",
+                resource="table",
+                resource_name=(
+                    f"{state_table_name}-restore-validation-*"
+                ),
+            ),
+        ]
+        backup_service_role.add_to_policy(
+            iam.PolicyStatement(
+                sid="BackUpAxonLLMStateTables",
+                actions=[
+                    "dynamodb:DescribeContinuousBackups",
+                    "dynamodb:DescribeTable",
+                    "dynamodb:ListTagsOfResource",
+                    "dynamodb:StartAwsBackupJob",
+                ],
+                resources=backup_table_arns,
+            )
+        )
+        backup_service_role.add_to_policy(
+            iam.PolicyStatement(
+                sid="UseAxonLLMStateKeyThroughDynamoDB",
+                actions=[
+                    "kms:Decrypt",
+                    "kms:GenerateDataKey*",
+                ],
+                resources=[data_key.key_arn],
+                conditions={
+                    "StringEquals": {
+                        "kms:CallerAccount": self.account,
+                        "kms:ViaService": (
+                            f"dynamodb.{self.region}.{self.url_suffix}"
+                        ),
+                    }
+                },
+            )
         )
         backup_plan = backup.BackupPlan(
             self,
@@ -1570,15 +1801,29 @@ class AxonLLMAgentCoreStack(Stack):
                 },
             )
         )
-        backup_plan.add_selection(
+        backup.CfnBackupSelection(
+            self,
             "StateTableSelection",
-            resources=[backup.BackupResource.from_dynamo_db_table(state_table)],
-            allow_restores=True,
+            backup_plan_id=backup_plan.backup_plan_id,
+            backup_selection=(
+                backup.CfnBackupSelection
+                .BackupSelectionResourceTypeProperty(
+                    iam_role_arn=backup_service_role.role_arn,
+                    selection_name="StateTableSelection",
+                    resources=[state_table.table_arn],
+                )
+            ),
         )
-        recovered_backup_selection = backup_plan.add_selection(
+        recovered_backup_selection = backup.CfnBackupSelection(
+            self,
             "RecoveredStateTableSelection",
-            resources=[
-                backup.BackupResource.from_arn(
+            backup_plan_id=backup_plan.backup_plan_id,
+            backup_selection=(
+                backup.CfnBackupSelection
+                .BackupSelectionResourceTypeProperty(
+                    iam_role_arn=backup_service_role.role_arn,
+                    selection_name="RecoveredStateTableSelection",
+                    resources=[
                     self.format_arn(
                         service="dynamodb",
                         resource="table",
@@ -1586,27 +1831,27 @@ class AxonLLMAgentCoreStack(Stack):
                             runtime_state_table_name.value_as_string
                         ),
                     )
+                    ],
                 )
-            ],
-            allow_restores=True,
+            ),
         )
-        for child in recovered_backup_selection.node.find_all():
-            if isinstance(child, CfnResource):
-                child.cfn_options.condition = use_recovered_state
+        recovered_backup_selection.cfn_options.condition = (
+            use_recovered_state
+        )
 
         application_logs = logs.LogGroup(
             self,
             "ApplicationLogs",
             encryption_key=data_key,
             retention=logs.RetentionDays.ONE_YEAR,
-            removal_policy=RemovalPolicy.RETAIN,
+            removal_policy=removal_policy,
         )
         usage_logs = logs.LogGroup(
             self,
             "UsageLogs",
             encryption_key=data_key,
             retention=logs.RetentionDays.ONE_YEAR,
-            removal_policy=RemovalPolicy.RETAIN,
+            removal_policy=removal_policy,
         )
 
         runtime_execution_role = iam.Role(
@@ -1614,7 +1859,15 @@ class AxonLLMAgentCoreStack(Stack):
             "RuntimeExecutionRole",
             role_name=Fn.join(
                 "-",
-                ["axonllm-agentcore-runtime", self.region],
+                [
+                    "axonllm-agentcore-runtime",
+                    *(
+                        [deployment_namespace]
+                        if deployment_namespace
+                        else []
+                    ),
+                    self.region,
+                ],
             ),
             assumed_by=iam.ServicePrincipal(
                 "bedrock-agentcore.amazonaws.com",
@@ -1625,7 +1878,8 @@ class AxonLLMAgentCoreStack(Stack):
                     "ArnLike": {
                         "aws:SourceArn": (
                             f"arn:{self.partition}:bedrock-agentcore:"
-                            f"{self.region}:{self.account}:runtime/axonllm*"
+                            f"{self.region}:{self.account}:"
+                            f"runtime/{runtime_name}*"
                         )
                     },
                 },
@@ -1643,32 +1897,32 @@ class AxonLLMAgentCoreStack(Stack):
                 Fn.select(2, Fn.split("/", self.stack_id)),
             ],
         )
-        selected_oidc_client_id = Token.as_string(
+        selected_oidc_client_ids = Token.as_list(
             Fn.condition_if(
                 recovery_access_blocked.logical_id,
-                blocked_authorizer_value,
-                oidc_client_id.value_as_string,
+                [blocked_authorizer_value],
+                oidc_client_ids.value_as_list,
             )
         )
-        selected_oidc_audience = Token.as_string(
+        selected_oidc_audiences = Token.as_list(
             Fn.condition_if(
                 recovery_access_blocked.logical_id,
-                blocked_authorizer_value,
-                oidc_audience.value_as_string,
+                [blocked_authorizer_value],
+                oidc_audiences.value_as_list,
             )
         )
         runtime = agentcore.Runtime(
             self,
             "Runtime",
-            runtime_name="axonllm",
+            runtime_name=runtime_name,
             description="Tenant-isolated AxonLLM production runtime",
             agent_runtime_artifact=runtime_artifact,
             execution_role=runtime_execution_role,
             authorizer_configuration=(
                 agentcore.RuntimeAuthorizerConfiguration.using_jwt(
                     oidc_discovery_url.value_as_string,
-                    [selected_oidc_client_id],
-                    [selected_oidc_audience],
+                    selected_oidc_client_ids,
+                    selected_oidc_audiences,
                 )
             ),
             environment_variables={
@@ -1688,7 +1942,10 @@ class AxonLLMAgentCoreStack(Stack):
                 "AXON_DEPLOYMENT_PROFILE": "production",
                 "AXON_LOAD_DEMO_DATA": "false",
                 "AXON_OIDC_ISSUER": oidc_issuer.value_as_string,
-                "AXON_OIDC_AUDIENCE": oidc_audience.value_as_string,
+                "AXON_OIDC_AUDIENCE": Fn.join(
+                    ",",
+                    oidc_audiences.value_as_list,
+                ),
                 "AXON_OIDC_TENANT_CLAIM": (
                     oidc_tenant_claim.value_as_string
                 ),
@@ -1702,6 +1959,16 @@ class AxonLLMAgentCoreStack(Stack):
                 "AXON_PROVIDER_SECRET_ARN": provider_secret.secret_arn,
                 "AXON_PROVIDER_SECRET_VERSION": (
                     provider_secret_version.value_as_string
+                ),
+                **(
+                    {
+                        "AXON_LAUNCH_REHEARSAL_TABLE": (
+                            rehearsal_control_table_arn.value_as_string
+                        ),
+                        "AXON_LAUNCH_REHEARSAL_ALLOW_PROCESS_EXIT": "true",
+                    }
+                    if rehearsal_control_table_arn is not None
+                    else {}
                 ),
                 **query_config.environment(),
             },
@@ -1771,6 +2038,31 @@ class AxonLLMAgentCoreStack(Stack):
                 ],
             )
         )
+        if rehearsal_control_table_arn is not None:
+            runtime.add_to_role_policy(
+                iam.PolicyStatement(
+                    sid="UseLaunchRehearsalControlLedger",
+                    actions=[
+                        "dynamodb:GetItem",
+                        "dynamodb:PutItem",
+                    ],
+                    resources=[
+                        rehearsal_control_table_arn.value_as_string
+                    ],
+                )
+            )
+            dynamodb_endpoint.add_to_policy(
+                iam.PolicyStatement(
+                    principals=[runtime.role],
+                    actions=[
+                        "dynamodb:GetItem",
+                        "dynamodb:PutItem",
+                    ],
+                    resources=[
+                        rehearsal_control_table_arn.value_as_string
+                    ],
+                )
+            )
         transaction_policy = iam.Policy(
             self,
             "RuntimeDynamoTransactionPolicy",
@@ -1794,10 +2086,78 @@ class AxonLLMAgentCoreStack(Stack):
             "cfn-lint",
             {"config": {"ignore_checks": ["W3037"]}},
         )
-        provider_secret.grant_read(runtime.role)
-        event_outbox_queue.grant_send_messages(runtime.role)
-        event_outbox_queue.grant_consume_messages(runtime.role)
-        security_event_topic.grant_publish(runtime.role)
+        runtime.add_to_role_policy(
+            iam.PolicyStatement(
+                sid="ReadProviderCredentials",
+                actions=[
+                    "secretsmanager:DescribeSecret",
+                    "secretsmanager:GetSecretValue",
+                ],
+                resources=[provider_secret.secret_arn],
+            )
+        )
+        runtime.add_to_role_policy(
+            iam.PolicyStatement(
+                sid="DecryptProviderCredentials",
+                actions=["kms:Decrypt"],
+                resources=[data_key.key_arn],
+                conditions={
+                    "StringEquals": {
+                        "kms:CallerAccount": self.account,
+                        "kms:ViaService": (
+                            f"secretsmanager.{self.region}.{self.url_suffix}"
+                        ),
+                    }
+                },
+            )
+        )
+        runtime.add_to_role_policy(
+            iam.PolicyStatement(
+                sid="UseSecurityEventOutbox",
+                actions=_RUNTIME_SQS_ACTIONS,
+                resources=[event_outbox_queue.queue_arn],
+            )
+        )
+        runtime.add_to_role_policy(
+            iam.PolicyStatement(
+                sid="UseSecurityEventOutboxKey",
+                actions=["kms:Decrypt", "kms:GenerateDataKey*"],
+                resources=[data_key.key_arn],
+                conditions={
+                    "StringEquals": {
+                        "kms:CallerAccount": self.account,
+                        "kms:ViaService": (
+                            f"sqs.{self.region}.{self.url_suffix}"
+                        ),
+                    }
+                },
+            )
+        )
+        runtime.add_to_role_policy(
+            iam.PolicyStatement(
+                sid="PublishSecurityEvents",
+                actions=["sns:Publish"],
+                resources=[security_event_topic.topic_arn],
+            )
+        )
+        runtime.add_to_role_policy(
+            iam.PolicyStatement(
+                sid="UseSecurityEventTopicKey",
+                actions=["kms:Decrypt", "kms:GenerateDataKey*"],
+                resources=[data_key.key_arn],
+                conditions={
+                    "StringEquals": {
+                        "kms:CallerAccount": self.account,
+                        "kms:ViaService": (
+                            f"sns.{self.region}.{self.url_suffix}"
+                        ),
+                        "kms:EncryptionContext:aws:sns:topicArn": (
+                            security_event_topic.topic_arn
+                        ),
+                    }
+                },
+            )
+        )
         security_event_log_group.grant_write(runtime.role)
         runtime.add_to_role_policy(
             iam.PolicyStatement(
@@ -1910,7 +2270,7 @@ class AxonLLMAgentCoreStack(Stack):
             "RecoveryGuardHandlerLogs",
             encryption_key=data_key,
             retention=logs.RetentionDays.ONE_YEAR,
-            removal_policy=RemovalPolicy.RETAIN,
+            removal_policy=removal_policy,
         )
         recovery_guard_handler = lambda_.Function(
             self,
@@ -1940,7 +2300,9 @@ class AxonLLMAgentCoreStack(Stack):
                     self.format_arn(
                         service="cloudformation",
                         resource="stack",
-                        resource_name="AxonLLMControlPlaneStack/*",
+                        resource_name=(
+                            f"{control_plane_stack_name}/*"
+                        ),
                     )
                 ],
             )
@@ -1970,7 +2332,7 @@ class AxonLLMAgentCoreStack(Stack):
             "RecoveryGuardProviderLogs",
             encryption_key=data_key,
             retention=logs.RetentionDays.ONE_YEAR,
-            removal_policy=RemovalPolicy.RETAIN,
+            removal_policy=removal_policy,
         )
         recovery_guard_provider = cr.Provider(
             self,
@@ -1985,13 +2347,13 @@ class AxonLLMAgentCoreStack(Stack):
             properties={
                 "AgentCoreStackName": self.stack_name,
                 "ApprovalId": recovery_approval_id.value_as_string,
-                "ControlPlaneStackName": "AxonLLMControlPlaneStack",
+                "ControlPlaneStackName": control_plane_stack_name,
                 "MinimumQuiescenceSeconds": str(
                     _RECOVERY_MIN_QUIESCENCE_SECONDS
                 ),
                 "Mode": recovery_cutover_mode.value_as_string,
                 "PrimaryTable": state_table.table_name,
-                "RuntimeName": "axonllm",
+                "RuntimeName": runtime_name,
                 "SelectedTable": selected_state_table_name,
             },
         )
@@ -2012,7 +2374,15 @@ class AxonLLMAgentCoreStack(Stack):
         production_endpoint = runtime.add_endpoint(
             "production",
             description="AxonLLM production endpoint",
-            version=runtime.agent_runtime_version,
+            version=production_runtime_version.value_as_string,
+        )
+        candidate_endpoint = agentcore.RuntimeEndpoint(
+            self,
+            "CandidateRuntimeEndpoint",
+            agent_runtime_id=runtime.agent_runtime_id,
+            endpoint_name=candidate_endpoint_name.value_as_string,
+            description="AxonLLM pre-production certification endpoint",
+            agent_runtime_version=runtime.agent_runtime_version,
         )
         recovery_endpoint = runtime.add_endpoint(
             "recovery",
@@ -2020,9 +2390,13 @@ class AxonLLMAgentCoreStack(Stack):
             version=runtime.agent_runtime_version,
         )
         cfn_production_endpoint = production_endpoint.node.default_child
+        cfn_candidate_endpoint = candidate_endpoint.node.default_child
         cfn_recovery_endpoint = recovery_endpoint.node.default_child
         if not isinstance(
             cfn_production_endpoint,
+            agentcore.CfnRuntimeEndpoint,
+        ) or not isinstance(
+            cfn_candidate_endpoint,
             agentcore.CfnRuntimeEndpoint,
         ) or not isinstance(
             cfn_recovery_endpoint,
@@ -2034,8 +2408,12 @@ class AxonLLMAgentCoreStack(Stack):
         cfn_production_endpoint.cfn_options.condition = (
             production_endpoint_enabled
         )
+        cfn_candidate_endpoint.cfn_options.condition = (
+            candidate_endpoint_enabled
+        )
         cfn_recovery_endpoint.cfn_options.condition = recovery_validation
         cfn_production_endpoint.add_dependency(recovery_guard_resource)
+        cfn_candidate_endpoint.add_dependency(recovery_guard_resource)
         cfn_recovery_endpoint.add_dependency(recovery_guard_resource)
 
         alarm_topic = sns.Topic(
@@ -2043,6 +2421,11 @@ class AxonLLMAgentCoreStack(Stack):
             "AlarmTopic",
             display_name="AxonLLM AgentCore production alarms",
             master_key=data_key,
+        )
+        alarm_topic.add_subscription(
+            sns_subscriptions.EmailSubscription(
+                alarm_notification_email.value_as_string,
+            )
         )
         alarm_topic.add_to_resource_policy(
             iam.PolicyStatement(
@@ -2150,6 +2533,7 @@ class AxonLLMAgentCoreStack(Stack):
                 ),
             ),
         ]
+        security_event_dead_letters_alarm = alarms[-1]
         alarm_action = cloudwatch_actions.SnsAction(alarm_topic)
         for alarm in alarms:
             alarm.add_alarm_action(alarm_action)
@@ -2158,7 +2542,9 @@ class AxonLLMAgentCoreStack(Stack):
         dashboard = cloudwatch.Dashboard(
             self,
             "OperationsDashboard",
-            dashboard_name="AxonLLM-AgentCore-Production",
+            dashboard_name=(
+                f"AxonLLM-AgentCore-Production{physical_suffix}"
+            ),
         )
         dashboard.add_widgets(
             cloudwatch.GraphWidget(
@@ -2194,11 +2580,24 @@ class AxonLLMAgentCoreStack(Stack):
             "RuntimeVersion",
             value=runtime.agent_runtime_version,
         )
-        CfnOutput(
+        runtime_endpoint_name_output = CfnOutput(
             self,
             "RuntimeEndpointName",
             value="production",
         )
+        runtime_endpoint_name_output.condition = production_endpoint_enabled
+        candidate_endpoint_name_output = CfnOutput(
+            self,
+            "CandidateRuntimeEndpointName",
+            value=candidate_endpoint_name.value_as_string,
+        )
+        candidate_endpoint_name_output.condition = candidate_endpoint_enabled
+        enabled_providers_output = CfnOutput(
+            self,
+            "EnabledProvidersOutput",
+            value=enabled_providers.value_as_string,
+        )
+        enabled_providers_output.override_logical_id("EnabledProviders")
         provider_secret_version_output = CfnOutput(
             self,
             "ProviderSecretVersionOutput",
@@ -2206,6 +2605,38 @@ class AxonLLMAgentCoreStack(Stack):
         )
         provider_secret_version_output.override_logical_id(
             "ProviderSecretVersion"
+        )
+        approved_https_prefix_list_output = CfnOutput(
+            self,
+            "ApprovedHttpsPrefixListIdOutput",
+            value=approved_https_prefix_list_id.value_as_string,
+        )
+        approved_https_prefix_list_output.override_logical_id(
+            "ApprovedHttpsPrefixListId"
+        )
+        bedrock_invoke_resource_arns_output = CfnOutput(
+            self,
+            "BedrockInvokeResourceArnsOutput",
+            value=Fn.join(
+                ",",
+                bedrock_invoke_resource_arns.value_as_list,
+            ),
+        )
+        bedrock_invoke_resource_arns_output.override_logical_id(
+            "BedrockInvokeResourceArns"
+        )
+        CfnOutput(
+            self,
+            "AthenaConfigurationFingerprint",
+            value=query_config.fingerprint(),
+        )
+        alarm_notification_email_output = CfnOutput(
+            self,
+            "AlarmNotificationEmailOutput",
+            value=alarm_notification_email.value_as_string,
+        )
+        alarm_notification_email_output.override_logical_id(
+            "AlarmNotificationEmail"
         )
         CfnOutput(
             self,
@@ -2222,6 +2653,31 @@ class AxonLLMAgentCoreStack(Stack):
             value=production_endpoint.agent_runtime_endpoint_arn,
         )
         runtime_endpoint_output.condition = production_endpoint_enabled
+        production_runtime_version_output = CfnOutput(
+            self,
+            "ProductionRuntimeVersionOutput",
+            value=production_runtime_version.value_as_string,
+        )
+        production_runtime_version_output.override_logical_id(
+            "ProductionRuntimeVersion"
+        )
+        production_runtime_version_output.condition = (
+            production_endpoint_enabled
+        )
+        candidate_runtime_version_output = CfnOutput(
+            self,
+            "CandidateRuntimeVersion",
+            value=runtime.agent_runtime_version,
+        )
+        candidate_runtime_version_output.condition = (
+            candidate_endpoint_enabled
+        )
+        candidate_endpoint_output = CfnOutput(
+            self,
+            "CandidateRuntimeEndpointArn",
+            value=candidate_endpoint.agent_runtime_endpoint_arn,
+        )
+        candidate_endpoint_output.condition = candidate_endpoint_enabled
         recovery_endpoint_output = CfnOutput(
             self,
             "RecoveryRuntimeEndpointArn",
@@ -2303,6 +2759,16 @@ class AxonLLMAgentCoreStack(Stack):
         )
         CfnOutput(
             self,
+            "SecurityEventDeadLetterQueueArn",
+            value=event_dead_letter_queue.queue_arn,
+        )
+        CfnOutput(
+            self,
+            "SecurityEventDeadLettersAlarmArn",
+            value=security_event_dead_letters_alarm.alarm_arn,
+        )
+        CfnOutput(
+            self,
             "SecurityEventTopicArn",
             value=security_event_topic.topic_arn,
             export_name=Fn.join(
@@ -2328,6 +2794,11 @@ class AxonLLMAgentCoreStack(Stack):
             self,
             "StateBackupVaultArn",
             value=backup_vault.backup_vault_arn,
+        )
+        CfnOutput(
+            self,
+            "StateBackupRoleArn",
+            value=backup_service_role.role_arn,
         )
         CfnOutput(
             self,

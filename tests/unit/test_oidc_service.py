@@ -480,6 +480,52 @@ class TestValidateOIDCJWT:
 
         assert asyncio.run(service.validate_oidc_jwt(token)) is not None
 
+    def test_accepts_a_dedicated_certification_audience(
+        self,
+        config,
+        rsa_signing_material,
+    ):
+        multi_config = OIDCConfig(
+            issuer=config.issuer,
+            audience="axonllm-app,axonllm-certification",
+        )
+        service = OIDCService(multi_config)
+        _cache_signing_key(service, rsa_signing_material)
+        token = _signed_token(
+            multi_config,
+            rsa_signing_material,
+            aud="axonllm-certification",
+        )
+
+        assert asyncio.run(service.validate_oidc_jwt(token)) is not None
+
+    @pytest.mark.parametrize(
+        "audience",
+        [
+            "axonllm-app,",
+            "axonllm-app,axonllm-app",
+            ",".join(f"client-{index}" for index in range(9)),
+        ],
+    )
+    def test_rejects_malformed_configured_audience_lists(
+        self,
+        config,
+        rsa_signing_material,
+        audience,
+    ):
+        configured = OIDCConfig(
+            issuer=config.issuer,
+            audience=audience,
+        )
+        service = OIDCService(configured)
+        token = _signed_token(
+            configured,
+            rsa_signing_material,
+            aud="axonllm-app",
+        )
+
+        assert asyncio.run(service.validate_oidc_jwt(token)) is None
+
     @pytest.mark.parametrize(
         "audience",
         [

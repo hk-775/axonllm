@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import random
 import re
 import threading
@@ -106,12 +107,22 @@ class ProviderRoute:
             raise ValueError("route max_concurrency must be greater than zero")
         if self.capacity_limit < 0:
             raise ValueError("route capacity_limit must be non-negative")
-        if self.connect_timeout <= 0 or self.read_timeout <= 0:
-            raise ValueError("route timeouts must be greater than zero")
+        for name, value in (
+            ("connect_timeout", self.connect_timeout),
+            ("read_timeout", self.read_timeout),
+            ("keepalive_timeout", self.keepalive_timeout),
+        ):
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+                or value <= 0
+            ):
+                raise ValueError(
+                    f"route {name} must be finite and greater than zero"
+                )
         if self.max_connections <= 0 or self.max_connections_per_host <= 0:
             raise ValueError("route connection limits must be greater than zero")
-        if self.keepalive_timeout <= 0:
-            raise ValueError("route keepalive_timeout must be greater than zero")
         if (
             self.credential_provider is not None
             and not callable(
@@ -241,6 +252,8 @@ class ProviderRoute:
             "models": sorted(self.allowed_models),
             "capacity_group": self.capacity_group,
             "capacity_limit": self.capacity_limit,
+            "connect_timeout": self.connect_timeout,
+            "read_timeout": self.read_timeout,
             "extra_headers": self.extra_headers,
             "extra_params": self.extra_params,
             "credential_provider": (
@@ -289,6 +302,7 @@ class RouteLease:
     route: ProviderRoute
     model_id: str
     started_at: float
+    generation: int = 1
 
 
 class NoAvailableRouteError(RuntimeError):
@@ -321,7 +335,13 @@ class ProviderRoutePool:
         self._clock = clock
         self._routes: dict[str, ProviderRoute] = {}
         self._by_provider: dict[str, list[str]] = {}
-        self._runtime: dict[str, RouteRuntime] = {}
+        self._runtime: dict[tuple[str, int], RouteRuntime] = {}
+        self._generation_routes: dict[
+            tuple[str, int],
+            ProviderRoute,
+        ] = {}
+        self._active_generations: dict[str, int] = {}
+        self._last_generations: dict[str, int] = {}
         self._fingerprints: dict[str, str] = {}
         self.replace(routes or [])
 
@@ -336,19 +356,29 @@ class ProviderRoutePool:
             by_provider.setdefault(route.provider, []).append(route.route_id)
 
         with self._lock:
-            runtime: dict[str, RouteRuntime] = {}
+            active_generations: dict[str, int] = {}
             fingerprints: dict[str, str] = {}
             for route_id, route in route_map.items():
                 fingerprint = route.fingerprint()
                 fingerprints[route_id] = fingerprint
-                if self._fingerprints.get(route_id) == fingerprint:
-                    runtime[route_id] = self._runtime[route_id]
+                if (
+                    self._fingerprints.get(route_id) == fingerprint
+                    and route_id in self._active_generations
+                ):
+                    generation = self._active_generations[route_id]
                 else:
-                    runtime[route_id] = RouteRuntime()
+                    generation = self._last_generations.get(route_id, 0) + 1
+                    self._last_generations[route_id] = generation
+                    key = (route_id, generation)
+                    self._runtime[key] = RouteRuntime()
+                    self._generation_routes[key] = route
+                active_generations[route_id] = generation
+                self._generation_routes[(route_id, generation)] = route
             self._routes = route_map
             self._by_provider = by_provider
-            self._runtime = runtime
+            self._active_generations = active_generations
             self._fingerprints = fingerprints
+            self._prune_retired_locked()
 
     @property
     def providers(self) -> frozenset[str]:
@@ -398,18 +428,24 @@ class ProviderRoutePool:
                 route for route in eligible if route.priority == priority
             ]
             for route in candidates:
-                state = self._runtime[route.route_id]
+                state = self._active_state(route.route_id)
                 if state.cooldown_until and now >= state.cooldown_until:
                     state.status = "recovering"
                     state.cooldown_until = 0.0
                     state.recovery_successes = 0
             weights = self._adaptive_weights(candidates)
             route = self._rng.choices(candidates, weights=weights, k=1)[0]
-            state = self._runtime[route.route_id]
+            generation = self._active_generations[route.route_id]
+            state = self._runtime[(route.route_id, generation)]
             state.inflight += 1
             state.selected += 1
             state.last_selected_at = now
-            return RouteLease(route=route, model_id=model_id, started_at=now)
+            return RouteLease(
+                route=route,
+                model_id=model_id,
+                started_at=now,
+                generation=generation,
+            )
 
     def peek(self, provider: str, model_id: str = "") -> ProviderRoute | None:
         """Return an eligible route without reserving capacity."""
@@ -432,9 +468,11 @@ class ProviderRoutePool:
 
     def release(self, lease: RouteLease) -> None:
         with self._lock:
-            state = self._runtime.get(lease.route.route_id)
+            key = self._lease_key(lease)
+            state = self._runtime.get(key)
             if state is not None:
                 state.inflight = max(0, state.inflight - 1)
+                self._prune_runtime_key_locked(key)
 
     def record_success(
         self,
@@ -444,7 +482,8 @@ class ProviderRoutePool:
         output_tokens: int = 0,
     ) -> None:
         with self._lock:
-            state = self._runtime.get(lease.route.route_id)
+            key = self._lease_key(lease)
+            state = self._runtime.get(key)
             if state is None:
                 return
             state.inflight = max(0, state.inflight - 1)
@@ -468,12 +507,14 @@ class ProviderRoutePool:
                 state.status = "healthy"
             state.cooldown_until = 0.0
             state.last_status_code = None
+            self._prune_runtime_key_locked(key)
 
     def record_failure(self, lease: RouteLease, status_code: int) -> None:
         """Release a lease and update only route-affecting failures."""
         now = self._clock()
         with self._lock:
-            state = self._runtime.get(lease.route.route_id)
+            key = self._lease_key(lease)
+            state = self._runtime.get(key)
             if state is None:
                 return
             state.inflight = max(0, state.inflight - 1)
@@ -483,6 +524,7 @@ class ProviderRoutePool:
             # Request/schema errors apply to every credential and endpoint. They
             # consume an attempt but must not poison this route's health.
             if status_code in {400, 405, 409, 422}:
+                self._prune_runtime_key_locked(key)
                 return
 
             state.consecutive_failures += 1
@@ -519,6 +561,7 @@ class ProviderRoutePool:
                     if should_cooldown
                     else 0.0
                 )
+            self._prune_runtime_key_locked(key)
 
     def has_available(
         self,
@@ -526,6 +569,7 @@ class ProviderRoutePool:
         model_id: str,
         *,
         exclude_route_id: str | None = None,
+        exclude_generation: int | None = None,
     ) -> bool:
         provider = canonical_provider(provider)
         now = self._clock()
@@ -535,6 +579,7 @@ class ProviderRoutePool:
                 model_id,
                 now,
                 exclude_route_id=exclude_route_id,
+                exclude_generation=exclude_generation,
             )
 
     def snapshot(self) -> list[dict[str, Any]]:
@@ -568,7 +613,7 @@ class ProviderRoutePool:
                 self._routes.values(),
                 key=lambda item: (item.provider, item.priority, item.route_id),
             ):
-                state = self._runtime[route.route_id]
+                state = self._active_state(route.route_id)
                 result.append(
                     {
                         "route_id": route.route_id,
@@ -614,15 +659,15 @@ class ProviderRoutePool:
             return result
 
     def _is_eligible(self, route: ProviderRoute, now: float) -> bool:
-        state = self._runtime[route.route_id]
+        state = self._active_state(route.route_id)
         if state.cooldown_until > now:
             return False
         if state.inflight >= route.max_concurrency:
             return False
         if route.capacity_group and route.capacity_limit:
             group_inflight = sum(
-                self._runtime[item.route_id].inflight
-                for item in self._routes.values()
+                self._runtime[key].inflight
+                for key, item in self._generation_routes.items()
                 if item.capacity_group == route.capacity_group
             )
             if group_inflight >= route.capacity_limit:
@@ -636,9 +681,17 @@ class ProviderRoutePool:
         now: float,
         *,
         exclude_route_id: str | None = None,
+        exclude_generation: int | None = None,
     ) -> bool:
         return any(
-            route_id != exclude_route_id
+            not (
+                route_id == exclude_route_id
+                and (
+                    exclude_generation is None
+                    or self._active_generations[route_id]
+                    == exclude_generation
+                )
+            )
             and (route := self._routes[route_id]).enabled
             and route.supports_model(model_id)
             and self._is_eligible(route, now)
@@ -647,14 +700,16 @@ class ProviderRoutePool:
 
     def _adaptive_weights(self, routes: list[ProviderRoute]) -> list[float]:
         token_latencies = [
-            self._runtime[route.route_id].latency_per_token_ewma_ms
+            self._active_state(route.route_id).latency_per_token_ewma_ms
             for route in routes
-            if self._runtime[route.route_id].latency_per_token_ewma_ms is not None
+            if self._active_state(
+                route.route_id
+            ).latency_per_token_ewma_ms is not None
         ]
         request_latencies = [
-            self._runtime[route.route_id].latency_ewma_ms
+            self._active_state(route.route_id).latency_ewma_ms
             for route in routes
-            if self._runtime[route.route_id].latency_ewma_ms is not None
+            if self._active_state(route.route_id).latency_ewma_ms is not None
         ]
         baseline = (
             min(token_latencies)
@@ -664,7 +719,7 @@ class ProviderRoutePool:
 
         weights: list[float] = []
         for route in routes:
-            state = self._runtime[route.route_id]
+            state = self._active_state(route.route_id)
             reliability = max(0.05, 1.0 - state.error_ewma)
             observed = (
                 state.latency_per_token_ewma_ms
@@ -694,6 +749,32 @@ class ProviderRoutePool:
                 )
             )
         return weights
+
+    def _active_state(self, route_id: str) -> RouteRuntime:
+        return self._runtime[
+            (route_id, self._active_generations[route_id])
+        ]
+
+    @staticmethod
+    def _lease_key(lease: RouteLease) -> tuple[str, int]:
+        return (lease.route.route_id, lease.generation)
+
+    def _prune_runtime_key_locked(self, key: tuple[str, int]) -> None:
+        if self._active_generations.get(key[0]) == key[1]:
+            return
+        state = self._runtime.get(key)
+        if state is not None and state.inflight == 0:
+            self._runtime.pop(key, None)
+            self._generation_routes.pop(key, None)
+
+    def _prune_retired_locked(self) -> None:
+        for key, state in list(self._runtime.items()):
+            if (
+                self._active_generations.get(key[0]) != key[1]
+                and state.inflight == 0
+            ):
+                self._runtime.pop(key, None)
+                self._generation_routes.pop(key, None)
 
     def _ewma(self, previous: float, observation: float) -> float:
         return (

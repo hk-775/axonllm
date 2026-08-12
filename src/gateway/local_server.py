@@ -12,22 +12,46 @@ import threading
 import webbrowser
 
 import uvicorn
+from starlette.requests import Request
+from starlette.responses import RedirectResponse
 
+from src.gateway import bootstrap as gateway_bootstrap
 from src.gateway.admin.pricing_drift import audit_pricing, format_startup_notice
 from src.gateway.admin.production_checklist import (
     format_startup_notice as checklist_notice,
     run_checklist,
 )
-from src.gateway.bootstrap import build_starlette_app
+from src.gateway.admin.routes import AdminAPI
 from src.gateway.config_loader import load_app_config, load_pricing_config
 from src.gateway.dev_env import load_dev_env_file
 from src.gateway.health_check_task import HealthCheckTask
 from src.gateway.health_tracker import ProviderHealthTracker
+from src.gateway.model_leaderboard import ModelLeaderboard
 from src.gateway.model_registry import ModelRegistry
 from src.gateway.provider_loader import load_provider_configs
 
 
 _RUNTIME_ROOT = Path(__file__).resolve().parent / "resources" / "runtime"
+
+
+class _PackagedAdminAPI(AdminAPI):
+    async def architecture(self, _request: Request) -> RedirectResponse:
+        """Use the interactive architecture page already shipped in the wheel."""
+        return RedirectResponse("/architecture.html", status_code=307)
+
+
+class _PackagedModelLeaderboard(ModelLeaderboard):
+    def load(
+        self,
+        config_path: str,
+        valid_models: set[str] | None = None,
+    ) -> None:
+        """Resolve bootstrap's repository-relative default inside the wheel."""
+        if Path(config_path) == Path("config/leaderboard.yaml"):
+            config_path = str(
+                _RUNTIME_ROOT / "config" / "leaderboard.yaml"
+            )
+        super().load(config_path, valid_models)
 
 
 def _configure_packaged_runtime() -> None:
@@ -39,16 +63,23 @@ def _configure_packaged_runtime() -> None:
 
     config_dir = _RUNTIME_ROOT / "config"
     defaults = {
-        "AXON_MODELS_CONFIG": config_dir / "models.yaml",
-        "AXON_PROVIDERS_CONFIG": config_dir / "providers.yaml",
-        "AXON_PRICING_CONFIG": config_dir / "pricing.yaml",
-        "AXON_DEMO_SEED_CONFIG": config_dir / "demo_seed.yaml",
-        "AXON_CATALOG_CONFIG": config_dir / "catalog.yaml",
-        "AXON_ENSEMBLE_CONFIG": config_dir / "ensemble.yaml",
-        "AXON_SPOKES_CONFIG": config_dir / "spokes.yaml",
+        "AXON_MODELS_CONFIG": "models.yaml",
+        "AXON_PROVIDERS_CONFIG": "providers.yaml",
+        "AXON_PRICING_CONFIG": "pricing.yaml",
+        "AXON_DEMO_SEED_CONFIG": "demo_seed.yaml",
+        "AXON_CATALOG_CONFIG": "catalog.yaml",
+        "AXON_ENSEMBLE_CONFIG": "ensemble.yaml",
+        "AXON_SPOKES_CONFIG": "spokes.yaml",
     }
-    for name, path in defaults.items():
-        os.environ.setdefault(name, str(path))
+    for name, filename in defaults.items():
+        configured = os.environ.get(name)
+        if configured is None:
+            path = config_dir / filename
+        else:
+            path = Path(configured).expanduser()
+            if not path.is_absolute():
+                path = invocation_dir / path
+        os.environ[name] = str(path.resolve())
 
     # AdminAPI intentionally resolves the public site from a project root.
     # Installed wheels have no project root, so bind that lookup to the
@@ -56,7 +87,6 @@ def _configure_packaged_runtime() -> None:
     from src.gateway.admin import routes as admin_routes
 
     admin_routes._PROJECT_ROOT = _RUNTIME_ROOT
-    os.chdir(_RUNTIME_ROOT)
 
 
 def build_app() -> tuple:
@@ -87,7 +117,15 @@ def build_app() -> tuple:
         os.environ["AXON_AUTH_MODE"] = "LOG_ONLY"
 
     app_config = load_app_config()
-    app = build_starlette_app(app_config)
+    original_admin_api = gateway_bootstrap.AdminAPI
+    original_leaderboard = gateway_bootstrap.ModelLeaderboard
+    gateway_bootstrap.AdminAPI = _PackagedAdminAPI
+    gateway_bootstrap.ModelLeaderboard = _PackagedModelLeaderboard
+    try:
+        app = gateway_bootstrap.build_starlette_app(app_config)
+    finally:
+        gateway_bootstrap.AdminAPI = original_admin_api
+        gateway_bootstrap.ModelLeaderboard = original_leaderboard
     return app, app_config
 
 

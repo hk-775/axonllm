@@ -10,6 +10,7 @@ from src.gateway.mantle_provider import (
     _is_anthropic_model,
     _is_unsupported_route_error,
     _prefers_responses_api,
+    _sigv4_request,
     create_mantle_provider_fn,
 )
 from src.gateway.models import ChatCompletionRequest, ProviderModelMapping
@@ -51,21 +52,139 @@ class TestUnsupportedRouteDetection:
         assert not _is_unsupported_route_error(ProviderError(400, "bedrock-mantle", "bad request"))
         assert not _is_unsupported_route_error(ProviderError(429, "bedrock-mantle", "does not support"))
 
+    def test_real_http_boundary_preserves_only_safe_fallback_marker(
+        self,
+        monkeypatch,
+    ):
+        class _Credentials:
+            def get_frozen_credentials(self):
+                return object()
+
+        class _Signer:
+            def add_auth(self, _request):
+                return None
+
+        class _Response:
+            status = 400
+
+            def __init__(self) -> None:
+                self.body = (
+                    b'{"message":"model does not support this route",'
+                    b'"echo":"provider-secret"}'
+                )
+                self.offset = 0
+                self.released = False
+                self.closed = False
+
+            def read(self, *, amt, decode_content):
+                assert decode_content is True
+                chunk = self.body[self.offset : self.offset + amt]
+                self.offset += len(chunk)
+                return chunk
+
+            def release_conn(self) -> None:
+                self.released = True
+
+            def close(self) -> None:
+                self.closed = True
+
+        response = _Response()
+        request_kwargs: dict = {}
+        monkeypatch.setattr(
+            mp,
+            "SigV4Auth",
+            lambda *_args: _Signer(),
+        )
+        monkeypatch.setattr(
+            mp._MANTLE_HTTP,
+            "request",
+            lambda *_args, **kwargs: (
+                request_kwargs.update(kwargs) or response
+            ),
+        )
+
+        with pytest.raises(ProviderError) as caught:
+            _sigv4_request(
+                _Credentials(),
+                "us-east-1",
+                "https://mantle.example/openai/v1/responses",
+                "{}",
+            )
+
+        assert _is_unsupported_route_error(caught.value)
+        assert "provider-secret" not in caught.value.message
+        assert request_kwargs["preload_content"] is False
+        assert response.released is True
+        assert response.closed is True
+
+    def test_incremental_body_limit_always_closes_response(
+        self,
+        monkeypatch,
+    ):
+        class _Credentials:
+            def get_frozen_credentials(self):
+                return object()
+
+        class _Signer:
+            def add_auth(self, _request):
+                return None
+
+        class _Response:
+            status = 200
+
+            def __init__(self) -> None:
+                self.chunks = iter((b"1234", b"5"))
+                self.released = False
+                self.closed = False
+
+            def read(self, **_kwargs):
+                return next(self.chunks, b"")
+
+            def release_conn(self) -> None:
+                self.released = True
+
+            def close(self) -> None:
+                self.closed = True
+
+        response = _Response()
+        monkeypatch.setattr(mp, "_MAX_MANTLE_RESPONSE_BYTES", 4)
+        monkeypatch.setattr(mp, "SigV4Auth", lambda *_args: _Signer())
+        monkeypatch.setattr(
+            mp._MANTLE_HTTP,
+            "request",
+            lambda *_args, **_kwargs: response,
+        )
+
+        with pytest.raises(ProviderError, match="maximum size"):
+            _sigv4_request(
+                _Credentials(),
+                "us-east-1",
+                "https://mantle.example/v1/chat/completions",
+                "{}",
+            )
+
+        assert response.released is True
+        assert response.closed is True
+
 
 def _make_provider(monkeypatch, calls):
     """Build a provider_fn while recording which API path each call takes."""
     # Avoid real AWS session/credential resolution.
     monkeypatch.setattr(mp.boto3, "Session", lambda: type("S", (), {"get_credentials": lambda self: None})())
 
-    async def fake_responses(creds, endpoint, region, request, mapping):
+    async def fake_responses(
+        creds, endpoint, region, request, mapping, **_kwargs
+    ):
         calls.append("responses")
         raise ProviderError(400, "bedrock-mantle", f"The model '{mapping.model_id}' does not support the '/v1/responses' API")
 
-    async def fake_chat(creds, endpoint, region, request, mapping):
+    async def fake_chat(creds, endpoint, region, request, mapping, **_kwargs):
         calls.append("chat")
         return "CHAT_OK"
 
-    async def fake_messages(creds, endpoint, region, request, mapping):
+    async def fake_messages(
+        creds, endpoint, region, request, mapping, **_kwargs
+    ):
         calls.append("messages")
         return "MSG_OK"
 
@@ -111,12 +230,85 @@ class TestDispatch:
         assert result == "CHAT_OK"
         assert calls == ["responses", "chat"]
 
+    def test_fallback_obeys_one_cumulative_wall_clock_deadline(
+        self,
+        monkeypatch,
+    ):
+        monkeypatch.setattr(
+            mp.boto3,
+            "Session",
+            lambda: type(
+                "S",
+                (),
+                {"get_credentials": lambda self: None},
+            )(),
+        )
+        calls: list[str] = []
+
+        async def slow_responses(*_args, **_kwargs):
+            calls.append("responses")
+            await asyncio.sleep(0.06)
+            raise ProviderError(
+                400,
+                "bedrock-mantle",
+                mp._UNSUPPORTED_ROUTE_MESSAGE,
+            )
+
+        async def slow_chat(*_args, **_kwargs):
+            calls.append("chat")
+            await asyncio.sleep(0.06)
+            return "too-late"
+
+        monkeypatch.setattr(mp, "_invoke_responses_api", slow_responses)
+        monkeypatch.setattr(
+            mp,
+            "_invoke_chat_completions_api",
+            slow_chat,
+        )
+        request = ChatCompletionRequest(
+            messages=[{"role": "user", "content": "hi"}],
+            model="m",
+        )
+        provider = create_mantle_provider_fn(
+            connect_timeout=0.05,
+            read_timeout=0.05,
+        )(request)
+
+        with pytest.raises(ProviderError) as raised:
+            _run(
+                provider(
+                    ProviderModelMapping(
+                        provider="bedrock-mantle",
+                        model_id="openai.gpt-5.6-sol",
+                    )
+                )
+            )
+
+        assert raised.value.status_code == 504
+        assert calls == ["responses", "chat"]
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("connect_timeout", 0),
+        ("connect_timeout", float("nan")),
+        ("read_timeout", float("inf")),
+        ("read_timeout", True),
+    ],
+)
+def test_mantle_rejects_invalid_timeouts(name, value) -> None:
+    with pytest.raises(ValueError, match=name):
+        create_mantle_provider_fn(**{name: value})
+
 
 class TestFallbackDoesNotMaskRealErrors:
     def test_non_route_error_propagates(self, monkeypatch):
         monkeypatch.setattr(mp.boto3, "Session", lambda: type("S", (), {"get_credentials": lambda self: None})())
 
-        async def fake_responses(creds, endpoint, region, request, mapping):
+        async def fake_responses(
+            creds, endpoint, region, request, mapping, **_kwargs
+        ):
             raise ProviderError(429, "bedrock-mantle", "rate limited")
 
         monkeypatch.setattr(mp, "_invoke_responses_api", fake_responses)
@@ -168,7 +360,7 @@ def _capture(monkeypatch, response_data):
     """
     captured: dict = {}
 
-    def fake_sigv4(credentials, region, url, body):
+    def fake_sigv4(credentials, region, url, body, **_kwargs):
         captured["url"] = url
         captured["payload"] = json.loads(body)
         return response_data
@@ -497,14 +689,14 @@ class TestToolTranslationEdgeCases:
         _invoke(mp._invoke_responses_api, req, "openai.gpt-5.6-sol")
         assert cap["payload"]["input"][0]["arguments"] == '{"city": "Paris"}'
 
-    def test_tool_choice_none_is_omitted_on_anthropic_route(self, monkeypatch):
-        # "none" has no Anthropic equivalent; sending it would be rejected.
+    def test_tool_choice_none_omits_tools_on_anthropic_route(self, monkeypatch):
+        # Anthropic expresses "none" by omitting the tool set entirely.
         cap = _capture(monkeypatch, {"content": [], "usage": {}})
         req = ChatCompletionRequest(messages=[{"role": "user", "content": "hi"}],
                                     model="m", tools=[WEATHER_TOOL], tool_choice="none")
         _invoke(mp._invoke_messages_api, req, "anthropic.claude-sonnet-5")
         assert "tool_choice" not in cap["payload"]
-        assert "tools" in cap["payload"]
+        assert "tools" not in cap["payload"]
 
 
 class TestAdvertisedModels:

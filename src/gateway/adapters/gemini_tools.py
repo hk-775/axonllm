@@ -22,6 +22,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from src.gateway.models import TokenUsage
+
 # Gemini rejects unknown JSON Schema keys outright rather than ignoring them, so
 # a schema written for OpenAI has to be filtered rather than passed through.
 _ALLOWED_SCHEMA_KEYS = frozenset({
@@ -101,7 +103,37 @@ def _parse_args(raw: Any) -> dict:
     return raw or {}
 
 
-def openai_msg_to_gemini(msg: dict) -> dict | None:
+def openai_tool_call_names(messages: list[dict]) -> dict[str, str]:
+    """Index assistant tool calls so standard tool results can recover names."""
+    names: dict[str, str] = {}
+    for message in messages:
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            continue
+        raw_calls = message.get("tool_calls")
+        if not isinstance(raw_calls, list):
+            continue
+        for raw_call in raw_calls:
+            if not isinstance(raw_call, dict):
+                continue
+            function = raw_call.get("function")
+            if not isinstance(function, dict):
+                function = {}
+            call_id = raw_call.get("id")
+            name = function.get("name") or raw_call.get("name")
+            if (
+                isinstance(call_id, str)
+                and call_id
+                and isinstance(name, str)
+                and name
+            ):
+                names[call_id] = name
+    return names
+
+
+def openai_msg_to_gemini(
+    msg: dict,
+    tool_call_names: dict[str, str] | None = None,
+) -> dict | None:
     """Convert one OpenAI-shaped message to a Gemini ``contents`` entry.
 
     Returns None for a message the caller should skip (a system message, which
@@ -117,10 +149,13 @@ def openai_msg_to_gemini(msg: dict) -> dict | None:
     # Gemini's model, not something the adapter can fix.
     if role == "tool":
         content = msg.get("content")
+        name = msg.get("name")
+        if not name and tool_call_names is not None:
+            name = tool_call_names.get(msg.get("tool_call_id", ""), "")
         return {
             "role": "user",
             "parts": [{"functionResponse": {
-                "name": msg.get("name", ""),
+                "name": name or "",
                 "response": {"content": content if isinstance(content, str)
                              else json.dumps(content)},
             }}],
@@ -145,6 +180,22 @@ def openai_msg_to_gemini(msg: dict) -> dict | None:
         "role": "model" if role == "assistant" else "user",
         "parts": [{"text": content if isinstance(content, str) else str(content or "")}],
     }
+
+
+def gemini_token_usage(metadata: object) -> TokenUsage:
+    """Map Gemini usage, charging hidden thinking tokens as provider output."""
+    usage = metadata if isinstance(metadata, dict) else {}
+    prompt_tokens = int(usage.get("promptTokenCount", 0) or 0)
+    completion_tokens = (
+        int(usage.get("candidatesTokenCount", 0) or 0)
+        + int(usage.get("thoughtsTokenCount", 0) or 0)
+    )
+    return TokenUsage(
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        total_tokens=prompt_tokens + completion_tokens,
+        cached_tokens=int(usage.get("cachedContentTokenCount", 0) or 0),
+    )
 
 
 def gemini_parts_to_tool_calls(parts: list[dict]) -> list[dict]:

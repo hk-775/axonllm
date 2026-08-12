@@ -188,7 +188,7 @@ class TestTranslateStreamChunk:
         raw = {"type": "message_stop"}
         chunk = adapter.translate_stream_chunk(raw)
         assert chunk.is_final is True
-        assert chunk.choices[0]["finish_reason"] == "stop"
+        assert chunk.choices == []
 
     def test_unknown_event_type(self, adapter):
         raw = {"type": "ping"}
@@ -206,10 +206,102 @@ class TestTranslateStreamChunk:
         assert chunk.usage.cached_tokens == 8
 
     def test_message_delta_carries_output_usage(self, adapter):
-        raw = {"type": "message_delta", "usage": {"input_tokens": 42, "output_tokens": 17}}
+        raw = {
+            "type": "message_delta",
+            "delta": {"stop_reason": "end_turn"},
+            "usage": {"input_tokens": 42, "output_tokens": 17},
+        }
         chunk = adapter.translate_stream_chunk(raw)
         assert chunk.usage is not None
         assert chunk.usage.completion_tokens == 17
+        assert chunk.is_final is True
+        assert chunk.choices[0]["finish_reason"] == "stop"
+
+    def test_streamed_tool_call_translates_start_arguments_and_finish(self, adapter):
+        translate = adapter.stream_translator()
+        start = translate({
+            "type": "content_block_start",
+            "index": 2,
+            "content_block": {
+                "type": "tool_use",
+                "id": "toolu_1",
+                "name": "lookup",
+                "input": {},
+            },
+        })
+        arguments = translate({
+            "type": "content_block_delta",
+            "index": 2,
+            "delta": {
+                "type": "input_json_delta",
+                "partial_json": '{"city":"Paris"}',
+            },
+        })
+        final = adapter.translate_stream_chunk({
+            "type": "message_delta",
+            "delta": {"stop_reason": "tool_use"},
+            "usage": {"output_tokens": 9},
+        })
+
+        call = start.choices[0]["delta"]["tool_calls"][0]
+        assert call == {
+            "index": 0,
+            "id": "toolu_1",
+            "type": "function",
+            "function": {"name": "lookup", "arguments": ""},
+        }
+        assert (
+            arguments.choices[0]["delta"]["tool_calls"][0]["function"][
+                "arguments"
+            ]
+            == '{"city":"Paris"}'
+        )
+        assert final.choices[0]["finish_reason"] == "tool_calls"
+        assert final.usage.completion_tokens == 9
+
+    def test_mixed_content_blocks_use_contiguous_tool_indices(self, adapter):
+        translate = adapter.stream_translator()
+        first = translate({
+            "type": "content_block_start",
+            "index": 1,
+            "content_block": {
+                "type": "tool_use",
+                "id": "toolu_1",
+                "name": "first",
+                "input": {},
+            },
+        })
+        second = translate({
+            "type": "content_block_start",
+            "index": 3,
+            "content_block": {
+                "type": "tool_use",
+                "id": "toolu_2",
+                "name": "second",
+                "input": {},
+            },
+        })
+        second_delta = translate({
+            "type": "content_block_delta",
+            "index": 3,
+            "delta": {
+                "type": "input_json_delta",
+                "partial_json": "{}",
+            },
+        })
+
+        assert (
+            first.choices[0]["delta"]["tool_calls"][0]["index"]
+            == 0
+        )
+        assert (
+            second.choices[0]["delta"]["tool_calls"][0]["index"]
+            == 1
+        )
+        assert (
+            second_delta.choices[0]["delta"]["tool_calls"][0]["index"]
+            == 1
+        )
 
 
 # --- list_models ---

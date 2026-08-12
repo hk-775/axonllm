@@ -2279,14 +2279,14 @@ class TestLandingPageStatBand:
         }
         assert band["Provider adapters"] == len(adapters), sorted(adapters)
 
-    def test_models_routed(self, band):
+    def test_models_configured(self, band):
         import pathlib
 
         import yaml
 
         cat = pathlib.Path(__file__).resolve().parents[2] / "config" / "models.yaml"
         models = yaml.safe_load(cat.read_text(encoding="utf-8"))["models"]
-        assert band["Models routed"] == len(models)
+        assert band["Models configured"] == len(models)
 
     def test_routing_strategies(self, band):
         """RoutingStrategy is the definition; the page cannot claim fewer."""

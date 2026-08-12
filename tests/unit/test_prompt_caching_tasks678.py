@@ -31,6 +31,11 @@ from src.gateway.provider_config import ProviderConfig
 # ---------------------------------------------------------------------------
 
 
+class _ResponseContent:
+    async def iter_chunked(self, _size: int):
+        yield b"{}"
+
+
 class TestHttpClientHeaderInjection:
     """Tests for prompt_caching_enabled parameter and anthropic-beta header."""
 
@@ -72,8 +77,7 @@ class TestHttpClientHeaderInjection:
         # Mock the session to capture headers
         mock_resp = AsyncMock()
         mock_resp.status = 200
-        mock_resp.text = AsyncMock(return_value="{}")
-        mock_resp.json = AsyncMock(return_value={})
+        mock_resp.content = _ResponseContent()
         mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
         mock_resp.__aexit__ = AsyncMock(return_value=False)
 
@@ -108,8 +112,7 @@ class TestHttpClientHeaderInjection:
 
         mock_resp = AsyncMock()
         mock_resp.status = 200
-        mock_resp.text = AsyncMock(return_value="{}")
-        mock_resp.json = AsyncMock(return_value={})
+        mock_resp.content = _ResponseContent()
         mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
         mock_resp.__aexit__ = AsyncMock(return_value=False)
 
@@ -142,8 +145,7 @@ class TestHttpClientHeaderInjection:
 
         mock_resp = AsyncMock()
         mock_resp.status = 200
-        mock_resp.text = AsyncMock(return_value="{}")
-        mock_resp.json = AsyncMock(return_value={})
+        mock_resp.content = _ResponseContent()
         mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
         mock_resp.__aexit__ = AsyncMock(return_value=False)
 

@@ -25,10 +25,6 @@ on:
         required: false
         default: us-east-1
         type: string
-    secrets:
-      AWS_ROLE_ARN:
-        description: Read-only ECR verification role assumed through GitHub OIDC
-        required: true
     outputs:
       verified_image:
         description: Immutable image reference that passed the release gate
@@ -194,7 +190,7 @@ jobs:
         uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
         with:
           aws-region: ${{ inputs.aws_region }}
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          role-to-assume: ${{ secrets.AXON_RELEASE_VERIFY_ROLE_ARN }}
           role-session-name: AxonLLMReleaseVerification
           allowed-account-ids: ${{ steps.image.outputs.account_id }}
           mask-aws-account-id: true

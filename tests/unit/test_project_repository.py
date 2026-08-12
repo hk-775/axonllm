@@ -8,10 +8,14 @@ import pytest
 
 from src.gateway.auth.project_repository import (
     DynamoProjectRepository,
+    ProjectConfigConflict,
     ProjectStoreUnavailable,
 )
 from src.gateway.models import Project
-from src.gateway.persistence import DynamoPersistence
+from src.gateway.persistence import (
+    DynamoPersistence,
+    PersistenceConflictError,
+)
 
 
 class _Table:
@@ -37,9 +41,23 @@ class _Persistence(DynamoPersistence):
         super().__init__()
         self._enabled = enabled
         self.table = _Table()
+        self.save_calls: list[tuple[Project, int | None]] = []
+        self.save_error: Exception | None = None
 
     def _get_table(self) -> _Table:
         return self.table
+
+    async def save_project(
+        self,
+        project: Project,
+        *,
+        expected_revision: int | None = None,
+    ) -> int:
+        self.save_calls.append((deepcopy(project), expected_revision))
+        if self.save_error is not None:
+            raise self.save_error
+        assert expected_revision is not None
+        return expected_revision + 1
 
 
 def _store(persistence: _Persistence, project: Project) -> None:
@@ -135,4 +153,64 @@ async def test_malformed_owner_row_fails_closed() -> None:
         await DynamoProjectRepository(persistence).resolve(
             "tenant-a",
             "shared",
+        )
+
+
+async def test_conditional_update_returns_only_the_committed_revision() -> None:
+    persistence = _Persistence()
+    repository = DynamoProjectRepository(persistence)
+    project = Project(
+        project_id="shared",
+        tenant_id="tenant-a",
+        name="Updated",
+        revision=7,
+    )
+
+    committed = await repository.update(
+        project,
+        expected_revision=7,
+    )
+
+    assert committed == Project(
+        project_id="shared",
+        tenant_id="tenant-a",
+        name="Updated",
+        revision=8,
+        created_at=project.created_at,
+    )
+    assert project.revision == 7
+    assert persistence.save_calls == [(project, 7)]
+
+
+async def test_conditional_update_maps_conflict_and_store_failure() -> None:
+    project = Project(
+        project_id="shared",
+        tenant_id="tenant-a",
+        name="Updated",
+        revision=7,
+    )
+    conflict = _Persistence()
+    conflict.save_error = PersistenceConflictError("stale")
+    with pytest.raises(ProjectConfigConflict):
+        await DynamoProjectRepository(conflict).update(
+            project,
+            expected_revision=7,
+        )
+
+    unavailable = _Persistence()
+    unavailable.save_error = RuntimeError("dynamodb unavailable")
+    with pytest.raises(ProjectStoreUnavailable):
+        await DynamoProjectRepository(unavailable).update(
+            project,
+            expected_revision=7,
+        )
+
+
+async def test_conditional_update_requires_tenant_owned_project() -> None:
+    repository = DynamoProjectRepository(_Persistence())
+
+    with pytest.raises(ProjectStoreUnavailable):
+        await repository.update(
+            Project(project_id="legacy", name="Legacy"),
+            expected_revision=0,
         )

@@ -92,6 +92,8 @@ class AuditEventType(Enum):
     QUERY_REJECTED = "query_rejected"
     DATASOURCE_MUTATION_REQUEST = "datasource_mutation_request"
     DATASOURCE_MUTATION_RESULT = "datasource_mutation_result"
+    TENANT_CONFIG_MUTATION_REQUEST = "tenant_config_mutation_request"
+    TENANT_CONFIG_MUTATION_RESULT = "tenant_config_mutation_result"
 
 
 def _normalize_tenant_id(tenant_id: str) -> str:

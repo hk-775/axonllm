@@ -11,6 +11,7 @@ from src.gateway.models import (
     StreamChunk,
     TokenUsage,
 )
+from src.gateway.router import ProviderError
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +22,63 @@ _COHERE_MODELS = [
     ModelInfo(model_id="command-r", provider=PROVIDER_NAME, capabilities=["chat", "streaming"]),
     ModelInfo(model_id="command-light", provider=PROVIDER_NAME, capabilities=["chat"]),
 ]
+_COHERE_FINISH_REASONS = {
+    "COMPLETE": "stop",
+    "STOP_SEQUENCE": "stop",
+    "MAX_TOKENS": "length",
+    "MAX_TOKENS_REACHED": "length",
+    "ERROR_TOXIC": "content_filter",
+}
+
+
+def _openai_tool_calls(messages: list[dict]) -> dict[str, dict]:
+    calls: dict[str, dict] = {}
+    for message in messages:
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            continue
+        raw_calls = message.get("tool_calls")
+        if not isinstance(raw_calls, list):
+            continue
+        for raw_call in raw_calls:
+            if not isinstance(raw_call, dict):
+                continue
+            function = raw_call.get("function")
+            if not isinstance(function, dict):
+                function = {}
+            call_id = raw_call.get("id")
+            name = function.get("name") or raw_call.get("name")
+            if (
+                isinstance(call_id, str)
+                and call_id
+                and isinstance(name, str)
+                and name
+            ):
+                calls[call_id] = {
+                    "name": name,
+                    "parameters": _cohere_args(
+                        function.get(
+                            "arguments",
+                            raw_call.get("arguments", {}),
+                        )
+                    ),
+                }
+    return calls
+
+
+def _cohere_finish_reason(value: object) -> str:
+    raw_reason = str(value or "COMPLETE").upper()
+    if raw_reason.startswith("ERROR"):
+        if raw_reason in _COHERE_FINISH_REASONS:
+            return _COHERE_FINISH_REASONS[raw_reason]
+        raise ProviderError(
+            status_code=502,
+            provider=PROVIDER_NAME,
+            message="Cohere generation failed",
+        )
+    return _COHERE_FINISH_REASONS.get(
+        raw_reason,
+        raw_reason.casefold(),
+    )
 
 
 class CohereAdapter(ProviderAdapter):
@@ -33,15 +91,37 @@ class CohereAdapter(ProviderAdapter):
     PROVIDER_NAME = PROVIDER_NAME
     _MODELS = _COHERE_MODELS
 
+    def validate_request(self, request: ChatCompletionRequest) -> None:
+        if not request.tools or request.tool_choice in (None, "auto", "none"):
+            return
+
+        if isinstance(request.tool_choice, dict):
+            unsupported_control = "named-tool selection"
+        elif request.tool_choice in ("required", "any"):
+            unsupported_control = "required-tool selection"
+        else:
+            unsupported_control = "explicit tool-choice"
+        raise ProviderError(
+            status_code=400,
+            provider=PROVIDER_NAME,
+            message=(
+                f"Cohere v1 chat has no {unsupported_control} control; "
+                f"tool_choice={request.tool_choice!r} cannot be honored"
+            ),
+            retryable=False,
+            provider_unavailable=False,
+        )
+
     async def translate_request(
         self, request: ChatCompletionRequest, *, prompt_caching_enabled: bool = False
     ) -> dict:
-        warnings: list[str] = []
+        self.validate_request(request)
 
         preamble = request.system
         chat_history: list[dict] = []
         last_user_message = ""
         tool_results: list[dict] = []
+        tool_calls_by_id = _openai_tool_calls(request.messages)
 
         for msg in request.messages:
             role = msg.get("role", "user")
@@ -55,8 +135,16 @@ class CohereAdapter(ProviderAdapter):
             # produced it. Keeping it out of chat_history also stops a tool
             # result from being mistaken for the user's next message below.
             if role == "tool":
+                call = tool_calls_by_id.get(msg.get("tool_call_id", ""), {})
+                name = (
+                    msg.get("name")
+                    or call.get("name", "")
+                )
                 tool_results.append({
-                    "call": {"name": msg.get("name", ""), "parameters": {}},
+                    "call": {
+                        "name": name,
+                        "parameters": call.get("parameters", {}),
+                    },
                     "outputs": [{"output": content if isinstance(content, str)
                                  else json.dumps(content)}],
                 })
@@ -99,46 +187,24 @@ class CohereAdapter(ProviderAdapter):
             payload["p"] = request.top_p
         if request.stop is not None:
             payload["stop_sequences"] = request.stop
-        if request.tools:
+        if request.tools and request.tool_choice != "none":
             payload["tools"] = [_openai_tool_to_cohere(t) for t in request.tools]
-            # Cohere's v1 chat has no tool_choice equivalent — the model always
-            # decides. Say so rather than dropping the caller's instruction
-            # silently, which is how tools went missing in the first place.
-            if request.tool_choice not in (None, "auto"):
-                warnings.append(
-                    f"Parameter 'tool_choice'={request.tool_choice!r} is not supported by "
-                    "Cohere v1 chat; the model chooses whether to call a tool"
-                )
-
         if request.stream:
-            warnings.append("Parameter 'stream' is not natively supported by Cohere; handled at gateway level")
-
-        if warnings:
-            payload["_warnings"] = warnings
+            payload["stream"] = True
 
         return payload
 
     def translate_response(self, provider_response: dict) -> ChatCompletionResponse:
         text = provider_response.get("text", "")
 
-        tool_calls = [
-            {
-                # Cohere returns no call id; synthesize a stable one for the
-                # round-trip (the caller echoes it back, Cohere matches on name).
-                "id": f"call_{tc.get('name', 'fn')}_{i}",
-                "type": "function",
-                "function": {
-                    "name": tc.get("name", ""),
-                    # Cohere calls it "parameters" and sends an object; OpenAI
-                    # callers json.loads() an "arguments" string.
-                    "arguments": json.dumps(tc.get("parameters", {})),
-                },
-            }
-            for i, tc in enumerate(provider_response.get("tool_calls") or [])
-        ]
+        tool_calls = _cohere_tool_calls(
+            provider_response.get("tool_calls") or []
+        )
 
         message: dict = {"role": "assistant", "content": text}
-        finish_reason = provider_response.get("finish_reason", "stop")
+        finish_reason = _cohere_finish_reason(
+            provider_response.get("finish_reason")
+        )
         if tool_calls:
             message["tool_calls"] = tool_calls
             if not text:
@@ -153,50 +219,106 @@ class CohereAdapter(ProviderAdapter):
             }
         ]
 
-        meta = provider_response.get("meta", {})
-        tokens = meta.get("tokens", {})
-        prompt_tokens = tokens.get("input_tokens", 0)
-        completion_tokens = tokens.get("output_tokens", 0)
-
         return ChatCompletionResponse(
             id=provider_response.get("id", ""),
             choices=choices,
-            usage=TokenUsage(
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-                total_tokens=prompt_tokens + completion_tokens,
-            ),
+            usage=_cohere_usage(provider_response),
             model=provider_response.get("model", ""),
             provider=PROVIDER_NAME,
         )
 
     def translate_stream_chunk(self, chunk: dict) -> StreamChunk:
         event_type = chunk.get("event_type", "")
-        delta_content = ""
+        response = chunk.get("response", {}) or {}
+        delta: dict = {}
+        choices: list[dict] = []
         is_final = False
+        usage = None
+        finish_reason = None
 
         if event_type == "text-generation":
-            delta_content = chunk.get("text", "")
+            text = chunk.get("text", "")
+            if text:
+                delta["content"] = text
         elif event_type == "stream-end":
             is_final = True
+            tool_calls = _cohere_tool_calls(
+                response.get("tool_calls") or []
+            )
+            if tool_calls:
+                delta["tool_calls"] = [
+                    {"index": index, **tool_call}
+                    for index, tool_call in enumerate(tool_calls)
+                ]
+                finish_reason = "tool_calls"
+            else:
+                finish_reason = _cohere_finish_reason(
+                    response.get("finish_reason")
+                    or chunk.get("finish_reason")
+                )
+            usage = _cohere_usage(response or chunk)
 
-        choices = [
-            {
+        if delta or is_final:
+            choices = [{
                 "index": 0,
-                "delta": {"content": delta_content} if delta_content else {},
-                "finish_reason": "stop" if is_final else None,
-            }
-        ]
+                "delta": delta,
+                "finish_reason": finish_reason,
+            }]
 
         return StreamChunk(
-            id=chunk.get("id", ""),
+            id=(
+                response.get("response_id")
+                or response.get("generation_id")
+                or chunk.get("generation_id")
+                or chunk.get("id", "")
+            ),
             choices=choices,
-            model=chunk.get("model", ""),
+            model=response.get("model") or chunk.get("model", ""),
             is_final=is_final,
+            usage=usage,
         )
 
 
 # --- OpenAI ⇄ Cohere tool translation ---------------------------------------
+
+
+def _cohere_tool_calls(raw_calls: list[dict]) -> list[dict]:
+    """Translate complete Cohere calls into OpenAI-compatible tool calls."""
+    return [
+        {
+            # Cohere returns no call id; synthesize a stable one for the
+            # round-trip (the caller echoes it back, Cohere matches on name).
+            "id": f"call_{call.get('name', 'fn')}_{index}",
+            "type": "function",
+            "function": {
+                "name": call.get("name", ""),
+                "arguments": json.dumps(call.get("parameters", {})),
+            },
+        }
+        for index, call in enumerate(raw_calls)
+        if isinstance(call, dict)
+    ]
+
+
+def _cohere_usage(payload: dict) -> TokenUsage:
+    meta = payload.get("meta", {}) or {}
+    billed_units = meta.get("billed_units")
+    if isinstance(billed_units, dict) and (
+        "input_tokens" in billed_units
+        or "output_tokens" in billed_units
+    ):
+        tokens = billed_units
+    else:
+        tokens = meta.get("tokens") or {}
+    if not isinstance(tokens, dict):
+        tokens = {}
+    prompt_tokens = int(tokens.get("input_tokens", 0) or 0)
+    completion_tokens = int(tokens.get("output_tokens", 0) or 0)
+    return TokenUsage(
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        total_tokens=prompt_tokens + completion_tokens,
+    )
 
 
 def _cohere_args(raw) -> dict:

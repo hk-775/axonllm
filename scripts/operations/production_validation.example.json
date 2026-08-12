@@ -7,9 +7,9 @@
       "name": "member-read",
       "category": "authenticated_read_allowed",
       "method": "GET",
-      "path": "/v1/models",
-      "credentialEnv": "AXON_CANARY_MEMBER_TOKEN",
-      "credentialType": "bearer",
+      "path": "/admin/projects/project-launch",
+      "credentialEnv": "AXON_CANARY_MEMBER_SESSION_COOKIE",
+      "credentialType": "alb-session-cookie",
       "expectedStatuses": [
         200
       ]
@@ -17,44 +17,63 @@
     {
       "name": "viewer-mutation-denied",
       "category": "viewer_mutation_denied",
-      "method": "POST",
-      "path": "/admin/projects",
+      "method": "PUT",
+      "path": "/admin/projects/project-launch",
       "credentialEnv": "AXON_CANARY_VIEWER_SESSION_COOKIE",
       "credentialType": "alb-session-cookie",
+      "csrfTokenEnv": "AXON_CANARY_VIEWER_CSRF_TOKEN",
+      "expectedErrorCode": "admin_access_denied",
       "expectedStatuses": [
         403
       ],
-      "jsonBody": {}
+      "jsonBody": {
+        "cache_enabled": true
+      }
+    },
+    {
+      "name": "tenant-admin-mutation-round-trip",
+      "category": "tenant_admin_mutation_round_trip",
+      "method": "PUT",
+      "path": "/admin/projects/project-launch",
+      "credentialEnv": "AXON_CANARY_TENANT_ADMIN_SESSION_COOKIE",
+      "credentialType": "alb-session-cookie",
+      "csrfTokenEnv": "AXON_CANARY_TENANT_ADMIN_CSRF_TOKEN",
+      "expectedStatuses": [
+        200
+      ],
+      "jsonBody": {
+        "cache_enabled": true
+      }
     },
     {
       "name": "cross-tenant-denied",
       "category": "cross_tenant_denied",
       "method": "GET",
-      "path": "/v1/models",
-      "credentialEnv": "AXON_CANARY_CROSS_TENANT_TOKEN",
-      "credentialType": "bearer",
+      "path": "/admin/projects/project-launch",
+      "credentialEnv": "AXON_CANARY_CROSS_TENANT_SESSION_COOKIE",
+      "credentialType": "alb-session-cookie",
       "expectedStatuses": [
-        403
+        404
       ]
     },
     {
       "name": "ungranted-project-denied",
       "category": "ungranted_project_denied",
       "method": "GET",
-      "path": "/v1/models",
-      "credentialEnv": "AXON_CANARY_UNGRANTED_PROJECT_TOKEN",
-      "credentialType": "bearer",
+      "path": "/admin/projects/project-launch",
+      "credentialEnv": "AXON_CANARY_UNGRANTED_PROJECT_SESSION_COOKIE",
+      "credentialType": "alb-session-cookie",
       "expectedStatuses": [
-        403
+        404
       ]
     }
   ],
   "load": {
     "request": {
       "method": "GET",
-      "path": "/v1/models",
-      "credentialEnv": "AXON_CANARY_MEMBER_TOKEN",
-      "credentialType": "bearer",
+      "path": "/admin/projects/project-launch",
+      "credentialEnv": "AXON_CANARY_MEMBER_SESSION_COOKIE",
+      "credentialType": "alb-session-cookie",
       "expectedStatuses": [
         200
       ]

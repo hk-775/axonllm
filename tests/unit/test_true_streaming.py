@@ -15,12 +15,14 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+import src.gateway.agent as agent_module
 from src.gateway.agent import GatewayAgent
 from src.gateway.cache_manager import CacheManager
 from src.gateway.cost_tracker import CostTracker
 from src.gateway.guardrail_engine import GuardrailEngine
 from src.gateway.models import (
     ChatCompletionRequest,
+    ChatCompletionResponse,
     GuardrailRule,
     Project,
     ProviderModelMapping,
@@ -36,10 +38,22 @@ from src.gateway.router import Router
 from src.gateway.security.pii_redactor import PIIRedactor
 
 
-def _chunk(content="", is_final=False, usage=None, model="claude-sonnet"):
+def _chunk(
+    content="",
+    is_final=False,
+    usage=None,
+    model="claude-sonnet",
+    chunk_id="c",
+):
     choices = [{"index": 0, "delta": {"content": content} if content else {},
                 "finish_reason": "stop" if is_final else None}]
-    return StreamChunk(id="c", choices=choices, model=model, is_final=is_final, usage=usage)
+    return StreamChunk(
+        id=chunk_id,
+        choices=choices,
+        model=model,
+        is_final=is_final,
+        usage=usage,
+    )
 
 
 class FakeHttpClient:
@@ -127,9 +141,14 @@ def _agent(
     )
 
 
-def _req(stream=True):
-    return {"messages": [{"role": "user", "content": "Hi there"}],
-            "model": "claude-sonnet", "stream": stream}
+def _req(stream=True, **overrides):
+    payload = {
+        "messages": [{"role": "user", "content": "Hi there"}],
+        "model": "claude-sonnet",
+        "stream": stream,
+    }
+    payload.update(overrides)
+    return payload
 
 
 def _ctx():
@@ -169,6 +188,13 @@ class TestSingleProviderCall:
         texts = [c["data"]["choices"][0]["delta"].get("content")
                  for c in out if isinstance(c.get("data"), dict) and "choices" in c["data"]]
         assert "".join(t for t in texts if t) == "Hello"
+        provider_chunks = [
+            chunk["data"]
+            for chunk in out
+            if isinstance(chunk.get("data"), dict)
+            and "choices" in chunk["data"]
+        ]
+        assert all(chunk["provider"] == "anthropic" for chunk in provider_chunks)
         assert out[-1] == {"data": "[DONE]"}
 
 
@@ -251,6 +277,152 @@ class TestEndOfStreamAccounting:
         rec = cost_tracker.record_usage.call_args.args[0]
         assert rec.prompt_tokens == 7 and rec.completion_tokens == 3
 
+    async def test_stream_retains_provider_request_id(self):
+        chunks = [
+            _chunk("Hi", chunk_id="provider-request-123"),
+            _chunk(
+                "",
+                is_final=True,
+                usage=TokenUsage(5, 2, 7),
+                chunk_id="",
+            ),
+        ]
+        chain = [
+            ProviderModelMapping(
+                provider="anthropic",
+                model_id="claude-sonnet",
+            )
+        ]
+        cost_tracker = MagicMock(spec=CostTracker)
+        cost_tracker.calculate_cost = MagicMock(return_value=0.0)
+        cost_tracker.record_usage = AsyncMock()
+        _no_budget(cost_tracker)
+        agent = _agent(
+            _router(chain),
+            FakeFactory(
+                ["anthropic"],
+                FakeHttpClient({"anthropic": chunks}),
+            ),
+            cost_tracker=cost_tracker,
+        )
+
+        await _drain(agent.handle_chat_completion(_req(), _ctx()))
+
+        record = cost_tracker.record_usage.call_args.args[0]
+        assert record.provider_request_id == "provider-request-123"
+
+    async def test_final_response_id_replaces_item_id(self):
+        chunks = [
+            _chunk("Hi", chunk_id="output-item-123"),
+            _chunk(
+                "",
+                is_final=True,
+                usage=TokenUsage(5, 2, 7),
+                chunk_id="response-456",
+            ),
+        ]
+        chain = [
+            ProviderModelMapping(
+                provider="openai",
+                model_id="gpt-5",
+            )
+        ]
+        cost_tracker = MagicMock(spec=CostTracker)
+        cost_tracker.calculate_cost = MagicMock(return_value=0.0)
+        cost_tracker.record_usage = AsyncMock()
+        _no_budget(cost_tracker)
+        agent = _agent(
+            _router(chain),
+            FakeFactory(
+                ["openai"],
+                FakeHttpClient({"openai": chunks}),
+            ),
+            cost_tracker=cost_tracker,
+        )
+
+        await _drain(agent.handle_chat_completion(_req(), _ctx()))
+
+        record = cost_tracker.record_usage.call_args.args[0]
+        assert record.provider_request_id == "response-456"
+
+    async def test_tool_only_stream_estimation_counts_schema_and_arguments(self):
+        chunks = [
+            StreamChunk(
+                id="provider-tool-1",
+                choices=[{
+                    "index": 0,
+                    "delta": {
+                        "tool_calls": [{
+                            "index": 0,
+                            "id": "call-1",
+                            "type": "function",
+                            "function": {
+                                "name": "lookup",
+                                "arguments": '{"city":"Paris"}',
+                            },
+                        }]
+                    },
+                    "finish_reason": None,
+                }],
+                model="claude-sonnet",
+            ),
+            StreamChunk(
+                id="",
+                choices=[{
+                    "index": 0,
+                    "delta": {},
+                    "finish_reason": "tool_calls",
+                }],
+                model="claude-sonnet",
+                is_final=True,
+            ),
+        ]
+        chain = [
+            ProviderModelMapping(
+                provider="anthropic",
+                model_id="claude-sonnet",
+            )
+        ]
+        cost_tracker = MagicMock(spec=CostTracker)
+        cost_tracker.calculate_cost = MagicMock(return_value=0.0)
+        cost_tracker.record_usage = AsyncMock()
+        cost_tracker.estimate_tokens = AsyncMock(side_effect=[12, 5])
+        _no_budget(cost_tracker)
+        agent = _agent(
+            _router(chain),
+            FakeFactory(
+                ["anthropic"],
+                FakeHttpClient({"anthropic": chunks}),
+            ),
+            cost_tracker=cost_tracker,
+        )
+        tool = {
+            "type": "function",
+            "function": {
+                "name": "lookup",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"city": {"type": "string"}},
+                },
+            },
+        }
+
+        await _drain(
+            agent.handle_chat_completion(
+                _req(tools=[tool], tool_choice="auto"),
+                _ctx(),
+            )
+        )
+
+        prompt_text = cost_tracker.estimate_tokens.await_args_list[0].args[0]
+        output_text = cost_tracker.estimate_tokens.await_args_list[1].args[0]
+        assert '"tools"' in prompt_text
+        assert "lookup" in prompt_text
+        assert output_text == 'lookup{"city":"Paris"}'
+        record = cost_tracker.record_usage.call_args.args[0]
+        assert record.completion_tokens == 5
+        assert record.provider_request_id == "provider-tool-1"
+
 
 class TestUsageAfterFinalChunk:
     async def test_openai_usage_chunk_after_finish_reason(self):
@@ -258,7 +430,13 @@ class TestUsageAfterFinalChunk:
         chunks = [
             _chunk("Hi"),
             _chunk("", is_final=True),                                  # finish_reason
-            _chunk("", is_final=True, usage=TokenUsage(50, 20, 70)),    # trailing usage-only
+            StreamChunk(
+                id="",
+                choices=[],
+                model="claude-sonnet",
+                is_final=True,
+                usage=TokenUsage(50, 20, 70),
+            ),
         ]
         chain = [ProviderModelMapping(provider="openai", model_id="gpt-4o")]
         cost_tracker = MagicMock(spec=CostTracker)
@@ -276,7 +454,8 @@ class TestUsageAfterFinalChunk:
         assert args[2] == 50 and args[3] == 20
         # The empty usage-only chunk was NOT emitted as a content chunk.
         emitted = [c for c in out if isinstance(c.get("data"), dict) and "choices" in c["data"]]
-        assert all(e["data"]["choices"] for e in emitted) or True  # no empty-choice chunk emitted
+        assert len(emitted) == 2
+        assert all(e["data"]["choices"] for e in emitted)
 
 
 class TestBufferedFallbackForNonHttpProvider:
@@ -323,6 +502,12 @@ class TestBufferedFallbackForNonHttpProvider:
             c["data"]["choices"][0]["delta"].get("content", "")
             for c in out if isinstance(c.get("data"), dict) and c["data"].get("choices"))
         assert "1, 2, 3" == text
+        assert all(
+            chunk["data"]["provider"] == "bedrock"
+            for chunk in out
+            if isinstance(chunk.get("data"), dict)
+            and chunk["data"].get("choices")
+        )
         assert not any(
             isinstance(c.get("data"), dict) and "error" in c["data"] for c in out)
         assert out[-1] == {"data": "[DONE]"}
@@ -889,3 +1074,73 @@ class TestSimulateFallbackWhenNoFactory:
         out = await _drain(agent.handle_chat_completion(_req(), _ctx()))
         router.execute_with_fallback.assert_awaited_once()   # blocking path used
         assert out[-1]["data"] == "[DONE]"
+
+
+class TestStreamOutputBounds:
+    async def test_true_stream_limit_applies_without_policy_buffer(
+        self,
+        monkeypatch,
+    ):
+        monkeypatch.setattr(agent_module, "_MAX_STREAM_OUTPUT_BYTES", 1)
+        chain = [
+            ProviderModelMapping(
+                provider="anthropic",
+                model_id="claude-sonnet",
+            )
+        ]
+        chunks = [
+            _chunk("provider output"),
+            _chunk("", is_final=True),
+        ]
+        agent = _agent(
+            _router(chain),
+            FakeFactory(
+                ["anthropic"],
+                FakeHttpClient({"anthropic": chunks}),
+            ),
+        )
+
+        out = await _drain(
+            agent.handle_chat_completion(_req(), _ctx())
+        )
+
+        assert "provider output" not in _content(out)
+        error = next(
+            chunk["data"]["error"]
+            for chunk in out
+            if isinstance(chunk.get("data"), dict)
+            and "error" in chunk["data"]
+        )
+        assert error["code"] == "provider_stream_failed"
+
+    async def test_simulated_stream_limit_is_checked_before_output(
+        self,
+        monkeypatch,
+    ):
+        monkeypatch.setattr(agent_module, "_MAX_STREAM_OUTPUT_BYTES", 1)
+        response = ChatCompletionResponse(
+            id="response-1",
+            choices=[
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": "provider output",
+                    },
+                }
+            ],
+            usage=TokenUsage(1, 1, 2),
+            model="claude-sonnet",
+            provider="anthropic",
+        )
+        agent = _agent(_router([]), factory=None)
+
+        out = [
+            chunk
+            async for chunk in agent._stream_response(response)
+        ]
+
+        assert "provider output" not in _content(out)
+        assert out[0]["data"]["error"]["code"] == (
+            "response_stream_failed"
+        )

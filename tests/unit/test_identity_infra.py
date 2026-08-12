@@ -93,6 +93,23 @@ def test_identity_inputs_are_explicit_https_values(identity_template):
     )
 
 
+def test_identity_stack_creates_no_service_roles(identity_template):
+    roles = _resources(identity_template, "AWS::IAM::Role")
+    assert roles == []
+    for role in roles:
+        properties = role["Properties"]
+        assert (
+            "AxonLLMAgentCoreServiceBoundary-axprod-us-east-1"
+            in json.dumps(properties["PermissionsBoundary"])
+        )
+        tags = {
+            tag["Key"]: tag["Value"]
+            for tag in properties["Tags"]
+        }
+        assert tags["Application"] == "AxonLLM"
+        assert tags["AxonLLMTrustDomain"] == "axprod"
+
+
 def test_user_pool_is_retained_and_operator_enrolled(identity_template):
     pool = _one_resource(
         identity_template,
@@ -219,6 +236,49 @@ def test_confidential_alb_client_has_its_own_exact_callback(
     assert "ExplicitAuthFlows" not in client
 
 
+def test_confidential_certification_client_is_not_a_workforce_flow(
+    identity_template,
+):
+    client_resource = _client(
+        identity_template,
+        "axonllm-agentcore-certification",
+    )
+    client = client_resource["Properties"]
+    assert client_resource["DeletionPolicy"] == "Retain"
+    assert client_resource["UpdateReplacePolicy"] == "Retain"
+    assert client["GenerateSecret"] is True
+    assert client["ExplicitAuthFlows"] == [
+        "ALLOW_ADMIN_USER_PASSWORD_AUTH",
+        "ALLOW_REFRESH_TOKEN_AUTH",
+    ]
+    assert "AllowedOAuthFlows" not in client
+    assert "CallbackURLs" not in client
+    assert client["PreventUserExistenceErrors"] == "ENABLED"
+    assert client["IdTokenValidity"] == 15
+    assert client["AccessTokenValidity"] == 15
+    assert client["RefreshTokenValidity"] == 60
+    assert client["TokenValidityUnits"] == {
+        "AccessToken": "minutes",
+        "IdToken": "minutes",
+        "RefreshToken": "minutes",
+    }
+
+
+def test_production_clients_keep_fifteen_minute_tokens(
+    identity_template,
+) -> None:
+    for name in (
+        "axonllm-agentcore-pkce",
+        "axonllm-agentcore-certification",
+        "axonllm-control-plane-alb",
+    ):
+        client = _client(identity_template, name)["Properties"]
+        assert client["AccessTokenValidity"] == 15
+        assert client["IdTokenValidity"] == 15
+        assert client["TokenValidityUnits"]["AccessToken"] == "minutes"
+        assert client["TokenValidityUnits"]["IdToken"] == "minutes"
+
+
 def test_hosted_ui_and_standard_oidc_outputs_are_retained(identity_template):
     domain = _one_resource(
         identity_template,
@@ -233,6 +293,7 @@ def test_hosted_ui_and_standard_oidc_outputs_are_retained(identity_template):
         "OidcDiscoveryUrl",
         "OidcClientId",
         "OidcAudience",
+        "CertificationClientId",
         "AlbClientId",
         "ControlPlaneDomainName",
         "HostedUiDomain",
