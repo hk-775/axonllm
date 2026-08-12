@@ -870,10 +870,12 @@ def test_launch_authorities_have_prefix_scoped_separate_capabilities(
         "Fn::GetAtt": [terminal_key_id, "Arn"]
     }
 
-    for role_name in (
-        "AxonLLMAgentCoreDeployRole",
-        "AxonLLMAgentCoreQualificationRole",
-    ):
+    role_qualifiers = {
+        "AxonLLMAgentCoreDeployRole": "axprod",
+        "AxonLLMExternalOidcCertificationRole": "axext",
+        "AxonLLMAgentCoreQualificationRole": "axqual",
+    }
+    for role_name, qualifier in role_qualifiers.items():
         statements = _role_statements(synthesized_template, role_name)
         caller = next(statement for statement in statements if statement.get("Sid") == "ConfirmDeploymentAccount")
         assert _actions(caller) == {"sts:GetCallerIdentity"}
@@ -885,6 +887,22 @@ def test_launch_authorities_have_prefix_scoped_separate_capabilities(
         ):
             statement = next(candidate for candidate in statements if candidate.get("Sid") == sid)
             assert statement["Resource"] != "*"
+        bootstrap_policies = next(
+            statement
+            for statement in statements
+            if statement.get("Sid") == "InspectCdkBootstrapPolicies"
+        )
+        resources = (
+            bootstrap_policies["Resource"]
+            if isinstance(bootstrap_policies["Resource"], list)
+            else [bootstrap_policies["Resource"]]
+        )
+        names = {_literal_parts(resource).rsplit("/", 1)[-1] for resource in resources}
+        assert {
+            "AxonLLMAgentCoreCloudFormationExecution-"
+            f"{qualifier}-us-east-1-part{part}"
+            for part in range(1, 4)
+        } <= names
 
 
 def test_launch_authorities_cannot_cross_production_and_qualification_namespaces(

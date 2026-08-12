@@ -913,20 +913,22 @@ pass `--yes` after review.
 `--bootstrap-cdk` is a one-time account/region operation and requires a
 dedicated IAM bootstrap principal. That principal must be able to identify the
 account, create/read the customer-managed policy
-`AxonLLMAgentCoreCloudFormationExecution-<region>`, and create or update the
-standard CDK bootstrap stack and its IAM, S3, ECR, SSM, and CloudFormation
-resources. This is more authority than the routine GitHub deployment role and
-must not be reused by it.
+set `AxonLLMAgentCoreCloudFormationExecution-<qualifier>-<region>-part1`
+through `part3`, and create or update the isolated CDK bootstrap stack and its
+IAM, S3, ECR, SSM, and CloudFormation resources. This is more authority than
+the routine GitHub deployment role and must not be reused by it.
 
-The wrapper generates the policy from
-`src/gateway/deployment/bootstrap_policy.py`, passes only that policy to
-`cdk bootstrap`, and enables bootstrap-stack termination protection. The policy
-bounds regional service actions, global S3/Route 53 bootstrap actions, AxonLLM
-role names, `iam:PassRole` target services, and required service-linked roles.
-Every later deployment compares the canonical live default policy document
-with the repository and requires the CDK CloudFormation execution role to have
-that one managed policy and no inline policy. Missing or drifted policy state
-fails before deployment. Do not substitute `AdministratorAccess`.
+The wrapper generates the policy set from
+`src/gateway/deployment/bootstrap_policy.py`, deterministically partitions the
+unchanged statements below IAM's managed-policy size limit, passes only those
+three policies to `cdk bootstrap`, and enables bootstrap-stack termination
+protection. The policies bound regional service actions, global S3/Route 53
+bootstrap actions, AxonLLM role names, `iam:PassRole` target services, and
+required service-linked roles. Every later deployment compares all three
+canonical live policy documents with the repository and requires the CDK
+CloudFormation execution role to have exactly that set and no inline policy.
+Missing, additional, or drifted policy state fails before deployment. Do not
+substitute `AdministratorAccess`.
 
 The first-adopter operation is restartable:
 
@@ -983,12 +985,23 @@ cd infra
 uv venv
 uv pip install -r requirements.txt
 
-# The account must already have the repository-defined policy installed.
-export BOOTSTRAP_POLICY_ARN="arn:aws:iam::${AWS_ACCOUNT_ID}:policy/AxonLLMAgentCoreCloudFormationExecution-${AWS_REGION}"
+# The account must already have the three repository-defined policies installed.
+export CDK_QUALIFIER=axprod
+BOOTSTRAP_POLICY_ARGS=()
+for part in 1 2 3; do
+  BOOTSTRAP_POLICY_ARGS+=(
+    --cloudformation-execution-policies
+    "arn:aws:iam::${AWS_ACCOUNT_ID}:policy/AxonLLMAgentCoreCloudFormationExecution-${CDK_QUALIFIER}-${AWS_REGION}-part${part}"
+  )
+done
 npx cdk bootstrap "aws://${AWS_ACCOUNT_ID}/${AWS_REGION}" \
   -c deployment_target=identity -c region="$AWS_REGION" \
-  --cloudformation-execution-policies "$BOOTSTRAP_POLICY_ARN" \
-  --termination-protection
+  "${BOOTSTRAP_POLICY_ARGS[@]}" \
+  --custom-permissions-boundary \
+    "AxonLLMAgentCoreBootstrapBoundary-${CDK_QUALIFIER}-${AWS_REGION}" \
+  --qualifier "$CDK_QUALIFIER" \
+  --termination-protection \
+  --toolkit-stack-name "AxonLLMToolkit-${CDK_QUALIFIER}"
 
 npx cdk synth AxonLLMAgentCoreStack \
   -c deployment_target=agentcore -c region="$AWS_REGION"

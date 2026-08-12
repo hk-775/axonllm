@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 
 POLICY_NAME_PREFIX = "AxonLLMAgentCoreCloudFormationExecution"
 BOUNDARY_NAME_PREFIX = "AxonLLMAgentCoreServiceBoundary"
 BOOTSTRAP_BOUNDARY_NAME_PREFIX = "AxonLLMAgentCoreBootstrapBoundary"
+EXECUTION_POLICY_PART_COUNT = 3
+IAM_MANAGED_POLICY_SIZE_LIMIT = 6_144
+_EXECUTION_POLICY_TARGET_SIZE = 5_500
 
 PRODUCTION_QUALIFIER = "axprod"
 QUALIFICATION_QUALIFIER = "axqual"
@@ -318,17 +322,35 @@ def policy_name(region: str, *, qualifier: str = PRODUCTION_QUALIFIER) -> str:
     return f"{POLICY_NAME_PREFIX}-{qualifier}-{region}"
 
 
-def policy_arn(
+def policy_part_name(
+    region: str,
+    *,
+    part: int,
+    qualifier: str = PRODUCTION_QUALIFIER,
+) -> str:
+    """Return one deterministic execution-policy part name."""
+    if not isinstance(part, int) or isinstance(part, bool) or not (
+        1 <= part <= EXECUTION_POLICY_PART_COUNT
+    ):
+        raise ValueError(
+            "execution policy part must be between 1 and "
+            f"{EXECUTION_POLICY_PART_COUNT}"
+        )
+    return f"{policy_name(region, qualifier=qualifier)}-part{part}"
+
+
+def policy_part_arn(
     *,
     partition: str,
     account_id: str,
     region: str,
+    part: int,
     qualifier: str = PRODUCTION_QUALIFIER,
 ) -> str:
-    """Return the expected customer-managed policy ARN."""
+    """Return one deterministic execution-policy part ARN."""
     return (
         f"arn:{partition}:iam::{account_id}:policy/"
-        f"{policy_name(region, qualifier=qualifier)}"
+        f"{policy_part_name(region, part=part, qualifier=qualifier)}"
     )
 
 
@@ -796,3 +818,110 @@ def policy_document(
             },
         ],
     }
+
+
+def _policy_document_size(statements: list[dict[str, Any]]) -> int:
+    return len(
+        json.dumps(
+            {
+                "Version": "2012-10-17",
+                "Statement": statements,
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+    )
+
+
+def _split_oversized_statement(
+    statement: dict[str, Any],
+) -> list[dict[str, Any]]:
+    if _policy_document_size([statement]) <= _EXECUTION_POLICY_TARGET_SIZE:
+        return [statement]
+    actions = statement.get("Action")
+    sid = statement.get("Sid")
+    if not isinstance(actions, list) or not actions or not isinstance(sid, str):
+        raise ValueError(
+            "an oversized bootstrap-policy statement cannot be partitioned"
+        )
+
+    chunks: list[list[str]] = []
+    current: list[str] = []
+    for action in actions:
+        candidate = {
+            **statement,
+            "Action": [*current, action],
+        }
+        if (
+            current
+            and _policy_document_size([candidate])
+            > _EXECUTION_POLICY_TARGET_SIZE
+        ):
+            chunks.append(current)
+            current = [action]
+        else:
+            current.append(action)
+    chunks.append(current)
+    return [
+        {
+            **statement,
+            "Sid": f"{sid}Part{index}",
+            "Action": chunk,
+        }
+        for index, chunk in enumerate(chunks, start=1)
+    ]
+
+
+def policy_documents(
+    *,
+    partition: str,
+    account_id: str,
+    region: str,
+    qualifier: str = PRODUCTION_QUALIFIER,
+) -> tuple[dict[str, Any], ...]:
+    """Partition the bounded execution policy into IAM-sized documents."""
+    complete = policy_document(
+        partition=partition,
+        account_id=account_id,
+        region=region,
+        qualifier=qualifier,
+    )
+    statements: list[dict[str, Any]] = []
+    for statement in complete["Statement"]:
+        statements.extend(_split_oversized_statement(statement))
+
+    documents: list[dict[str, Any]] = []
+    current: list[dict[str, Any]] = []
+    for statement in statements:
+        if (
+            current
+            and _policy_document_size([*current, statement])
+            > _EXECUTION_POLICY_TARGET_SIZE
+        ):
+            documents.append(
+                {
+                    "Version": "2012-10-17",
+                    "Statement": current,
+                }
+            )
+            current = [statement]
+        else:
+            current.append(statement)
+    if current:
+        documents.append(
+            {
+                "Version": "2012-10-17",
+                "Statement": current,
+            }
+        )
+
+    if len(documents) != EXECUTION_POLICY_PART_COUNT or any(
+        _policy_document_size(document["Statement"])
+        > IAM_MANAGED_POLICY_SIZE_LIMIT
+        for document in documents
+    ):
+        raise ValueError(
+            "bootstrap execution policy no longer fits its reviewed "
+            f"{EXECUTION_POLICY_PART_COUNT}-part IAM contract"
+        )
+    return tuple(documents)

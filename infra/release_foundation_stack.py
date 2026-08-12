@@ -47,6 +47,7 @@ _KMS_KEY_ARN_PATTERN = (
 _QUALIFICATION_NAMESPACE = "managed"
 _PRODUCTION_CDK_QUALIFIER = "axprod"
 _QUALIFICATION_CDK_QUALIFIER = "axqual"
+_CDK_EXECUTION_POLICY_PART_COUNT = 3
 _EXTERNAL_CDK_QUALIFIER = "axext"
 _OWNER_EXPIRY_INDEX_NAME = "owner-expiry"
 _REHEARSAL_EVIDENCE_PREFIX = "agentcore-production/rehearsal"
@@ -1498,7 +1499,14 @@ class AxonLLMReleaseFoundationStack(Stack):
                         resource_name=name,
                     )
                     for name in (
-                        f"AxonLLMAgentCoreCloudFormationExecution-{cdk_qualifier}-{self.region}",
+                        *(
+                            "AxonLLMAgentCoreCloudFormationExecution-"
+                            f"{cdk_qualifier}-{self.region}-part{part}"
+                            for part in range(
+                                1,
+                                _CDK_EXECUTION_POLICY_PART_COUNT + 1,
+                            )
+                        ),
                         f"AxonLLMAgentCoreServiceBoundary-{cdk_qualifier}-{self.region}",
                         f"AxonLLMAgentCoreBootstrapBoundary-{cdk_qualifier}-{self.region}",
                     )

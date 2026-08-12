@@ -906,7 +906,11 @@ def deployment_preflights(monkeypatch):
         account_id="123456789012",
         partition="aws",
     )
-    policy_arn = "arn:aws:iam::123456789012:policy/AxonLLMAgentCoreCloudFormationExecution-us-east-1"
+    policy_arns = tuple(
+        "arn:aws:iam::123456789012:policy/"
+        f"AxonLLMAgentCoreCloudFormationExecution-axprod-us-east-1-part{part}"
+        for part in range(1, 4)
+    )
     monkeypatch.setattr(
         deployment,
         "_validate_prefix_list_inputs",
@@ -925,7 +929,7 @@ def deployment_preflights(monkeypatch):
     monkeypatch.setattr(
         deployment,
         "_require_bootstrap_execution_policy",
-        lambda *_args, **_kwargs: (identity, policy_arn),
+        lambda *_args, **_kwargs: (identity, policy_arns),
     )
     monkeypatch.setattr(
         deployment,
@@ -993,31 +997,53 @@ class _PreflightSession:
 def test_bootstrap_requires_repository_execution_policy_without_admin():
     config = AgentCoreSetupConfig.from_mapping(_external())
     iam = _BootstrapIam()
-    identity, policy_arn = deployment._require_bootstrap_execution_policy(
+    identity, policy_arns = deployment._require_bootstrap_execution_policy(
         _PreflightSession(iam=iam),
         config=config,
         create_if_missing=True,
     )
 
     assert identity.account_id == "123456789012"
-    assert len(iam.create_calls) == 3
+    assert len(iam.create_calls) == 5
     calls = {call["PolicyName"]: call for call in iam.create_calls}
     assert set(calls) == {
         "AxonLLMAgentCoreBootstrapBoundary-axprod-us-east-1",
-        "AxonLLMAgentCoreCloudFormationExecution-axprod-us-east-1",
+        "AxonLLMAgentCoreCloudFormationExecution-axprod-us-east-1-part1",
+        "AxonLLMAgentCoreCloudFormationExecution-axprod-us-east-1-part2",
+        "AxonLLMAgentCoreCloudFormationExecution-axprod-us-east-1-part3",
         "AxonLLMAgentCoreServiceBoundary-axprod-us-east-1",
     }
-    execution_call = calls["AxonLLMAgentCoreCloudFormationExecution-axprod-us-east-1"]
-    document = json.loads(execution_call["PolicyDocument"])
-    assert all(statement["Action"] != "*" for statement in document["Statement"])
-    assert policy_arn.endswith("AxonLLMAgentCoreCloudFormationExecution-axprod-us-east-1")
+    for part in range(1, 4):
+        execution_call = calls[
+            "AxonLLMAgentCoreCloudFormationExecution-"
+            f"axprod-us-east-1-part{part}"
+        ]
+        document = json.loads(execution_call["PolicyDocument"])
+        assert len(execution_call["PolicyDocument"]) <= (
+            bootstrap_policy.IAM_MANAGED_POLICY_SIZE_LIMIT
+        )
+        assert all(
+            statement["Action"] != "*"
+            for statement in document["Statement"]
+        )
+    assert all(
+        policy_arn.endswith(
+            "AxonLLMAgentCoreCloudFormationExecution-"
+            f"axprod-us-east-1-part{part}"
+        )
+        for part, policy_arn in enumerate(policy_arns, start=1)
+    )
     command = deployment.cdk_bootstrap_command(
         config,
         identity=identity,
-        execution_policy_arn=policy_arn,
+        execution_policy_arns=policy_arns,
     )
     assert command[2] == "aws://123456789012/us-east-1"
-    assert command[command.index("--cloudformation-execution-policies") + 1] == policy_arn
+    assert [
+        command[index + 1]
+        for index, argument in enumerate(command)
+        if argument == "--cloudformation-execution-policies"
+    ] == list(policy_arns)
     assert command[command.index("--custom-permissions-boundary") + 1] == (
         "AxonLLMAgentCoreBootstrapBoundary-axprod-us-east-1"
     )
@@ -1105,6 +1131,60 @@ def test_bootstrap_policy_uses_valid_bounded_lifecycle_and_pass_role_actions():
     ]
 
 
+@pytest.mark.parametrize("qualifier", ("axprod", "axqual", "axext"))
+def test_bootstrap_execution_policy_parts_fit_iam_limit_and_preserve_actions(
+    qualifier,
+):
+    complete = bootstrap_policy.policy_document(
+        partition="aws",
+        account_id="123456789012",
+        region="us-east-1",
+        qualifier=qualifier,
+    )
+    parts = bootstrap_policy.policy_documents(
+        partition="aws",
+        account_id="123456789012",
+        region="us-east-1",
+        qualifier=qualifier,
+    )
+
+    assert len(parts) == bootstrap_policy.EXECUTION_POLICY_PART_COUNT
+    assert all(
+        len(
+            json.dumps(
+                part,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+        )
+        <= bootstrap_policy.IAM_MANAGED_POLICY_SIZE_LIMIT
+        for part in parts
+    )
+    original_actions = {
+        action
+        for statement in complete["Statement"]
+        for action in (
+            statement["Action"]
+            if isinstance(statement["Action"], list)
+            else [statement["Action"]]
+        )
+    }
+    partitioned_actions = {
+        action
+        for part in parts
+        for statement in part["Statement"]
+        for action in (
+            statement["Action"]
+            if isinstance(statement["Action"], list)
+            else [statement["Action"]]
+        )
+    }
+    assert partitioned_actions == original_actions
+    assert sum(len(part["Statement"]) for part in parts) == (
+        len(complete["Statement"]) + 1
+    )
+
+
 def test_bootstrap_trust_domains_have_distinct_qualifiers_and_boundaries():
     assert bootstrap_policy.qualifier_for_namespace(None) == "axprod"
     assert bootstrap_policy.qualifier_for_namespace("") == "axprod"
@@ -1141,17 +1221,20 @@ class _CdkExecutionRoleIam:
     def __init__(
         self,
         *,
-        policy_arn: str,
+        policy_arns: tuple[str, ...],
         boundary_arn: str,
     ) -> None:
-        self.policy_arn = policy_arn
+        self.policy_arns = policy_arns
         self.boundary_arn = boundary_arn
         self.role_names: list[str] = []
 
     def list_attached_role_policies(self, *, RoleName, **_kwargs):
         self.role_names.append(RoleName)
         return {
-            "AttachedPolicies": [{"PolicyArn": self.policy_arn}],
+            "AttachedPolicies": [
+                {"PolicyArn": policy_arn}
+                for policy_arn in reversed(self.policy_arns)
+            ],
             "IsTruncated": False,
         }
 
@@ -1177,10 +1260,14 @@ def test_cdk_execution_role_requires_exact_policy_boundary_and_qualifier():
         account_id="123456789012",
         partition="aws",
     )
-    policy_arn = "arn:aws:iam::123456789012:policy/AxonLLMAgentCoreCloudFormationExecution-axprod-us-east-1"
+    policy_arns = tuple(
+        "arn:aws:iam::123456789012:policy/"
+        f"AxonLLMAgentCoreCloudFormationExecution-axprod-us-east-1-part{part}"
+        for part in range(1, 4)
+    )
     boundary_arn = "arn:aws:iam::123456789012:policy/AxonLLMAgentCoreBootstrapBoundary-axprod-us-east-1"
     iam = _CdkExecutionRoleIam(
-        policy_arn=policy_arn,
+        policy_arns=policy_arns,
         boundary_arn=boundary_arn,
     )
 
@@ -1188,7 +1275,7 @@ def test_cdk_execution_role_requires_exact_policy_boundary_and_qualifier():
         _PreflightSession(iam=iam),
         config=config,
         identity=identity,
-        expected_policy_arn=policy_arn,
+        expected_policy_arns=policy_arns,
     )
 
     assert set(iam.role_names) == {"cdk-axprod-cfn-exec-role-123456789012-us-east-1"}
@@ -1202,7 +1289,7 @@ def test_cdk_execution_role_requires_exact_policy_boundary_and_qualifier():
             _PreflightSession(iam=iam),
             config=config,
             identity=identity,
-            expected_policy_arn=policy_arn,
+            expected_policy_arns=policy_arns,
         )
 
 
