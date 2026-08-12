@@ -13,7 +13,6 @@ uv export \
   --no-emit-project \
   --extra oidc \
   --extra otel \
-  --extra saml \
   --format requirements-txt \
   >"${work_dir}/runtime-requirements.txt"
 

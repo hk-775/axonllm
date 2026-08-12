@@ -5,7 +5,10 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
+import sys
+import types
 
 import pytest
 
@@ -17,6 +20,10 @@ _ROLE_ARNS = {
     "arn:aws:iam::123456789012:role/AxonAthenaReader",
     "arn:aws:iam::210987654321:role/data/AxonAthenaReader",
 }
+_SCIM_SECRET_ARN = (
+    "arn:aws:secretsmanager:us-east-1:123456789012:"
+    "secret:axonllm/scim-AbCd12"
+)
 _BINDINGS = [
     {
         "tenant_id": "tenant-a",
@@ -244,6 +251,21 @@ def query_templates(
     }
 
 
+@pytest.fixture(scope="module")
+def control_template_with_scim_secret(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> dict:
+    if not _INFRA_PYTHON.is_file():
+        pytest.skip("infra/.venv is required for CDK synthesis tests")
+    return _synth(
+        target="control-plane",
+        work_dir=tmp_path_factory.mktemp("control-scim-secret"),
+        extra_context={
+            "scim_tenants_secret_arn": _SCIM_SECRET_ARN,
+        },
+    )
+
+
 def test_agentcore_query_env_iam_and_endpoints_share_one_allowlist(
     query_templates,
 ):
@@ -259,7 +281,7 @@ def test_agentcore_query_env_iam_and_endpoints_share_one_allowlist(
     assert environment["AWS_STS_REGIONAL_ENDPOINTS"] == "regional"
 
     endpoints = _resources(template, "AWS::EC2::VPCEndpoint")
-    assert len(endpoints) == 7
+    assert len(endpoints) == 8
     athena = _interface_endpoint(template, ".athena")
     sts = _interface_endpoint(template, ".sts")
     for endpoint in (athena, sts):
@@ -352,10 +374,36 @@ def test_control_plane_imports_state_and_never_creates_another_table(
         item["Name"]: item["Value"]
         for item in container["Environment"]
     }
-    table_import = environment["AXON_DYNAMODB_TABLE"]["Fn::ImportValue"]
-    assert "StateTableName" in json.dumps(table_import)
+    table_selector = environment["AXON_DYNAMODB_TABLE"]["Fn::If"]
+    assert table_selector[:2] == [
+        "UseRecoveredState",
+        {"Ref": "RuntimeStateTableName"},
+    ]
+    assert "StateTableName" in json.dumps(table_selector[2])
     assert environment["AXON_CONTROL_PLANE_ONLY"] == "true"
+    assert environment["AXON_SAML_FEDERATION_MODE"] == "managed-cognito"
+    assert environment["AXON_SAML_LOGIN_PATH"] == {
+        "Ref": "SamlLoginPath"
+    }
     assert environment["AXON_ENABLED_PROVIDERS"] == "bedrock"
+    assert template["Parameters"]["SamlLoginPath"]["Default"] == (
+        "/admin/dashboard"
+    )
+    login_path_pattern = re.compile(
+        template["Parameters"]["SamlLoginPath"]["AllowedPattern"]
+    )
+    assert login_path_pattern.fullmatch("/chat")
+    for unsafe_path in (
+        "/",
+        "//evil.example/login",
+        "/saml/login",
+        "/SCIM/v2/Users",
+        "/oauth2/authorize",
+        "/admin/../ready",
+        "/admin dashboard",
+        "/caf\u00e9",
+    ):
+        assert login_path_pattern.fullmatch(unsafe_path) is None
     for name, value in _QUERY_ENVIRONMENT.items():
         assert environment[name] == value
     assert environment["AXON_ALB_CLIENT_ID"] == {
@@ -391,6 +439,353 @@ def test_control_plane_imports_state_and_never_creates_another_table(
         r"@sha256:[0-9a-f]{64}$"
     )
 
+
+def test_control_plane_recovery_selector_is_fail_closed(
+    query_templates,
+):
+    template = query_templates["control-plane"]
+    parameters = template["Parameters"]
+    primary_table = parameters["PrimaryStateTableName"]
+    assert "Default" not in primary_table
+    assert primary_table["MinLength"] == 3
+    assert primary_table["MaxLength"] == 255
+    assert primary_table["AllowedPattern"] == (
+        r"^[A-Za-z0-9_.-]{3,255}$"
+    )
+    assert parameters["RuntimeStateTableName"]["Default"] == ""
+    assert parameters["RecoveryCutoverMode"]["AllowedValues"] == [
+        "normal",
+        "quiesced",
+        "selected",
+    ]
+    assert parameters["RecoveryApprovalId"]["Default"] == ""
+    assert template["Conditions"]["RecoveryAccessBlocked"] == {
+        "Fn::Or": [
+            {"Condition": "RecoveryQuiesced"},
+            {"Condition": "RecoverySelected"},
+        ]
+    }
+
+    task = _one_resource(
+        template,
+        "AWS::ECS::TaskDefinition",
+    )["Properties"]
+    environment = {
+        item["Name"]: item["Value"]
+        for item in task["ContainerDefinitions"][0]["Environment"]
+    }
+    selected = environment["AXON_DYNAMODB_TABLE"]["Fn::If"]
+    assert selected[:2] == [
+        "UseRecoveredState",
+        {"Ref": "RuntimeStateTableName"},
+    ]
+
+    task_policy = next(
+        resource
+        for logical_id, resource in template["Resources"].items()
+        if logical_id.startswith("TaskRoleDefaultPolicy")
+    )
+    state_access = next(
+        statement
+        for statement in task_policy["Properties"]["PolicyDocument"][
+            "Statement"
+        ]
+        if "dynamodb:ConditionCheckItem" in _actions(statement)
+    )
+    assert "UseRecoveredState" in json.dumps(state_access["Resource"])
+    assert "RuntimeStateTableName" in json.dumps(
+        state_access["Resource"]
+    )
+
+    deny = next(
+        resource
+        for logical_id, resource in template["Resources"].items()
+        if logical_id.startswith("RecoveryStateAccessDeny")
+    )
+    deny_statement = deny["Properties"]["PolicyDocument"]["Statement"][0]
+    assert deny_statement["Effect"] == "Deny"
+    assert "dynamodb:TransactWriteItems" not in _actions(deny_statement)
+    assert deny_statement["Resource"]["Fn::If"][0] == (
+        "RecoveryAccessBlocked"
+    )
+    assert deny_statement["Resource"]["Fn::If"][1] == "*"
+
+    transaction_deny = next(
+        resource
+        for logical_id, resource in template["Resources"].items()
+        if logical_id.startswith("RecoveryStateTransactionAccessDeny")
+    )
+    assert transaction_deny["Metadata"] == {
+        "cfn-lint": {"config": {"ignore_checks": ["W3037"]}}
+    }
+    transaction_deny_statement = transaction_deny["Properties"][
+        "PolicyDocument"
+    ]["Statement"][0]
+    assert _actions(transaction_deny_statement) == {
+        "dynamodb:TransactWriteItems"
+    }
+    assert (
+        transaction_deny_statement["Resource"]
+        == deny_statement["Resource"]
+    )
+
+    guard = template["Resources"]["RecoveryGuard"]
+    assert guard["Properties"]["PrimaryTable"] == {
+        "Ref": "PrimaryStateTableName"
+    }
+    assert guard["Properties"]["SelectedTable"] == (
+        environment["AXON_DYNAMODB_TABLE"]
+    )
+    assert guard["Properties"]["Mode"] == {
+        "Ref": "RecoveryCutoverMode"
+    }
+    assert guard["Properties"]["ApprovalId"] == {
+        "Ref": "RecoveryApprovalId"
+    }
+
+    service = _one_resource(template, "AWS::ECS::Service")
+    assert service["Properties"]["DesiredCount"] == {
+        "Fn::If": ["RecoveryNormal", 2, 0]
+    }
+    assert "RecoveryGuard" in service["DependsOn"]
+    scaling = _one_resource(
+        template,
+        "AWS::ApplicationAutoScaling::ScalableTarget",
+    )
+    assert scaling["Properties"]["MinCapacity"] == {
+        "Fn::If": ["RecoveryNormal", 2, 0]
+    }
+    suspended = scaling["Properties"]["SuspendedState"]["Fn::If"]
+    assert suspended[0] == "RecoveryNormal"
+    assert not any(suspended[1].values())
+    assert all(suspended[2].values())
+    assert "RecoveryGuard" in scaling["DependsOn"]
+
+    dynamodb_endpoint = next(
+        endpoint["Properties"]
+        for endpoint in _resources(template, "AWS::EC2::VPCEndpoint")
+        if endpoint["Properties"]["VpcEndpointType"] == "Gateway"
+        and "dynamodb:GetItem" in json.dumps(
+            endpoint["Properties"]["PolicyDocument"]
+        )
+    )
+    endpoint_resources = dynamodb_endpoint["PolicyDocument"][
+        "Statement"
+    ][0]["Resource"]
+    assert "UseRecoveredState" in json.dumps(endpoint_resources)
+
+    outputs = template["Outputs"]
+    assert outputs["PrimaryStateTableName"]["Value"] == {
+        "Ref": "PrimaryStateTableName"
+    }
+    assert outputs["SelectedRuntimeStateTableName"]["Value"] == (
+        environment["AXON_DYNAMODB_TABLE"]
+    )
+    assert outputs["RecoveryCutoverMode"]["Value"] == {
+        "Ref": "RecoveryCutoverMode"
+    }
+    assert outputs["RecoveryApprovalId"]["Value"] == {
+        "Ref": "RecoveryApprovalId"
+    }
+
+    handler = next(
+        resource
+        for logical_id, resource in template["Resources"].items()
+        if logical_id.startswith("RecoveryGuardHandler")
+        and resource["Type"] == "AWS::Lambda::Function"
+    )
+    code = handler["Properties"]["Code"]["ZipFile"]
+    assert "_assert_control_plane_quiesced" in code
+    assert "_assert_agentcore" in code
+    assert "quiesced <-> selected transition" in code
+
+
+def test_control_plane_recovery_guard_enforces_cross_stack_phases(
+    query_templates,
+    monkeypatch,
+):
+    template = query_templates["control-plane"]
+    handler = next(
+        resource
+        for logical_id, resource in template["Resources"].items()
+        if logical_id.startswith("RecoveryGuardHandler")
+        and resource["Type"] == "AWS::Lambda::Function"
+    )
+    agentcore = {
+        "mode": "normal",
+        "selected": "axonllm-agentcore-state",
+        "approval": "",
+    }
+
+    class _CloudFormation:
+        def describe_stacks(self, *, StackName):
+            if StackName == "AxonLLMControlPlaneStack":
+                outputs = {
+                    "ClusterName": "control",
+                    "ServiceName": "web",
+                }
+            else:
+                outputs = {
+                    "RecoveryApprovalId": agentcore["approval"],
+                    "RecoveryCutoverMode": agentcore["mode"],
+                    "SelectedRuntimeStateTableName": (
+                        agentcore["selected"]
+                    ),
+                    "StateTableName": "axonllm-agentcore-state",
+                }
+            return {
+                "Stacks": [
+                    {
+                        "Outputs": [
+                            {
+                                "OutputKey": name,
+                                "OutputValue": value,
+                            }
+                            for name, value in outputs.items()
+                        ]
+                    }
+                ]
+            }
+
+    class _Ecs:
+        def describe_services(self, **_kwargs):
+            return {
+                "failures": [],
+                "services": [
+                    {
+                        "desiredCount": 0,
+                        "pendingCount": 0,
+                        "runningCount": 0,
+                    }
+                ],
+            }
+
+    class _Scaling:
+        def describe_scalable_targets(self, **_kwargs):
+            return {
+                "ScalableTargets": [
+                    {
+                        "MinCapacity": 0,
+                        "SuspendedState": {
+                            "DynamicScalingInSuspended": True,
+                            "DynamicScalingOutSuspended": True,
+                            "ScheduledScalingSuspended": True,
+                        },
+                    }
+                ]
+            }
+
+    clients = {
+        "application-autoscaling": _Scaling(),
+        "cloudformation": _CloudFormation(),
+        "ecs": _Ecs(),
+    }
+    monkeypatch.setitem(
+        sys.modules,
+        "boto3",
+        types.SimpleNamespace(client=lambda name: clients[name]),
+    )
+    namespace: dict[str, object] = {}
+    exec(
+        compile(
+            handler["Properties"]["Code"]["ZipFile"],
+            "control_plane_recovery_guard.py",
+            "exec",
+        ),
+        namespace,
+    )
+
+    base = {
+        "AgentCoreStackName": "AxonLLMAgentCoreStack",
+        "ApprovalId": "",
+        "ControlPlaneStackName": "AxonLLMControlPlaneStack",
+        "Mode": "normal",
+        "PrimaryTable": "axonllm-agentcore-state",
+        "SelectedTable": "axonllm-agentcore-state",
+    }
+    created = namespace["handler"](
+        {"RequestType": "Create", "ResourceProperties": base},
+        None,
+    )
+    quiesced = {
+        **base,
+        "ApprovalId": "CHG-2026-030",
+        "Mode": "quiesced",
+    }
+    namespace["handler"](
+        {
+            "RequestType": "Update",
+            "PhysicalResourceId": created["PhysicalResourceId"],
+            "OldResourceProperties": base,
+            "ResourceProperties": quiesced,
+        },
+        None,
+    )
+
+    restored = (
+        "axonllm-agentcore-state-restore-validation-reviewed"
+    )
+    selected = {
+        **quiesced,
+        "Mode": "selected",
+        "SelectedTable": restored,
+    }
+    agentcore.update(
+        mode="quiesced",
+        selected="axonllm-agentcore-state",
+        approval="CHG-2026-030",
+    )
+    namespace["handler"](
+        {
+            "RequestType": "Update",
+            "PhysicalResourceId": created["PhysicalResourceId"],
+            "OldResourceProperties": quiesced,
+            "ResourceProperties": selected,
+        },
+        None,
+    )
+
+    agentcore.update(mode="normal", selected=restored)
+    namespace["handler"](
+        {
+            "RequestType": "Update",
+            "PhysicalResourceId": created["PhysicalResourceId"],
+            "OldResourceProperties": selected,
+            "ResourceProperties": {
+                **selected,
+                "Mode": "normal",
+            },
+        },
+        None,
+    )
+
+    with pytest.raises(RuntimeError, match="table changes require"):
+        namespace["handler"](
+            {
+                "RequestType": "Update",
+                "PhysicalResourceId": created["PhysicalResourceId"],
+                "OldResourceProperties": base,
+                "ResourceProperties": {
+                    **base,
+                    "SelectedTable": restored,
+                },
+            },
+            None,
+        )
+
+    agentcore.update(mode="selected", selected=restored)
+    with pytest.raises(RuntimeError, match="does not authorize"):
+        namespace["handler"](
+            {
+                "RequestType": "Update",
+                "PhysicalResourceId": created["PhysicalResourceId"],
+                "OldResourceProperties": quiesced,
+                "ResourceProperties": selected,
+            },
+            None,
+        )
+
+
 def test_control_tasks_are_private_and_alb_requires_https_cognito(
     query_templates,
 ):
@@ -398,7 +793,9 @@ def test_control_tasks_are_private_and_alb_requires_https_cognito(
     service = _one_resource(template, "AWS::ECS::Service")["Properties"]
     network = service["NetworkConfiguration"]["AwsvpcConfiguration"]
     assert network["AssignPublicIp"] == "DISABLED"
-    assert service["DesiredCount"] == 2
+    assert service["DesiredCount"] == {
+        "Fn::If": ["RecoveryNormal", 2, 0]
+    }
     assert service["EnableExecuteCommand"] is False
     assert service["DeploymentConfiguration"][
         "DeploymentCircuitBreaker"
@@ -433,6 +830,22 @@ def test_control_tasks_are_private_and_alb_requires_https_cognito(
     assert "HostedUiDomainName" in json.dumps(
         authentication["UserPoolDomain"]
     )
+    listener_rule = _one_resource(
+        template,
+        "AWS::ElasticLoadBalancingV2::ListenerRule",
+    )["Properties"]
+    assert listener_rule["Priority"] == 10
+    assert [action["Type"] for action in listener_rule["Actions"]] == [
+        "forward"
+    ]
+    assert listener_rule["Conditions"] == [
+        {
+            "Field": "path-pattern",
+            "PathPatternConfig": {
+                "Values": ["/scim/*"],
+            },
+        }
+    ]
 
     load_balancer = _one_resource(
         template,
@@ -552,6 +965,66 @@ def test_control_plane_retains_bindings_but_has_no_query_execution_authority(
     assert _actions(transaction) == {"dynamodb:TransactWriteItems"}
     assert "StateTableName" in json.dumps(transaction["Resource"])
     assert "*" not in transaction["Resource"]
+
+
+def test_control_plane_scim_secret_is_exact_and_private(
+    control_template_with_scim_secret,
+):
+    template = control_template_with_scim_secret
+    task = _one_resource(
+        template,
+        "AWS::ECS::TaskDefinition",
+    )["Properties"]
+    container = task["ContainerDefinitions"][0]
+    secrets = {
+        item["Name"]: item["ValueFrom"]
+        for item in container["Secrets"]
+    }
+    assert secrets == {
+        "AXON_SCIM_TENANTS": _SCIM_SECRET_ARN,
+    }
+    environment_names = {
+        item["Name"] for item in container["Environment"]
+    }
+    assert {
+        "AXON_SAML_SP_ENTITY_ID",
+        "AXON_SAML_ACS_URL",
+        "AXON_SAML_IDP_ENTITY_ID",
+        "AXON_SAML_IDP_SSO_URL",
+        "AXON_SAML_IDP_CERT",
+        "AXON_SAML_IDP_CERT_FILE",
+    }.isdisjoint(environment_names | set(secrets))
+
+    secrets_endpoint = _interface_endpoint(template, ".secretsmanager")
+    statement = secrets_endpoint["PolicyDocument"]["Statement"][0]
+    assert _actions(statement) == {
+        "secretsmanager:DescribeSecret",
+        "secretsmanager:GetSecretValue",
+    }
+    assert _as_set(statement["Resource"]) == {_SCIM_SECRET_ARN}
+    assert statement["Principal"]["AWS"]["Fn::GetAtt"][0].startswith(
+        "ExecutionRole"
+    )
+
+    execution_policy = next(
+        resource
+        for logical_id, resource in template["Resources"].items()
+        if logical_id.startswith("ExecutionRoleDefaultPolicy")
+    )
+    secret_reads = [
+        statement
+        for statement in execution_policy["Properties"][
+            "PolicyDocument"
+        ]["Statement"]
+        if "secretsmanager:GetSecretValue" in _actions(statement)
+    ]
+    assert {statement["Resource"] for statement in secret_reads} == {
+        _SCIM_SECRET_ARN,
+    }
+    assert template["Outputs"]["ScimTenantsSecretArn"]["Value"] == (
+        _SCIM_SECRET_ARN
+    )
+    assert "SamlConfigSecretArn" not in template["Outputs"]
 
 
 def test_control_plane_retains_logs_and_access_log_bucket(

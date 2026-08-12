@@ -277,12 +277,12 @@ models:
     model_id: gemini-3.1-pro-preview
     weight: 1.0
     fallback_order: 0
-- name: gemini-3-pro
-  description: Gemini 3 Pro
+- name: gemini-2.5-pro
+  description: Gemini 2.5 Pro
   routing_strategy: round-robin
   providers:
   - provider: google_ai
-    model_id: gemini-3-pro-preview
+    model_id: gemini-2.5-pro
     weight: 1.0
     fallback_order: 0
 # --- xAI (Grok) ---
@@ -402,6 +402,25 @@ models:
     weight: 1.0
     fallback_order: 0
 # --- AI21 Labs ---
+# Bedrock exposes Jamba 1.5 while AI21's direct API exposes Jamba 1.6. Keep
+# separate gateway names so selecting the Bedrock route never silently changes
+# a caller's requested model version.
+- name: jamba-1.5-large-bedrock
+  description: AI21 Jamba 1.5 Large (Bedrock)
+  routing_strategy: round-robin
+  providers:
+  - provider: bedrock
+    model_id: ai21.jamba-1-5-large-v1:0
+    weight: 1.0
+    fallback_order: 0
+- name: jamba-1.5-mini-bedrock
+  description: AI21 Jamba 1.5 Mini (Bedrock)
+  routing_strategy: round-robin
+  providers:
+  - provider: bedrock
+    model_id: ai21.jamba-1-5-mini-v1:0
+    weight: 1.0
+    fallback_order: 0
 - name: jamba-large
   description: AI21 Jamba 1.6 Large
   routing_strategy: round-robin

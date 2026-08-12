@@ -30,11 +30,11 @@ has been retained for them.
 
 | Surface | Behavior |
 |---|---|
-| `chat` action | Validates and invokes the AxonLLM chat pipeline through Bedrock |
-| `list_models` action | Lists Bedrock models allowed for the resolved project |
+| `chat` action | Validates and invokes the AxonLLM chat pipeline through any enabled, credentialled provider |
+| `list_models` action | Lists production-eligible models allowed for the resolved project |
 | `query` action | Runs a bounded Athena `SELECT` through the canonical `QueryService` |
 | `health` action | Liveness only; returns `ready: false` and checks no dependencies |
-| `GET /ready` | Bounded runtime, OIDC/JWKS, canonical principal-store, and security-event outbox readiness |
+| `GET /ready` | Bounded runtime, OIDC/JWKS, canonical principal-store, security-event outbox, and configured query-reconciler readiness |
 
 Default lifecycle bounds are 60 seconds for initialization, 5 seconds for
 readiness, a 5-second readiness cache, and 10 seconds for shutdown. A watchdog
@@ -123,6 +123,10 @@ The AgentCore stack provides:
 - restricted runtime egress through a customer-managed HTTPS prefix list;
 - DynamoDB gateway plus Bedrock Runtime, SQS, SNS, and CloudWatch Logs
   interface endpoints;
+- Bedrock Mantle access through its regional public HTTPS endpoint and
+  least-privilege `CreateInference` and `ListModels` IAM actions;
+- a retained KMS-encrypted provider secret, resource-scoped private Secrets
+  Manager endpoint, and read-only runtime access;
 - optional private STS and Athena endpoints when exact query-role bindings are
   configured;
 - IAM restricted to supplied concrete Bedrock model/profile ARNs;
@@ -142,18 +146,46 @@ The AgentCore stack provides:
 The alarm and security-event topics have no subscriptions. Add confirmed
 receivers before traffic.
 
-The stack sets `AXON_ENABLED_PROVIDERS=bedrock`. The allowlist is applied when
-the runtime constructs its provider factory, so `list_models` and `chat`
-advertise and invoke only standard Bedrock mappings. Bedrock Mantle and every
-HTTP provider remain excluded even if the image contains their metadata or the
-runtime receives credentials for them. The stack injects no provider secrets.
+The stack allowlists all thirteen providers. The allowlist is applied when the
+runtime constructs its provider factory. Bedrock and Mantle are always
+credentialled through the runtime role; an HTTP provider is advertised only
+when its credential loads from the retained secret referenced by
+`AXON_PROVIDER_SECRET_ARN`. Mantle uses AWS SigV4 and needs no stored provider
+key.
+
+The provider secret accepts these fields:
+
+`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `AZURE_OPENAI_API_KEY`,
+`AZURE_OPENAI_ENDPOINT`, `GCP_CREDENTIALS_JSON`, `GCP_PROJECT_ID`,
+`GCP_LOCATION`, `VERTEX_AI_ENDPOINT`, `GOOGLE_AI_API_KEY`, `COHERE_API_KEY`,
+`XAI_API_KEY`, `GROQ_API_KEY`, `TOGETHER_API_KEY`, `FIREWORKS_API_KEY`, and
+`AI21_API_KEY`.
+
+Environment values override the secret, and the secret overrides checked-in
+metadata. Unknown secret fields are ignored; malformed known fields fail
+startup. Direct AI21 Jamba 1.6 uses `AI21_API_KEY`; Jamba 1.5 uses standard
+Bedrock IAM and no AI21 key.
+
+Google AI sends `GOOGLE_AI_API_KEY` only in the `x-goog-api-key` header; the
+key never enters completion, streaming, or model-list URLs. Vertex accepts only
+refreshable credentials: supply Google ADC or set `GCP_CREDENTIALS_JSON` to a
+JSON-encoded `external_account` AWS workload-identity configuration or
+`service_account` document. In the AgentCore provider secret, that field is a
+string containing the credential JSON, while `GCP_PROJECT_ID` and
+`GCP_LOCATION` select the Vertex resource. AWS workload identity avoids a
+long-lived Google private key and is preferred.
+
+Vertex performs one bounded credential exchange during synchronous bootstrap,
+then refreshes five minutes ahead of expiry on a daemon thread. Request and
+model-availability paths read only the cached token. An unexpectedly expired
+token fails closed immediately while background refresh runs. Secrets Manager
+startup calls use a 3-second connect timeout, 5-second read timeout, and at
+most three attempts.
 
 `AXON_ENABLED_PROVIDERS` is the general comma-separated runtime provider
 allowlist. An unset value adds no allowlist beyond configured credentials; an
-empty value or unknown provider fails startup. Do not broaden the AgentCore
-value without reviewing secret delivery, IAM, egress, model disclosure, and
-deployment tests. `SessionManager` and AgentCore Memory are not wired; do not
-claim durable conversation memory.
+empty value or unknown provider fails startup. `SessionManager` and AgentCore
+Memory are not wired; do not claim durable conversation memory.
 
 When query bindings are present, each exact tuple contains `tenant_id`,
 `project_id`, and a concrete role ARN. Their compact JSON value must remain
@@ -181,7 +213,11 @@ structure/nulls, and 1 GiB scanned. Query request/result/rejection audit stores
 SHA-256 values and execution statistics, not SQL literals. DynamoDB also
 enforces principal/project RPM, expiring concurrency slots, aggregate scan
 reservations, duplicate request ids, and durable accepted/running/terminal
-lifecycle state.
+lifecycle state. A fenced periodic worker claims expired records across
+replicas, closes accepted records, cancels or observes known Athena executions,
+atomically reconciles slots/reservations, and replays pending terminal audit
+writes. It defers a running record rather than guessing when the datasource or
+exact deployment binding cannot be re-established.
 
 The stack injects `AXON_AWS_ACCOUNT_ID`, `AXON_EVENT_OUTBOX_QUEUE_URL`,
 `AXON_SECURITY_EVENT_SNS_TOPIC_ARN`, and
@@ -214,14 +250,25 @@ native call that holds the GIL.
 
 `AxonLLMControlPlaneStack` runs a separate verified AMD64 server image on
 private Fargate tasks behind an HTTPS ALB, Cognito authentication, and a stable
-Route 53 alias. It imports the AgentCore table, data key, outbox, SNS topic, and
-CloudWatch event log. It creates no second DynamoDB table.
+Route 53 alias. It uses AgentCore's verified `StateTableName` output and imports
+the data key, outbox, SNS topic, and CloudWatch event log. It creates no second
+DynamoDB table.
 
 The stack sets `AXON_CONTROL_PLANE_ONLY=true`. It retains tenant admin,
-datasource, SAML/SCIM, health, and readiness routes while suppressing chat,
-model-list, OpenAI-compatible, and `/v1/query` routes. Although it receives the
-same role-binding metadata so datasource writes can be validated, its task role
-and endpoints grant no Athena or STS execution authority.
+datasource, managed-SAML handoff, SCIM, health, and readiness routes while
+suppressing chat, model-list, OpenAI-compatible, and `/v1/query` routes. Although
+it receives the same role-binding metadata so datasource writes can be
+validated, its task role and endpoints grant no Athena or STS execution
+authority.
+
+A higher-priority ALB rule forwards only `/scim/*` without Cognito because SCIM
+authenticates its own bearer token. Every `/saml/*` route remains behind the
+default ALB Cognito action. The stack optionally injects the complete
+`AXON_SCIM_TENANTS` value, sets
+`AXON_SAML_FEDERATION_MODE=managed-cognito`, and passes a validated
+`AXON_SAML_LOGIN_PATH`. It never receives SAML metadata, certificates, or
+assertions. Cognito is the SAML SP, the ALB owns the browser session, and
+AxonLLM accepts only the resulting ALB-signed OIDC identity.
 
 ## Release Evidence
 
@@ -292,6 +339,9 @@ export AXON_CONTROL_PLANE_CERTIFICATE_ARN='arn:aws:acm:us-east-1:123456789012:ce
 export AXON_CONTROL_PLANE_PUBLIC_HOSTED_ZONE_ID='Z0123456789EXAMPLE'
 export AXON_CONTROL_PLANE_APPROVED_INGRESS_PREFIX_LIST_ID='pl-0123456789abcdef1'
 export AXON_CONTROL_PLANE_APPROVED_HTTPS_PREFIX_LIST_ID='pl-0123456789abcdef2'
+# Optional SCIM credential map and managed-SAML landing path:
+export AXON_CONTROL_PLANE_SCIM_TENANTS_SECRET_ARN='arn:aws:secretsmanager:us-east-1:123456789012:secret:axonllm/scim-AbCd12'
+export AXON_CONTROL_PLANE_SAML_LOGIN_PATH='/admin/dashboard'
 
 uv run axon setup agentcore \
   --identity-mode managed-cognito \
@@ -318,6 +368,39 @@ client must generate a verifier and send
 application. Invoke AgentCore with the returned **ID token**, which carries
 `custom:tenant_id` and `custom:project_id`. Do not substitute the Cognito access
 token, which does not contain those user attributes by default.
+
+Omit the optional SCIM secret ARN when SCIM is disabled. Its complete
+`SecretString` is the tenant map accepted by `AXON_SCIM_TENANTS`; the
+control-plane execution role and private Secrets Manager endpoint are scoped to
+that exact ARN. There is no AxonLLM SAML secret.
+
+Before enabling enterprise SAML, configure the retained Cognito user pool as
+the service provider:
+
+1. Add the enterprise SAML IdP to Cognito from reviewed metadata and require a
+   signed response or assertion.
+2. Configure the IdP with Cognito's SP entity ID and SAML response endpoint, not
+   AxonLLM `/saml/acs` or `/saml/metadata`.
+3. Enable the SAML IdP on the confidential ALB client and on the public PKCE
+   client if federated users also invoke AgentCore.
+4. Verify Cognito attribute mappings, certificate rotation, logout, and
+   IdP-initiated and SP-initiated policy according to the enterprise IdP.
+5. Provision canonical principals using the exact Cognito issuer and Cognito
+   `sub`. If SCIM performs provisioning, its tenant issuer must be that Cognito
+   issuer and `externalId` must equal the Cognito `sub`.
+
+This tenant-specific Cognito configuration is an operator prerequisite; the
+first-adopter deployer creates the retained pool and clients but does not ingest
+IdP metadata. Cognito validates SAML signature, issuer, audience, destination,
+recipient, timestamps, request correlation, replay, and RelayState. SAML
+groups, roles, tenant values, and project values do not grant AxonLLM authority;
+the canonical principal and project records do.
+
+`GET /saml/login` is only a safe local handoff. An unauthenticated request is
+first intercepted by the ALB and sent through Cognito; after authentication the
+route redirects to the configured protected landing path. `/saml/acs` and
+`/saml/metadata` are permanent `410` tombstones for the retired direct-SP
+surface.
 
 The deployer sends the initial invitation through Cognito, never handles a
 temporary password, and refuses to reassign an existing user to another tenant
@@ -435,8 +518,29 @@ npx cdk deploy AxonLLMAgentCoreStack \
 
 `BEDROCK_INVOKE_RESOURCE_ARNS` is a comma-separated list of concrete ARNs; the
 parameter rejects wildcards. The image must be a private ECR digest in the
-deployment region. Include the OIDC origin and every deliberately enabled
-external HTTPS destination in the approved prefix list.
+deployment region. Include the OIDC origin,
+`bedrock-mantle.<region>.api.aws`, and every deliberately enabled external
+HTTPS destination in the approved prefix list. Because an EC2 managed prefix
+list stores CIDRs rather than hostnames, verify that every current A record for
+the Mantle endpoint is covered before deployment and after AWS publishes an
+address change.
+
+After the first deployment, resolve the generated secret:
+
+```bash
+PROVIDER_SECRET_ARN="$(
+  aws cloudformation describe-stacks \
+    --stack-name AxonLLMAgentCoreStack \
+    --query "Stacks[0].Outputs[?OutputKey=='ProviderSecretArn'].OutputValue | [0]" \
+    --output text
+)"
+```
+
+Populate only the required fields through an approved secret-management
+workflow, then deploy a new AgentCore runtime version so startup reloads the
+secret. Never pass secret values as CloudFormation parameters or commit a
+populated provider YAML file. The secret is retained across stack deletion; a
+replacement stack emits a different ARN.
 
 To enable query manually, pass the same contexts to AgentCore and the control
 plane:
@@ -467,8 +571,12 @@ and run `axon bootstrap-tenant`. Then deploy `AxonLLMControlPlaneStack` with
 `deployment_target=control-plane`, the same Athena contexts, the AgentCore and
 identity stack names, `ControlPlaneVerifiedImageUri`, `CertificateArn`,
 `PublicHostedZoneId`, `ApprovedIngressPrefixListId`, and
-`ApprovedHttpsPrefixListId`. Skipping any of those steps is not equivalent to
-the schema-v2 first-adopter workflow.
+`ApprovedHttpsPrefixListId`, plus the validated `SamlLoginPath` when overriding
+its `/admin/dashboard` default. `PrimaryStateTableName` has no default: resolve
+the deployed AgentCore stack's verified `StateTableName` output and pass that
+exact value. The deployment wrapper performs this lookup, parameter binding,
+and post-deployment output comparison automatically. Skipping any of those
+steps is not equivalent to the schema-v2 first-adopter workflow.
 
 ## Verification
 
@@ -482,14 +590,22 @@ Before traffic:
    subscriptions.
 4. Require `GET /ready` to return 200; do not use `health` as readiness.
 5. Run `list_models`, `chat`, and, when configured, `query` with an active,
-   project-granted principal.
+   project-granted principal. Require one completion and one streaming
+   completion from every credentialled provider.
 6. Verify query rejection for mutation/multiple statements, out-of-datasource
    references, unbound roles, unsafe workgroups, and missing service scope.
+   Exercise one interrupted lifecycle and verify terminal reconciliation,
+   accounting release, and exactly one durable result audit. Verify an
+   unavailable datasource/binding is deferred without accounting release.
 7. Verify the datasource role trust names the exact runtime role and permits
    `sts:AssumeRole`, `sts:TagSession`, and `sts:SetSourceIdentity`.
 8. For managed Cognito, verify the stable control-plane hostname, ALB login,
    datasource admin RBAC, shared AgentCore table, suppressed data routes, and
-   absence of Athena/STS task authority.
+   absence of Athena/STS task authority. For SAML, also verify Cognito SP
+   metadata and certificate rollover, signed assertion rejection, issuer,
+   audience, destination/recipient and time rejection, request/replay handling,
+   safe RelayState, exact Cognito issuer/`sub` canonical resolution, and that
+   `/saml/*` never matches the unauthenticated listener rule.
 9. Verify failures for missing/invalid tokens, payload identity fields, inactive
    membership, missing grants, cross-tenant projects, and missing service scopes.
 10. Exercise streaming and any response control that requires buffering.
@@ -514,7 +630,8 @@ python scripts/operations/validate_state_recovery.py \
 
 python scripts/operations/validate_state_recovery.py \
   --stack-name AxonLLMAgentCoreStack \
-  --exercise-restore
+  --exercise-restore \
+  --keep-restored-table
 ```
 
 The scheduled operations workflow audits both Fargate and AgentCore daily and
@@ -525,10 +642,138 @@ job matrices both require it. The stack configures governance-mode Vault Lock
 with 30-365 day retention. A restore exercise validates a temporary table and
 the workflow retains its JSON result as a 90-day evidence artifact.
 
-There is no AgentCore restored-table runtime parameter, quiescence guard, or
-application cutover workflow. `retain_fargate_restore` applies only to Fargate;
-do not use the Fargate recovery helper or claim AgentCore cutover. The first real
-AgentCore AWS restore exercise remains externally unverified.
+For a manually dispatched restore, set `exercise_restore=true` and
+`retain_agentcore_restore=true`. The recovery role creates, validates,
+protects, and returns a table named
+`<primary>-restore-validation-<timestamp>-<random>`. It cannot update the
+AgentCore stack. The deployment operator performs cutover with
+`scripts/operations/agentcore_recovery.py`; do not use the Fargate helper.
+
+The selector has four fail-closed phases:
+
+- `normal`: only `production` exists and the runtime can use only the selected
+  table.
+- `quiesced`: endpoints are removed, JWT client/audience values are blocked,
+  and explicit IAM deny prevents every runtime DynamoDB operation.
+- `selected`: the approved table, exact runtime IAM, VPC endpoint policy,
+  metrics, and backup selection have changed while access remains blocked.
+- `validation`: only `recovery` exists and can use the selected table.
+  Promotion replaces it with `production` without another table change.
+
+The guard accepts a table change only from `quiesced` to `selected`, bound to a
+new 3-128 character change/incident ID. It permits only the primary table or a
+restore in that table's namespace. It also requires every AgentCore endpoint
+absent and, when deployed, the web control plane at zero desired, pending, and
+running tasks with all scaling paths suspended. Quiescence lasts 14,700
+seconds: the four-hour maximum session lifetime plus a five-minute IAM margin.
+
+Deploy the updated stack in `normal` mode through the reviewed CDK path first.
+Confirm `describe-stacks` returns a nonempty `RoleARN`; the helper refuses to
+update a stack without a CloudFormation execution role. Stop new traffic, then
+run:
+
+```bash
+python scripts/operations/agentcore_recovery.py \
+  --stack-name AxonLLMAgentCoreStack \
+  quiesce \
+  --state-file agentcore-cutover.json \
+  --approval-id CHG-2026-001
+```
+
+The mode-`0600` state file is created before mutation. If the managed control
+plane exists, the helper records its task/scaling state, suspends scaling, and
+stops it. The helper uses the already-reviewed template and preserves every
+unrelated stack parameter. Keep that control plane stopped throughout recovery.
+Selection, validation start, promotion, and control-plane resume record
+restartable checkpoints before cross-stack updates. `quiesce` is also
+restartable after a partial ECS stop or selector update: rerun it with the same
+state file and approval ID. For later phases, rerun the same command with the
+same state file and expected table after an interruption. Before validation,
+`abort` completes any partial control-plane stop and reverses a partially
+completed selection in the required safe order.
+
+After the reported quiescence interval, select the retained table while access
+remains denied, then open only the recovery endpoint:
+
+```bash
+python scripts/operations/agentcore_recovery.py \
+  --stack-name AxonLLMAgentCoreStack \
+  select \
+  --state-file agentcore-cutover.json \
+  --expected-table "$RESTORED_TABLE_NAME"
+
+python scripts/operations/agentcore_recovery.py \
+  --stack-name AxonLLMAgentCoreStack \
+  start \
+  --state-file agentcore-cutover.json \
+  --expected-table "$RESTORED_TABLE_NAME"
+
+python scripts/operations/agentcore_recovery.py \
+  --stack-name AxonLLMAgentCoreStack status
+```
+
+Selection rechecks ACTIVE status, encryption by the exact AgentCore data KMS
+key, deletion protection, PITR, `expires_at` TTL, key schema, namespace, stack
+identity, approval ID, and control-plane quiescence. Invoke the `recovery`
+qualifier with approved JWT canaries. Verify readiness,
+administrator/viewer behavior, cross-tenant denials, chat/streaming, event
+delivery, and selected-table audit integrity. Retain that evidence, then
+promote and resume the control plane on the same selected table:
+
+```bash
+python scripts/operations/agentcore_recovery.py \
+  --stack-name AxonLLMAgentCoreStack \
+  promote \
+  --state-file agentcore-cutover.json \
+  --expected-table "$RESTORED_TABLE_NAME"
+
+python scripts/operations/agentcore_recovery.py \
+  --stack-name AxonLLMAgentCoreStack \
+  resume-control-plane \
+  --state-file agentcore-cutover.json
+```
+
+Resume requires recorded `promoted` or `aborted` evidence, both stacks in
+`normal`/blocked-compatible phases on the same selected table, matching stack
+ownership, and matching recovery approval where applicable. It restores the
+recorded ECS desired count, scaling range, and suspension state only after the
+control-plane stack follows AgentCore.
+
+Rollback uses a new state file and approval ID. Repeat `quiesce`, `select`,
+`start`, and `promote`, passing the primary table as `--expected-table`, rerun
+all canaries, and resume with the rollback state file. Only then remove the
+unused restore using the recovery role:
+
+```bash
+python scripts/operations/agentcore_recovery.py \
+  --stack-name AxonLLMAgentCoreStack \
+  resume-control-plane \
+  --state-file agentcore-rollback.json
+
+python scripts/operations/agentcore_recovery.py \
+  --stack-name AxonLLMAgentCoreStack \
+  cleanup --table-name "$RESTORED_TABLE_NAME"
+```
+
+Before validation, `abort --state-file agentcore-cutover.json` safely returns
+both selectors to the pre-cutover table while access remains blocked. Then run
+`resume-control-plane` with that same state file. After validation starts, use
+the full approved rollback flow.
+
+The deployment operator needs read/update access to the exact AgentCore stack,
+target-table metadata reads, AgentCore endpoint reads, and, when present,
+describe/update access to the exact control-plane ECS service and scalable
+target. CloudFormation mutates infrastructure through the stack execution role.
+Keep this operator separate from the PITR recovery role, which is limited to
+restore/protection/cleanup and data-key use. Neither role needs provider-secret
+value access.
+
+The managed control-plane stack now has its own phase-gated selector. It follows
+the reviewed AgentCore-selected primary or restored table through environment,
+task IAM, transaction policy, DynamoDB endpoint policy, explicit blocked-phase
+deny, desired count, and scaling suspension. Keep both planes stopped during
+selection and resume only through the helper. The first real AWS execution and
+measured recovery time remain external launch evidence.
 
 Use the incident and key-rotation procedure in the
 [Production Runbook](PRODUCTION_RUNBOOK.md#rotation-and-incident-response).

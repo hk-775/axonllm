@@ -256,6 +256,19 @@ class TestPricingCheck:
         assert "$0.00" in result.detail
         assert ("xai / grok-3", "grok") in result.rows
 
+    def test_production_gate_reports_unpriced_model_as_unavailable(self):
+        registry = _registry(_model("grok", ("xai", "grok-3")))
+
+        result = check_pricing(
+            audit_pricing(registry, {}),
+            unpriced_mappings_blocked=True,
+        )
+
+        assert result.status is Status.FAIL
+        assert "unavailable in production" in result.summary
+        assert "Production routing fails closed" in result.detail
+        assert "$0.00" not in result.detail
+
     def test_partially_priced_model_only_warns(self):
         """One priced provider still bills, so this is survivable, not broken."""
         registry = _registry(_model("claude", ("anthropic", "c-1"), ("bedrock", "c-2")))

@@ -506,12 +506,12 @@ class TestPage:
         assert '<span class="title">Catalogue Coverage</span>' in html
         assert "<title>AxonLLM — Catalogue Coverage</title>" in html
 
-        shell = (
+        dashboard_source = (
             pathlib.Path(__file__).resolve().parents[2]
-            / "src/gateway/admin/static/index.html"
+            / "src/gateway/admin/dashboard.jsx"
         ).read_text(encoding="utf-8")
-        assert 'title="Catalogue Coverage"' in shell
-        assert "label: 'Catalogue'" in shell
+        assert 'title="Catalogue Coverage"' in dashboard_source
+        assert "label: 'Catalogue'" in dashboard_source
 
     def test_both_config_paths_are_named_on_the_page(self):
         """The drift is fixed by editing one of two files and a finding does not

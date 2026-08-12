@@ -92,6 +92,10 @@ install paths — local or AWS, seeded or clean — and which flag decides.
   concurrency slots, aggregate per-minute scan reservations, duplicate
   `request_id` rejection, and durable accepted/running/terminal lifecycle
   state shared across replicas.
+- **Interrupted-query recovery** — a fenced periodic worker closes expired
+  accepted/running records, reconciles reservations and slots atomically, and
+  replays terminal audit writes. It defers when datasource authority cannot be
+  proven.
 - **Datasource administration** — `/admin/datasources` stores tenant/project
   Athena metadata without credentials. `tenant_admin` can write;
   `tenant_member` and `tenant_auditor` can read; `service` is denied. Lists are
@@ -120,7 +124,9 @@ install paths — local or AWS, seeded or clean — and which flag decides.
   writes and region topology require `platform_admin`; tenant control-plane
   access by that role requires both a break-glass reason and an explicit
   `X-Axon-Target-Tenant` selector.
-- **SAML 2.0 SSO** — SP-initiated login + ACS with pure-Python signed-assertion verification (no xmlsec1 system dependency)
+- **Managed SAML federation** — Cognito is the SAML service provider, the ALB
+  establishes the browser session, and AxonLLM resolves the resulting Cognito
+  issuer and `sub` through canonical authority
 - **SCIM 2.0 provisioning** — `/scim/v2/Users` + `/scim/v2/Groups` for IdP-driven joiner/mover/leaver (Okta, Entra ID, …)
 - **API key management** — canonical issue, revoke, and rotation transactionally
   update tenant-qualified key and service-principal records. Tenant keys default
@@ -154,7 +160,9 @@ unconditional denial.
 
 ### Observability
 - **Admin dashboard** — 20 pages in four groups. *Observe:* Overview, Traces, Efficiency, Audit Log. *Configure:* Models, Projects, Users, API Keys. *Govern:* Policies, Hierarchy, Quotas, Regions, Webhooks. *System:* Health, Configuration, Architecture, Pricing, Catalogue, Readiness. Plus Sandbox, a live playground that issues real requests through the gateway.
-- **Pricing coverage check** — flags models with no configured price, which bill at $0.00 and so silently under-count budgets. Reported at startup and on `/admin/pricing-drift`.
+- **Pricing coverage check** — flags mappings with no usable price. Production
+  excludes them from listing and routing; development reports their $0.00
+  accounting behavior. Reported at startup and on `/admin/pricing-drift`.
 - **Production readiness checklist** — eight checks for misconfigurations that
   can otherwise serve traffic quietly: canonical identity, auth enforcement,
   demo data, provider credentials, pricing, model ids, persistence, and API-key
@@ -180,10 +188,10 @@ evidence of a defect and not evidence against one.
 | Together | API key | Verified |
 | Fireworks | API key | Verified |
 | Google AI (Gemini) | API key | Adapter ready — request timed out |
-| AI21 | API key | Adapter ready — untested (no credential) |
+| AI21 | Direct API key, or AWS credentials through Bedrock | Jamba 1.5 Bedrock mappings available; direct Jamba 1.6 adapter untested |
 | Groq | API key | Adapter ready — untested (no credential) |
 | Azure OpenAI | API key | Adapter ready — untested (no credential) |
-| Google Vertex AI | GCP service account | Adapter ready — untested (no credential) |
+| Google Vertex AI | Refreshable ADC / AWS workload identity | Adapter ready — untested (no credential) |
 | Cohere | API key | Adapter ready — untested (no credential) |
 
 ## Quick Start
@@ -607,6 +615,9 @@ export AXON_CONTROL_PLANE_CERTIFICATE_ARN='arn:aws:acm:us-east-1:123456789012:ce
 export AXON_CONTROL_PLANE_PUBLIC_HOSTED_ZONE_ID='Z0123456789EXAMPLE'
 export AXON_CONTROL_PLANE_APPROVED_INGRESS_PREFIX_LIST_ID='pl-0123456789abcdef1'
 export AXON_CONTROL_PLANE_APPROVED_HTTPS_PREFIX_LIST_ID='pl-0123456789abcdef2'
+# Optional SCIM credential map and managed-SAML landing path:
+export AXON_CONTROL_PLANE_SCIM_TENANTS_SECRET_ARN='arn:aws:secretsmanager:us-east-1:123456789012:secret:axonllm/scim-AbCd12'
+export AXON_CONTROL_PLANE_SAML_LOGIN_PATH='/admin/dashboard'
 
 uv run axon setup agentcore \
   --identity-mode managed-cognito \
@@ -625,9 +636,18 @@ The deployer retains the identity resources, invites the first Cognito
 administrator, deploys the authenticated AgentCore runtime, idempotently
 creates or verifies canonical authority, and then deploys the
 Cognito-authenticated shared-state control plane at the stable domain. The
-control plane uses the AMD64 image, imports AgentCore's table, and has no
-Athena/STS query authority. It stores no client secret or password. Review the
-CDK diff before adding `--yes` for noninteractive deployment.
+control plane uses the AMD64 image and AgentCore's verified `StateTableName`
+output, and has no Athena/STS query authority. It stores no client secret or
+password. Review the CDK diff before adding `--yes` for noninteractive
+deployment.
+
+The optional SCIM secret is injected whole as `AXON_SCIM_TENANTS`. No SAML
+metadata, certificate, assertion, or IdP credential is injected into AxonLLM.
+The stack fixes `AXON_SAML_FEDERATION_MODE=managed-cognito` and validates the
+optional protected landing path. Only `/scim/*` bypasses ALB Cognito;
+every `/saml/*` request is subject to the normal Cognito authentication action.
+The tenant-specific SAML IdP must be configured on the retained Cognito pool and
+enabled on the relevant app clients before SAML users are admitted.
 
 The managed client supports only OAuth authorization code. The adopting
 application must send an S256 PKCE challenge and use the returned **ID token**
@@ -802,13 +822,19 @@ The environment variable name per provider (from `src/gateway/provider_loader.py
 | Azure OpenAI | `AZURE_OPENAI_API_KEY` |
 | Cohere | `COHERE_API_KEY` |
 | Google AI (Gemini) | `GOOGLE_AI_API_KEY` |
-| Vertex AI | `GCP_ACCESS_TOKEN` |
+| Vertex AI | ADC or `GCP_CREDENTIALS_JSON` plus `GCP_PROJECT_ID` / `GCP_LOCATION` |
 | xAI | `XAI_API_KEY` |
 | Groq | `GROQ_API_KEY` |
 | Together | `TOGETHER_API_KEY` |
 | Fireworks | `FIREWORKS_API_KEY` |
 | AI21 | `AI21_API_KEY` |
 | **Bedrock / Bedrock Mantle** | **none** — uses the AWS credential chain (`AWS_PROFILE`, instance role, task role) |
+
+Google AI sends its key only in `x-goog-api-key`; it never places credentials
+in a URL. Vertex rejects the static `GCP_ACCESS_TOKEN` design. Use ADC, an AWS
+workload-identity `external_account` document, or a service-account document.
+The gateway obtains a bounded short-lived token at startup and refreshes it off
+the request event loop.
 
 > **A provider with no key is dropped from the routing table at startup**, not
 > failed at request time. So a missing key does not present as "unauthorized" —
@@ -1263,35 +1289,45 @@ remain available through `OIDCConfig.claim_mappings` when embedding the service.
 > from `uv.lock`, includes `python-jose`, cryptography, and
 > `bedrock-agentcore`.
 
-#### SAML 2.0 SSO
+#### SAML 2.0 through managed Cognito
+
+Production SAML is supported only through the managed-Cognito control plane.
+AxonLLM is not a SAML service provider and never receives an assertion. Configure
+the enterprise IdP on the retained Cognito user pool, enable that provider on the
+confidential ALB client and on the public PKCE client when federated users invoke
+AgentCore, and give the IdP Cognito's SP entity ID and SAML response endpoint.
+Require signed responses or assertions and manage IdP metadata/certificate
+rotation in Cognito.
+
+Cognito validates the signature, issuer, audience, destination, recipient,
+timestamps, request correlation, replay, and RelayState. The ALB performs the
+authorization-code exchange and establishes its secure session. AxonLLM then
+verifies the ALB-signed OIDC identity and resolves the exact Cognito issuer and
+Cognito `sub` against DynamoDB. SAML roles, groups, tenant attributes, and
+project attributes are routing data only and never grant authority.
+
+The checked-in identity stack creates the retained pool and clients but cannot
+create tenant-specific IdP metadata. Manage that federation in reviewed
+IdP-specific infrastructure. Before traffic, provision each canonical principal
+with the exact Cognito issuer and `sub`; when SCIM creates the principal, its
+configured issuer and `externalId` must be those exact values.
 
 ```bash
-AXON_SAML_SP_ENTITY_ID=https://axonllm.example.com/saml/metadata   # required
-AXON_SAML_IDP_SSO_URL=https://your-tenant.okta.com/app/.../sso/saml  # required
-AXON_SAML_IDP_CERT_FILE=/etc/axonllm/idp.crt   # required (or AXON_SAML_IDP_CERT inline)
-AXON_SAML_ACS_URL=https://axonllm.example.com/saml/acs
-AXON_SAML_IDP_ENTITY_ID=http://www.okta.com/exk1234
+AXON_SAML_FEDERATION_MODE=managed-cognito
+AXON_SAML_LOGIN_PATH=/admin/dashboard
 ```
 
-**SSO is enabled only once the first three are set** — SP entity id, IdP SSO URL,
-and the IdP certificate. Until then every `/saml/*` endpoint answers **503
-`sso_not_configured`** rather than opening, so a half-finished configuration fails
-closed. Set the other two as well: they go into the metadata your IdP consumes.
+The control-plane stack sets both values; the login path may be changed through
+the validated setup field. The route behavior is:
 
 | Endpoint | Purpose |
 |----------|---------|
-| `GET /saml/metadata` | SP metadata XML — hand this to your IdP admin |
-| `GET /saml/login` | SP-initiated login, 302 to the IdP |
-| `POST /saml/acs` | Assertion Consumer Service (IdP POST binding) |
+| `GET /saml/login` | ALB-protected local handoff to the configured landing path; accepts at most one safe same-origin `return_to` |
+| `POST /saml/acs` | Always `410`; direct assertions are disabled |
+| `GET /saml/metadata` | Always `410`; use Cognito's SP metadata |
 
-Assertion signatures are verified in pure Python — no `xmlsec1` system
-dependency. Roles come from the `http://schemas.xmlsoap.org/claims/Group`
-attribute by default. `/saml/*` bypasses the normal auth chain, necessarily: the
-login flow cannot require a session it is in the process of creating.
-
-> **`POST /saml/acs` returns the resolved identity as JSON; it does not mint a
-> session cookie.** That is enough to verify your IdP mapping end-to-end, and it
-> is where you would integrate your own session layer for a browser SSO flow.
+All three paths remain behind ALB Cognito authentication. Legacy direct-SP
+environment variables fail the managed handoff closed.
 
 #### SCIM 2.0 — automated user provisioning
 
@@ -1323,7 +1359,7 @@ export AXON_SCIM_TENANTS='{
 SCIM credential means disabled (503, not open), and a wrong token is 401.
 
 SCIM group membership resolves roles inside the SCIM directory. In legacy mode,
-the authentication chain still reads roles from the JWT/SAML assertion rather
+the authentication chain may still read roles from a verified OIDC token rather
 than that directory. In canonical mode, both SCIM roles and token roles are
 non-authoritative: access comes from the canonical principal row.
 
@@ -1479,7 +1515,11 @@ scan bounds. Before Athena starts, fleet-wide principal/project RPM,
 concurrency, and aggregate scan-byte limits reserve capacity in DynamoDB.
 `request_id` is a durable idempotency identity: reusing it in the same project
 returns `409`. The Athena execution id is persisted before polling and terminal
-paths reconcile the worst-case scan reservation.
+paths reconcile the worst-case scan reservation. A fenced periodic worker
+recovers interrupted lifecycle records, cancels or observes known Athena
+executions, finalizes accounting atomically, and retries pending audit writes.
+It leaves a running record deferred when its datasource or exact deployment
+binding cannot be re-established safely.
 
 The datasource role must trust the exact AgentCore execution role for
 `sts:AssumeRole`, `sts:TagSession`, and `sts:SetSourceIdentity`. Its Athena
@@ -2039,7 +2079,7 @@ permit(principal, action == Action::"write", resource) when { principal.role == 
 Two more caveats worth knowing before you rely on this layer:
 
 * **API keys all carry the single role `service`**, so `principal.role` only
-  distinguishes callers who authenticate via OIDC or SAML. Key-based
+  distinguishes OIDC identities, including Cognito-federated SAML users. Key-based
   authorization is scopes and admin RBAC, not Cedar.
 * **Policies are not versioned and there is no delete endpoint.** A `POST`
   overwrites by name; to remove a policy, drop its `CEDAR_POLICY#<name>` item
@@ -2096,10 +2136,8 @@ Two more caveats worth knowing before you rely on this layer:
 | `AXON_ALB_ISSUER` | — | Exact regional ALB key issuer, such as `https://public-keys.auth.elb.us-east-1.amazonaws.com` |
 | `AXON_SCIM_TENANTS` | — | Canonical JSON map of tenant ids to unique `{issuer, token}` SCIM credentials |
 | `AXON_SCIM_TOKEN` | — | Legacy single-trust-domain SCIM bearer token; rejected in canonical mode |
-| `AXON_SAML_SP_ENTITY_ID` | — | SP entity id (SAML audience) |
-| `AXON_SAML_ACS_URL` | — | Assertion Consumer Service URL (this gateway's `/saml/acs`) |
-| `AXON_SAML_IDP_SSO_URL` | — | IdP SSO redirect endpoint |
-| `AXON_SAML_IDP_CERT` / `AXON_SAML_IDP_CERT_FILE` | — | IdP signing certificate (PEM inline or file path); SAML disabled until set |
+| `AXON_SAML_FEDERATION_MODE` | — | Must be `managed-cognito` to enable the protected SAML login handoff; set by the managed control-plane stack |
+| `AXON_SAML_LOGIN_PATH` | `/admin/dashboard` | Validated protected same-origin landing path after ALB/Cognito authentication |
 | `AXON_SEMANTIC_CACHE` | `false` | Build the embedder for semantic caching. A project also needs `semantic_cache_enabled` — both must say yes |
 | `AXON_SEMANTIC_CACHE_REGION` | `AXON_BEDROCK_REGION` | Region for the embedding calls |
 | `AXON_SEMANTIC_CACHE_MODEL` | `amazon.titan-embed-text-v2:0` | Bedrock embedding model id |
@@ -2180,22 +2218,22 @@ providers:
       completion_token_cost: 0.015
 ```
 
-`models.yaml` and `pricing.yaml` are edited independently and nothing tied them
-together, so a model added to one and not the other has two silent consequences:
+`models.yaml` and `pricing.yaml` are edited independently, so a model added to
+one and not the other changes behavior by deployment profile:
 
-- **It bills at $0.00.** An unknown provider/model pair costs zero, so the usage
-  record carries no cost and project spend does not move — budget blocks and
-  quota alerts under-count rather than erring safe.
-- **Smart routing scores it on an estimate.** With no rate to read, the cost half
-  of `cost_quality_tradeoff` substitutes the average of the known prices and
-  flags the decision `cost_estimated`.
+- **Production fails closed.** A mapping without positive finite prompt and
+  completion rates is excluded from model listing, direct and streaming
+  requests, cost-optimized and smart routing, and ensembles. A fully unpriced
+  model is unavailable; a partially unpriced model has less failover capacity.
+- **Development remains diagnostic.** It may route the mapping and account it at
+  $0.00. Smart routing uses the mean known cost and marks the decision
+  `cost_estimated`.
 
-Neither raises anything, so the gateway reports the gap instead: the startup
-banner names the count and links to **`/admin/pricing-drift`**, which lists every
-unpriced mapping, every pricing entry no model reads (usually the other half of a
-renamed model id), and a paste-ready YAML fragment for the missing ones. Rates in
-the fragment are left at `0.0` deliberately — a guessed price bills silently,
-where a missing one shows up on the page.
+The startup banner links to **`/admin/pricing-drift`**, which lists every
+unpriced mapping, every pricing entry no model reads (usually the other half of
+a renamed model id), and a paste-ready YAML fragment for the missing ones. Rates
+in the fragment are left at `0.0` deliberately: zero remains unpriced and cannot
+bypass the production guard.
 
 The banner is gated on unpriced mappings only, so it clears once every model has
 a rate; leftover entries are listed but not escalated, since they charge nobody
@@ -2376,19 +2414,23 @@ allows only the approved roles and bounded Athena API set. The datasource role
 trust policy must name the exact AgentCore runtime execution role and permit
 all three STS actions.
 
-The stack sets
-`AXON_ENABLED_PROVIDERS=bedrock`, so AgentCore advertises and invokes only
-standard Bedrock model mappings, not Bedrock Mantle or HTTP providers. AgentCore
-Memory is not wired and non-Bedrock provider secrets are not injected. AgentCore
-exposes no bootstrap action. The first-adopter deployer invokes the restartable
-canonical bootstrap out of band against its DynamoDB table before traffic;
-`axon bootstrap-tenant` remains available for manual recovery.
+The stack allowlists all supported providers. Bedrock and Mantle use the runtime
+role; direct HTTP providers become available only when their credential is
+present in the retained KMS-encrypted secret exported as `ProviderSecretArn`.
+The runtime reads that secret through a resource-scoped private Secrets Manager
+endpoint. The approved HTTPS prefix list must include the current addresses for
+`bedrock-mantle.<region>.api.aws` and every configured direct-provider
+hostname. Updating the secret requires a new runtime process/version before the
+new value is used. AgentCore Memory is not wired. AgentCore exposes no bootstrap
+action. The first-adopter deployer invokes the restartable canonical bootstrap
+out of band against its DynamoDB table before traffic; `axon bootstrap-tenant`
+remains available for manual recovery.
 
 For `managed-cognito`, that deployer also creates a separate
 `AxonLLMControlPlaneStack`: private AMD64 Fargate tasks behind a
-Cognito-authenticated HTTPS ALB and stable Route 53 name. It imports AgentCore's
-canonical table/KMS/outbox resources, exposes tenant admin and datasource
-routes, suppresses chat/model/query execution with
+Cognito-authenticated HTTPS ALB and stable Route 53 name. It binds AgentCore's
+verified canonical table output and imports its KMS/outbox resources, exposes
+tenant admin and datasource routes, suppresses chat/model/query execution with
 `AXON_CONTROL_PLANE_ONLY=true`, and has no Athena/STS authority. The
 `external-oidc` path currently deploys AgentCore only and does not receive this
 Cognito-authenticated web control plane.
@@ -2427,7 +2469,8 @@ docker run --read-only --tmpfs /tmp:rw,noexec,nosuid,size=64m \
 ```
 
 The image runs as UID/GID `10001`, owns no writable application files, installs
-from `uv.lock` with `--frozen`, and includes the locked OIDC/SAML/OTEL extras.
+from `uv.lock` with `--frozen`, and includes the locked identity and OTEL extras.
+SAML protocol handling remains in Cognito, outside the application container.
 The build context excludes local provider config, env files, private keys, AWS
 state, AgentCore state, and CDK output. Mount secrets at runtime. File-backed
 admin updates are incompatible with the immutable application tree; use durable

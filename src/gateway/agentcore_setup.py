@@ -21,6 +21,7 @@ EXTERNAL_OIDC = "external-oidc"
 IDENTITY_MODES = (MANAGED_COGNITO, EXTERNAL_OIDC)
 DEFAULT_TENANT_CLAIM = "custom:tenant_id"
 DEFAULT_PROJECT_CLAIM = "custom:project_id"
+DEFAULT_SAML_LOGIN_PATH = "/admin/dashboard"
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _DOMAIN_PREFIX_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9-]{1,61}[a-z0-9])$")
@@ -30,6 +31,9 @@ _DOMAIN_NAME_PATTERN = re.compile(
 )
 _PREFIX_LIST_PATTERN = re.compile(r"^pl-[0-9a-fA-F]+$")
 _HOSTED_ZONE_PATTERN = re.compile(r"^Z[A-Z0-9]+$")
+_SAML_LOGIN_PATH_PATTERN = re.compile(
+    r"^/[A-Za-z0-9._~!$&'()*+,;=:@/-]+$"
+)
 _IMAGE_PATTERN = re.compile(
     r"^(?P<account>[0-9]{12})\.dkr\.ecr\."
     r"(?P<region>[a-z0-9-]+)\.amazonaws\.com/"
@@ -39,6 +43,11 @@ _ACM_CERTIFICATE_ARN_PATTERN = re.compile(
     r"^arn:(?:aws|aws-us-gov|aws-cn):acm:"
     r"(?P<region>[a-z0-9-]+):[0-9]{12}:"
     r"certificate/[0-9a-fA-F-]+$"
+)
+_SECRETS_MANAGER_ARN_PATTERN = re.compile(
+    r"^arn:(?:aws|aws-us-gov|aws-cn):secretsmanager:"
+    r"(?P<region>[a-z0-9-]+):[0-9]{12}:"
+    r"secret:[A-Za-z0-9/_+=.@-]{1,512}$"
 )
 _BEDROCK_ARN_PATTERN = re.compile(
     r"^arn:(?:aws|aws-us-gov|aws-cn):bedrock:"
@@ -144,6 +153,58 @@ def _oauth_identifier(value: Any, name: str) -> str:
     if any(character.isspace() for character in value):
         raise AgentCoreSetupError(f"{name} must not contain whitespace")
     return value
+
+
+def _saml_login_path(value: Any, name: str) -> str:
+    value = _required_string(value, name, max_length=2048)
+    try:
+        parsed = urlsplit(value)
+    except ValueError as exc:
+        raise AgentCoreSetupError(
+            f"{name} must be a protected application-local path"
+        ) from exc
+    path = parsed.path
+    lowered = path.casefold()
+    if (
+        parsed.scheme
+        or parsed.netloc
+        or parsed.query
+        or parsed.fragment
+        or path != value
+        or not path.startswith("/")
+        or path.startswith("//")
+        or _SAML_LOGIN_PATH_PATTERN.fullmatch(path) is None
+        or "//" in path
+        or "\\" in path
+        or "%" in path
+        or any(segment in {".", ".."} for segment in path.split("/"))
+        or lowered in {"/", "/health", "/ready"}
+        or any(
+            lowered == prefix or lowered.startswith(f"{prefix}/")
+            for prefix in ("/saml", "/scim", "/oauth2")
+        )
+    ):
+        raise AgentCoreSetupError(
+            f"{name} must be a protected application-local path"
+        )
+    return path
+
+
+def _optional_secret_arn(
+    value: Any,
+    name: str,
+    *,
+    aws_region: str,
+) -> str | None:
+    if value in (None, ""):
+        return None
+    arn = _required_string(value, name, max_length=700)
+    match = _SECRETS_MANAGER_ARN_PATTERN.fullmatch(arn)
+    if match is None or match.group("region") != aws_region:
+        raise AgentCoreSetupError(
+            f"{name} must be a complete Secrets Manager ARN in {aws_region}"
+        )
+    return arn
 
 
 def _email(value: Any, name: str) -> str:
@@ -607,6 +668,8 @@ class ControlPlaneSetup:
     public_hosted_zone_id: str
     approved_ingress_prefix_list_id: str
     approved_https_prefix_list_id: str
+    scim_tenants_secret_arn: str | None = None
+    saml_login_path: str = DEFAULT_SAML_LOGIN_PATH
 
     @classmethod
     def from_mapping(
@@ -625,6 +688,10 @@ class ControlPlaneSetup:
                 "public_hosted_zone_id",
                 "approved_ingress_prefix_list_id",
                 "approved_https_prefix_list_id",
+            },
+            optional={
+                "scim_tenants_secret_arn",
+                "saml_login_path",
             },
         )
         domain_name = _required_string(
@@ -702,6 +769,18 @@ class ControlPlaneSetup:
             ),
             approved_https_prefix_list_id=(
                 prefix_lists["approved_https_prefix_list_id"]
+            ),
+            scim_tenants_secret_arn=_optional_secret_arn(
+                value.get("scim_tenants_secret_arn"),
+                "control_plane.scim_tenants_secret_arn",
+                aws_region=aws_region,
+            ),
+            saml_login_path=_saml_login_path(
+                value.get(
+                    "saml_login_path",
+                    DEFAULT_SAML_LOGIN_PATH,
+                ),
+                "control_plane.saml_login_path",
             ),
         )
 
@@ -872,6 +951,8 @@ class AgentCoreSetupConfig:
             value["managed_cognito"]["oauth_callback_urls"] = list(self.managed_cognito.oauth_callback_urls)
         if self.control_plane is None:
             value.pop("control_plane")
+        elif value["control_plane"]["scim_tenants_secret_arn"] is None:
+            value["control_plane"].pop("scim_tenants_secret_arn")
         if self.external_oidc is None:
             value.pop("external_oidc")
         value["runtime"]["bedrock_invoke_resource_arns"] = list(self.runtime.bedrock_invoke_resource_arns)
@@ -1035,7 +1116,14 @@ def config_from_args(args: argparse.Namespace) -> AgentCoreSetupConfig:
             "approved_https_prefix_list_id": (
                 args.control_plane_approved_https_prefix_list_id
             ),
+            "saml_login_path": (
+                args.control_plane_saml_login_path
+            ),
         }
+        if args.control_plane_scim_tenants_secret_arn:
+            mapping["control_plane"]["scim_tenants_secret_arn"] = (
+                args.control_plane_scim_tenants_secret_arn
+            )
     elif mode == EXTERNAL_OIDC:
         mapping["admin"]["subject"] = args.admin_subject
         mapping["external_oidc"] = {
@@ -1272,6 +1360,17 @@ def add_setup_subcommands(subparsers: argparse._SubParsersAction) -> None:
         "--control-plane-approved-https-prefix-list-id",
         default=_env(
             "AXON_CONTROL_PLANE_APPROVED_HTTPS_PREFIX_LIST_ID"
+        ),
+    )
+    agentcore.add_argument(
+        "--control-plane-scim-tenants-secret-arn",
+        default=_env("AXON_CONTROL_PLANE_SCIM_TENANTS_SECRET_ARN"),
+    )
+    agentcore.add_argument(
+        "--control-plane-saml-login-path",
+        default=_env(
+            "AXON_CONTROL_PLANE_SAML_LOGIN_PATH",
+            DEFAULT_SAML_LOGIN_PATH,
         ),
     )
     agentcore.add_argument(

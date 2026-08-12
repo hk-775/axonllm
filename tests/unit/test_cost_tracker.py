@@ -79,6 +79,24 @@ class TestCalculateCost:
         tracker = CostTracker(_pricing_config())
         assert tracker.calculate_cost("openai", "unknown-model", 100, 50) == 0.0
 
+    def test_zero_placeholder_is_not_usable_pricing(self):
+        tracker = CostTracker(
+            {"openai": {"placeholder": TokenPricing(0.0, 0.0)}}
+        )
+
+        assert tracker.has_pricing("openai", "placeholder") is False
+        assert tracker.calculate_cost(
+            "openai",
+            "placeholder",
+            100,
+            50,
+        ) == 0.0
+
+    def test_real_rate_is_usable_pricing(self):
+        tracker = CostTracker(_pricing_config())
+
+        assert tracker.has_pricing("openai", "gpt-4") is True
+
     def test_different_provider_model(self):
         tracker = CostTracker(_pricing_config())
         # (200/1000 * 0.003) + (100/1000 * 0.015) = 0.0006 + 0.0015 = 0.0021

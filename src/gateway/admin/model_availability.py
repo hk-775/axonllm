@@ -277,16 +277,16 @@ async def _fetch_ids(
         # for a provider the operator has not configured.
         return [], ProviderCheckError(provider, "no credentials configured", unconfigured=True)
 
-    # Google AI authenticates by query parameter rather than by header. Passed
-    # via params rather than interpolated into the URL so the key cannot end up
-    # in a log line or an exception message built from it.
+    # Google AI uses x-goog-api-key so the credential can never enter a URL,
+    # proxy access log, redirect, or URL-bearing transport exception.
     if provider == "google_ai":
         key = config.credentials.get("api_key", "")
         if not key:
             return [], ProviderCheckError(
                 provider, "no credentials configured", unconfigured=True
             )
-        params = {"key": key, "pageSize": "1000"}
+        headers["x-goog-api-key"] = key
+        params = {"pageSize": "1000"}
 
     headers = {**headers, **_LIST_HEADERS.get(provider, {}), "accept": "application/json"}
 
@@ -294,8 +294,7 @@ async def _fetch_ids(
         async with httpx.AsyncClient(timeout=timeout) as client:
             response = await client.get(url, headers=headers, params=params)
     except Exception as exc:
-        # Type name only. An httpx exception's message embeds the request URL,
-        # which for google_ai carries the API key as a query parameter.
+        # Type name only. Transport exceptions can include request metadata.
         return [], ProviderCheckError(provider, f"request failed ({type(exc).__name__})")
 
     if response.status_code != 200:

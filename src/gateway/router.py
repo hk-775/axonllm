@@ -142,17 +142,21 @@ class Router:
         ensemble_config: "EnsembleConfig | None" = None,
         cost_tracker: "CostTracker | None" = None,
         available_providers: frozenset[str] | None = None,
+        require_priced_mappings: bool = False,
     ) -> None:
         self.model_registry = model_registry
         self.health_tracker = health_tracker
         self.available_providers = available_providers
+        self.require_priced_mappings = require_priced_mappings
 
         # Strategy map: instantiated once, reused across requests
         self._strategies: dict[RoutingStrategy, RoutingStrategyBase] = {
             RoutingStrategy.ROUND_ROBIN: RoundRobinStrategy(),
             RoutingStrategy.WEIGHTED: WeightedStrategy(),
             RoutingStrategy.LEAST_LATENCY: LeastLatencyStrategy(),
-            RoutingStrategy.COST_OPTIMIZED: CostOptimizedStrategy(),
+            RoutingStrategy.COST_OPTIMIZED: CostOptimizedStrategy(
+                getattr(cost_tracker, "pricing_config", None)
+            ),
         }
 
         # Smart routing strategy (optional)
@@ -206,12 +210,30 @@ class Router:
     def available_mappings(self, model: str) -> list[ProviderModelMapping]:
         """Return mappings this deployment is configured to invoke."""
         mappings = self.model_registry.resolve(model)
-        if self.available_providers is None:
-            return list(mappings)
-        return [
+        available = [
             mapping
             for mapping in mappings
-            if mapping.provider in self.available_providers
+            if (
+                self.available_providers is None
+                or mapping.provider in self.available_providers
+            )
+        ]
+        if not self.require_priced_mappings:
+            return available
+        return [
+            mapping
+            for mapping in available
+            if (
+                mapping.pricing is not None
+                and mapping.pricing.is_billable
+            )
+            or (
+                self._cost_tracker is not None
+                and self._cost_tracker.has_pricing(
+                    mapping.provider,
+                    mapping.model_id,
+                )
+            )
         ]
 
     def is_model_available(self, model: str) -> bool:
@@ -330,7 +352,7 @@ class Router:
 
         cost = self._cost_tracker.calculate_cost(
             response.provider,
-            response.model,
+            response.provider_model or response.model,
             response.usage.prompt_tokens,
             response.usage.completion_tokens,
             cached_tokens=response.usage.cached_tokens,
@@ -342,7 +364,7 @@ class Router:
             user_id=user_id,
             tenant_id=tenant_id,
             provider=response.provider,
-            model=response.model,
+            model=model,
             prompt_tokens=response.usage.prompt_tokens,
             completion_tokens=response.usage.completion_tokens,
             total_tokens=response.usage.total_tokens,
@@ -458,7 +480,7 @@ class Router:
                 )
             cost = await self._record_member_cost(
                 resp,
-                request.model,
+                model,
                 project_id,
                 user_id,
                 tenant_id,
@@ -569,7 +591,12 @@ class Router:
             # Find the mapping for the preferred provider
             preferred = [m for m in mappings if m.provider == preferred_provider]
             if preferred:
-                result = await self._try_provider(preferred[0], provider_fn, attempts)
+                result = await self._try_provider(
+                    preferred[0],
+                    provider_fn,
+                    attempts,
+                    request.model,
+                )
                 if result is not None:
                     return result
                 # Preferred failed — fall through to remaining providers
@@ -581,7 +608,12 @@ class Router:
                 if not self.health_tracker.is_healthy(mapping.provider):
                     attempts.append({"provider": mapping.provider, "status_code": 0, "message": "skipped (unhealthy)"})
                     continue
-                result = await self._try_provider(mapping, provider_fn, attempts)
+                result = await self._try_provider(
+                    mapping,
+                    provider_fn,
+                    attempts,
+                    request.model,
+                )
                 if result is not None:
                     return result
             raise AllProvidersExhaustedError(attempts)
@@ -603,7 +635,12 @@ class Router:
             raise AllProvidersExhaustedError(attempts)
 
         # --- Step 2: Try the initial provider with retry logic ---
-        result = await self._try_provider(initial, provider_fn, attempts)
+        result = await self._try_provider(
+            initial,
+            provider_fn,
+            attempts,
+            request.model,
+        )
         if result is not None:
             return result
 
@@ -624,7 +661,12 @@ class Router:
                 )
                 continue
 
-            result = await self._try_provider(mapping, provider_fn, attempts)
+            result = await self._try_provider(
+                mapping,
+                provider_fn,
+                attempts,
+                request.model,
+            )
             if result is not None:
                 return result
 
@@ -635,13 +677,21 @@ class Router:
         mapping: ProviderModelMapping,
         provider_fn: Callable[[ProviderModelMapping], Awaitable[ChatCompletionResponse]],
         attempts: list[dict],
+        logical_model: str,
     ) -> ChatCompletionResponse | None:
         """Try a single provider with retry logic. Returns response or None on failure."""
         last_error: ProviderError | None = None
 
         for attempt in range(self.max_retries + 1):
             try:
-                return await provider_fn(mapping)
+                response = await provider_fn(mapping)
+                # Providers can return an alias target or dated snapshot.
+                # Preserve the configured provider id as the pricing key while
+                # keeping the public response in the gateway model namespace.
+                response.provider = mapping.provider
+                response.provider_model = mapping.model_id
+                response.model = logical_model
+                return response
             except ProviderError as exc:
                 last_error = exc
 

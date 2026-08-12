@@ -869,6 +869,17 @@ async def test_production_runtime_probes_and_closes_owned_resources(
             events.append("event_outbox_stop")
             self.worker_running = False
 
+    class QueryWorker:
+        running = False
+
+        async def start(self) -> None:
+            events.append("query_reconciliation_start")
+            self.running = True
+
+        async def stop(self) -> None:
+            events.append("query_reconciliation_stop")
+            self.running = False
+
     policies = [
         {
             "name": "deny-agentcore-writes",
@@ -879,6 +890,7 @@ async def test_production_runtime_probes_and_closes_owned_resources(
             "tenant_id": "tenant-a",
         }
     ]
+    query_service = SimpleNamespace()
     components = SimpleNamespace(
         gateway_agent=SimpleNamespace(_otlp_exporter=OTLP()),
         oidc_service=Verifier(),
@@ -896,6 +908,9 @@ async def test_production_runtime_probes_and_closes_owned_resources(
         policies=policies,
         persistence=Persistence(),
         multi_factory=SimpleNamespace(_http_client=HttpClient()),
+        audit_trail=SimpleNamespace(durable_enabled=True),
+        query_service=query_service,
+        query_reconciliation_worker=QueryWorker(),
     )
     monkeypatch.setattr(
         "src.gateway.bootstrap.build_gateway_components",
@@ -903,6 +918,7 @@ async def test_production_runtime_probes_and_closes_owned_resources(
     )
 
     services = build_runtime_services()
+    assert services.query_service is query_service
     assert isinstance(services.policy_service, CedarPolicyService)
     assert services.policy_service._policies is policies
     assert services.policy_service._persistence is components.persistence
@@ -932,6 +948,7 @@ async def test_production_runtime_probes_and_closes_owned_resources(
         "identity_provider": "ready",
         "principal_store": "ready",
         "security_event_outbox": "ready",
+        "query_reconciliation": "ready",
     }
     assert service_report.ready is True
     assert service_report.dependencies == {
@@ -939,6 +956,7 @@ async def test_production_runtime_probes_and_closes_owned_resources(
         "identity_provider": "ready",
         "principal_store": "ready",
         "security_event_outbox": "ready",
+        "query_reconciliation": "ready",
     }
     assert sorted(events) == [
         "event_outbox_ready",
@@ -948,6 +966,8 @@ async def test_production_runtime_probes_and_closes_owned_resources(
         "health_monitor",
         "otlp",
         "provider_http",
+        "query_reconciliation_start",
+        "query_reconciliation_stop",
         "service_jwks",
         "startup_jwks",
     ]

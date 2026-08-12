@@ -44,6 +44,10 @@ _CERTIFICATE_ARN = (
     "arn:aws:acm:us-east-1:123456789012:"
     "certificate/11111111-2222-3333-4444-555555555555"
 )
+_SCIM_SECRET_ARN = (
+    "arn:aws:secretsmanager:us-east-1:123456789012:"
+    "secret:axonllm/scim-AbCd12"
+)
 
 
 def _base() -> dict:
@@ -141,9 +145,77 @@ def test_managed_setup_round_trips_without_a_secret_or_subject(tmp_path):
     assert loaded == config
     assert payload["identity_mode"] == "managed-cognito"
     assert payload["control_plane"]["domain_name"] == "axon.example.com"
+    assert (
+        payload["control_plane"]["saml_login_path"]
+        == "/admin/dashboard"
+    )
     assert "subject" not in payload["admin"]
     assert "secret" not in output.read_text(encoding="utf-8").casefold()
     assert output.stat().st_mode & 0o777 == 0o600
+
+
+def test_managed_setup_accepts_scim_secret_and_saml_login_path(tmp_path):
+    value = _base()
+    value["control_plane"].update(
+        scim_tenants_secret_arn=_SCIM_SECRET_ARN,
+        saml_login_path="/chat",
+    )
+
+    config = AgentCoreSetupConfig.from_mapping(value)
+    output = write_agentcore_setup(config, tmp_path / "agentcore.json")
+
+    assert load_agentcore_setup(output) == config
+    assert config.control_plane is not None
+    assert config.control_plane.scim_tenants_secret_arn == _SCIM_SECRET_ARN
+    assert config.control_plane.saml_login_path == "/chat"
+    assert config.to_dict()["control_plane"][
+        "scim_tenants_secret_arn"
+    ] == _SCIM_SECRET_ARN
+
+    wrong_region = deepcopy(value)
+    wrong_region["control_plane"]["scim_tenants_secret_arn"] = (
+        _SCIM_SECRET_ARN.replace("us-east-1", "us-west-2")
+    )
+    with pytest.raises(
+        AgentCoreSetupError,
+        match="complete Secrets Manager ARN in us-east-1",
+    ):
+        AgentCoreSetupConfig.from_mapping(wrong_region)
+
+    legacy_direct_sp = deepcopy(value)
+    legacy_direct_sp["control_plane"]["saml_config_secret_arn"] = (
+        _SCIM_SECRET_ARN
+    )
+    with pytest.raises(
+        AgentCoreSetupError,
+        match="unsupported fields: saml_config_secret_arn",
+    ):
+        AgentCoreSetupConfig.from_mapping(legacy_direct_sp)
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "https://evil.example/login",
+        "//evil.example/login",
+        "/saml/acs",
+        "/scim/v2/Users",
+        "/oauth2/authorize",
+        "/admin/../ready",
+        "/chat?next=/admin",
+        "/admin dashboard",
+        "/caf\u00e9",
+    ],
+)
+def test_managed_setup_rejects_unsafe_saml_login_path(path):
+    value = _base()
+    value["control_plane"]["saml_login_path"] = path
+
+    with pytest.raises(
+        AgentCoreSetupError,
+        match="must be a protected application-local path",
+    ):
+        AgentCoreSetupConfig.from_mapping(value)
 
 
 def test_external_oidc_requires_complete_explicit_claim_mapping():
@@ -387,6 +459,10 @@ def test_cli_parses_and_writes_managed_setup(monkeypatch, tmp_path, capsys):
             "pl-123abc",
             "--control-plane-approved-https-prefix-list-id",
             "pl-456def",
+            "--control-plane-scim-tenants-secret-arn",
+            _SCIM_SECRET_ARN,
+            "--control-plane-saml-login-path",
+            "/chat",
             "--output",
             str(output),
         ],
@@ -394,7 +470,11 @@ def test_cli_parses_and_writes_managed_setup(monkeypatch, tmp_path, capsys):
 
     cli.main()
 
-    assert load_agentcore_setup(output).identity_mode == "managed-cognito"
+    loaded = load_agentcore_setup(output)
+    assert loaded.identity_mode == "managed-cognito"
+    assert loaded.control_plane is not None
+    assert loaded.control_plane.scim_tenants_secret_arn == _SCIM_SECRET_ARN
+    assert loaded.control_plane.saml_login_path == "/chat"
     assert "Wrote authenticated AgentCore setup" in capsys.readouterr().out
 
 
@@ -444,6 +524,7 @@ def test_control_plane_deploy_command_is_bound_to_managed_identity(
     config = AgentCoreSetupConfig.from_mapping(_base())
     command = control_plane_deploy_command(
         config,
+        primary_state_table_name="axonllm-agentcore-state",
         outputs_file=tmp_path / "control.json",
         assume_yes=True,
     )
@@ -457,6 +538,10 @@ def test_control_plane_deploy_command_is_bound_to_managed_identity(
     assert (
         "AxonLLMControlPlaneStack:IdentityStackName="
         "AxonLLMIdentityStack"
+    ) in command
+    assert (
+        "AxonLLMControlPlaneStack:PrimaryStateTableName="
+        "axonllm-agentcore-state"
     ) in command
     assert (
         "AxonLLMControlPlaneStack:ControlPlaneVerifiedImageUri="
@@ -474,9 +559,53 @@ def test_control_plane_deploy_command_is_bound_to_managed_identity(
     ):
         control_plane_deploy_command(
             AgentCoreSetupConfig.from_mapping(_external()),
+            primary_state_table_name="axonllm-agentcore-state",
             outputs_file=tmp_path / "external-control.json",
             assume_yes=True,
         )
+
+
+def test_control_plane_deploy_command_passes_recovery_and_identity_inputs(
+    tmp_path,
+):
+    value = _base()
+    value["control_plane"].update(
+        scim_tenants_secret_arn=_SCIM_SECRET_ARN,
+        saml_login_path="/chat",
+    )
+    config = AgentCoreSetupConfig.from_mapping(value)
+
+    command = control_plane_deploy_command(
+        config,
+        primary_state_table_name="axonllm-agentcore-state",
+        outputs_file=tmp_path / "control.json",
+        assume_yes=True,
+        runtime_state_table_name=(
+            "axonllm-agentcore-state-restore-validation-reviewed"
+        ),
+        recovery_approval_id="CHG-2026-015",
+    )
+
+    assert (
+        "scim_tenants_secret_arn=" + _SCIM_SECRET_ARN
+    ) in command
+    assert (
+        "AxonLLMControlPlaneStack:SamlLoginPath=/chat"
+    ) in command
+    assert not any(
+        "saml_config_secret_arn" in argument
+        for argument in command
+    )
+    assert (
+        "AxonLLMControlPlaneStack:RuntimeStateTableName="
+        "axonllm-agentcore-state-restore-validation-reviewed"
+    ) in command
+    assert (
+        "AxonLLMControlPlaneStack:RecoveryCutoverMode=normal"
+    ) in command
+    assert (
+        "AxonLLMControlPlaneStack:RecoveryApprovalId=CHG-2026-015"
+    ) in command
 
 
 def test_agentcore_deploy_command_binds_exact_athena_roles(tmp_path):
@@ -517,6 +646,7 @@ def test_agentcore_deploy_command_binds_exact_athena_roles(tmp_path):
                 "runtime": value["runtime"],
             }
         ),
+        primary_state_table_name="axonllm-agentcore-state",
         outputs_file=tmp_path / "control.json",
         assume_yes=True,
     )
@@ -661,6 +791,11 @@ def test_managed_deploy_provisions_identity_runtime_and_control_plane(
         },
         deployment.AGENTCORE_STACK: {
             "StateTableName": "axonllm-agentcore-state",
+            "SelectedRuntimeStateTableName": (
+                "axonllm-agentcore-state"
+            ),
+            "RecoveryCutoverMode": "normal",
+            "RecoveryApprovalId": "",
             "RuntimeExecutionRoleArn": (
                 "arn:aws:iam::123456789012:"
                 "role/axonllm-agentcore-runtime-us-east-1"
@@ -671,7 +806,14 @@ def test_managed_deploy_provisions_identity_runtime_and_control_plane(
             ),
         },
         deployment.CONTROL_PLANE_STACK: {
+            "AgentCoreStackName": deployment.AGENTCORE_STACK,
             "LoadBalancerDnsName": "internal.example.elb.amazonaws.com",
+            "PrimaryStateTableName": "axonllm-agentcore-state",
+            "SelectedRuntimeStateTableName": (
+                "axonllm-agentcore-state"
+            ),
+            "RecoveryCutoverMode": "normal",
+            "RecoveryApprovalId": "",
         },
     }
 

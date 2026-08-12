@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import uuid
 from typing import Any
 
@@ -28,13 +29,18 @@ from .athena import (
     AthenaExecutionError,
     AthenaExecutor,
     AthenaQueryResult,
+    AthenaQueryTermination,
 )
 from .models import AthenaRoleBindings
 from .repository import (
     DatasourceRepository,
     DatasourceStoreUnavailable,
 )
+from .reconciliation import QueryLifecycleClaim, QueryTerminalAudit
 from .sql_policy import QueryPolicyError, validate_athena_select
+
+
+logger = logging.getLogger(__name__)
 
 
 class QueryServiceError(RuntimeError):
@@ -56,6 +62,7 @@ _ATHENA_STATUS = {
     "invalid_query_limit": 400,
     "athena_query_timeout": 504,
     "athena_query_failed": 502,
+    "athena_query_cancelled": 502,
     "athena_scan_limit_exceeded": 502,
     "athena_start_failed": 502,
     "athena_status_failed": 502,
@@ -129,6 +136,237 @@ class QueryService:
                 "query_audit_unavailable",
                 "Durable query audit is unavailable.",
             ) from exc
+
+    async def _ack_terminal_audit(
+        self,
+        claim: object | None,
+    ) -> None:
+        if not isinstance(claim, QueryLifecycleClaim):
+            return
+        acknowledge = getattr(self.admission, "ack_audit", None)
+        if not callable(acknowledge):
+            logger.error(
+                "Query audit acknowledgement is unavailable request_id=%s",
+                claim.lease.request_id,
+            )
+            return
+        try:
+            await acknowledge(claim)
+        except Exception:
+            # The durable pending marker remains for the reconciliation worker.
+            logger.warning(
+                "Query audit acknowledgement deferred request_id=%s",
+                claim.lease.request_id,
+                exc_info=True,
+            )
+
+    @staticmethod
+    def _error_termination(
+        error: AthenaExecutionError,
+        execution_id: str | None,
+    ) -> AthenaQueryTermination | None:
+        resolved_execution_id = (
+            error.query_execution_id or execution_id
+        )
+        if resolved_execution_id is None or error.athena_state is None:
+            return None
+        return AthenaQueryTermination(
+            query_execution_id=resolved_execution_id,
+            state=error.athena_state,
+            terminal=error.athena_state
+            in {"SUCCEEDED", "FAILED", "CANCELLED"},
+            data_scanned_bytes=error.data_scanned_bytes,
+            engine_execution_ms=error.engine_execution_ms,
+            cancellation_requested=error.cancellation_requested,
+        )
+
+    async def _cancel_observed_execution(
+        self,
+        *,
+        datasource: Any,
+        tenant_id: str,
+        project_id: str,
+        principal_id: str,
+        request_id: str,
+        execution_id: str | None,
+        observed: AthenaQueryTermination | None = None,
+    ) -> AthenaQueryTermination | None:
+        if observed is not None and observed.terminal:
+            return observed
+        if execution_id is None:
+            return observed
+        cancel = getattr(self.executor, "cancel", None)
+        if not callable(cancel):
+            return observed
+        try:
+            return await cancel(
+                datasource,
+                tenant_id=tenant_id,
+                project_id=project_id,
+                principal_id=principal_id,
+                request_id=request_id,
+                execution_id=execution_id,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning(
+                "Athena cancellation status could not be observed "
+                "request_id=%s execution_id=%s",
+                request_id,
+                execution_id,
+                exc_info=True,
+            )
+            return observed
+
+    async def _finalize_and_record_failure(
+        self,
+        *,
+        principal: Principal,
+        project_id: str,
+        request_id: str,
+        datasource_id: str,
+        query_sha256: str,
+        lease: QueryAdmissionLease | None,
+        status: str,
+        failure_code: str,
+        execution_id: str | None,
+        termination: AthenaQueryTermination | None,
+        execution_may_have_started: bool = False,
+        reconciled: bool = False,
+    ) -> None:
+        terminal_observed = (
+            execution_id is None
+            or (
+                termination is not None
+                and termination.terminal
+            )
+        )
+        observed_scan_bytes = (
+            termination.data_scanned_bytes
+            if termination is not None
+            else None
+        )
+        accounted_scan_bytes: int | None = None
+        scan_accounting = "not_reserved"
+        lifecycle_finalized = lease is None
+        admission_error: QueryAdmissionError | None = None
+        audit_claim: object | None = None
+        terminal_audit: QueryTerminalAudit | None = None
+
+        if lease is not None:
+            if execution_id is None:
+                if execution_may_have_started:
+                    accounted_scan_bytes = lease.reserved_scan_bytes
+                    scan_accounting = "reserved_fallback"
+                else:
+                    accounted_scan_bytes = 0
+                    scan_accounting = "zero_before_start"
+            elif terminal_observed:
+                if observed_scan_bytes is None:
+                    accounted_scan_bytes = lease.reserved_scan_bytes
+                    scan_accounting = "reserved_fallback"
+                else:
+                    accounted_scan_bytes = min(
+                        observed_scan_bytes,
+                        lease.reserved_scan_bytes,
+                    )
+                    scan_accounting = (
+                        "actual"
+                        if observed_scan_bytes
+                        <= lease.reserved_scan_bytes
+                        else "reservation_ceiling"
+                    )
+            else:
+                accounted_scan_bytes = lease.reserved_scan_bytes
+                scan_accounting = "reservation_held"
+
+            if terminal_observed:
+                terminal_audit = QueryTerminalAudit(
+                    status=status,
+                    failure_code=failure_code,
+                    execution_id=execution_id,
+                    athena_state=(
+                        termination.state
+                        if termination is not None
+                        else None
+                    ),
+                    observed_scan_bytes=observed_scan_bytes,
+                    accounted_scan_bytes=accounted_scan_bytes,
+                    engine_execution_ms=(
+                        termination.engine_execution_ms
+                        if termination is not None
+                        else None
+                    ),
+                    cancellation_requested=(
+                        termination.cancellation_requested
+                        if termination is not None
+                        else False
+                    ),
+                    scan_accounting=scan_accounting,
+                )
+                try:
+                    audit_claim = await self.admission.finalize(  # type: ignore[union-attr]
+                        lease,
+                        status=status,
+                        actual_scan_bytes=accounted_scan_bytes,
+                        execution_id=execution_id,
+                        failure_code=failure_code,
+                        terminal_audit=terminal_audit,
+                    )
+                    lifecycle_finalized = True
+                except QueryAdmissionError as exc:
+                    admission_error = exc
+
+        audit_status = (
+            status
+            if terminal_observed or lease is None
+            else "reconciliation_pending"
+        )
+        await self._record(
+            AuditEventType.QUERY_RESULT,
+            principal=principal,
+            project_id=project_id,
+            request_id=request_id,
+            data={
+                "datasource_id": datasource_id,
+                "query_sha256": query_sha256,
+                "status": audit_status,
+                "failure_code": failure_code,
+                "query_execution_id": execution_id,
+                "athena_state": (
+                    termination.state
+                    if termination is not None
+                    else None
+                ),
+                "data_scanned_bytes": observed_scan_bytes,
+                "accounted_scan_bytes": accounted_scan_bytes,
+                "engine_execution_ms": (
+                    termination.engine_execution_ms
+                    if termination is not None
+                    else None
+                ),
+                "cancellation_requested": (
+                    termination.cancellation_requested
+                    if termination is not None
+                    else False
+                ),
+                "execution_may_have_started": (
+                    execution_may_have_started
+                    or execution_id is not None
+                ),
+                "scan_accounting": scan_accounting,
+                "lifecycle_finalized": lifecycle_finalized,
+                "reconciled": reconciled,
+            },
+        )
+        await self._ack_terminal_audit(audit_claim)
+        if admission_error is not None:
+            raise QueryServiceError(
+                admission_error.status_code,
+                admission_error.code,
+                admission_error.message,
+            ) from admission_error
 
     @staticmethod
     def _request_id(value: str | None) -> str:
@@ -327,44 +565,78 @@ class QueryService:
                 **execution_kwargs,
             )
         except asyncio.CancelledError:
-            if self.admission is not None and lease is not None:
-                await asyncio.shield(
-                    self.admission.finalize(
-                        lease,
-                        status="cancelled",
-                        actual_scan_bytes=0,
-                        execution_id=execution_id,
-                        failure_code="query_cancelled",
-                    )
+            async def _finish_cancellation() -> None:
+                termination = await self._cancel_observed_execution(
+                    datasource=datasource,
+                    tenant_id=tenant_id,
+                    project_id=project_id,
+                    principal_id=principal.principal_id,
+                    request_id=resolved_request_id,
+                    execution_id=execution_id,
+                )
+                await self._finalize_and_record_failure(
+                    principal=principal,
+                    project_id=project_id,
+                    request_id=resolved_request_id,
+                    datasource_id=datasource_id,
+                    query_sha256=validated.sha256,
+                    lease=lease,
+                    status="cancelled",
+                    failure_code="query_cancelled",
+                    execution_id=execution_id,
+                    termination=termination,
+                )
+
+            try:
+                await asyncio.shield(_finish_cancellation())
+            except Exception:
+                logger.exception(
+                    "Cancelled query cleanup failed request_id=%s",
+                    resolved_request_id,
                 )
             raise
         except AthenaExecutionError as exc:
-            if self.admission is not None and lease is not None:
-                try:
-                    await self.admission.finalize(
-                        lease,
-                        status="failed",
-                        actual_scan_bytes=0,
-                        execution_id=execution_id,
-                        failure_code=exc.code,
+            resolved_execution_id = (
+                exc.query_execution_id or execution_id
+            )
+            termination = self._error_termination(
+                exc,
+                resolved_execution_id,
+            )
+            termination = await self._cancel_observed_execution(
+                datasource=datasource,
+                tenant_id=tenant_id,
+                project_id=project_id,
+                principal_id=principal.principal_id,
+                request_id=resolved_request_id,
+                execution_id=resolved_execution_id,
+                observed=termination,
+            )
+            terminal_status = (
+                "cancelled"
+                if (
+                    exc.code == "athena_query_cancelled"
+                    or (
+                        termination is not None
+                        and termination.state == "CANCELLED"
                     )
-                except QueryAdmissionError as admission_exc:
-                    raise QueryServiceError(
-                        admission_exc.status_code,
-                        admission_exc.code,
-                        admission_exc.message,
-                    ) from admission_exc
-            await self._record(
-                AuditEventType.QUERY_RESULT,
+                )
+                else "failed"
+            )
+            await self._finalize_and_record_failure(
                 principal=principal,
                 project_id=project_id,
                 request_id=resolved_request_id,
-                data={
-                    "datasource_id": datasource_id,
-                    "query_sha256": validated.sha256,
-                    "status": "failed",
-                    "failure_code": exc.code,
-                },
+                datasource_id=datasource_id,
+                query_sha256=validated.sha256,
+                lease=lease,
+                status=terminal_status,
+                failure_code=exc.code,
+                execution_id=resolved_execution_id,
+                termination=termination,
+                execution_may_have_started=(
+                    exc.execution_may_have_started
+                ),
             )
             raise QueryServiceError(
                 _ATHENA_STATUS.get(exc.code, 503),
@@ -372,32 +644,25 @@ class QueryService:
                 exc.message,
             ) from exc
         except Exception as exc:
-            if self.admission is not None and lease is not None:
-                try:
-                    await self.admission.finalize(
-                        lease,
-                        status="failed",
-                        actual_scan_bytes=0,
-                        execution_id=execution_id,
-                        failure_code="query_execution_unavailable",
-                    )
-                except QueryAdmissionError as admission_exc:
-                    raise QueryServiceError(
-                        admission_exc.status_code,
-                        admission_exc.code,
-                        admission_exc.message,
-                    ) from admission_exc
-            await self._record(
-                AuditEventType.QUERY_RESULT,
+            termination = await self._cancel_observed_execution(
+                datasource=datasource,
+                tenant_id=tenant_id,
+                project_id=project_id,
+                principal_id=principal.principal_id,
+                request_id=resolved_request_id,
+                execution_id=execution_id,
+            )
+            await self._finalize_and_record_failure(
                 principal=principal,
                 project_id=project_id,
                 request_id=resolved_request_id,
-                data={
-                    "datasource_id": datasource_id,
-                    "query_sha256": validated.sha256,
-                    "status": "failed",
-                    "failure_code": "query_execution_unavailable",
-                },
+                datasource_id=datasource_id,
+                query_sha256=validated.sha256,
+                lease=lease,
+                status="failed",
+                failure_code="query_execution_unavailable",
+                execution_id=execution_id,
+                termination=termination,
             )
             raise QueryServiceError(
                 503,
@@ -405,12 +670,27 @@ class QueryService:
                 "Query execution is temporarily unavailable.",
             ) from exc
         if self.admission is not None and lease is not None:
+            terminal_audit = QueryTerminalAudit(
+                status="succeeded",
+                failure_code=None,
+                execution_id=result.query_execution_id,
+                athena_state="SUCCEEDED",
+                observed_scan_bytes=result.data_scanned_bytes,
+                accounted_scan_bytes=result.data_scanned_bytes,
+                engine_execution_ms=result.engine_execution_ms,
+                cancellation_requested=False,
+                scan_accounting="actual",
+                row_count=result.row_count,
+                truncated=result.truncated,
+                result_bytes=result.result_bytes,
+            )
             try:
-                await self.admission.finalize(
+                audit_claim = await self.admission.finalize(
                     lease,
                     status="succeeded",
                     actual_scan_bytes=result.data_scanned_bytes,
                     execution_id=result.query_execution_id,
+                    terminal_audit=terminal_audit,
                 )
             except QueryAdmissionError as exc:
                 raise QueryServiceError(
@@ -418,6 +698,8 @@ class QueryService:
                     exc.code,
                     exc.message,
                 ) from exc
+        else:
+            audit_claim = None
         await self._record_result(
             principal=principal,
             project_id=project_id,
@@ -426,6 +708,7 @@ class QueryService:
             query_sha256=validated.sha256,
             result=result,
         )
+        await self._ack_terminal_audit(audit_claim)
         response = result.to_dict()
         response.update(
             {

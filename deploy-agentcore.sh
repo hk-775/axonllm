@@ -36,4 +36,4 @@ if [[ "${validate_only}" != "true" ]] &&
 fi
 
 cd "${repo_root}"
-exec uv run --frozen python scripts/operations/deploy_agentcore.py "$@"
+exec uv run --frozen --no-sync python scripts/operations/deploy_agentcore.py "$@"

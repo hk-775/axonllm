@@ -6,12 +6,16 @@ import re
 from dataclasses import dataclass
 
 from aws_cdk import (
+    CfnCondition,
     CfnOutput,
     CfnParameter,
+    CfnResource,
+    CustomResource,
     Duration,
     Fn,
     RemovalPolicy,
     Stack,
+    Token,
     aws_backup as backup,
     aws_bedrockagentcore as agentcore,
     aws_cloudwatch as cloudwatch,
@@ -22,7 +26,9 @@ from aws_cdk import (
     aws_events as events,
     aws_iam as iam,
     aws_kms as kms,
+    aws_lambda as lambda_,
     aws_logs as logs,
+    aws_secretsmanager as secretsmanager,
     aws_sns as sns,
     aws_sqs as sqs,
 )
@@ -47,6 +53,441 @@ ATHENA_ASSUME_ROLE_ACTIONS = [
     "sts:TagSession",
 ]
 _MAX_ATHENA_BINDINGS_CHARACTERS = 2_048
+_AGENTCORE_MAX_SESSION_SECONDS = 4 * 60 * 60
+_RECOVERY_PROPAGATION_MARGIN_SECONDS = 5 * 60
+_RECOVERY_MIN_QUIESCENCE_SECONDS = (
+    _AGENTCORE_MAX_SESSION_SECONDS
+    + _RECOVERY_PROPAGATION_MARGIN_SECONDS
+)
+_RUNTIME_DYNAMODB_STANDARD_ACTIONS = [
+    "dynamodb:BatchGetItem",
+    "dynamodb:BatchWriteItem",
+    "dynamodb:ConditionCheckItem",
+    "dynamodb:DeleteItem",
+    "dynamodb:DescribeTable",
+    "dynamodb:GetItem",
+    "dynamodb:PutItem",
+    "dynamodb:Query",
+    "dynamodb:Scan",
+    "dynamodb:UpdateItem",
+]
+_RUNTIME_DYNAMODB_TRANSACTION_ACTIONS = [
+    "dynamodb:TransactWriteItems",
+]
+_RUNTIME_DYNAMODB_ACTIONS = [
+    *_RUNTIME_DYNAMODB_STANDARD_ACTIONS,
+    *_RUNTIME_DYNAMODB_TRANSACTION_ACTIONS,
+]
+_AGENTCORE_ENABLED_PROVIDERS = ",".join(
+    (
+        "bedrock",
+        "bedrock-mantle",
+        "anthropic",
+        "openai",
+        "azure_openai",
+        "vertex_ai",
+        "google_ai",
+        "cohere",
+        "xai",
+        "groq",
+        "together",
+        "fireworks",
+        "ai21",
+    )
+)
+_PROVIDER_SECRET_FIELDS = (
+    "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY",
+    "AZURE_OPENAI_API_KEY",
+    "AZURE_OPENAI_ENDPOINT",
+    "GCP_CREDENTIALS_JSON",
+    "GCP_PROJECT_ID",
+    "GCP_LOCATION",
+    "VERTEX_AI_ENDPOINT",
+    "GOOGLE_AI_API_KEY",
+    "COHERE_API_KEY",
+    "XAI_API_KEY",
+    "GROQ_API_KEY",
+    "TOGETHER_API_KEY",
+    "FIREWORKS_API_KEY",
+    "AI21_API_KEY",
+)
+
+
+_AGENTCORE_RECOVERY_GUARD = """\
+import time
+from datetime import datetime, timezone
+
+import boto3
+from botocore.exceptions import ClientError
+
+
+control = boto3.client("bedrock-agentcore-control")
+cloudformation = boto3.client("cloudformation")
+ecs = boto3.client("ecs")
+autoscaling = boto3.client("application-autoscaling")
+
+_PHYSICAL_ID = "AxonLLMAgentCoreRecoveryGuard"
+_BLOCKED_MODES = {"quiesced", "selected"}
+_SUSPENSION_KEYS = (
+    "DynamicScalingInSuspended",
+    "DynamicScalingOutSuspended",
+    "ScheduledScalingSuspended",
+)
+
+
+def _pages(client, method_name, result_name, **arguments):
+    results = []
+    token = None
+    while True:
+        request = dict(arguments)
+        if token:
+            request["nextToken"] = token
+        response = getattr(client, method_name)(**request)
+        page = response.get(result_name, [])
+        if not isinstance(page, list):
+            raise RuntimeError(f"{method_name} returned malformed results")
+        results.extend(page)
+        token = response.get("nextToken")
+        if not token:
+            return results
+
+
+def _runtime_id(runtime_name):
+    matches = [
+        runtime
+        for runtime in _pages(
+            control,
+            "list_agent_runtimes",
+            "agentRuntimes",
+            maxResults=100,
+        )
+        if runtime.get("agentRuntimeName") == runtime_name
+    ]
+    if len(matches) != 1 or not matches[0].get("agentRuntimeId"):
+        raise RuntimeError(
+            "recovery guard could not resolve exactly one AgentCore runtime"
+        )
+    return matches[0]["agentRuntimeId"]
+
+
+def _assert_no_runtime_endpoints(runtime_name):
+    runtime_id = _runtime_id(runtime_name)
+    endpoints = _pages(
+        control,
+        "list_agent_runtime_endpoints",
+        "runtimeEndpoints",
+        agentRuntimeId=runtime_id,
+        maxResults=100,
+    )
+    if endpoints:
+        summary = sorted(
+            f"{item.get('name', 'unknown')}:{item.get('status', 'unknown')}"
+            for item in endpoints
+        )
+        raise RuntimeError(
+            "AgentCore recovery requires every runtime endpoint removed: "
+            + ", ".join(summary)
+        )
+
+
+def _control_plane_outputs(stack_name):
+    try:
+        response = cloudformation.describe_stacks(StackName=stack_name)
+    except ClientError as exc:
+        error = exc.response.get("Error", {})
+        if (
+            error.get("Code") == "ValidationError"
+            and "does not exist" in error.get("Message", "")
+        ):
+            return None
+        raise
+    stacks = response.get("Stacks", [])
+    if len(stacks) != 1:
+        raise RuntimeError(
+            "recovery guard could not resolve the control-plane stack"
+        )
+    outputs = {
+        item.get("OutputKey"): item.get("OutputValue")
+        for item in stacks[0].get("Outputs", [])
+    }
+    required = {
+        "AgentCoreStackName",
+        "ClusterName",
+        "PrimaryStateTableName",
+        "RecoveryApprovalId",
+        "RecoveryCutoverMode",
+        "SelectedRuntimeStateTableName",
+        "ServiceName",
+    }
+    missing = sorted(
+        name for name in required if name not in outputs
+    )
+    if missing:
+        raise RuntimeError(
+            "control-plane stack is missing recovery outputs: "
+            + ", ".join(missing)
+        )
+    return outputs
+
+
+def _assert_table_namespace(primary, selected):
+    if selected == primary:
+        return
+    if not selected.startswith(f"{primary}-restore-validation-"):
+        raise RuntimeError(
+            "AgentCore recovery table is outside the restore-validation "
+            "namespace"
+        )
+
+
+def _assert_control_plane_quiesced(stack_name):
+    outputs = _control_plane_outputs(stack_name)
+    if outputs is None:
+        return None
+    resource_id = (
+        f"service/{outputs['ClusterName']}/{outputs['ServiceName']}"
+    )
+    targets = autoscaling.describe_scalable_targets(
+        ServiceNamespace="ecs",
+        ResourceIds=[resource_id],
+        ScalableDimension="ecs:service:DesiredCount",
+    ).get("ScalableTargets", [])
+    if len(targets) != 1:
+        raise RuntimeError(
+            "recovery requires exactly one control-plane scalable target"
+        )
+    target = targets[0]
+    suspended = target.get("SuspendedState", {})
+    if target.get("MinCapacity") != 0 or not all(
+        suspended.get(key) is True for key in _SUSPENSION_KEYS
+    ):
+        raise RuntimeError(
+            "recovery requires the control plane at minimum capacity zero "
+            "with every scaling path suspended"
+        )
+    response = ecs.describe_services(
+        cluster=outputs["ClusterName"],
+        services=[outputs["ServiceName"]],
+    )
+    if response.get("failures") or len(response.get("services", [])) != 1:
+        raise RuntimeError(
+            "recovery guard could not resolve the control-plane service"
+        )
+    service = response["services"][0]
+    counts = {
+        name: service.get(name)
+        for name in ("desiredCount", "pendingCount", "runningCount")
+    }
+    if any(value != 0 for value in counts.values()):
+        raise RuntimeError(
+            "recovery requires a fully quiesced control plane: "
+            f"{counts}"
+        )
+    return outputs
+
+
+def _assert_control_plane_recovery_state(
+    current,
+    previous,
+    transition,
+    outputs,
+):
+    if outputs is None:
+        return
+    if (
+        outputs["AgentCoreStackName"] != current["AgentCoreStackName"]
+        or outputs["PrimaryStateTableName"] != current["PrimaryTable"]
+    ):
+        raise RuntimeError(
+            "control-plane recovery ownership does not match AgentCore"
+        )
+
+    mode = current["Mode"]
+    selected = current["SelectedTable"]
+    approval = current["ApprovalId"]
+    if transition == ("selected", "quiesced"):
+        expected = (
+            "selected",
+            previous["SelectedTable"],
+            previous["ApprovalId"],
+        )
+    elif transition == ("quiesced", "normal"):
+        expected = (
+            "quiesced",
+            selected,
+            previous["ApprovalId"],
+        )
+    else:
+        expected_mode = {
+            "normal": "normal",
+            "quiesced": "quiesced",
+            "selected": "selected",
+            "validation": "selected",
+        }[mode]
+        expected = (expected_mode, selected, approval)
+    actual = (
+        outputs["RecoveryCutoverMode"],
+        outputs["SelectedRuntimeStateTableName"],
+        outputs["RecoveryApprovalId"],
+    )
+    if actual != expected:
+        raise RuntimeError(
+            "control-plane recovery state does not authorize this "
+            f"AgentCore transition: expected {expected}, found {actual}"
+        )
+
+
+def _quiesced_epoch(physical_id):
+    prefix = f"{_PHYSICAL_ID}:"
+    if not physical_id.startswith(prefix):
+        raise RuntimeError("recovery quiescence evidence is missing")
+    try:
+        value = int(physical_id[len(prefix):])
+    except ValueError as exc:
+        raise RuntimeError(
+            "recovery quiescence evidence is malformed"
+        ) from exc
+    if value < 1:
+        raise RuntimeError("recovery quiescence evidence is malformed")
+    return value
+
+
+def _result(physical_id, quiesced_at=None):
+    if quiesced_at is None:
+        timestamp = "not-quiesced"
+    else:
+        timestamp = datetime.fromtimestamp(
+            quiesced_at,
+            tz=timezone.utc,
+        ).isoformat()
+    return {
+        "PhysicalResourceId": physical_id,
+        "Data": {"QuiescedAt": timestamp},
+    }
+
+
+def handler(event, _context):
+    if event["RequestType"] == "Delete":
+        return _result(event.get("PhysicalResourceId", _PHYSICAL_ID))
+
+    current = event["ResourceProperties"]
+    mode = current.get("Mode")
+    primary = current.get("PrimaryTable", "")
+    target = current.get("SelectedTable", "")
+    approval = current.get("ApprovalId", "")
+    if not primary or not target:
+        raise RuntimeError("AgentCore recovery table ownership is missing")
+    _assert_table_namespace(primary, target)
+    if event["RequestType"] == "Create":
+        if mode != "normal" or target != primary or approval:
+            raise RuntimeError(
+                "a new AgentCore stack must start on the primary table "
+                "in normal mode without a recovery approval"
+            )
+        return _result(_PHYSICAL_ID)
+
+    previous = event.get("OldResourceProperties", {})
+    for immutable in ("AgentCoreStackName", "PrimaryTable"):
+        if current.get(immutable) != previous.get(immutable):
+            raise RuntimeError(
+                f"AgentCore recovery ownership changed: {immutable}"
+            )
+    old_mode = previous.get("Mode")
+    old_target = previous.get("SelectedTable", "")
+    old_approval = previous.get("ApprovalId", "")
+    target_changed = target != old_target
+    transition = (old_mode, mode)
+    allowed = {
+        ("normal", "normal"),
+        ("normal", "quiesced"),
+        ("quiesced", "quiesced"),
+        ("quiesced", "normal"),
+        ("quiesced", "selected"),
+        ("selected", "selected"),
+        ("selected", "quiesced"),
+        ("selected", "validation"),
+        ("validation", "validation"),
+        ("validation", "normal"),
+    }
+    if transition not in allowed:
+        raise RuntimeError(
+            f"unsupported AgentCore recovery transition: "
+            f"{old_mode} -> {mode}"
+        )
+
+    if target_changed and transition not in {
+        ("quiesced", "selected"),
+        ("selected", "quiesced"),
+    }:
+        raise RuntimeError(
+            "AgentCore state table changes require a blocked "
+            "quiesced -> selected transition"
+        )
+    if transition == ("quiesced", "selected") and not target_changed:
+        raise RuntimeError(
+            "selected mode requires an approved state table change"
+        )
+    if transition == ("selected", "validation") and target_changed:
+        raise RuntimeError(
+            "validation must use the table already fixed in selected mode"
+        )
+
+    if mode == "quiesced" and old_mode == "normal":
+        if not approval or approval == old_approval:
+            raise RuntimeError(
+                "entering recovery requires a new non-empty approval ID"
+            )
+    elif mode in {"selected", "validation"}:
+        if not approval or approval != old_approval:
+            raise RuntimeError(
+                "recovery approval ID changed during a protected transition"
+            )
+
+    must_be_quiesced = (
+        mode in _BLOCKED_MODES
+        or old_mode in _BLOCKED_MODES
+        or old_mode == "validation"
+    )
+    if must_be_quiesced:
+        control_plane = _assert_control_plane_quiesced(
+            current["ControlPlaneStackName"]
+        )
+    else:
+        control_plane = _control_plane_outputs(
+            current["ControlPlaneStackName"]
+        )
+    _assert_control_plane_recovery_state(
+        current,
+        previous,
+        transition,
+        control_plane,
+    )
+    if mode in _BLOCKED_MODES:
+        _assert_no_runtime_endpoints(current["RuntimeName"])
+
+    physical_id = event.get("PhysicalResourceId", _PHYSICAL_ID)
+    quiesced_at = None
+    if mode == "quiesced" and old_mode == "normal":
+        quiesced_at = int(time.time())
+        physical_id = f"{_PHYSICAL_ID}:{quiesced_at}"
+    elif old_mode in _BLOCKED_MODES:
+        quiesced_at = _quiesced_epoch(physical_id)
+
+    if transition == ("quiesced", "selected"):
+        minimum = int(current["MinimumQuiescenceSeconds"])
+        elapsed = int(time.time()) - quiesced_at
+        if elapsed < minimum:
+            raise RuntimeError(
+                "AgentCore recovery quiescence is too recent: "
+                f"{elapsed}s elapsed, {minimum}s required"
+            )
+
+    if mode == "normal":
+        physical_id = _PHYSICAL_ID
+        quiesced_at = None
+    return _result(physical_id, quiesced_at)
+"""
 
 
 @dataclass(frozen=True)
@@ -429,7 +870,8 @@ class AxonLLMAgentCoreStack(Stack):
             constraint_description="must be an EC2 managed prefix list ID",
             description=(
                 "Managed prefix list containing approved OIDC and provider "
-                "HTTPS destinations"
+                "HTTPS destinations, including the regional Bedrock Mantle "
+                "API endpoint and every configured HTTP provider"
             ),
         )
         bedrock_invoke_resource_arns = CfnParameter(
@@ -691,15 +1133,159 @@ class AxonLLMAgentCoreStack(Stack):
                 resources=["*"],
             )
         )
+        provider_secret = secretsmanager.Secret(
+            self,
+            "ProviderCredentials",
+            description=(
+                "AxonLLM AgentCore HTTP-provider credentials and endpoints"
+            ),
+            encryption_key=data_key,
+            generate_secret_string=secretsmanager.SecretStringGenerator(
+                secret_string_template=json.dumps(
+                    {field_name: "" for field_name in _PROVIDER_SECRET_FIELDS},
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ),
+                generate_string_key="placeholder",
+            ),
+            removal_policy=RemovalPolicy.RETAIN,
+        )
+        secrets_endpoint = vpc.add_interface_endpoint(
+            "SecretsManagerEndpoint",
+            service=ec2.InterfaceVpcEndpointAwsService.SECRETS_MANAGER,
+            open=False,
+            private_dns_enabled=True,
+            security_groups=[endpoint_security_group],
+            subnets=ec2.SubnetSelection(
+                subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS
+            ),
+        )
+        secrets_endpoint.add_to_policy(
+            iam.PolicyStatement(
+                principals=[iam.AnyPrincipal()],
+                actions=[
+                    "secretsmanager:DescribeSecret",
+                    "secretsmanager:GetSecretValue",
+                ],
+                resources=[provider_secret.secret_arn],
+            )
+        )
         state_table_name = (
             self.node.try_get_context("agentcore_table_name")
             or "axonllm-agentcore-state"
         )
-        if len(state_table_name) > 214:
+        restore_table_marker = "-restore-validation-"
+        restore_table_suffix_limit = (
+            255
+            - len(state_table_name)
+            - len(restore_table_marker)
+        )
+        if restore_table_suffix_limit < 21:
             raise ValueError(
                 "AgentCore state table name must be at most 214 characters "
                 "to preserve the PITR validation suffix"
             )
+        restored_state_table_pattern = (
+            rf"^$|^{re.escape(state_table_name)}"
+            rf"{restore_table_marker}[A-Za-z0-9_.-]"
+            rf"{{1,{restore_table_suffix_limit}}}$"
+        )
+        runtime_state_table_name = CfnParameter(
+            self,
+            "RuntimeStateTableName",
+            type="String",
+            default="",
+            allowed_pattern=restored_state_table_pattern,
+            constraint_description=(
+                "must be blank or a PITR validation table derived from the "
+                f"{state_table_name} primary table"
+            ),
+            description=(
+                "Optional restored state table selected through the "
+                "reviewed AgentCore recovery workflow"
+            ),
+        )
+        recovery_cutover_mode = CfnParameter(
+            self,
+            "RecoveryCutoverMode",
+            type="String",
+            default="normal",
+            allowed_values=[
+                "normal",
+                "quiesced",
+                "selected",
+                "validation",
+            ],
+            description=(
+                "AgentCore recovery phase; table changes are accepted only "
+                "from quiesced to selected"
+            ),
+        )
+        recovery_approval_id = CfnParameter(
+            self,
+            "RecoveryApprovalId",
+            type="String",
+            default="",
+            max_length=128,
+            allowed_pattern=r"^$|^[A-Za-z0-9][A-Za-z0-9._:/-]{2,127}$",
+            constraint_description=(
+                "must be blank or a 3-128 character change/incident ID"
+            ),
+            description=(
+                "Reviewed change or incident identifier bound to a recovery "
+                "cutover and rollback"
+            ),
+        )
+        use_recovered_state = CfnCondition(
+            self,
+            "UseRecoveredState",
+            expression=Fn.condition_not(
+                Fn.condition_equals(
+                    runtime_state_table_name.value_as_string,
+                    "",
+                )
+            ),
+        )
+        recovery_normal = CfnCondition(
+            self,
+            "RecoveryNormal",
+            expression=Fn.condition_equals(
+                recovery_cutover_mode.value_as_string,
+                "normal",
+            ),
+        )
+        recovery_quiesced = CfnCondition(
+            self,
+            "RecoveryQuiesced",
+            expression=Fn.condition_equals(
+                recovery_cutover_mode.value_as_string,
+                "quiesced",
+            ),
+        )
+        recovery_selected = CfnCondition(
+            self,
+            "RecoverySelected",
+            expression=Fn.condition_equals(
+                recovery_cutover_mode.value_as_string,
+                "selected",
+            ),
+        )
+        recovery_validation = CfnCondition(
+            self,
+            "RecoveryValidation",
+            expression=Fn.condition_equals(
+                recovery_cutover_mode.value_as_string,
+                "validation",
+            ),
+        )
+        recovery_access_blocked = CfnCondition(
+            self,
+            "RecoveryAccessBlocked",
+            expression=Fn.condition_or(
+                recovery_quiesced,
+                recovery_selected,
+            ),
+        )
         state_table = dynamodb.Table(
             self,
             "StateTable",
@@ -723,6 +1309,18 @@ class AxonLLMAgentCoreStack(Stack):
             ),
             time_to_live_attribute="expires_at",
             removal_policy=RemovalPolicy.RETAIN,
+        )
+        selected_state_table_name = Token.as_string(
+            Fn.condition_if(
+                use_recovered_state.logical_id,
+                runtime_state_table_name.value_as_string,
+                state_table.table_name,
+            )
+        )
+        selected_state_table_arn = self.format_arn(
+            service="dynamodb",
+            resource="table",
+            resource_name=selected_state_table_name,
         )
         event_dead_letter_queue = sqs.Queue(
             self,
@@ -850,11 +1448,12 @@ class AxonLLMAgentCoreStack(Stack):
                     "dynamodb:PutItem",
                     "dynamodb:Query",
                     "dynamodb:Scan",
+                    "dynamodb:TransactWriteItems",
                     "dynamodb:UpdateItem",
                 ],
                 resources=[
-                    state_table.table_arn,
-                    f"{state_table.table_arn}/index/*",
+                    selected_state_table_arn,
+                    f"{selected_state_table_arn}/index/*",
                 ],
             )
         )
@@ -922,6 +1521,24 @@ class AxonLLMAgentCoreStack(Stack):
             resources=[backup.BackupResource.from_dynamo_db_table(state_table)],
             allow_restores=True,
         )
+        recovered_backup_selection = backup_plan.add_selection(
+            "RecoveredStateTableSelection",
+            resources=[
+                backup.BackupResource.from_arn(
+                    self.format_arn(
+                        service="dynamodb",
+                        resource="table",
+                        resource_name=(
+                            runtime_state_table_name.value_as_string
+                        ),
+                    )
+                )
+            ],
+            allow_restores=True,
+        )
+        for child in recovered_backup_selection.node.find_all():
+            if isinstance(child, CfnResource):
+                child.cfn_options.condition = use_recovered_state
 
         application_logs = logs.LogGroup(
             self,
@@ -965,6 +1582,27 @@ class AxonLLMAgentCoreStack(Stack):
         runtime_artifact = agentcore.AgentRuntimeArtifact.from_image_uri(
             verified_image_uri.value_as_string
         )
+        blocked_authorizer_value = Fn.join(
+            ":",
+            [
+                "axonllm-recovery-blocked",
+                Fn.select(2, Fn.split("/", self.stack_id)),
+            ],
+        )
+        selected_oidc_client_id = Token.as_string(
+            Fn.condition_if(
+                recovery_access_blocked.logical_id,
+                blocked_authorizer_value,
+                oidc_client_id.value_as_string,
+            )
+        )
+        selected_oidc_audience = Token.as_string(
+            Fn.condition_if(
+                recovery_access_blocked.logical_id,
+                blocked_authorizer_value,
+                oidc_audience.value_as_string,
+            )
+        )
         runtime = agentcore.Runtime(
             self,
             "Runtime",
@@ -975,8 +1613,8 @@ class AxonLLMAgentCoreStack(Stack):
             authorizer_configuration=(
                 agentcore.RuntimeAuthorizerConfiguration.using_jwt(
                     oidc_discovery_url.value_as_string,
-                    [oidc_client_id.value_as_string],
-                    [oidc_audience.value_as_string],
+                    [selected_oidc_client_id],
+                    [selected_oidc_audience],
                 )
             ),
             environment_variables={
@@ -984,7 +1622,7 @@ class AxonLLMAgentCoreStack(Stack):
                 "AXON_AWS_ACCOUNT_ID": self.account,
                 "AXON_BEDROCK_REGION": self.region,
                 "LLM_ROUTER_DYNAMODB_ENABLED": "true",
-                "AXON_DYNAMODB_TABLE": state_table.table_name,
+                "AXON_DYNAMODB_TABLE": selected_state_table_name,
                 "AXON_EVENT_OUTBOX_QUEUE_URL": event_outbox_queue.queue_url,
                 "AXON_SECURITY_EVENT_SNS_TOPIC_ARN": (
                     security_event_topic.topic_arn
@@ -1004,7 +1642,8 @@ class AxonLLMAgentCoreStack(Stack):
                     oidc_project_claim.value_as_string
                 ),
                 "AXON_REQUIRE_CANONICAL_IDENTITY": "true",
-                "AXON_ENABLED_PROVIDERS": "bedrock",
+                "AXON_ENABLED_PROVIDERS": _AGENTCORE_ENABLED_PROVIDERS,
+                "AXON_PROVIDER_SECRET_ARN": provider_secret.secret_arn,
                 **query_config.environment(),
             },
             lifecycle_configuration=agentcore.LifecycleConfiguration(
@@ -1063,7 +1702,40 @@ class AxonLLMAgentCoreStack(Stack):
                 resources=["*"],
             )
         )
-        state_table.grant_read_write_data(runtime.role)
+        runtime.add_to_role_policy(
+            iam.PolicyStatement(
+                sid="UseSelectedStateTable",
+                actions=_RUNTIME_DYNAMODB_STANDARD_ACTIONS,
+                resources=[
+                    selected_state_table_arn,
+                    f"{selected_state_table_arn}/index/*",
+                ],
+            )
+        )
+        transaction_policy = iam.Policy(
+            self,
+            "RuntimeDynamoTransactionPolicy",
+            statements=[
+                iam.PolicyStatement(
+                    sid="TransactWithSelectedStateTable",
+                    actions=_RUNTIME_DYNAMODB_TRANSACTION_ACTIONS,
+                    resources=[
+                        selected_state_table_arn,
+                        f"{selected_state_table_arn}/index/*",
+                    ],
+                )
+            ],
+        )
+        transaction_policy.attach_to_role(runtime.role)
+        cfn_transaction_policy = transaction_policy.node.default_child
+        if not isinstance(cfn_transaction_policy, iam.CfnPolicy):
+            raise TypeError("runtime transaction policy has no CfnPolicy child")
+        # cfn-lint 1.52.1 omits this valid DynamoDB IAM action.
+        cfn_transaction_policy.add_metadata(
+            "cfn-lint",
+            {"config": {"ignore_checks": ["W3037"]}},
+        )
+        provider_secret.grant_read(runtime.role)
         event_outbox_queue.grant_send_messages(runtime.role)
         event_outbox_queue.grant_consume_messages(runtime.role)
         security_event_topic.grant_publish(runtime.role)
@@ -1075,6 +1747,15 @@ class AxonLLMAgentCoreStack(Stack):
                     "bedrock:InvokeModelWithResponseStream",
                 ],
                 resources=bedrock_invoke_resource_arns.value_as_list,
+            )
+        )
+        runtime.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "bedrock-mantle:CreateInference",
+                    "bedrock-mantle:ListModels",
+                ],
+                resources=["*"],
             )
         )
         if query_config.enabled:
@@ -1105,11 +1786,196 @@ class AxonLLMAgentCoreStack(Stack):
                     resources=["*"],
                 )
             )
-        endpoint = runtime.add_endpoint(
+        recovery_deny_resource = Token.as_string(
+            Fn.condition_if(
+                recovery_access_blocked.logical_id,
+                "*",
+                self.format_arn(
+                    service="dynamodb",
+                    resource="table",
+                    resource_name=(
+                        "__axonllm_recovery_access_not_blocked__"
+                    ),
+                ),
+            )
+        )
+        recovery_deny_policy = iam.Policy(
+            self,
+            "RecoveryStateAccessDeny",
+            statements=[
+                iam.PolicyStatement(
+                    sid="BlockStateAccessDuringRecoveryTransition",
+                    effect=iam.Effect.DENY,
+                    actions=_RUNTIME_DYNAMODB_STANDARD_ACTIONS,
+                    resources=[recovery_deny_resource],
+                )
+            ],
+        )
+        recovery_deny_policy.attach_to_role(runtime.role)
+        cfn_recovery_deny_policy = (
+            recovery_deny_policy.node.default_child
+        )
+        if not isinstance(cfn_recovery_deny_policy, iam.CfnPolicy):
+            raise TypeError("recovery deny policy has no CfnPolicy child")
+        recovery_transaction_deny_policy = iam.Policy(
+            self,
+            "RecoveryStateTransactionAccessDeny",
+            statements=[
+                iam.PolicyStatement(
+                    sid="BlockStateTransactionsDuringRecoveryTransition",
+                    effect=iam.Effect.DENY,
+                    actions=_RUNTIME_DYNAMODB_TRANSACTION_ACTIONS,
+                    resources=[recovery_deny_resource],
+                )
+            ],
+        )
+        recovery_transaction_deny_policy.attach_to_role(runtime.role)
+        cfn_recovery_transaction_deny_policy = (
+            recovery_transaction_deny_policy.node.default_child
+        )
+        if not isinstance(
+            cfn_recovery_transaction_deny_policy,
+            iam.CfnPolicy,
+        ):
+            raise TypeError(
+                "recovery transaction deny policy has no CfnPolicy child"
+            )
+        # cfn-lint 1.52.1 omits this valid DynamoDB IAM action.
+        cfn_recovery_transaction_deny_policy.add_metadata(
+            "cfn-lint",
+            {"config": {"ignore_checks": ["W3037"]}},
+        )
+
+        recovery_guard_handler_logs = logs.LogGroup(
+            self,
+            "RecoveryGuardHandlerLogs",
+            encryption_key=data_key,
+            retention=logs.RetentionDays.ONE_YEAR,
+            removal_policy=RemovalPolicy.RETAIN,
+        )
+        recovery_guard_handler = lambda_.Function(
+            self,
+            "RecoveryGuardHandler",
+            description=(
+                "Blocks unsafe AgentCore DynamoDB recovery transitions"
+            ),
+            runtime=lambda_.Runtime.PYTHON_3_12,
+            handler="index.handler",
+            code=lambda_.Code.from_inline(_AGENTCORE_RECOVERY_GUARD),
+            timeout=Duration.seconds(60),
+            log_group=recovery_guard_handler_logs,
+        )
+        recovery_guard_handler.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "bedrock-agentcore:ListAgentRuntimeEndpoints",
+                    "bedrock-agentcore:ListAgentRuntimes",
+                ],
+                resources=["*"],
+            )
+        )
+        recovery_guard_handler.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["cloudformation:DescribeStacks"],
+                resources=[
+                    self.format_arn(
+                        service="cloudformation",
+                        resource="stack",
+                        resource_name="AxonLLMControlPlaneStack/*",
+                    )
+                ],
+            )
+        )
+        recovery_guard_handler.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["ecs:DescribeServices"],
+                resources=[
+                    self.format_arn(
+                        service="ecs",
+                        resource="service",
+                        resource_name="*/*",
+                    )
+                ],
+            )
+        )
+        recovery_guard_handler.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "application-autoscaling:DescribeScalableTargets"
+                ],
+                resources=["*"],
+            )
+        )
+        recovery_guard_provider_logs = logs.LogGroup(
+            self,
+            "RecoveryGuardProviderLogs",
+            encryption_key=data_key,
+            retention=logs.RetentionDays.ONE_YEAR,
+            removal_policy=RemovalPolicy.RETAIN,
+        )
+        recovery_guard_provider = cr.Provider(
+            self,
+            "RecoveryGuardProvider",
+            on_event_handler=recovery_guard_handler,
+            log_group=recovery_guard_provider_logs,
+        )
+        recovery_guard = CustomResource(
+            self,
+            "RecoveryGuard",
+            service_token=recovery_guard_provider.service_token,
+            properties={
+                "AgentCoreStackName": self.stack_name,
+                "ApprovalId": recovery_approval_id.value_as_string,
+                "ControlPlaneStackName": "AxonLLMControlPlaneStack",
+                "MinimumQuiescenceSeconds": str(
+                    _RECOVERY_MIN_QUIESCENCE_SECONDS
+                ),
+                "Mode": recovery_cutover_mode.value_as_string,
+                "PrimaryTable": state_table.table_name,
+                "RuntimeName": "axonllm",
+                "SelectedTable": selected_state_table_name,
+            },
+        )
+        recovery_guard_resource = recovery_guard.node.default_child
+        if not isinstance(recovery_guard_resource, CfnResource):
+            raise TypeError("recovery guard has no CloudFormation child")
+        recovery_guard_resource.add_dependency(
+            cfn_recovery_deny_policy
+        )
+        recovery_guard_resource.add_dependency(
+            cfn_recovery_transaction_deny_policy
+        )
+        cfn_runtime = runtime.node.default_child
+        if not isinstance(cfn_runtime, agentcore.CfnRuntime):
+            raise TypeError("AgentCore runtime has no CfnRuntime child")
+        cfn_runtime.add_dependency(recovery_guard_resource)
+
+        production_endpoint = runtime.add_endpoint(
             "production",
             description="AxonLLM production endpoint",
             version=runtime.agent_runtime_version,
         )
+        recovery_endpoint = runtime.add_endpoint(
+            "recovery",
+            description="AxonLLM recovery-validation endpoint",
+            version=runtime.agent_runtime_version,
+        )
+        cfn_production_endpoint = production_endpoint.node.default_child
+        cfn_recovery_endpoint = recovery_endpoint.node.default_child
+        if not isinstance(
+            cfn_production_endpoint,
+            agentcore.CfnRuntimeEndpoint,
+        ) or not isinstance(
+            cfn_recovery_endpoint,
+            agentcore.CfnRuntimeEndpoint,
+        ):
+            raise TypeError(
+                "AgentCore endpoint has no CfnRuntimeEndpoint child"
+            )
+        cfn_production_endpoint.cfn_options.condition = recovery_normal
+        cfn_recovery_endpoint.cfn_options.condition = recovery_validation
+        cfn_production_endpoint.add_dependency(recovery_guard_resource)
+        cfn_recovery_endpoint.add_dependency(recovery_guard_resource)
 
         alarm_topic = sns.Topic(
             self,
@@ -1146,21 +2012,34 @@ class AxonLLMAgentCoreStack(Stack):
             period=Duration.minutes(5),
             statistic="p95",
         )
-        dynamodb_throttles = (
-            state_table.metric_throttled_requests_for_operations(
-                operations=[
-                    dynamodb.Operation.GET_ITEM,
-                    dynamodb.Operation.QUERY,
-                    dynamodb.Operation.SCAN,
-                    dynamodb.Operation.PUT_ITEM,
-                    dynamodb.Operation.UPDATE_ITEM,
-                    dynamodb.Operation.DELETE_ITEM,
-                    dynamodb.Operation.TRANSACT_GET_ITEMS,
-                    dynamodb.Operation.TRANSACT_WRITE_ITEMS,
-                ],
+        state_operations = [
+            "GetItem",
+            "Query",
+            "Scan",
+            "PutItem",
+            "UpdateItem",
+            "DeleteItem",
+            "TransactGetItems",
+            "TransactWriteItems",
+        ]
+        throttle_metrics = {
+            operation.lower(): cloudwatch.Metric(
+                namespace="AWS/DynamoDB",
+                metric_name="ThrottledRequests",
+                dimensions_map={
+                    "Operation": operation,
+                    "TableName": selected_state_table_name,
+                },
                 period=Duration.minutes(5),
                 statistic="Sum",
             )
+            for operation in state_operations
+        }
+        dynamodb_throttles = cloudwatch.MathExpression(
+            expression=" + ".join(throttle_metrics),
+            using_metrics=throttle_metrics,
+            period=Duration.minutes(5),
+            label="Sum of throttled requests across all operations",
         )
         alarms = [
             cloudwatch.Alarm(
@@ -1258,11 +2137,18 @@ class AxonLLMAgentCoreStack(Stack):
                 "must trust"
             ),
         )
-        CfnOutput(
+        runtime_endpoint_output = CfnOutput(
             self,
             "RuntimeEndpointArn",
-            value=endpoint.agent_runtime_endpoint_arn,
+            value=production_endpoint.agent_runtime_endpoint_arn,
         )
+        runtime_endpoint_output.condition = recovery_normal
+        recovery_endpoint_output = CfnOutput(
+            self,
+            "RecoveryRuntimeEndpointArn",
+            value=recovery_endpoint.agent_runtime_endpoint_arn,
+        )
+        recovery_endpoint_output.condition = recovery_validation
         CfnOutput(
             self,
             "StateTableName",
@@ -1271,6 +2157,38 @@ class AxonLLMAgentCoreStack(Stack):
                 ":",
                 [self.stack_name, "StateTableName"],
             ),
+        )
+        CfnOutput(
+            self,
+            "AgentCoreStackName",
+            value=self.stack_name,
+        )
+        CfnOutput(
+            self,
+            "SelectedRuntimeStateTableName",
+            value=selected_state_table_name,
+        )
+        recovery_mode_output = CfnOutput(
+            self,
+            "RecoveryCutoverModeOutput",
+            value=recovery_cutover_mode.value_as_string,
+        )
+        recovery_mode_output.override_logical_id("RecoveryCutoverMode")
+        recovery_approval_output = CfnOutput(
+            self,
+            "RecoveryApprovalIdOutput",
+            value=recovery_approval_id.value_as_string,
+        )
+        recovery_approval_output.override_logical_id("RecoveryApprovalId")
+        CfnOutput(
+            self,
+            "RecoveryQuiescedAt",
+            value=recovery_guard.get_att_string("QuiescedAt"),
+        )
+        CfnOutput(
+            self,
+            "RecoveryMinimumQuiescenceSeconds",
+            value=str(_RECOVERY_MIN_QUIESCENCE_SECONDS),
         )
         CfnOutput(
             self,
@@ -1321,6 +2239,11 @@ class AxonLLMAgentCoreStack(Stack):
                 ":",
                 [self.stack_name, "SecurityEventLogGroupArn"],
             ),
+        )
+        CfnOutput(
+            self,
+            "ProviderSecretArn",
+            value=provider_secret.secret_arn,
         )
         CfnOutput(
             self,

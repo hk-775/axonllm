@@ -21,7 +21,7 @@ ENV UV_COMPILE_BYTECODE=1 \
 # the lockfile itself changes. --no-install-project skips the app: it is copied
 # below and would otherwise invalidate this layer on every source edit.
 COPY pyproject.toml uv.lock ./
-RUN uv sync --frozen --no-dev --no-install-project --extra oidc --extra saml --extra otel
+RUN uv sync --frozen --no-dev --no-install-project --extra oidc --extra otel
 
 COPY src/ src/
 COPY config/ config/
@@ -37,7 +37,7 @@ COPY scripts/ scripts/
 # the gap was invisible. site/infra is excluded in .dockerignore.
 COPY site/ site/
 
-RUN uv sync --frozen --no-dev --extra oidc --extra saml --extra otel \
+RUN uv sync --frozen --no-dev --extra oidc --extra otel \
     && groupadd --gid 10001 axon \
     && useradd --uid 10001 --gid 10001 --no-create-home \
         --home-dir /nonexistent --shell /usr/sbin/nologin axon \

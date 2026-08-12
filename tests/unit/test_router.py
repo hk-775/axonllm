@@ -2,6 +2,7 @@
 
 import pytest
 
+from src.gateway.cost_tracker import CostTracker
 from src.gateway.health_tracker import ProviderHealthTracker
 from src.gateway.model_registry import ModelRegistry
 from src.gateway.models import (
@@ -115,6 +116,83 @@ class TestGetFallbackChain:
             for mapping in router.get_fallback_chain("gpt-4")
         ] == ["bedrock"]
 
+    def test_production_pricing_gate_filters_unpriced_mappings(
+        self,
+        registry,
+        health_tracker,
+    ):
+        tracker = CostTracker(
+            {
+                "openai": {
+                    "gpt-4-turbo": TokenPricing(0.01, 0.03),
+                }
+            }
+        )
+        for mapping in registry.resolve("gpt-4"):
+            mapping.pricing = None
+
+        router = Router(
+            registry,
+            health_tracker,
+            cost_tracker=tracker,
+            require_priced_mappings=True,
+        )
+
+        assert [
+            (mapping.provider, mapping.model_id)
+            for mapping in router.get_fallback_chain("gpt-4")
+        ] == [("openai", "gpt-4-turbo")]
+
+    def test_custom_price_reenables_a_mapping(
+        self,
+        registry,
+        health_tracker,
+    ):
+        for mapping in registry.resolve("gpt-4"):
+            mapping.pricing = None
+        tracker = CostTracker(
+            {
+                "bedrock": {
+                    "gpt-4-bedrock": TokenPricing(0.005, 0.02),
+                }
+            }
+        )
+        router = Router(
+            registry,
+            health_tracker,
+            cost_tracker=tracker,
+            require_priced_mappings=True,
+        )
+
+        assert router.is_model_available("gpt-4") is True
+        assert [
+            mapping.provider
+            for mapping in router.available_mappings("gpt-4")
+        ] == ["bedrock"]
+
+    def test_zero_placeholders_do_not_bypass_the_pricing_gate(
+        self,
+        registry,
+        health_tracker,
+    ):
+        for mapping in registry.resolve("gpt-4"):
+            mapping.pricing = None
+        tracker = CostTracker(
+            {
+                "openai": {
+                    "gpt-4-turbo": TokenPricing(0.0, 0.0),
+                }
+            }
+        )
+        router = Router(
+            registry,
+            health_tracker,
+            cost_tracker=tracker,
+            require_priced_mappings=True,
+        )
+
+        assert router.available_mappings("gpt-4") == []
+
 
 # ---------------------------------------------------------------------------
 # execute_with_fallback — success cases
@@ -129,6 +207,26 @@ class TestExecuteSuccess:
 
         resp = await router.execute_with_fallback(_make_request(), provider_fn)
         assert resp.provider == "openai"
+        assert resp.model == "gpt-4"
+        assert resp.provider_model == "gpt-4-turbo"
+
+    @pytest.mark.asyncio
+    async def test_provider_alias_is_normalized_to_the_pricing_key(
+        self,
+        router,
+    ):
+        async def provider_fn(mapping):
+            response = _make_response(mapping.provider)
+            response.model = "gpt-4o-2026-08-01"
+            return response
+
+        response = await router.execute_with_fallback(
+            _make_request(),
+            provider_fn,
+        )
+
+        assert response.model == "gpt-4"
+        assert response.provider_model == "gpt-4-turbo"
 
     @pytest.mark.asyncio
     async def test_falls_back_on_non_retryable_error(self, router):

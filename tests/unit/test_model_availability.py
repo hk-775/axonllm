@@ -199,8 +199,7 @@ class TestFetchFailures:
 
     @pytest.mark.asyncio
     async def test_transport_failure_never_leaks_the_url(self, monkeypatch):
-        """httpx embeds the request URL in its exceptions, and for google_ai that
-        URL carries the API key as a query parameter."""
+        """Transport exception text is never exposed to the admin surface."""
 
         def _raise(*args):
             raise httpx.ConnectError("failed to connect to https://api.test?key=sk-secret")
@@ -225,15 +224,16 @@ class TestFetchFailures:
         assert error.reason == "no model ids in response"
 
     @pytest.mark.asyncio
-    async def test_google_key_goes_in_params_not_the_url(self, monkeypatch):
-        """So it cannot end up in a log line or an exception built from the URL."""
+    async def test_google_key_uses_header_and_never_the_url(self, monkeypatch):
+        """The API key must not enter URL-bearing logs or exceptions."""
         client = _patch_client(monkeypatch, lambda *a: _response({"models": [{"name": "g"}]}))
 
         await _fetch_ids("google_ai", _config("google_ai", api_key="sk-secret"), 5.0)
 
         url, headers, params = client.requests[0]
         assert "sk-secret" not in url
-        assert params["key"] == "sk-secret"
+        assert headers["x-goog-api-key"] == "sk-secret"
+        assert params == {"pageSize": "1000"}
 
     @pytest.mark.asyncio
     async def test_anthropic_sends_its_required_version_header(self, monkeypatch):

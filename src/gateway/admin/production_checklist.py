@@ -4,8 +4,8 @@ Every check here exists because the thing it checks fails *quietly*. The gateway
 starts, serves traffic and returns 200s in all of these states — the config is
 wrong in a way no request surfaces:
 
-* an unpriced mapping bills $0.00, so budgets and quotas under-count and never
-  block;
+* an unpriced mapping bills $0.00 in development; production excludes it from
+  routing, which can silently narrow a model's providers or remove the model;
 * a retired or aliased model id serves a different model than the one named, or
   fails over silently;
 * ``AXON_AUTH_MODE=LOG_ONLY`` admits every unauthenticated request while logging
@@ -30,10 +30,10 @@ to fail — so rendering it there would show a wall of red that is correct for a
 demo and teaches operators to ignore the page. It also makes live outbound calls,
 which a demo should not.
 
-Checks are *reported*, never enforced. Nothing here can refuse a boot or reject a
-request: an operator who has read the warning and decided to proceed is making a
-call this module is not in a position to overrule, and a readiness page that can
-take down a deployment is one nobody will enable.
+Checks are reported rather than used as a boot gate. Production's priced-mapping
+router guard is the one enforcement boundary: it rejects unpriced mappings
+regardless of this page. The checklist still fails them because a configured
+model that is unavailable is not launch-ready.
 """
 
 from __future__ import annotations
@@ -178,7 +178,11 @@ def should_run(app_config: AppConfig) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def check_pricing(report: PricingDriftReport) -> CheckResult:
+def check_pricing(
+    report: PricingDriftReport,
+    *,
+    unpriced_mappings_blocked: bool = False,
+) -> CheckResult:
     """Every routable mapping bills at a real rate.
 
     FAIL rather than WARN when a model has no priced provider at all: that model
@@ -207,28 +211,48 @@ def check_pricing(report: PricingDriftReport) -> CheckResult:
     ]
     if fully:
         status = Status.FAIL
-        summary = (
-            f"{unpriced} of {report.total_mappings} mappings unpriced; "
-            f"{fully} model{'s' if fully != 1 else ''} "
-            f"{'have' if fully != 1 else 'has'} no priced provider at all."
-        )
-        detail = (
-            f"Requests to {'those models' if fully != 1 else 'that model'} bill at "
-            "$0.00. Project spend never accrues, so budget blocks and quota alerts "
-            "cannot fire — enforcement fails open, not closed."
-        )
+        if unpriced_mappings_blocked:
+            summary = (
+                f"{unpriced} of {report.total_mappings} mappings unpriced; "
+                f"{fully} configured model{'s are' if fully != 1 else ' is'} "
+                "unavailable in production."
+            )
+            detail = (
+                "Production routing fails closed by excluding every unpriced "
+                "mapping from model listing, direct routing, smart routing, "
+                "streaming, and ensembles. Add verified or contracted rates "
+                "before treating the affected models as launch-ready."
+            )
+        else:
+            summary = (
+                f"{unpriced} of {report.total_mappings} mappings unpriced; "
+                f"{fully} model{'s' if fully != 1 else ''} "
+                f"{'have' if fully != 1 else 'has'} no priced provider at all."
+            )
+            detail = (
+                f"Requests to {'those models' if fully != 1 else 'that model'} bill at "
+                "$0.00. Project spend never accrues, so budget blocks and quota alerts "
+                "cannot fire — enforcement fails open, not closed."
+            )
     else:
         status = Status.WARN
         summary = (
             f"{unpriced} of {report.total_mappings} mappings unpriced, but every "
             "model has at least one priced provider."
         )
-        detail = (
-            "Traffic that lands on an unpriced provider is billed at $0.00, so "
-            "spend under-counts whenever routing or failover picks it. Smart "
-            "routing also scores those candidates on an estimate rather than a "
-            "measured cost."
-        )
+        if unpriced_mappings_blocked:
+            detail = (
+                "Production excludes the unpriced mappings, so billing remains "
+                "fail-closed but routing and failover capacity are narrower than "
+                "the model configuration advertises."
+            )
+        else:
+            detail = (
+                "Traffic that lands on an unpriced provider is billed at $0.00, so "
+                "spend under-counts whenever routing or failover picks it. Smart "
+                "routing also scores those candidates on an estimate rather than a "
+                "measured cost."
+            )
 
     return CheckResult(
         key="pricing",
@@ -760,7 +784,12 @@ async def run_checklist(
         check_canonical_identity(app_config),
         check_demo_data(app_config, environ),
         check_provider_credentials(model_registry, provider_configs),
-        check_pricing(drift),
+        check_pricing(
+            drift,
+            unpriced_mappings_blocked=(
+                app_config.deployment_profile == "production"
+            ),
+        ),
         check_model_ids(availability),
         await check_persistence(persistence),
         await check_api_keys(api_key_service, project_ids or []),

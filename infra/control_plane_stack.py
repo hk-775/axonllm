@@ -1,25 +1,32 @@
 """Production ECS control plane sharing AgentCore's canonical authority."""
 
+import re
+
 from aws_cdk import (
+    CfnCondition,
     CfnOutput,
     CfnParameter,
+    CfnResource,
+    CustomResource,
     Duration,
     Fn,
     RemovalPolicy,
     Stack,
+    Token,
     custom_resources as cr,
     aws_certificatemanager as acm,
     aws_cognito as cognito,
-    aws_dynamodb as dynamodb,
     aws_ec2 as ec2,
     aws_ecs as ecs,
     aws_elasticloadbalancingv2 as elbv2,
     aws_elasticloadbalancingv2_actions as elbv2_actions,
     aws_iam as iam,
     aws_kms as kms,
+    aws_lambda as lambda_,
     aws_logs as logs,
     aws_route53 as route53,
     aws_s3 as s3,
+    aws_secretsmanager as secretsmanager,
     aws_sns as sns,
     aws_sqs as sqs,
 )
@@ -59,6 +66,287 @@ _ECR_PULL_ACTIONS = [
 ]
 
 
+_CONTROL_PLANE_RECOVERY_GUARD = """\
+import boto3
+
+
+cloudformation = boto3.client("cloudformation")
+ecs = boto3.client("ecs")
+autoscaling = boto3.client("application-autoscaling")
+
+_PHYSICAL_ID = "AxonLLMControlPlaneRecoveryGuard"
+_BLOCKED_MODES = {"quiesced", "selected"}
+_SUSPENSION_KEYS = (
+    "DynamicScalingInSuspended",
+    "DynamicScalingOutSuspended",
+    "ScheduledScalingSuspended",
+)
+
+
+def _stack_outputs(stack_name):
+    response = cloudformation.describe_stacks(StackName=stack_name)
+    stacks = response.get("Stacks", [])
+    if len(stacks) != 1:
+        raise RuntimeError(
+            f"recovery guard could not resolve stack {stack_name}"
+        )
+    stack = stacks[0]
+    outputs = {
+        item.get("OutputKey"): item.get("OutputValue")
+        for item in stack.get("Outputs", [])
+    }
+    return stack, outputs
+
+
+def _assert_table_namespace(primary, selected):
+    if selected == primary:
+        return
+    if not selected.startswith(f"{primary}-restore-validation-"):
+        raise RuntimeError(
+            "control-plane recovery table is outside the AgentCore "
+            "restore-validation namespace"
+        )
+
+
+def _agentcore_state(properties):
+    stack, outputs = _stack_outputs(properties["AgentCoreStackName"])
+    required = {
+        "RecoveryApprovalId",
+        "RecoveryCutoverMode",
+        "SelectedRuntimeStateTableName",
+        "StateTableName",
+    }
+    missing = sorted(required.difference(outputs))
+    if missing:
+        raise RuntimeError(
+            "AgentCore stack is missing recovery outputs: "
+            + ", ".join(missing)
+        )
+    if outputs["StateTableName"] != properties["PrimaryTable"]:
+        raise RuntimeError(
+            "control-plane primary table is not owned by the selected "
+            "AgentCore stack"
+        )
+    return stack, outputs
+
+
+def _assert_agentcore(outputs, *, mode, selected, approval):
+    actual = (
+        outputs["RecoveryCutoverMode"],
+        outputs["SelectedRuntimeStateTableName"],
+        outputs["RecoveryApprovalId"],
+    )
+    expected = (mode, selected, approval)
+    if actual != expected:
+        raise RuntimeError(
+            "AgentCore recovery state does not authorize this control-plane "
+            f"transition: expected {expected}, found {actual}"
+        )
+
+
+def _assert_control_plane_quiesced(stack_name):
+    _, outputs = _stack_outputs(stack_name)
+    cluster_name = outputs.get("ClusterName")
+    service_name = outputs.get("ServiceName")
+    if not cluster_name or not service_name:
+        raise RuntimeError(
+            "control-plane stack is missing ClusterName or ServiceName"
+        )
+    resource_id = f"service/{cluster_name}/{service_name}"
+    targets = autoscaling.describe_scalable_targets(
+        ServiceNamespace="ecs",
+        ResourceIds=[resource_id],
+        ScalableDimension="ecs:service:DesiredCount",
+    ).get("ScalableTargets", [])
+    if len(targets) != 1:
+        raise RuntimeError(
+            "recovery requires exactly one control-plane scalable target"
+        )
+    target = targets[0]
+    suspended = target.get("SuspendedState", {})
+    if target.get("MinCapacity") != 0 or not all(
+        suspended.get(key) is True for key in _SUSPENSION_KEYS
+    ):
+        raise RuntimeError(
+            "recovery requires the control plane at minimum capacity zero "
+            "with every scaling path suspended"
+        )
+    response = ecs.describe_services(
+        cluster=cluster_name,
+        services=[service_name],
+    )
+    if response.get("failures") or len(response.get("services", [])) != 1:
+        raise RuntimeError(
+            "recovery guard could not resolve the control-plane service"
+        )
+    service = response["services"][0]
+    counts = {
+        name: service.get(name)
+        for name in ("desiredCount", "pendingCount", "runningCount")
+    }
+    if any(value != 0 for value in counts.values()):
+        raise RuntimeError(
+            "recovery requires a fully quiesced control plane: "
+            f"{counts}"
+        )
+
+
+def _result():
+    return {"PhysicalResourceId": _PHYSICAL_ID}
+
+
+def handler(event, _context):
+    if event["RequestType"] == "Delete":
+        return _result()
+
+    current = event["ResourceProperties"]
+    mode = current.get("Mode")
+    selected = current.get("SelectedTable", "")
+    primary = current.get("PrimaryTable", "")
+    approval = current.get("ApprovalId", "")
+    if not primary or not selected:
+        raise RuntimeError("control-plane recovery table ownership is missing")
+    _assert_table_namespace(primary, selected)
+    _, agentcore = _agentcore_state(current)
+
+    if event["RequestType"] == "Create":
+        if mode != "normal":
+            raise RuntimeError(
+                "a new control-plane stack must start in normal mode"
+            )
+        _assert_agentcore(
+            agentcore,
+            mode="normal",
+            selected=selected,
+            approval=approval,
+        )
+        return _result()
+
+    previous = event.get("OldResourceProperties", {})
+    for immutable in (
+        "AgentCoreStackName",
+        "ControlPlaneStackName",
+        "PrimaryTable",
+    ):
+        if current.get(immutable) != previous.get(immutable):
+            raise RuntimeError(
+                f"control-plane recovery ownership changed: {immutable}"
+            )
+
+    old_mode = previous.get("Mode")
+    old_selected = previous.get("SelectedTable", "")
+    old_approval = previous.get("ApprovalId", "")
+    transition = (old_mode, mode)
+    allowed = {
+        ("normal", "normal"),
+        ("normal", "quiesced"),
+        ("quiesced", "quiesced"),
+        ("quiesced", "normal"),
+        ("quiesced", "selected"),
+        ("selected", "selected"),
+        ("selected", "quiesced"),
+        ("selected", "normal"),
+    }
+    if transition not in allowed:
+        raise RuntimeError(
+            "unsupported control-plane recovery transition: "
+            f"{old_mode} -> {mode}"
+        )
+
+    table_changed = selected != old_selected
+    if table_changed and transition not in {
+        ("quiesced", "selected"),
+        ("selected", "quiesced"),
+    }:
+        raise RuntimeError(
+            "control-plane table changes require a blocked "
+            "quiesced <-> selected transition"
+        )
+    if transition in {
+        ("quiesced", "selected"),
+        ("selected", "quiesced"),
+    } and not table_changed:
+        raise RuntimeError(
+            "control-plane selection transition requires a table change"
+        )
+
+    if transition == ("normal", "quiesced"):
+        if not approval or approval == old_approval:
+            raise RuntimeError(
+                "entering control-plane recovery requires a new approval ID"
+            )
+    elif mode in _BLOCKED_MODES and approval != old_approval:
+        raise RuntimeError(
+            "control-plane recovery approval changed during a blocked phase"
+        )
+    elif transition == ("selected", "normal") and approval != old_approval:
+        raise RuntimeError(
+            "control-plane promotion changed its recovery approval"
+        )
+
+    if mode in _BLOCKED_MODES or old_mode in _BLOCKED_MODES:
+        _assert_control_plane_quiesced(current["ControlPlaneStackName"])
+
+    if transition == ("normal", "quiesced"):
+        _assert_agentcore(
+            agentcore,
+            mode="normal",
+            selected=old_selected,
+            approval=old_approval,
+        )
+    elif transition == ("quiesced", "selected"):
+        _assert_agentcore(
+            agentcore,
+            mode="quiesced",
+            selected=old_selected,
+            approval=approval,
+        )
+    elif transition == ("selected", "quiesced"):
+        _assert_agentcore(
+            agentcore,
+            mode="quiesced",
+            selected=selected,
+            approval=approval,
+        )
+    elif transition == ("quiesced", "normal"):
+        _assert_agentcore(
+            agentcore,
+            mode="normal",
+            selected=selected,
+            approval=approval,
+        )
+    elif transition == ("selected", "normal"):
+        _assert_agentcore(
+            agentcore,
+            mode="normal",
+            selected=selected,
+            approval=approval,
+        )
+    elif mode == "normal":
+        _assert_agentcore(
+            agentcore,
+            mode="normal",
+            selected=selected,
+            approval=approval,
+        )
+    elif mode == "quiesced":
+        _assert_agentcore(
+            agentcore,
+            mode="quiesced",
+            selected=selected,
+            approval=approval,
+        )
+    else:
+        _assert_agentcore(
+            agentcore,
+            mode="selected",
+            selected=selected,
+            approval=approval,
+        )
+    return _result()
+"""
+
+
 class AxonLLMControlPlaneStack(Stack):
     """Private Fargate control plane backed by AgentCore-owned state."""
 
@@ -70,6 +358,29 @@ class AxonLLMControlPlaneStack(Stack):
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
         query_config = load_athena_infrastructure_config(self)
+        secret_arn_pattern = re.compile(
+            rf"^arn:(?:aws|aws-us-gov|aws-cn):secretsmanager:"
+            rf"{re.escape(self.region)}:[0-9]{{12}}:"
+            r"secret:[A-Za-z0-9/_+=.@-]{1,512}$"
+        )
+
+        def secret_context(name: str) -> str | None:
+            value = self.node.try_get_context(name)
+            if value in (None, ""):
+                return None
+            if (
+                not isinstance(value, str)
+                or secret_arn_pattern.fullmatch(value) is None
+            ):
+                raise ValueError(
+                    f"{name} must be a complete Secrets Manager ARN in "
+                    f"{self.region}"
+                )
+            return value
+
+        scim_tenants_secret_arn = secret_context(
+            "scim_tenants_secret_arn"
+        )
 
         agentcore_stack_name = CfnParameter(
             self,
@@ -143,6 +454,31 @@ class AxonLLMControlPlaneStack(Stack):
                 "control-plane hostname"
             ),
         )
+        saml_login_path = CfnParameter(
+            self,
+            "SamlLoginPath",
+            type="String",
+            default="/admin/dashboard",
+            min_length=2,
+            max_length=2048,
+            allowed_pattern=(
+                r"^/(?!/)(?!$)(?!.*//)(?!.*[/]\.{1,2}(?:/|$))"
+                r"(?!(?:[Ss][Aa][Mm][Ll]|[Ss][Cc][Ii][Mm]|"
+                r"[Oo][Aa][Uu][Tt][Hh]2)(?:/|$))"
+                r"(?!(?:[Hh][Ee][Aa][Ll][Tt][Hh]|"
+                r"[Rr][Ee][Aa][Dd][Yy])$)"
+                r"[A-Za-z0-9._~!$&'()*+,;=:@/-]+$"
+            ),
+            constraint_description=(
+                "must be a protected application-local path without a "
+                "scheme, authority, query, fragment, encoding, empty or dot "
+                "segments, or SAML, SCIM, OAuth, health, or readiness targets"
+            ),
+            description=(
+                "Protected local route used after the ALB and Cognito start "
+                "managed enterprise login"
+            ),
+        )
         verified_image_uri = CfnParameter(
             self,
             "ControlPlaneVerifiedImageUri",
@@ -162,6 +498,104 @@ class AxonLLMControlPlaneStack(Stack):
                 "AgentCore image"
             ),
         )
+        runtime_state_table_name = CfnParameter(
+            self,
+            "RuntimeStateTableName",
+            type="String",
+            default="",
+            min_length=0,
+            max_length=255,
+            allowed_pattern=r"^$|^[A-Za-z0-9_.-]{3,255}$",
+            constraint_description=(
+                "must be blank or a valid DynamoDB table name; the recovery "
+                "guard enforces AgentCore ownership and restore namespace"
+            ),
+            description=(
+                "Optional restored AgentCore table selected only through the "
+                "coordinated recovery workflow"
+            ),
+        )
+        primary_state_table_name_parameter = CfnParameter(
+            self,
+            "PrimaryStateTableName",
+            type="String",
+            min_length=3,
+            max_length=255,
+            allowed_pattern=r"^[A-Za-z0-9_.-]{3,255}$",
+            constraint_description="must be a valid DynamoDB table name",
+            description=(
+                "Primary table name read from the verified AgentCore stack "
+                "outputs by the deployment wrapper"
+            ),
+        )
+        recovery_cutover_mode = CfnParameter(
+            self,
+            "RecoveryCutoverMode",
+            type="String",
+            default="normal",
+            allowed_values=["normal", "quiesced", "selected"],
+            description=(
+                "Control-plane recovery phase; table changes are accepted "
+                "only while every task and scaling path is stopped"
+            ),
+        )
+        recovery_approval_id = CfnParameter(
+            self,
+            "RecoveryApprovalId",
+            type="String",
+            default="",
+            max_length=128,
+            allowed_pattern=r"^$|^[A-Za-z0-9][A-Za-z0-9._:/-]{2,127}$",
+            constraint_description=(
+                "must be blank or a 3-128 character change/incident ID"
+            ),
+            description=(
+                "Reviewed change or incident identifier shared with the "
+                "AgentCore recovery selector"
+            ),
+        )
+        use_recovered_state = CfnCondition(
+            self,
+            "UseRecoveredState",
+            expression=Fn.condition_not(
+                Fn.condition_equals(
+                    runtime_state_table_name.value_as_string,
+                    "",
+                )
+            ),
+        )
+        recovery_normal = CfnCondition(
+            self,
+            "RecoveryNormal",
+            expression=Fn.condition_equals(
+                recovery_cutover_mode.value_as_string,
+                "normal",
+            ),
+        )
+        recovery_quiesced = CfnCondition(
+            self,
+            "RecoveryQuiesced",
+            expression=Fn.condition_equals(
+                recovery_cutover_mode.value_as_string,
+                "quiesced",
+            ),
+        )
+        recovery_selected = CfnCondition(
+            self,
+            "RecoverySelected",
+            expression=Fn.condition_equals(
+                recovery_cutover_mode.value_as_string,
+                "selected",
+            ),
+        )
+        recovery_access_blocked = CfnCondition(
+            self,
+            "RecoveryAccessBlocked",
+            expression=Fn.condition_or(
+                recovery_quiesced,
+                recovery_selected,
+            ),
+        )
 
         def imported(stack_name: CfnParameter, output_name: str) -> str:
             return Fn.import_value(
@@ -171,19 +605,34 @@ class AxonLLMControlPlaneStack(Stack):
                 )
             )
 
+        primary_state_table_name = (
+            primary_state_table_name_parameter.value_as_string
+        )
+        selected_state_table_name = Token.as_string(
+            Fn.condition_if(
+                use_recovered_state.logical_id,
+                runtime_state_table_name.value_as_string,
+                primary_state_table_name,
+            )
+        )
+        selected_state_table_arn = self.format_arn(
+            service="dynamodb",
+            resource="table",
+            resource_name=selected_state_table_name,
+        )
         data_key = kms.Key.from_key_arn(
             self,
             "AgentCoreDataKey",
             imported(agentcore_stack_name, "DataKeyArn"),
         )
-        state_table = dynamodb.Table.from_table_attributes(
-            self,
-            "AgentCoreStateTable",
-            table_name=imported(
-                agentcore_stack_name,
-                "StateTableName",
-            ),
-            encryption_key=data_key,
+        scim_tenants_secret = (
+            secretsmanager.Secret.from_secret_complete_arn(
+                self,
+                "ScimTenantsSecret",
+                scim_tenants_secret_arn,
+            )
+            if scim_tenants_secret_arn is not None
+            else None
         )
         event_outbox_queue = sqs.Queue.from_queue_attributes(
             self,
@@ -483,6 +932,23 @@ class AxonLLMControlPlaneStack(Stack):
             security_groups=[endpoint_security_group],
             subnets=private_subnets,
         )
+        configured_secrets = (
+            [scim_tenants_secret]
+            if scim_tenants_secret is not None
+            else []
+        )
+        secrets_endpoint = None
+        if configured_secrets:
+            secrets_endpoint = vpc.add_interface_endpoint(
+                "SecretsManagerEndpoint",
+                service=(
+                    ec2.InterfaceVpcEndpointAwsService.SECRETS_MANAGER
+                ),
+                open=False,
+                private_dns_enabled=True,
+                security_groups=[endpoint_security_group],
+                subnets=private_subnets,
+            )
         ecs_trust = iam.ServicePrincipal(
             "ecs-tasks.amazonaws.com",
             conditions={
@@ -511,12 +977,28 @@ class AxonLLMControlPlaneStack(Stack):
                 "Pulls the verified control-plane image and writes logs"
             ),
         )
+        for secret in configured_secrets:
+            secret.grant_read(execution_role)
+        if secrets_endpoint is not None:
+            secrets_endpoint.add_to_policy(
+                iam.PolicyStatement(
+                    principals=[execution_role],
+                    actions=[
+                        "secretsmanager:DescribeSecret",
+                        "secretsmanager:GetSecretValue",
+                    ],
+                    resources=[
+                        secret.secret_arn
+                        for secret in configured_secrets
+                    ],
+                )
+            )
         task_role.add_to_principal_policy(
             iam.PolicyStatement(
                 actions=_DYNAMODB_STANDARD_ACTIONS,
                 resources=[
-                    state_table.table_arn,
-                    f"{state_table.table_arn}/index/*",
+                    selected_state_table_arn,
+                    f"{selected_state_table_arn}/index/*",
                 ],
             )
         )
@@ -527,8 +1009,8 @@ class AxonLLMControlPlaneStack(Stack):
                 iam.PolicyStatement(
                     actions=_DYNAMODB_TRANSACTION_ACTIONS,
                     resources=[
-                        state_table.table_arn,
-                        f"{state_table.table_arn}/index/*",
+                        selected_state_table_arn,
+                        f"{selected_state_table_arn}/index/*",
                     ],
                 )
             ],
@@ -541,6 +1023,66 @@ class AxonLLMControlPlaneStack(Stack):
             )
         # cfn-lint 1.52.1 omits this valid DynamoDB IAM action.
         cfn_transaction_policy.add_metadata(
+            "cfn-lint",
+            {"config": {"ignore_checks": ["W3037"]}},
+        )
+        recovery_deny_resource = Token.as_string(
+            Fn.condition_if(
+                recovery_access_blocked.logical_id,
+                "*",
+                self.format_arn(
+                    service="dynamodb",
+                    resource="table",
+                    resource_name=(
+                        "__axonllm_control_recovery_access_not_blocked__"
+                    ),
+                ),
+            )
+        )
+        recovery_deny_policy = iam.Policy(
+            self,
+            "RecoveryStateAccessDeny",
+            statements=[
+                iam.PolicyStatement(
+                    sid="BlockStateAccessDuringRecoveryTransition",
+                    effect=iam.Effect.DENY,
+                    actions=_DYNAMODB_STANDARD_ACTIONS,
+                    resources=[recovery_deny_resource],
+                )
+            ],
+        )
+        recovery_deny_policy.attach_to_role(task_role)
+        cfn_recovery_deny_policy = recovery_deny_policy.node.default_child
+        if not isinstance(cfn_recovery_deny_policy, iam.CfnPolicy):
+            raise RuntimeError(
+                "control-plane recovery deny policy did not synthesize"
+            )
+        recovery_transaction_deny_policy = iam.Policy(
+            self,
+            "RecoveryStateTransactionAccessDeny",
+            statements=[
+                iam.PolicyStatement(
+                    sid="BlockStateTransactionsDuringRecoveryTransition",
+                    effect=iam.Effect.DENY,
+                    actions=_DYNAMODB_TRANSACTION_ACTIONS,
+                    resources=[recovery_deny_resource],
+                )
+            ],
+        )
+        recovery_transaction_deny_policy.attach_to_role(task_role)
+        cfn_recovery_transaction_deny_policy = (
+            recovery_transaction_deny_policy.node.default_child
+        )
+        if not isinstance(
+            cfn_recovery_transaction_deny_policy,
+            iam.CfnPolicy,
+        ):
+            raise RuntimeError(
+                "control-plane recovery transaction deny policy did not "
+                "synthesize"
+            )
+        # cfn-lint 1.52.1 omits this valid DynamoDB IAM action.
+        cfn_recovery_transaction_deny_policy.add_metadata(
             "cfn-lint",
             {"config": {"ignore_checks": ["W3037"]}},
         )
@@ -590,6 +1132,11 @@ class AxonLLMControlPlaneStack(Stack):
             init_process_enabled=True,
         )
         linux_parameters.drop_capabilities(ecs.Capability.ALL)
+        container_secrets: dict[str, ecs.Secret] = {}
+        if scim_tenants_secret is not None:
+            container_secrets["AXON_SCIM_TENANTS"] = (
+                ecs.Secret.from_secrets_manager(scim_tenants_secret)
+            )
         container = task_definition.add_container(
             "Application",
             image=ecs.ContainerImage.from_registry(
@@ -604,7 +1151,7 @@ class AxonLLMControlPlaneStack(Stack):
                 "AWS_STS_REGIONAL_ENDPOINTS": "regional",
                 "AXON_AWS_ACCOUNT_ID": self.account,
                 "LLM_ROUTER_DYNAMODB_ENABLED": "true",
-                "AXON_DYNAMODB_TABLE": state_table.table_name,
+                "AXON_DYNAMODB_TABLE": selected_state_table_name,
                 "AXON_EVENT_OUTBOX_QUEUE_URL": event_outbox_queue.queue_url,
                 "AXON_SECURITY_EVENT_SNS_TOPIC_ARN": (
                     security_event_topic.topic_arn
@@ -626,11 +1173,16 @@ class AxonLLMControlPlaneStack(Stack):
                 ),
                 "AXON_REQUIRE_CANONICAL_IDENTITY": "true",
                 "AXON_CONTROL_PLANE_ONLY": "true",
+                "AXON_SAML_FEDERATION_MODE": "managed-cognito",
+                "AXON_SAML_LOGIN_PATH": (
+                    saml_login_path.value_as_string
+                ),
                 "AXON_ENABLED_PROVIDERS": "bedrock",
                 "AXON_SERVER_PORT": "8000",
                 "HOME": "/tmp",
                 **query_config.environment(),
             },
+            secrets=container_secrets,
             health_check=ecs.HealthCheck(
                 command=[
                     "CMD-SHELL",
@@ -740,7 +1292,7 @@ class AxonLLMControlPlaneStack(Stack):
             "Certificate",
             certificate_arn.value_as_string,
         )
-        load_balancer.add_listener(
+        https_listener = load_balancer.add_listener(
             "HttpsListener",
             port=443,
             protocol=elbv2.ApplicationProtocol.HTTPS,
@@ -760,6 +1312,16 @@ class AxonLLMControlPlaneStack(Stack):
                 session_timeout=Duration.hours(1),
                 next=elbv2.ListenerAction.forward([target_group]),
             ),
+        )
+        https_listener.add_action(
+            "SelfAuthenticatedProtocols",
+            priority=10,
+            conditions=[
+                elbv2.ListenerCondition.path_patterns(
+                    ["/scim/*"]
+                )
+            ],
+            action=elbv2.ListenerAction.forward([target_group]),
         )
         container.add_environment(
             "AXON_ALB_SIGNER_ARN",
@@ -804,13 +1366,174 @@ class AxonLLMControlPlaneStack(Stack):
             scale_out_cooldown=Duration.minutes(1),
         )
 
+        recovery_guard_handler_logs = logs.LogGroup(
+            self,
+            "RecoveryGuardHandlerLogs",
+            encryption_key=data_key,
+            retention=logs.RetentionDays.ONE_YEAR,
+            removal_policy=RemovalPolicy.RETAIN,
+        )
+        recovery_guard_handler = lambda_.Function(
+            self,
+            "RecoveryGuardHandler",
+            description=(
+                "Blocks unsafe control-plane DynamoDB recovery transitions"
+            ),
+            runtime=lambda_.Runtime.PYTHON_3_12,
+            handler="index.handler",
+            code=lambda_.Code.from_inline(
+                _CONTROL_PLANE_RECOVERY_GUARD
+            ),
+            timeout=Duration.seconds(60),
+            log_group=recovery_guard_handler_logs,
+        )
+        recovery_guard_handler.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["cloudformation:DescribeStacks"],
+                resources=[
+                    self.format_arn(
+                        service="cloudformation",
+                        resource="stack",
+                        resource_name=Fn.join(
+                            "",
+                            [
+                                agentcore_stack_name.value_as_string,
+                                "/*",
+                            ],
+                        ),
+                    ),
+                    self.format_arn(
+                        service="cloudformation",
+                        resource="stack",
+                        resource_name="AxonLLMControlPlaneStack/*",
+                    ),
+                ],
+            )
+        )
+        recovery_guard_handler.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["ecs:DescribeServices"],
+                resources=[
+                    self.format_arn(
+                        service="ecs",
+                        resource="service",
+                        resource_name="*/*",
+                    )
+                ],
+            )
+        )
+        recovery_guard_handler.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "application-autoscaling:DescribeScalableTargets"
+                ],
+                resources=["*"],
+            )
+        )
+        recovery_guard_provider_logs = logs.LogGroup(
+            self,
+            "RecoveryGuardProviderLogs",
+            encryption_key=data_key,
+            retention=logs.RetentionDays.ONE_YEAR,
+            removal_policy=RemovalPolicy.RETAIN,
+        )
+        recovery_guard_provider = cr.Provider(
+            self,
+            "RecoveryGuardProvider",
+            on_event_handler=recovery_guard_handler,
+            log_group=recovery_guard_provider_logs,
+        )
+        recovery_guard = CustomResource(
+            self,
+            "RecoveryGuard",
+            service_token=recovery_guard_provider.service_token,
+            properties={
+                "AgentCoreStackName": (
+                    agentcore_stack_name.value_as_string
+                ),
+                "ApprovalId": recovery_approval_id.value_as_string,
+                "ControlPlaneStackName": "AxonLLMControlPlaneStack",
+                "Mode": recovery_cutover_mode.value_as_string,
+                "PrimaryTable": primary_state_table_name,
+                "SelectedTable": selected_state_table_name,
+            },
+        )
+        recovery_guard_resource = recovery_guard.node.default_child
+        if not isinstance(recovery_guard_resource, CfnResource):
+            raise RuntimeError(
+                "control-plane recovery guard did not synthesize"
+            )
+
+        cfn_service = service.node.default_child
+        if not isinstance(cfn_service, ecs.CfnService):
+            raise RuntimeError("control-plane service did not synthesize")
+        cfn_service.add_override(
+            "Properties.DesiredCount",
+            Fn.condition_if(
+                recovery_normal.logical_id,
+                2,
+                0,
+            ),
+        )
+        cfn_service.add_dependency(recovery_guard_resource)
+
+        scaling_targets = [
+            child
+            for child in scaling.node.find_all()
+            if isinstance(child, CfnResource)
+            and child.cfn_resource_type
+            == "AWS::ApplicationAutoScaling::ScalableTarget"
+        ]
+        if len(scaling_targets) != 1:
+            raise RuntimeError(
+                "control-plane scalable target did not synthesize"
+            )
+        cfn_scaling_target = scaling_targets[0]
+        cfn_scaling_target.add_override(
+            "Properties.MinCapacity",
+            Fn.condition_if(
+                recovery_normal.logical_id,
+                2,
+                0,
+            ),
+        )
+        cfn_scaling_target.add_override(
+            "Properties.SuspendedState",
+            Fn.condition_if(
+                recovery_normal.logical_id,
+                {
+                    key: False
+                    for key in (
+                        "DynamicScalingInSuspended",
+                        "DynamicScalingOutSuspended",
+                        "ScheduledScalingSuspended",
+                    )
+                },
+                {
+                    key: True
+                    for key in (
+                        "DynamicScalingInSuspended",
+                        "DynamicScalingOutSuspended",
+                        "ScheduledScalingSuspended",
+                    )
+                },
+            ),
+        )
+        cfn_scaling_target.add_dependency(recovery_guard_resource)
+        cfn_recovery_deny_policy.add_dependency(
+            recovery_guard_resource
+        )
+        cfn_recovery_transaction_deny_policy.add_dependency(
+            recovery_guard_resource
+        )
+
         dynamodb_endpoint.add_to_policy(
             iam.PolicyStatement(
                 principals=[task_role],
                 actions=_DYNAMODB_ACTIONS,
                 resources=[
-                    state_table.table_arn,
-                    f"{state_table.table_arn}/index/*",
+                    selected_state_table_arn,
+                    f"{selected_state_table_arn}/index/*",
                 ],
             )
         )
@@ -872,6 +1595,31 @@ class AxonLLMControlPlaneStack(Stack):
         )
         CfnOutput(
             self,
+            "AgentCoreStackNameOutput",
+            value=agentcore_stack_name.value_as_string,
+        ).override_logical_id("AgentCoreStackName")
+        CfnOutput(
+            self,
+            "PrimaryStateTableNameOutput",
+            value=primary_state_table_name,
+        ).override_logical_id("PrimaryStateTableName")
+        CfnOutput(
+            self,
+            "SelectedRuntimeStateTableName",
+            value=selected_state_table_name,
+        )
+        CfnOutput(
+            self,
+            "RecoveryCutoverModeOutput",
+            value=recovery_cutover_mode.value_as_string,
+        ).override_logical_id("RecoveryCutoverMode")
+        CfnOutput(
+            self,
+            "RecoveryApprovalIdOutput",
+            value=recovery_approval_id.value_as_string,
+        ).override_logical_id("RecoveryApprovalId")
+        CfnOutput(
+            self,
             "LoadBalancerDnsName",
             value=load_balancer.load_balancer_dns_name,
         )
@@ -890,3 +1638,9 @@ class AxonLLMControlPlaneStack(Stack):
             "QueryPlaneEnabled",
             value="true" if query_config.enabled else "false",
         )
+        if scim_tenants_secret is not None:
+            CfnOutput(
+                self,
+                "ScimTenantsSecretArn",
+                value=scim_tenants_secret.secret_arn,
+            )

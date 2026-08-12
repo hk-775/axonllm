@@ -309,6 +309,11 @@ jobs:
             dispatch_inputs["retain_fargate_restore"]["default"],
             "false",
         )
+        self.assertIn("retain_agentcore_restore", dispatch_inputs)
+        self.assertEqual(
+            dispatch_inputs["retain_agentcore_restore"]["default"],
+            "false",
+        )
         self.assertGreaterEqual(recovery["timeout-minutes"], 60)
         self.assertEqual(
             recovery["steps"][2]["with"]["role-to-assume"],
@@ -333,6 +338,10 @@ jobs:
         )
         self.assertIn(
             "matrix.target == 'fargate'",
+            restore["env"]["RETAIN_RESTORE"],
+        )
+        self.assertIn(
+            "matrix.target == 'agentcore'",
             restore["env"]["RETAIN_RESTORE"],
         )
         self.assertIn("--keep-restored-table", restore["run"])

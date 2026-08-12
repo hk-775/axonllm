@@ -186,14 +186,14 @@ def frame_doc(tab: Tab):
 
 # Bottom of the *contiguous* run of trafficked rows at the top of the table.
 #
-# Only some of the 46 catalogue rows carry seeded traffic, so a fixed scroll
+# Only some of the 48 catalogue rows carry seeded traffic, so a fixed scroll
 # distance walks off the end of them into a wall of "0  0  $0.0000" — which is
 # what the customer reads while the narration talks about routing strategy.
 #
 # Contiguous rather than last-trafficked: the rows are not sorted by traffic.
-# gemini-3-pro has 6 requests and sits at row 33 with two dozen empty rows above
-# it, so scrolling to the last trafficked row crosses exactly the dead zone this
-# is meant to avoid. Stopping at the first zero keeps every visible row populated.
+# gemini-2.5-pro has 6 requests but sits after two dozen empty rows, so scrolling
+# to the last trafficked row crosses exactly the dead zone this is meant to
+# avoid. Stopping at the first zero keeps every visible row populated.
 #
 # Measured rather than a constant: row height depends on the webfont and the
 # two-line name cell, and which rows are populated changes with the seed.

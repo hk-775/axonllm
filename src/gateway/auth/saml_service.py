@@ -1,78 +1,121 @@
-"""SAML 2.0 SSO (SP side) — pure-Python assertion verification.
+"""Managed Cognito federation contract for enterprise SAML login.
 
-Validates IdP-signed SAML responses without a libxml2/xmlsec1 system dependency:
-signature verification uses ``signxml`` (XML-DSig over lxml + ``cryptography``,
-both installed from wheels — no native build step). Safe XML parsing guards
-against entity-expansion / external-entity attacks.
+AxonLLM is not a SAML service provider.  Production browser authentication is
+owned by the control-plane ALB and its Cognito user pool:
 
-Flow:
-- ``build_authn_request()`` → SP-initiated redirect to the IdP SSO URL.
-- ``handle_acs(saml_response_b64)`` → verify the signed assertion against the
-  IdP cert, enforce audience + NotOnOrAfter, map attributes to a RequestContext.
-- ``sp_metadata()`` → SP metadata XML for IdP configuration.
+* Cognito validates the SAML protocol, signatures, issuer, audience,
+  destination, recipient, timestamps, request correlation, and replay.
+* Cognito and the ALB own RelayState and the secure browser session.
+* AxonLLM validates the ALB-signed OIDC identity and resolves all authority
+  through its canonical principal repository.
 
-Only the signed-assertion (or signed-response) POST binding is supported — the
-flow every enterprise IdP uses. Encrypted assertions are not handled.
+Accepting a SAML assertion in this process would create a second session and
+identity authority without a distributed request/replay store or session-key
+lifecycle.  The direct ACS and SP metadata methods therefore fail closed.
 """
 
 from __future__ import annotations
 
-import base64
-import logging
 import os
-import secrets
-import zlib
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from urllib.parse import urlencode
+import re
+from dataclasses import dataclass
+from typing import Mapping
+from urllib.parse import unquote, urlsplit, urlunsplit
 
-from src.gateway.models import AuthMethod, RequestContext
+MANAGED_COGNITO_MODE = "managed-cognito"
+DEFAULT_LOGIN_PATH = "/admin/dashboard"
+MAX_RETURN_TO_BYTES = 2048
 
-logger = logging.getLogger(__name__)
+LEGACY_DIRECT_SAML_ENV_VARS = frozenset(
+    {
+        "AXON_SAML_SP_ENTITY_ID",
+        "AXON_SAML_ACS_URL",
+        "AXON_SAML_IDP_ENTITY_ID",
+        "AXON_SAML_IDP_SSO_URL",
+        "AXON_SAML_IDP_CERT",
+        "AXON_SAML_IDP_CERT_FILE",
+    }
+)
 
-NS = {
-    "samlp": "urn:oasis:names:tc:SAML:2.0:protocol",
-    "saml": "urn:oasis:names:tc:SAML:2.0:assertion",
+_AWS_DNS_SUFFIXES = {
+    "aws": "amazonaws.com",
+    "aws-cn": "amazonaws.com.cn",
+    "aws-us-gov": "amazonaws.com",
 }
+_INVALID_PERCENT_ESCAPE = re.compile(r"%(?![0-9A-Fa-f]{2})")
+_REGION_PATTERN = re.compile(r"^[a-z0-9-]{3,32}$")
+_RESERVED_LOGIN_PREFIXES = ("/saml", "/scim", "/oauth2")
+_NON_LOGIN_PATHS = frozenset({"/", "/health", "/ready"})
 
 
-class SamlError(Exception):
-    """Raised when a SAML response is missing, malformed, or fails validation."""
+class SamlError(ValueError):
+    """Raised when the managed SAML handoff cannot be performed safely."""
 
 
-@dataclass
+@dataclass(frozen=True)
 class SamlConfig:
-    """SP + IdP settings for SAML SSO."""
+    """Inputs that prove the managed Cognito trust boundary is active."""
 
-    sp_entity_id: str = ""          # our SP identifier (audience the IdP asserts to)
-    acs_url: str = ""               # Assertion Consumer Service URL (our /saml/acs)
-    idp_entity_id: str = ""         # the IdP's issuer
-    idp_sso_url: str = ""           # IdP SSO redirect endpoint
-    idp_x509_cert: str = ""         # IdP signing cert (PEM or bare base64 body)
-    attribute_mappings: dict = field(default_factory=lambda: {
-        "user_id": "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/nameidentifier",
-        "email": "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress",
-        "roles": "http://schemas.xmlsoap.org/claims/Group",
-        "project_id": "project_id",
-    })
+    federation_mode: str = ""
+    login_path: str = DEFAULT_LOGIN_PATH
+    deployment_profile: str = "development"
+    auth_mode: str = "ENFORCE"
+    canonical_identity_required: bool = False
+    control_plane_only: bool = False
+    aws_region: str = ""
+    oidc_issuer: str = ""
+    oidc_audience: str = ""
+    alb_signer_arn: str = ""
+    alb_client_id: str = ""
+    alb_issuer: str = ""
+    legacy_direct_configuration: bool = False
+
+    @property
+    def configuration_error(self) -> str | None:
+        """Return a non-secret reason this handoff must remain disabled."""
+        if self.legacy_direct_configuration:
+            return (
+                "legacy direct-SP SAML settings are unsupported; configure "
+                "the SAML identity provider on the Cognito user pool"
+            )
+        if self.federation_mode != MANAGED_COGNITO_MODE:
+            return "managed Cognito SAML federation is not enabled"
+        if self.deployment_profile != "production":
+            return "managed SAML federation requires the production profile"
+        if self.auth_mode != "ENFORCE":
+            return "managed SAML federation requires enforced authentication"
+        if not self.canonical_identity_required:
+            return "managed SAML federation requires canonical identity"
+        if not self.control_plane_only:
+            return "managed SAML federation is available only on the control plane"
+        if not _is_alb_trust_config(
+            signer_arn=self.alb_signer_arn,
+            client_id=self.alb_client_id,
+            issuer=self.alb_issuer,
+            region=self.aws_region,
+        ):
+            return "the regional ALB trust configuration is invalid"
+        if not _is_cognito_issuer(
+            self.oidc_issuer,
+            region=self.aws_region,
+            partition=self.alb_signer_arn.split(":", 2)[1],
+        ):
+            return "managed SAML federation requires a Cognito OIDC issuer"
+        if not self.oidc_audience or self.oidc_audience != self.alb_client_id:
+            return "the OIDC audience must match the ALB Cognito client"
+        try:
+            _safe_local_target(self.login_path)
+        except SamlError:
+            return "the managed SAML login path is unsafe"
+        return None
 
     @property
     def enabled(self) -> bool:
-        return bool(self.idp_sso_url and self.idp_x509_cert and self.sp_entity_id)
-
-
-def _pem(cert: str) -> str:
-    """Normalize an IdP cert to PEM (accept a bare base64 body)."""
-    cert = cert.strip()
-    if "BEGIN CERTIFICATE" in cert:
-        return cert
-    body = "".join(cert.split())
-    lines = "\n".join(body[i:i + 64] for i in range(0, len(body), 64))
-    return f"-----BEGIN CERTIFICATE-----\n{lines}\n-----END CERTIFICATE-----\n"
+        return self.configuration_error is None
 
 
 class SamlService:
-    """SP-side SAML 2.0: build AuthnRequests, verify assertions, expose metadata."""
+    """Safe application handoff to ALB/Cognito-managed SAML federation."""
 
     def __init__(self, config: SamlConfig) -> None:
         self._config = config
@@ -81,179 +124,205 @@ class SamlService:
     def enabled(self) -> bool:
         return self._config.enabled
 
-    # -- SP-initiated login --------------------------------------------------
+    @property
+    def configuration_error(self) -> str | None:
+        return self._config.configuration_error
 
-    def build_authn_request(self, relay_state: str = "") -> str:
-        """Return the IdP SSO redirect URL (HTTP-Redirect binding, deflated)."""
-        cfg = self._config
-        req_id = "_" + secrets.token_hex(16)
-        issue_instant = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        xml = (
-            f'<samlp:AuthnRequest xmlns:samlp="{NS["samlp"]}" '
-            f'xmlns:saml="{NS["saml"]}" ID="{req_id}" Version="2.0" '
-            f'IssueInstant="{issue_instant}" '
-            f'AssertionConsumerServiceURL="{cfg.acs_url}" '
-            f'ProtocolBinding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST">'
-            f'<saml:Issuer>{cfg.sp_entity_id}</saml:Issuer>'
-            f'</samlp:AuthnRequest>'
-        )
-        # HTTP-Redirect binding: raw-DEFLATE + base64 in the SAMLRequest param.
-        deflated = zlib.compress(xml.encode())[2:-4]
-        params = {"SAMLRequest": base64.b64encode(deflated).decode()}
-        if relay_state:
-            params["RelayState"] = relay_state
-        sep = "&" if "?" in cfg.idp_sso_url else "?"
-        return f"{cfg.idp_sso_url}{sep}{urlencode(params)}"
+    def login_target(self, return_to: str | None = None) -> str:
+        """Return a local protected route where the ALB starts authentication."""
+        if not self.enabled:
+            raise SamlError("managed Cognito SAML federation is unavailable")
+        return _safe_local_target(return_to or self._config.login_path)
 
-    # -- ACS: verify and map -------------------------------------------------
-
-    def handle_acs(self, saml_response_b64: str) -> RequestContext:
-        """Verify a base64 SAMLResponse and map its assertion to a context.
-
-        Raises SamlError on any failure (bad signature, wrong audience, expired).
-        """
-        if not self._config.enabled:
-            raise SamlError("SAML is not configured")
-        try:
-            raw = base64.b64decode(saml_response_b64)
-        except Exception as e:
-            raise SamlError(f"SAMLResponse is not valid base64: {e}") from e
-
-        verified = self._verify_signature(raw)
-        self._check_conditions(verified)
-        return self._map_attributes(verified)
-
-    def _verify_signature(self, raw: bytes):
-        """Verify the XML-DSig against the configured IdP cert; return the root.
-
-        Uses signxml (XML-DSig, exclusive C14N) — verification fails closed on a
-        broken/absent signature, protecting against signature-wrapping.
-        """
-        try:
-            from lxml import etree
-            from signxml import XMLVerifier
-        except ImportError as e:  # pragma: no cover - dep guaranteed by pyproject
-            raise SamlError(f"SAML dependencies unavailable: {e}") from e
-
-        # Parse with entity resolution + network access DISABLED to block XXE /
-        # billion-laughs. (defusedxml.lxml is deprecated now that lxml exposes
-        # these parser controls directly.)
-        try:
-            parser = etree.XMLParser(
-                resolve_entities=False, no_network=True, dtd_validation=False,
-                load_dtd=False, huge_tree=False)
-            doc = etree.fromstring(raw, parser=parser)
-        except Exception as e:
-            raise SamlError(f"SAMLResponse XML is malformed or unsafe: {e}") from e
-        # Reject any DOCTYPE (entity-expansion vector) outright.
-        if doc.getroottree().docinfo.doctype:
-            raise SamlError("SAMLResponse contains a DOCTYPE (rejected)")
-
-        try:
-            result = XMLVerifier().verify(doc, x509_cert=_pem(self._config.idp_x509_cert))
-            return result.signed_xml
-        except Exception as e:
-            raise SamlError(f"SAML signature verification failed: {e}") from e
-
-    def _check_conditions(self, signed_root) -> None:
-        """Enforce audience restriction and NotOnOrAfter on the signed element."""
-        # signed_root may be the Assertion or the Response; search within it.
-        tag = signed_root.tag.split("}")[-1]
-        assertion = signed_root if tag == "Assertion" else signed_root.find(
-            ".//saml:Assertion", NS)
-        if assertion is None:
-            raise SamlError("No signed Assertion in SAMLResponse")
-
-        conditions = assertion.find("saml:Conditions", NS)
-        now = datetime.now(timezone.utc)
-        if conditions is not None:
-            not_after = conditions.get("NotOnOrAfter")
-            if not_after and now >= _parse_instant(not_after):
-                raise SamlError("SAML assertion has expired (NotOnOrAfter)")
-            not_before = conditions.get("NotBefore")
-            if not_before and now < _parse_instant(not_before):
-                raise SamlError("SAML assertion not yet valid (NotBefore)")
-            # Audience must match our SP entity id when the IdP restricts it.
-            audiences = [a.text for a in conditions.findall(
-                ".//saml:AudienceRestriction/saml:Audience", NS)]
-            if audiences and self._config.sp_entity_id not in audiences:
-                raise SamlError(
-                    f"SAML audience mismatch: expected {self._config.sp_entity_id}")
-
-    def _map_attributes(self, signed_root) -> RequestContext:
-        tag = signed_root.tag.split("}")[-1]
-        assertion = signed_root if tag == "Assertion" else signed_root.find(
-            ".//saml:Assertion", NS)
-
-        # NameID is the canonical subject identifier.
-        name_id_el = assertion.find(".//saml:Subject/saml:NameID", NS)
-        name_id = name_id_el.text if name_id_el is not None else ""
-
-        attrs: dict[str, list[str]] = {}
-        for attr in assertion.findall(".//saml:AttributeStatement/saml:Attribute", NS):
-            key = attr.get("Name", "")
-            values = [v.text or "" for v in attr.findall("saml:AttributeValue", NS)]
-            attrs[key] = values
-
-        m = self._config.attribute_mappings
-
-        def first(mapped_key: str, default: str = "") -> str:
-            vals = attrs.get(m.get(mapped_key, mapped_key), [])
-            return vals[0] if vals else default
-
-        roles = attrs.get(m.get("roles", "roles"), [])
-        user_id = first("user_id") or name_id or "saml-user"
-        return RequestContext(
-            user_id=user_id,
-            project_id=first("project_id"),
-            roles=list(roles),
-            scopes=[],
-            auth_method=AuthMethod.SSO,
-            email=first("email") or None,
+    def handle_acs(self, _saml_response_b64: str) -> None:
+        """Reject direct assertions; Cognito is the only SAML protocol endpoint."""
+        raise SamlError(
+            "direct SAML assertions are disabled; use managed Cognito federation"
         )
 
-    # -- SP metadata ---------------------------------------------------------
-
-    def sp_metadata(self) -> str:
-        cfg = self._config
-        return (
-            f'<?xml version="1.0"?>'
-            f'<md:EntityDescriptor xmlns:md="urn:oasis:names:tc:SAML:2.0:metadata" '
-            f'entityID="{cfg.sp_entity_id}">'
-            f'<md:SPSSODescriptor AuthnRequestsSigned="false" '
-            f'WantAssertionsSigned="true" '
-            f'protocolSupportEnumeration="urn:oasis:names:tc:SAML:2.0:protocol">'
-            f'<md:AssertionConsumerService '
-            f'Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST" '
-            f'Location="{cfg.acs_url}" index="0" isDefault="true"/>'
-            f'</md:SPSSODescriptor></md:EntityDescriptor>'
+    def sp_metadata(self) -> None:
+        """Reject direct-SP metadata; the IdP must use Cognito's SP metadata."""
+        raise SamlError(
+            "AxonLLM is not a SAML service provider; use Cognito SP metadata"
         )
 
 
-def load_saml_config() -> SamlConfig:
-    """Build a SamlConfig from AXON_SAML_* env vars. Empty → SSO disabled."""
-    cert = os.environ.get("AXON_SAML_IDP_CERT", "")
-    # Allow the cert to be provided as a file path.
-    cert_path = os.environ.get("AXON_SAML_IDP_CERT_FILE", "")
-    if cert_path and not cert:
-        try:
-            with open(cert_path, encoding="utf-8") as fh:
-                cert = fh.read()
-        except OSError:
-            logger.warning("AXON_SAML_IDP_CERT_FILE %s not readable", cert_path)
+def load_saml_config(
+    *,
+    deployment_profile: str = "development",
+    auth_mode: str = "ENFORCE",
+    canonical_identity_required: bool = False,
+    control_plane_only: bool = False,
+    aws_region: str = "",
+    oidc_issuer: str = "",
+    oidc_audience: str = "",
+    alb_signer_arn: str = "",
+    alb_client_id: str = "",
+    alb_issuer: str = "",
+    environ: Mapping[str, str] | None = None,
+) -> SamlConfig:
+    """Load only the application-side managed-federation switch and target.
+
+    IdP metadata, certificates, and assertions intentionally never enter this
+    process.  Presence of any retired direct-SP variable disables the handoff
+    so an old deployment cannot appear to provide authentication.
+    """
+    values = os.environ if environ is None else environ
     return SamlConfig(
-        sp_entity_id=os.environ.get("AXON_SAML_SP_ENTITY_ID", ""),
-        acs_url=os.environ.get("AXON_SAML_ACS_URL", ""),
-        idp_entity_id=os.environ.get("AXON_SAML_IDP_ENTITY_ID", ""),
-        idp_sso_url=os.environ.get("AXON_SAML_IDP_SSO_URL", ""),
-        idp_x509_cert=cert,
+        federation_mode=values.get("AXON_SAML_FEDERATION_MODE", "").strip(),
+        login_path=values.get(
+            "AXON_SAML_LOGIN_PATH",
+            DEFAULT_LOGIN_PATH,
+        ).strip(),
+        deployment_profile=deployment_profile,
+        auth_mode=auth_mode,
+        canonical_identity_required=canonical_identity_required,
+        control_plane_only=control_plane_only,
+        aws_region=aws_region,
+        oidc_issuer=oidc_issuer,
+        oidc_audience=oidc_audience,
+        alb_signer_arn=alb_signer_arn,
+        alb_client_id=alb_client_id,
+        alb_issuer=alb_issuer,
+        legacy_direct_configuration=any(
+            values.get(name, "").strip()
+            for name in LEGACY_DIRECT_SAML_ENV_VARS
+        ),
     )
 
 
-def _parse_instant(value: str) -> datetime:
-    """Parse a SAML xsd:dateTime (…Z) into an aware UTC datetime."""
-    v = value.replace("Z", "+00:00")
-    dt = datetime.fromisoformat(v)
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt
+def _is_https_url(value: str) -> bool:
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return False
+    return (
+        parsed.scheme == "https"
+        and bool(parsed.hostname)
+        and parsed.username is None
+        and parsed.password is None
+        and parsed.query == ""
+        and parsed.fragment == ""
+    )
+
+
+def _is_cognito_issuer(
+    value: str,
+    *,
+    region: str,
+    partition: str,
+) -> bool:
+    if not _is_https_url(value):
+        return False
+    parsed = urlsplit(value)
+    hostname = (parsed.hostname or "").lower()
+    dns_suffix = _AWS_DNS_SUFFIXES.get(partition)
+    if (
+        dns_suffix is None
+        or hostname != f"cognito-idp.{region}.{dns_suffix}"
+    ):
+        return False
+    path_parts = [part for part in parsed.path.split("/") if part]
+    return (
+        len(path_parts) == 1
+        and parsed.path == f"/{path_parts[0]}"
+        and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", path_parts[0]) is not None
+    )
+
+
+def _is_alb_trust_config(
+    *,
+    signer_arn: str,
+    client_id: str,
+    issuer: str,
+    region: str,
+) -> bool:
+    if (
+        not signer_arn
+        or signer_arn != signer_arn.strip()
+        or not client_id
+        or client_id != client_id.strip()
+        or len(client_id.encode("utf-8", errors="ignore")) > 2048
+        or any(
+            not character.isprintable() or character.isspace()
+            for character in client_id
+        )
+        or _REGION_PATTERN.fullmatch(region) is None
+    ):
+        return False
+    arn_parts = signer_arn.split(":", 5)
+    if len(arn_parts) != 6:
+        return False
+    arn, partition, service, signer_region, account_id, resource = arn_parts
+    dns_suffix = _AWS_DNS_SUFFIXES.get(partition)
+    return (
+        arn == "arn"
+        and dns_suffix is not None
+        and service == "elasticloadbalancing"
+        and signer_region == region
+        and len(account_id) == 12
+        and account_id.isdigit()
+        and resource.startswith("loadbalancer/app/")
+        and issuer == (
+            f"https://public-keys.auth.elb.{region}.{dns_suffix}"
+        )
+    )
+
+
+def _safe_local_target(value: str) -> str:
+    """Validate an application-local redirect without creating an open redirect."""
+    if not isinstance(value, str):
+        raise SamlError("return_to must be a string")
+    try:
+        encoded_length = len(value.encode("utf-8"))
+    except UnicodeError as exc:
+        raise SamlError("return_to is not valid UTF-8") from exc
+    if not value or encoded_length > MAX_RETURN_TO_BYTES:
+        raise SamlError("return_to is empty or too long")
+    if (
+        _INVALID_PERCENT_ESCAPE.search(value)
+        or any(
+            ord(character) < 0x20 or ord(character) == 0x7F
+            for character in value
+        )
+    ):
+        raise SamlError("return_to contains control characters")
+
+    try:
+        parsed = urlsplit(value)
+    except ValueError as exc:
+        raise SamlError("return_to is malformed") from exc
+    if parsed.scheme or parsed.netloc or parsed.fragment:
+        raise SamlError("return_to must be a same-origin path")
+    if not parsed.path.startswith("/") or parsed.path.startswith("//"):
+        raise SamlError("return_to must be an absolute local path")
+
+    decoded_path = parsed.path
+    for _ in range(3):
+        next_path = unquote(decoded_path)
+        if next_path == decoded_path:
+            break
+        decoded_path = next_path
+    lowered_path = decoded_path.casefold()
+    if (
+        decoded_path.startswith("//")
+        or "//" in decoded_path
+        or "\\" in decoded_path
+        or any(
+            ord(character) < 0x20 or ord(character) == 0x7F
+            for character in decoded_path
+        )
+        or any(
+            segment in {".", ".."}
+            for segment in decoded_path.split("/")
+        )
+        or any(
+            lowered_path == prefix
+            or lowered_path.startswith(f"{prefix}/")
+            for prefix in _RESERVED_LOGIN_PREFIXES
+        )
+        or lowered_path in _NON_LOGIN_PATHS
+    ):
+        raise SamlError("return_to does not identify a protected application path")
+
+    return urlunsplit(("", "", parsed.path, parsed.query, ""))

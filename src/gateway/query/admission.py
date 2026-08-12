@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Protocol
@@ -350,7 +351,13 @@ class QueryAdmissionController:
         actual_scan_bytes: int,
         execution_id: str | None,
         failure_code: str | None = None,
-    ) -> None:
+        terminal_audit: object,
+    ) -> object:
+        from src.gateway.query.reconciliation import (
+            QueryLifecycleClaim,
+            QueryTerminalAudit,
+        )
+
         if status not in {"succeeded", "failed", "cancelled"}:
             raise ValueError("query terminal status is invalid")
         if (
@@ -363,6 +370,17 @@ class QueryAdmissionController:
             not isinstance(execution_id, str) or not execution_id
         ):
             raise ValueError("execution_id must be None or non-empty")
+        if (
+            not isinstance(terminal_audit, QueryTerminalAudit)
+            or terminal_audit.status != status
+            or terminal_audit.execution_id != execution_id
+            or terminal_audit.failure_code != failure_code
+            or terminal_audit.accounted_scan_bytes != actual_scan_bytes
+        ):
+            raise ValueError(
+                "query terminal audit does not match finalization"
+            )
+        audit_claim_token = f"query-service-{uuid.uuid4().hex}"
         finalize = getattr(
             self.persistence,
             "finalize_query_capacity",
@@ -389,6 +407,9 @@ class QueryAdmissionController:
                 status=status,
                 execution_id=execution_id,
                 failure_code=failure_code,
+                terminal_audit=terminal_audit,
+                audit_claim_token=audit_claim_token,
+                audit_claim_seconds=60,
                 now=datetime.now(timezone.utc),
             )
         except Exception as exc:
@@ -398,6 +419,47 @@ class QueryAdmissionController:
                 "Query lifecycle persistence is unavailable.",
             ) from exc
         if finalized is not True:
+            raise QueryAdmissionError(
+                503,
+                "query_lifecycle_unavailable",
+                "Query lifecycle persistence is unavailable.",
+            )
+        return QueryLifecycleClaim(
+            lease=lease,
+            claim_token=audit_claim_token,
+            status=status,
+            execution_id=execution_id,
+            terminal_audit=terminal_audit,
+        )
+
+    async def ack_audit(self, claim: object) -> None:
+        from src.gateway.query.reconciliation import QueryLifecycleClaim
+
+        if not isinstance(claim, QueryLifecycleClaim):
+            raise ValueError("query terminal audit claim is invalid")
+        acknowledge = getattr(
+            self.persistence,
+            "ack_query_reconciliation_audit",
+            None,
+        )
+        if not callable(acknowledge):
+            raise QueryAdmissionError(
+                503,
+                "query_lifecycle_unavailable",
+                "Query lifecycle persistence is unavailable.",
+            )
+        try:
+            acknowledged = await acknowledge(
+                claim=claim,
+                now=datetime.now(timezone.utc),
+            )
+        except Exception as exc:
+            raise QueryAdmissionError(
+                503,
+                "query_lifecycle_unavailable",
+                "Query lifecycle persistence is unavailable.",
+            ) from exc
+        if acknowledged is not True:
             raise QueryAdmissionError(
                 503,
                 "query_lifecycle_unavailable",

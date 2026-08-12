@@ -58,6 +58,12 @@ providers:
       - model_id: us.deepseek.r1-v1:0
         name: DeepSeek R1
         capabilities: [chat, reasoning]
+      - model_id: ai21.jamba-1-5-large-v1:0
+        name: AI21 Jamba 1.5 Large
+        capabilities: [chat]
+      - model_id: ai21.jamba-1-5-mini-v1:0
+        name: AI21 Jamba 1.5 Mini
+        capabilities: [chat]
 
   azure_openai:
     display_name: Azure OpenAI

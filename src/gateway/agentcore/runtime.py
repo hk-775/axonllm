@@ -439,6 +439,24 @@ def build_runtime_services() -> RuntimeServices:
             await dispatcher.start()
         return await dispatcher.check_readiness()
 
+    query_reconciliation_worker = getattr(
+        components,
+        "query_reconciliation_worker",
+        None,
+    )
+
+    async def _query_reconciliation_startup_ready() -> bool:
+        return (
+            components.persistence.enabled
+            and components.audit_trail.durable_enabled
+        )
+
+    async def _query_reconciliation_ready() -> bool:
+        if query_reconciliation_worker is None:
+            return False
+        await query_reconciliation_worker.start()
+        return query_reconciliation_worker.running
+
     async def _close_provider_http() -> None:
         client = getattr(components.multi_factory, "_http_client", None)
         close = getattr(client, "close", None)
@@ -453,6 +471,27 @@ def build_runtime_services() -> RuntimeServices:
 
     # Bootstrap owns the canonical query repository, executor, and audit trail.
     query_service = getattr(components, "query_service", None)
+    query_readiness = (
+        (
+            RuntimeDependency(
+                "query_reconciliation",
+                _query_reconciliation_ready,
+                _query_reconciliation_startup_ready,
+            ),
+        )
+        if query_reconciliation_worker is not None
+        else ()
+    )
+    query_close_hooks = (
+        (
+            RuntimeCloseHook(
+                "query_reconciliation",
+                query_reconciliation_worker.stop,
+            ),
+        )
+        if query_reconciliation_worker is not None
+        else ()
+    )
     return RuntimeServices(
         gateway=components.gateway_agent,
         token_verifier=components.oidc_service,
@@ -480,8 +519,10 @@ def build_runtime_services() -> RuntimeServices:
                 _event_outbox_ready,
                 _event_outbox_startup_ready,
             ),
-        ),
-        close_hooks=(
+        )
+        + query_readiness,
+        close_hooks=query_close_hooks
+        + (
             RuntimeCloseHook(
                 "spoke_health_monitor",
                 components.health_monitor.stop,

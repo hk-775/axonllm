@@ -2,9 +2,16 @@
 
 from __future__ import annotations
 
+import json
+import logging
 import os
 from pathlib import Path
+import threading
+from datetime import datetime, timezone
+from typing import Any
 
+import boto3
+from botocore.config import Config
 import yaml
 
 from src.gateway.provider_config import ProviderConfig
@@ -18,13 +25,256 @@ _ENV_KEY_MAP = {
     "azure_openai": "AZURE_OPENAI_API_KEY",
     "cohere": "COHERE_API_KEY",
     "google_ai": "GOOGLE_AI_API_KEY",
-    "vertex_ai": "GCP_ACCESS_TOKEN",
     "xai": "XAI_API_KEY",
     "groq": "GROQ_API_KEY",
     "together": "TOGETHER_API_KEY",
     "fireworks": "FIREWORKS_API_KEY",
     "ai21": "AI21_API_KEY",
 }
+
+_PROVIDER_SECRET_ARN_ENV = "AXON_PROVIDER_SECRET_ARN"
+_GCP_CREDENTIALS_JSON_ENV = "GCP_CREDENTIALS_JSON"
+_GOOGLE_CLOUD_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
+_GOOGLE_REFRESH_MARGIN_SECONDS = 300.0
+_GOOGLE_REFRESH_RETRY_SECONDS = 30.0
+_SECRETS_MANAGER_CONFIG = Config(
+    connect_timeout=3,
+    read_timeout=5,
+    retries={"mode": "standard", "total_max_attempts": 3},
+)
+_BASE_URL_ENV_MAP = {
+    "azure_openai": "AZURE_OPENAI_ENDPOINT",
+    "vertex_ai": "VERTEX_AI_ENDPOINT",
+}
+_EXTRA_PARAM_ENV_MAP = {
+    "vertex_ai": {
+        "project": "GCP_PROJECT_ID",
+        "location": "GCP_LOCATION",
+    },
+}
+_ALLOWED_SECRET_FIELDS = frozenset(
+    {
+        *_ENV_KEY_MAP.values(),
+        _GCP_CREDENTIALS_JSON_ENV,
+        *_BASE_URL_ENV_MAP.values(),
+        *(
+            env_name
+            for provider_fields in _EXTRA_PARAM_ENV_MAP.values()
+            for env_name in provider_fields.values()
+        ),
+    }
+)
+
+logger = logging.getLogger(__name__)
+
+
+class GoogleCredentialProvider:
+    """Keep a refreshable Google token ready without request-path network I/O."""
+
+    def __init__(
+        self,
+        credentials: Any,
+        *,
+        request: Any | None = None,
+        project_id: str | None = None,
+        auto_refresh: bool = True,
+    ) -> None:
+        self._credentials = credentials
+        self._request = request or _google_refresh_request()
+        self._state_lock = threading.Lock()
+        self._refreshing = False
+        self._timer: threading.Timer | None = None
+        self._auto_refresh = auto_refresh
+        self.project_id = project_id
+        if not self._valid_token():
+            self._refresh_credentials()
+        elif self._auto_refresh:
+            self._schedule_refresh()
+
+    def get_token(self) -> str:
+        token = getattr(self._credentials, "token", None)
+        if getattr(self._credentials, "valid", False) and isinstance(
+            token,
+            str,
+        ) and token:
+            return token
+        self._start_background_refresh()
+        raise RuntimeError(
+            "Google access token is unavailable while refresh is pending"
+        )
+
+    def _valid_token(self) -> bool:
+        token = getattr(self._credentials, "token", None)
+        return (
+            getattr(self._credentials, "valid", False)
+            and isinstance(token, str)
+            and bool(token)
+        )
+
+    def _refresh_credentials(self) -> None:
+        self._credentials.refresh(self._request)
+        if not self._valid_token():
+            raise RuntimeError(
+                "Google credential refresh returned no access token"
+            )
+        if self._auto_refresh:
+            self._schedule_refresh()
+
+    def _refresh_delay(self) -> float:
+        expiry = getattr(self._credentials, "expiry", None)
+        if not isinstance(expiry, datetime):
+            return _GOOGLE_REFRESH_MARGIN_SECONDS
+        if expiry.tzinfo is None:
+            expiry = expiry.replace(tzinfo=timezone.utc)
+        remaining = (expiry - datetime.now(timezone.utc)).total_seconds()
+        return max(1.0, remaining - _GOOGLE_REFRESH_MARGIN_SECONDS)
+
+    def _schedule_refresh(
+        self,
+        delay: float | None = None,
+    ) -> None:
+        timer = threading.Timer(
+            self._refresh_delay() if delay is None else delay,
+            self._start_background_refresh,
+        )
+        timer.daemon = True
+        with self._state_lock:
+            previous = self._timer
+            self._timer = timer
+        if previous is not None:
+            previous.cancel()
+        timer.start()
+
+    def _start_background_refresh(self) -> None:
+        with self._state_lock:
+            pending = self._timer
+            self._timer = None
+            if self._refreshing:
+                return
+            self._refreshing = True
+        if pending is not None:
+            pending.cancel()
+        worker = threading.Thread(
+            target=self._background_refresh,
+            name="axon-vertex-credential-refresh",
+            daemon=True,
+        )
+        worker.start()
+
+    def _background_refresh(self) -> None:
+        retry = False
+        try:
+            self._credentials.refresh(self._request)
+            if not self._valid_token():
+                raise RuntimeError(
+                    "Google credential refresh returned no access token"
+                )
+        except Exception as exc:
+            retry = True
+            logger.warning(
+                "Vertex AI credential background refresh failed (%s)",
+                type(exc).__name__,
+            )
+        finally:
+            with self._state_lock:
+                self._refreshing = False
+        if self._auto_refresh:
+            self._schedule_refresh(
+                _GOOGLE_REFRESH_RETRY_SECONDS if retry else None
+            )
+
+
+class _BoundedGoogleRequest:
+    def __init__(self, request: Any) -> None:
+        self._request = request
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        requested_timeout = kwargs.get("timeout")
+        if (
+            not isinstance(requested_timeout, (int, float))
+            or isinstance(requested_timeout, bool)
+            or requested_timeout <= 0
+        ):
+            kwargs["timeout"] = 10
+        else:
+            kwargs["timeout"] = min(float(requested_timeout), 10)
+        return self._request(*args, **kwargs)
+
+
+def _google_refresh_request() -> Any:
+    try:
+        from google.auth.transport.requests import Request
+    except ImportError as exc:
+        raise RuntimeError(
+            "Vertex AI requires the google-auth dependency"
+        ) from exc
+    return _BoundedGoogleRequest(Request())
+
+
+def _load_google_credential_provider(
+    secret_values: dict[str, str],
+) -> GoogleCredentialProvider | None:
+    credentials_json = (
+        os.environ.get(_GCP_CREDENTIALS_JSON_ENV, "")
+        or secret_values.get(_GCP_CREDENTIALS_JSON_ENV, "")
+    )
+    try:
+        import google.auth
+        from google.auth.exceptions import DefaultCredentialsError
+    except ImportError as exc:
+        if credentials_json or os.environ.get(
+            "GOOGLE_APPLICATION_CREDENTIALS"
+        ):
+            raise RuntimeError(
+                "Vertex AI requires the google-auth dependency"
+            ) from exc
+        return None
+
+    try:
+        if credentials_json:
+            payload = json.loads(credentials_json)
+            if not isinstance(payload, dict):
+                raise ValueError(
+                    "GCP_CREDENTIALS_JSON must contain a JSON object"
+                )
+            credential_type = payload.get("type")
+            if credential_type not in {
+                "external_account",
+                "service_account",
+            }:
+                raise ValueError(
+                    "GCP_CREDENTIALS_JSON type must be external_account "
+                    "or service_account"
+                )
+            credentials, project_id = (
+                google.auth.load_credentials_from_dict(
+                    payload,
+                    scopes=[_GOOGLE_CLOUD_SCOPE],
+                )
+            )
+        else:
+            credentials, project_id = google.auth.default(
+                scopes=[_GOOGLE_CLOUD_SCOPE],
+            )
+    except DefaultCredentialsError:
+        if credentials_json:
+            raise ValueError(
+                "GCP_CREDENTIALS_JSON could not be loaded"
+            ) from None
+        return None
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError(
+            "refreshable Vertex AI credentials are malformed"
+        ) from exc
+    try:
+        return GoogleCredentialProvider(
+            credentials,
+            project_id=project_id,
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            "Unable to initialize refreshable Vertex AI credentials"
+        ) from exc
 
 
 def load_provider_configs(config_path: str = "config/providers.yaml") -> dict[str, ProviderConfig]:
@@ -35,6 +285,7 @@ def load_provider_configs(config_path: str = "config/providers.yaml") -> dict[st
     Providers without credentials are silently skipped.
     """
     configs: dict[str, ProviderConfig] = {}
+    secret_values = _load_provider_secret()
 
     # Production images intentionally exclude providers.yaml because operators
     # may put secrets in it. The distributable example contains only endpoint
@@ -53,16 +304,74 @@ def load_provider_configs(config_path: str = "config/providers.yaml") -> dict[st
         if not isinstance(provider_data, dict):
             continue
 
-        base_url = provider_data.get("base_url", "")
+        base_url = _configuration_value(
+            _BASE_URL_ENV_MAP.get(provider_name),
+            secret_values,
+            provider_data.get("base_url", ""),
+        )
         auth_type = provider_data.get("auth_type", "api_key")
 
         # Build credentials from YAML + env var override
-        credentials = _build_credentials(provider_name, provider_data)
+        credential_provider = None
+        if auth_type == "gcp_service_account":
+            credential_provider = _load_google_credential_provider(
+                secret_values
+            )
+            credentials = (
+                {"credential_source": "google-auth"}
+                if credential_provider is not None
+                else {}
+            )
+        else:
+            credentials = _build_credentials(
+                provider_name,
+                provider_data,
+                secret_values,
+            )
         if not credentials:
             continue  # Skip providers without credentials
+        if not isinstance(base_url, str) or not base_url.strip():
+            raise ValueError(
+                f"{provider_name} is credentialled but has no base_url"
+            )
 
         extra_headers = provider_data.get("extra_headers", {})
-        extra_params = provider_data.get("extra_params", {})
+        extra_params = dict(provider_data.get("extra_params", {}))
+        for field_name, env_name in _EXTRA_PARAM_ENV_MAP.get(
+            provider_name,
+            {},
+        ).items():
+            configured = _configuration_value(
+                env_name,
+                secret_values,
+                extra_params.get(field_name, ""),
+            )
+            if configured:
+                extra_params[field_name] = configured
+        if provider_name == "vertex_ai":
+            missing = [
+                field
+                for field in ("project", "location")
+                if not extra_params.get(field)
+            ]
+            if missing:
+                raise ValueError(
+                    "vertex_ai is credentialled but is missing "
+                    + ", ".join(missing)
+                )
+            credential_project = getattr(
+                credential_provider,
+                "project_id",
+                None,
+            )
+            if (
+                credential_project
+                and credential_project != extra_params["project"]
+            ):
+                raise ValueError(
+                    "vertex_ai project does not match the Google credential "
+                    "project"
+                )
         connect_timeout = float(provider_data.get("connect_timeout", 30.0))
         read_timeout = float(provider_data.get("read_timeout", 120.0))
 
@@ -75,25 +384,87 @@ def load_provider_configs(config_path: str = "config/providers.yaml") -> dict[st
             read_timeout=read_timeout,
             extra_headers=extra_headers,
             extra_params=extra_params,
+            credential_provider=credential_provider,
         )
 
     return configs
 
 
-def _build_credentials(provider_name: str, provider_data: dict) -> dict[str, str]:
+def _load_provider_secret() -> dict[str, str]:
+    secret_arn = os.environ.get(_PROVIDER_SECRET_ARN_ENV, "").strip()
+    if not secret_arn:
+        return {}
+    try:
+        response = boto3.client(
+            "secretsmanager",
+            config=_SECRETS_MANAGER_CONFIG,
+        ).get_secret_value(
+            SecretId=secret_arn
+        )
+        secret_string = response.get("SecretString")
+        if not isinstance(secret_string, str):
+            raise ValueError("provider secret must use SecretString")
+        payload = json.loads(secret_string)
+        if not isinstance(payload, dict):
+            raise ValueError("provider secret must contain a JSON object")
+        values: dict[str, str] = {}
+        for field_name in _ALLOWED_SECRET_FIELDS:
+            value = payload.get(field_name)
+            if value is None or value == "":
+                continue
+            if not isinstance(value, str):
+                raise ValueError(
+                    f"provider secret field {field_name} must be a string"
+                )
+            values[field_name] = value
+        return values
+    except Exception as exc:
+        raise RuntimeError(
+            "Unable to load the configured provider credential secret"
+        ) from exc
+
+
+def _configuration_value(
+    env_name: str | None,
+    secret_values: dict[str, str],
+    fallback: object,
+) -> object:
+    if env_name is None:
+        return fallback
+    return (
+        os.environ.get(env_name, "")
+        or secret_values.get(env_name, "")
+        or fallback
+    )
+
+
+def _build_credentials(
+    provider_name: str,
+    provider_data: dict,
+    secret_values: dict[str, str] | None = None,
+) -> dict[str, str]:
     """Build credentials dict from YAML data + env var overrides."""
+    secret_values = secret_values or {}
     auth_type = provider_data.get("auth_type", "api_key")
 
     if auth_type == "api_key":
         env_var = _ENV_KEY_MAP.get(provider_name, "")
-        api_key = os.environ.get(env_var, "") or provider_data.get("api_key", "")
+        api_key = (
+            os.environ.get(env_var, "")
+            or secret_values.get(env_var, "")
+            or provider_data.get("api_key", "")
+        )
         if api_key:
             return {"api_key": api_key}
         return {}
 
     if auth_type == "azure_key":
         env_var = _ENV_KEY_MAP.get(provider_name, "")
-        api_key = os.environ.get(env_var, "") or provider_data.get("api_key", "")
+        api_key = (
+            os.environ.get(env_var, "")
+            or secret_values.get(env_var, "")
+            or provider_data.get("api_key", "")
+        )
         if api_key:
             return {"api_key": api_key}
         return {}
@@ -106,10 +477,6 @@ def _build_credentials(provider_name: str, provider_data: dict) -> dict[str, str
         }
 
     if auth_type == "gcp_service_account":
-        env_var = _ENV_KEY_MAP.get(provider_name, "")
-        access_token = os.environ.get(env_var, "") or provider_data.get("access_token", "")
-        if access_token:
-            return {"access_token": access_token}
         return {}
 
     return {}

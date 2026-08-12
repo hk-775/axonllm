@@ -236,13 +236,11 @@ class SemanticCacheEntry:
     embedding: list[float]
     response: ChatCompletionResponse
     expires_at: datetime
-    # The model the *caller asked for*, not response.model. The two differ:
-    # response.model is the provider-side id (``us.anthropic.claude-sonnet-4-6``
-    # — the key CostTracker bills from), while a request names a gateway alias
-    # (``claude-sonnet``). Matching on response.model would compare an alias
-    # against a provider id, never find them equal, and reject every candidate —
-    # a cache that silently never hits. This is also the field the exact-match
-    # cache keys on, so both caches agree on what "same model" means.
+    # The model the caller asked for is the cache and authorization namespace.
+    # Do not infer it from a provider response: legacy/custom integrations may
+    # return provider ids, and multiple gateway aliases can map to the same id.
+    # This is also the field the exact-match cache keys on, so both caches agree
+    # on what "same model" means.
     request_model: str = ""
     # Extracted once at insert. Recomputing per comparison would make every
     # lookup O(entries x prompt length) on top of the vector maths.

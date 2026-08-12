@@ -38,6 +38,14 @@ PUBLIC_PATHS = frozenset({
     "/routing",
 })
 
+SAML_HANDOFF_PATHS = frozenset(
+    {
+        "/saml/login",
+        "/saml/acs",
+        "/saml/metadata",
+    }
+)
+
 
 def _is_site_asset(path: str) -> bool:
     """True for the marketing site's pages and the assets they fetch.
@@ -100,16 +108,17 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next) -> Response:
         # Skip auth for public paths and static assets.
-        # /scim/* and /saml/* carry their OWN auth (SCIM bearer token; SAML is
-        # the login flow itself), so the gateway's user-auth chain is bypassed
-        # for them — they must not require an existing session to authenticate.
+        # SCIM carries tenant-bound bearer authentication.  The three exact
+        # SAML paths are either a managed-Cognito handoff or direct-SP
+        # tombstones.  Do not exempt the whole /saml/* namespace: a future
+        # endpoint must be authenticated unless it is explicitly reviewed.
         path = request.url.path
         if (
             path in self.public_paths
             or path.startswith("/admin/static")
             or path.startswith("/chat/static")
             or path.startswith("/scim/")
-            or path.startswith("/saml/")
+            or path in SAML_HANDOFF_PATHS
             or _is_site_asset(path)
         ):
             request.state.context = RequestContext(

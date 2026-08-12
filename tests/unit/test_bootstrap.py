@@ -93,6 +93,23 @@ class TestBuildGatewayComponents:
         assert len(comp.cost_tracker.pricing_config) > 0
         assert "openai" in comp.cost_tracker.pricing_config
 
+    def test_production_routes_only_priced_mappings(
+        self,
+        minimal_app_config: AppConfig,
+    ):
+        minimal_app_config.deployment_profile = "production"
+
+        comp = build_gateway_components(minimal_app_config)
+
+        assert comp.router.require_priced_mappings is True
+        assert comp.router.is_model_available("gpt-5.5") is False
+        assert comp.router.is_model_available("gpt-oss-120b-mantle") is True
+        assert "gemini-2.5-pro" in comp.registry.models
+        assert (
+            "gemini-2.5-pro"
+            in comp.cost_tracker.pricing_config["google_ai"]
+        )
+
     def test_catalog_loaded(self, demo_app_config: AppConfig):
         comp = build_gateway_components(demo_app_config)
         assert isinstance(comp.catalog, dict)

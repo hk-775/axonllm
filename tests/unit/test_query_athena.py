@@ -375,6 +375,24 @@ async def test_lifecycle_start_failure_cancels_started_query() -> None:
     ]
 
 
+async def test_start_transport_failure_is_marked_accounting_ambiguous() -> None:
+    class _StartFailureClient(_AthenaClient):
+        def start_query_execution(self, **kwargs: Any) -> dict[str, str]:
+            self.start_calls.append(kwargs)
+            raise TimeoutError("response lost")
+
+    client = _StartFailureClient()
+    executor = AthenaExecutor(client_factory=_ClientFactory(client))
+
+    with pytest.raises(AthenaExecutionError) as raised:
+        await _execute(executor)
+
+    assert raised.value.code == "athena_start_failed"
+    assert raised.value.query_execution_id is None
+    assert raised.value.execution_may_have_started is True
+    assert client.stop_calls == []
+
+
 @pytest.mark.parametrize(
     "values",
     [
@@ -523,15 +541,103 @@ async def test_scan_limit_stops_result_retrieval() -> None:
 
 
 @pytest.mark.parametrize(
-    "statistics",
+    ("state", "code"),
     [
-        {"DataScannedInBytes": -1, "EngineExecutionTimeInMillis": 1},
-        {"DataScannedInBytes": True, "EngineExecutionTimeInMillis": 1},
-        {"DataScannedInBytes": 1, "EngineExecutionTimeInMillis": "1"},
+        ("FAILED", "athena_query_failed"),
+        ("CANCELLED", "athena_query_cancelled"),
+    ],
+)
+async def test_terminal_failure_preserves_billable_statistics(
+    state: str,
+    code: str,
+) -> None:
+    client = _AthenaClient(
+        executions=[_execution(state=state, scanned=3072, engine_ms=41)],
+    )
+    executor = AthenaExecutor(client_factory=_ClientFactory(client))
+
+    with pytest.raises(AthenaExecutionError) as raised:
+        await _execute(executor)
+
+    assert raised.value.code == code
+    assert raised.value.query_execution_id == "execution-123"
+    assert raised.value.athena_state == state
+    assert raised.value.data_scanned_bytes == 3072
+    assert raised.value.engine_execution_ms == 41
+    assert client.result_calls == []
+
+
+async def test_result_failure_retains_successful_execution_statistics() -> None:
+    client = _AthenaClient(
+        result_pages=[{"ResultSet": "invalid"}],
+    )
+    executor = AthenaExecutor(client_factory=_ClientFactory(client))
+
+    with pytest.raises(AthenaExecutionError) as raised:
+        await _execute(executor)
+
+    assert raised.value.code == "athena_results_failed"
+    assert raised.value.query_execution_id == "execution-123"
+    assert raised.value.athena_state == "SUCCEEDED"
+    assert raised.value.data_scanned_bytes == 2048
+    assert raised.value.engine_execution_ms == 25
+
+
+async def test_cancellation_is_idempotent_and_returns_terminal_statistics() -> None:
+    client = _AthenaClient(
+        executions=[
+            _execution(state="RUNNING", scanned=128),
+            _execution(state="CANCELLED", scanned=512, engine_ms=19),
+            _execution(state="CANCELLED", scanned=512, engine_ms=19),
+        ],
+    )
+    executor = AthenaExecutor(
+        client_factory=_ClientFactory(client),
+        sleep=lambda _seconds: asyncio.sleep(0),
+    )
+    kwargs = {
+        "tenant_id": "tenant-a",
+        "project_id": "project-a",
+        "principal_id": "principal:analyst",
+        "request_id": "request-123",
+        "execution_id": "execution-123",
+    }
+
+    first = await executor.cancel(_datasource(), **kwargs)
+    repeated = await executor.cancel(_datasource(), **kwargs)
+
+    assert first.state == "CANCELLED"
+    assert first.terminal is True
+    assert first.cancellation_requested is True
+    assert first.data_scanned_bytes == 512
+    assert first.engine_execution_ms == 19
+    assert repeated.state == "CANCELLED"
+    assert repeated.cancellation_requested is False
+    assert client.stop_calls == [
+        {"QueryExecutionId": "execution-123"}
+    ]
+
+
+@pytest.mark.parametrize(
+    ("statistics", "expected_scan"),
+    [
+        (
+            {"DataScannedInBytes": -1, "EngineExecutionTimeInMillis": 1},
+            None,
+        ),
+        (
+            {"DataScannedInBytes": True, "EngineExecutionTimeInMillis": 1},
+            None,
+        ),
+        (
+            {"DataScannedInBytes": 1, "EngineExecutionTimeInMillis": "1"},
+            1,
+        ),
     ],
 )
 async def test_malformed_execution_statistics_fail_closed(
     statistics: dict[str, object],
+    expected_scan: int | None,
 ) -> None:
     execution = _execution()
     execution["QueryExecution"]["Statistics"] = statistics
@@ -542,6 +648,9 @@ async def test_malformed_execution_statistics_fail_closed(
         await _execute(executor)
 
     assert raised.value.code == "athena_status_failed"
+    assert raised.value.query_execution_id == "execution-123"
+    assert raised.value.athena_state == "SUCCEEDED"
+    assert raised.value.data_scanned_bytes == expected_scan
     assert client.result_calls == []
 
 

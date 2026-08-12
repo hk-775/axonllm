@@ -232,8 +232,11 @@ def agentcore_deploy_command(
 def control_plane_deploy_command(
     config: AgentCoreSetupConfig,
     *,
+    primary_state_table_name: str,
     outputs_file: Path,
     assume_yes: bool,
+    runtime_state_table_name: str = "",
+    recovery_approval_id: str = "",
 ) -> list[str]:
     if config.identity_mode != MANAGED_COGNITO:
         raise AgentCoreDeploymentError(
@@ -270,10 +273,25 @@ def control_plane_deploy_command(
         "ApprovedHttpsPrefixListId": (
             control_plane.approved_https_prefix_list_id
         ),
+        "SamlLoginPath": control_plane.saml_login_path,
+        "PrimaryStateTableName": primary_state_table_name,
+        "RuntimeStateTableName": runtime_state_table_name,
+        "RecoveryCutoverMode": "normal",
+        "RecoveryApprovalId": recovery_approval_id,
     }
     for name, value in parameters.items():
         command.extend(
             _parameter(name, value, stack=CONTROL_PLANE_STACK)
+        )
+    if control_plane.scim_tenants_secret_arn is not None:
+        command.extend(
+            [
+                "-c",
+                (
+                    "scim_tenants_secret_arn="
+                    f"{control_plane.scim_tenants_secret_arn}"
+                ),
+            ]
         )
     _append_athena_contexts(command, config)
     command.extend(
@@ -635,7 +653,28 @@ def deploy(
         INFRA_ROOT,
     )
     runtime_outputs = _stack_outputs(runtime_output_path, AGENTCORE_STACK)
-    table_name = _required_output(runtime_outputs, "StateTableName")
+    recovery_mode = _required_output(
+        runtime_outputs,
+        "RecoveryCutoverMode",
+    )
+    if recovery_mode != "normal":
+        raise AgentCoreDeploymentError(
+            "AgentCore recovery is active; complete or abort it before "
+            "running the first-adopter deployment"
+        )
+    primary_table_name = _required_output(
+        runtime_outputs,
+        "StateTableName",
+    )
+    table_name = _required_output(
+        runtime_outputs,
+        "SelectedRuntimeStateTableName",
+    )
+    recovery_approval_id = runtime_outputs.get("RecoveryApprovalId")
+    if not isinstance(recovery_approval_id, str):
+        raise AgentCoreDeploymentError(
+            "AgentCore recovery approval output is missing"
+        )
 
     print("Creating or verifying canonical tenant authority...")
     result = bootstrap_canonical_admin(
@@ -653,8 +692,15 @@ def deploy(
         runner(
             control_plane_deploy_command(
                 config,
+                primary_state_table_name=primary_table_name,
                 outputs_file=control_output_path,
                 assume_yes=assume_yes,
+                runtime_state_table_name=(
+                    ""
+                    if table_name == primary_table_name
+                    else table_name
+                ),
+                recovery_approval_id=recovery_approval_id,
             ),
             INFRA_ROOT,
         )
@@ -662,6 +708,23 @@ def deploy(
             control_output_path,
             CONTROL_PLANE_STACK,
         )
+        expected_control_outputs = {
+            "AgentCoreStackName": AGENTCORE_STACK,
+            "PrimaryStateTableName": primary_table_name,
+            "SelectedRuntimeStateTableName": table_name,
+            "RecoveryCutoverMode": "normal",
+            "RecoveryApprovalId": recovery_approval_id,
+        }
+        actual_control_outputs = {
+            name: control_outputs.get(name)
+            for name in expected_control_outputs
+        }
+        if actual_control_outputs != expected_control_outputs:
+            raise AgentCoreDeploymentError(
+                "control-plane recovery outputs do not match AgentCore: "
+                f"expected {expected_control_outputs}, "
+                f"found {actual_control_outputs}"
+            )
     if identity.hosted_ui_domain:
         print(f"Managed login: {identity.hosted_ui_domain}")
         print(f"OIDC client ID: {identity.client_id}")

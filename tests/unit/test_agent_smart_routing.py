@@ -242,6 +242,76 @@ class TestSmartRoutingIntegration:
         assert sr["cost_quality_tradeoff"] == 0.3
 
     @pytest.mark.asyncio
+    async def test_true_streaming_only_offers_runtime_available_models(
+        self,
+        mock_rate_limiter,
+        cost_tracker,
+    ):
+        router = MagicMock(spec=Router)
+        strategy = MagicMock()
+        strategy.default_model = "priced"
+        strategy.select_model = AsyncMock(
+            return_value=_make_decision(selected_model="priced")
+        )
+        router._smart_strategy = strategy
+        router._ensemble_config = None
+        router.model_registry = MagicMock()
+        router.model_registry.list_models.return_value = [
+            ModelConfig(
+                name="priced",
+                description="priced",
+                providers=[
+                    ProviderModelMapping(
+                        provider="anthropic",
+                        model_id="claude-sonnet",
+                    )
+                ],
+            ),
+            ModelConfig(
+                name="unpriced",
+                description="unpriced",
+                providers=[
+                    ProviderModelMapping(
+                        provider="anthropic",
+                        model_id="unknown",
+                    )
+                ],
+            ),
+        ]
+        router.is_model_available.side_effect = (
+            lambda model: model == "priced"
+        )
+        factory = MagicMock()
+        agent = GatewayAgent(
+            router=router,
+            rate_limiter=mock_rate_limiter,
+            guardrail_engine=GuardrailEngine(),
+            cache_manager=CacheManager(),
+            cost_tracker=cost_tracker,
+            provider_fn_factory=factory,
+            smart_routing_enabled=True,
+        )
+        agent._can_stream_true = MagicMock(return_value=True)
+
+        async def empty_stream():
+            if False:
+                yield {}
+
+        agent._stream_true = MagicMock(return_value=empty_stream())
+
+        stream = await agent.handle_chat_completion(
+            {
+                "messages": [{"role": "user", "content": "route me"}],
+                "model": "",
+                "stream": True,
+            },
+            _smart_routing_context(),
+        )
+        await stream.aclose()
+
+        assert strategy.select_model.await_args.args[1] == {"priced"}
+
+    @pytest.mark.asyncio
     async def test_non_smart_routing_no_metadata(self, mock_rate_limiter, cost_tracker):
         """Normal requests do not include smart_routing metadata."""
         mock_router = MagicMock(spec=Router)

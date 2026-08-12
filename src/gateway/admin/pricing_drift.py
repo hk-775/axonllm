@@ -2,12 +2,12 @@
 
 The two files are edited independently and nothing checks them against each
 other, so a model added to ``models.yaml`` without a matching entry in
-``config/pricing.yaml`` has two silent consequences:
+``config/pricing.yaml`` has two consequences:
 
-* **CostTracker bills it at $0.00.** ``calculate_cost`` returns 0.0 for an
-  unknown provider/model pair, so the request is recorded with no cost and the
-  project's spend counter does not move — which means budget and quota
-  enforcement under-counts rather than erring on the safe side.
+* **Production excludes it from routing.** Development still permits the
+  mapping and ``CostTracker`` records it at $0.00, but the production profile
+  removes it from model listing, direct routing, smart routing and ensembles.
+  A fully unpriced model is therefore unavailable until a real rate exists.
 * **Smart routing has to estimate.** The cost half of ``cost_quality_tradeoff``
   scores an unpriced candidate at the mean of the known costs, so the ranking is
   a guess for that model rather than a measurement.
@@ -106,9 +106,8 @@ class PricingDriftReport:
     # Called out separately from the individual mappings because the fix is
     # different: add a whole block, not a single key.
     providers_missing_section: list[str] = field(default_factory=list)
-    # Models where *no* provider is priced. These are the ones that bill at
-    # $0.00 outright; a partially-priced model still bills on the provider that
-    # has a price, and routing averages over the priced ones.
+    # Models where *no* provider is priced. Production makes these models
+    # unavailable; development can still route and account them at $0.00.
     models_fully_unpriced: list[str] = field(default_factory=list)
 
     @property
@@ -118,14 +117,12 @@ class PricingDriftReport:
 
     @property
     def has_billing_gap(self) -> bool:
-        """True when some mapping bills at $0.00 — the consequential half.
+        """True when some mapping has no usable rate — the consequential half.
 
         Kept distinct from :attr:`has_drift` because the two findings differ in
-        severity and in who has to act. An unpriced mapping under-charges real
-        traffic; an unused pricing entry charges nothing to nobody, and is at
-        worst a stale line in a config file. Escalating both identically would
-        mean a startup banner that survives the operator fixing every price it
-        complained about, which trains people to ignore it.
+        severity and in who has to act. Production blocks an unpriced mapping;
+        development under-charges it. An unused pricing entry affects no
+        traffic and is at worst a stale line in a config file.
         """
         return bool(self.unpriced)
 
@@ -157,8 +154,17 @@ def audit_pricing(
 
             # An inline pricing: block in models.yaml counts as priced — it is
             # the more specific declaration and smart routing prefers it.
-            has_inline = mapping.pricing is not None
-            in_table = mapping.model_id in pricing_config.get(mapping.provider, {})
+            has_inline = (
+                mapping.pricing is not None
+                and mapping.pricing.is_billable
+            )
+            table_pricing = pricing_config.get(mapping.provider, {}).get(
+                mapping.model_id
+            )
+            in_table = (
+                table_pricing is not None
+                and table_pricing.is_billable
+            )
             if has_inline or in_table:
                 report.priced_mappings += 1
                 priced_here += 1
@@ -258,7 +264,11 @@ def _esc(value: object) -> str:
 
 
 def render_drift_page(
-    report: PricingDriftReport, pricing_path: str, *, embed: bool = False
+    report: PricingDriftReport,
+    pricing_path: str,
+    *,
+    embed: bool = False,
+    unpriced_mappings_blocked: bool = False,
 ) -> str:
     """Render the drift report as a self-contained HTML page.
 
@@ -302,24 +312,41 @@ def render_drift_page(
         fully = len(report.models_fully_unpriced)
         detail = ""
         if fully:
-            detail = (
-                f" <b>{fully}</b> model{'s' if fully != 1 else ''} "
-                f"{'have' if fully != 1 else 'has'} no priced provider at all, so every "
-                "request to "
-                f"{'them' if fully != 1 else 'it'} is free as far as the gateway knows."
+            if unpriced_mappings_blocked:
+                detail = (
+                    f" <b>{fully}</b> configured model"
+                    f"{'s are' if fully != 1 else ' is'} unavailable because "
+                    f"{'none of their' if fully != 1 else 'its'} provider "
+                    f"mapping{'s have' if fully != 1 else ' has'} a usable rate."
+                )
+            else:
+                detail = (
+                    f" <b>{fully}</b> model{'s' if fully != 1 else ''} "
+                    f"{'have' if fully != 1 else 'has'} no priced provider at all, so every "
+                    "request to "
+                    f"{'them' if fully != 1 else 'it'} is free as far as the gateway knows."
+                )
+        if unpriced_mappings_blocked:
+            consequence = (
+                "<p>Production routing excludes these mappings from model listing, "
+                "direct requests, smart routing, streaming, and ensembles. "
+                f"{detail}</p>"
+            )
+        else:
+            consequence = (
+                "<p>Development requests routed to these are recorded at "
+                "<b>$0.00</b>, so project spend, budget blocks and quota alerts "
+                f"under-count.{detail}</p>"
             )
         parts.append(
             '<div class="banner warn"><h1>'
             f"{unpriced_n} of {report.total_mappings} provider mappings have no price."
             "</h1>"
-            "<p>Requests routed to these are recorded at <b>$0.00</b>, so project spend, "
-            "budget blocks and quota alerts all under-count — they will not fire when they "
-            f"should.{detail}</p>"
-            "<p>Smart routing also has no cost to score these on, so it substitutes the "
-            "average of the known prices and flags the decision "
-            "<code>cost_estimated</code>.</p>"
-            f'<p>Fix by adding the entries below to <code>{_esc(pricing_path)}</code>. '
-            "Nothing here changes behaviour until that file does.</p></div>"
+            f"{consequence}"
+            "<p>Smart routing has no measured cost for these mappings.</p>"
+            f'<p>Fill the entries below with verified rates in '
+            f"<code>{_esc(pricing_path)}</code>. A <code>0.0</code> TODO remains "
+            "unpriced and cannot bypass production enforcement.</p></div>"
         )
 
     parts.append(
@@ -334,10 +361,15 @@ def render_drift_page(
 
     if report.providers_missing_section:
         names = ", ".join(f"<code>{_esc(p)}</code>" for p in report.providers_missing_section)
+        consequence = (
+            "Every model on these providers is unavailable in production"
+            if unpriced_mappings_blocked
+            else "Every model on these providers is accounted at $0.00"
+        )
         parts.append(
             f'<h2>Providers with no pricing section <span class="count">'
             f"({len(report.providers_missing_section)})</span></h2>"
-            f'<p class="hint">Every model on {names} bills at $0.00 — the provider has no '
+            f'<p class="hint">{consequence}: {names}. The provider has no '
             f"block in <code>{_esc(pricing_path)}</code> at all, so there is nothing to "
             "look a model id up in.</p>"
         )
@@ -420,9 +452,9 @@ def format_startup_notice(report: PricingDriftReport, url: str) -> str | None:
         f"  ⚠  PRICING GAP: {len(report.unpriced)} of {report.total_mappings} "
         f"provider mappings have no price.",
         "",
-        "     Requests to these bill at $0.00, so project spend, budget blocks",
-        "     and quota alerts under-count. Smart routing scores them on an",
-        "     estimate rather than a real cost.",
+        "     Production excludes these mappings from listing and routing.",
+        "     Development accounts them at $0.00 and smart routing has to",
+        "     estimate rather than use a measured cost.",
     ]
     if report.providers_missing_section:
         names = ", ".join(report.providers_missing_section)

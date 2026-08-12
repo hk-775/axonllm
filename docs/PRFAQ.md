@@ -51,7 +51,7 @@ A: The Starlette application exposes:
 - OpenAI-compatible `/v1/chat/completions` and `/v1/models`, plus governed
   `POST /v1/query` when Athena query configuration is enabled;
 - the `/admin/*` API and dashboard, including `/admin/datasources`;
-- SAML and SCIM routes;
+- managed-SAML handoff/direct-SP tombstones and SCIM routes;
 - public `/health` liveness and `/ready` persistence/outbox readiness.
 
 The AgentCore application is separate. It exposes `chat`, `list_models`,
@@ -107,7 +107,9 @@ catalog/database and exact deployment role binding, validates the
 KMS-encrypted workgroup immediately before execution, bounds timeout/rows/the
 compact serialized result set/scan, and durably audits hashes rather than SQL
 literals. DynamoDB enforces fleet RPM, expiring concurrency, aggregate scan
-reservations, duplicate request IDs, and durable execution lifecycle. A
+reservations, duplicate request IDs, and durable execution lifecycle. A fenced
+periodic worker reconciles interrupted records and pending terminal audit,
+deferring rather than guessing when datasource authority cannot be restored. A
 caller-defined model tool named `db_query` remains caller-executed;
 AxonLLM does not automatically invoke tools emitted by a model.
 
@@ -159,6 +161,28 @@ deploys the shared-state control plane for managed Cognito. Token claims never
 grant the role; DynamoDB remains authoritative. Anonymous use remains local
 development only.
 
+**Q: How does enterprise SAML login work?**
+
+A: Cognito, not AxonLLM, is the SAML service provider. The operator configures
+the tenant IdP metadata and signing certificate on the retained Cognito pool,
+uses Cognito's SP entity ID and SAML response endpoint at the IdP, and enables
+the provider on the confidential ALB client and any public client used by
+federated AgentCore users. The first-adopter deployer does not ingest this
+tenant-specific configuration.
+
+Cognito validates the signed response or assertion, issuer, audience,
+destination, recipient, time conditions, request correlation, replay, and
+RelayState. The ALB establishes the browser session and sends an ALB-signed OIDC
+identity to AxonLLM. AxonLLM verifies that trust chain and resolves the exact
+Cognito issuer and Cognito `sub` through canonical DynamoDB authority. SAML
+roles, groups, scopes, tenant values, and project values grant nothing.
+
+Only `/scim/*` bypasses ALB Cognito. `GET /saml/login` is an authenticated local
+handoff to a validated protected path; `/saml/acs` and `/saml/metadata` return
+`410`. No SAML secret, certificate, metadata, or assertion enters the AxonLLM
+container. SCIM-created principals must use the Cognito issuer and Cognito `sub`
+as their immutable issuer and `externalId`.
+
 After bootstrap,
 `POST /admin/projects/{id}/members` takes the SCIM resource id in `user_id`.
 POST/DELETE member operations atomically update `Project.members`,
@@ -183,8 +207,9 @@ A: With DynamoDB enabled, canonical projects, user configuration, usage/spend,
 policies, quota state, webhooks, audit chains, API keys, SCIM, datasource
 metadata, query lifecycle/admission, rate limits, and budget reservations have
 tenant-aware durable paths. Rate limiting uses atomic fixed-window counters;
-budget and query admission use reserve/finalize transactions. Authority and
-admission failures fail closed.
+budget and query admission use reserve/finalize transactions, and interrupted
+query records use fenced reconciliation leases. Authority and admission failures
+fail closed.
 
 Provider health and exact/semantic response-cache contents remain process-local.
 Cache keys include tenant and project, so process-local caches are isolated but
@@ -332,8 +357,9 @@ A:
   can provision its DynamoDB table out of band;
 - external OIDC does not deploy the Cognito-authenticated web control plane;
 - `/ready` does not validate datasource roles or Athena workgroups;
-- no non-Bedrock provider-secret injection in the CDK stack;
-- no supported restored-table application cutover;
+- restored-table cutover requires the reviewed four-phase AgentCore selector,
+  a separate recovery endpoint, full-session quiescence, coordinated
+  control-plane shutdown, and authenticated canaries;
 - no automatic SNS alarm or security-event topic subscription;
 - a synchronous bootstrap worker cannot be forcibly canceled by Python;
 - no image publication or deployment step in the evidence and verification

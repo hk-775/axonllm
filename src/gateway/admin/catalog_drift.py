@@ -24,7 +24,7 @@ That third one is the reason this is a page and not a lint rule. A static check
 of two files catches the first two; only the join against recorded usage catches
 a model that is being called but was never declared, and only usage tells you
 which declared models are dormant. Dormant is the useful half in practice: it is
-the difference between "populate metadata for 46 models" and "for the 9 that
+the difference between "populate metadata for 48 models" and "for the 9 that
 carry traffic".
 
 The lookups here mirror the ones the serving code performs — ``list_models``

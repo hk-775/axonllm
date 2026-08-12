@@ -40,9 +40,10 @@ Include:
 
 The following are in scope:
 - Authentication/authorization bypass
-- Injection vulnerabilities (prompt injection bypass, XSS). There is no SQL
-  anywhere in the gateway — persistence is DynamoDB only — so SQL injection is
-  not an applicable class here.
+- Injection vulnerabilities, including prompt-injection bypass, XSS, and any
+  way to escape the read-only Athena SQL policy. Gateway persistence is
+  DynamoDB, but the optional query plane parses and executes bounded Athena
+  `SELECT` statements against explicitly bound tenant datasources.
 - PII redaction bypass
 - Audit trail tampering
 - Credential exposure
@@ -75,9 +76,17 @@ administrators need an attributed break-glass reason and explicit
 
 **Some API surfaces are intentionally absent.** Canonical mode denies unmapped
 `/api/*` and `/v1/*` routes. `GET /api/users` remains unavailable because its
-legacy aggregate has no safe tenant selector. `query.select` is authorization
-vocabulary reserved for a future read-only integration; there is no SQL parser,
-datasource adapter, or query route. `query.mutate` always denies.
+legacy aggregate has no safe tenant selector. When exact Athena role bindings
+are configured, `query.select` gates both `POST /v1/query` and the AgentCore
+`query` action through the same datasource authority, AST policy, admission,
+lifecycle, and audit service. `query.mutate` always denies.
+
+**Interrupted query state is reconciled, not trusted.** A fenced periodic worker
+claims expired accepted/running records, cancels or observes known Athena
+executions to terminal state, atomically reconciles admission accounting, and
+replays pending terminal audit writes. A running record whose datasource or
+exact deployment binding cannot be re-established is deferred without releasing
+its accounting state or inventing a terminal result.
 
 **Canonical key lifecycle has a separate audit transaction.** Canonical issue,
 rotation, and revocation transactionally update tenant-qualified key and service

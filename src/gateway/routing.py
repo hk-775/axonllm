@@ -6,7 +6,7 @@ import random
 from abc import ABC, abstractmethod
 
 from src.gateway.health_tracker import ProviderHealthTracker
-from src.gateway.models import ProviderModelMapping
+from src.gateway.models import ProviderModelMapping, TokenPricing
 
 
 class NoHealthyProviderError(Exception):
@@ -111,6 +111,14 @@ class LeastLatencyStrategy(RoutingStrategyBase):
 class CostOptimizedStrategy(RoutingStrategyBase):
     """Routes to the cheapest healthy provider based on per-token pricing."""
 
+    def __init__(
+        self,
+        pricing_config: dict[str, dict[str, TokenPricing]] | None = None,
+    ) -> None:
+        self.pricing_config = (
+            pricing_config if pricing_config is not None else {}
+        )
+
     def select(
         self,
         providers: list[ProviderModelMapping],
@@ -121,8 +129,10 @@ class CostOptimizedStrategy(RoutingStrategyBase):
             raise NoHealthyProviderError("No healthy providers available")
         return min(healthy, key=self._cost_key)
 
-    @staticmethod
-    def _cost_key(p: ProviderModelMapping) -> float:
-        if p.pricing is None:
+    def _cost_key(self, p: ProviderModelMapping) -> float:
+        pricing = p.pricing
+        if pricing is None or not pricing.is_billable:
+            pricing = self.pricing_config.get(p.provider, {}).get(p.model_id)
+        if pricing is None or not pricing.is_billable:
             return float("inf")
-        return p.pricing.prompt_token_cost + p.pricing.completion_token_cost
+        return pricing.prompt_token_cost + pricing.completion_token_cost

@@ -21,7 +21,7 @@ them.
   `AXON_LOAD_DEMO_DATA=true uv run python serve_dashboard.py`
 
 That last one matters more than it looks. The narration names the numbers on the
-pages being filmed — 66 requests, $1.26, 6 of 49 unpriced mappings — so filming a
+pages being filmed — 66 requests, $1.26, 5 of 51 unpriced mappings — so filming a
 gateway with a different seed, or none, produces a film whose voice-over
 contradicts the screen it is describing.
 

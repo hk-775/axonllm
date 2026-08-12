@@ -61,7 +61,10 @@ from src.gateway.multi_region.region_config import (
 from src.gateway.multi_region.region_router import RegionRouter
 from src.gateway.multi_region.spoke_loader import load_hub_config
 from src.gateway.quota_enforcer import QuotaEnforcer
-from src.gateway.middleware.security import SecurityMiddleware
+from src.gateway.middleware.security import (
+    ControlPlaneHTTPMiddleware,
+    SecurityMiddleware,
+)
 from src.gateway.observability.otlp_exporter import OTLPSpanExporter
 from src.gateway.observability.trace_forwarder import TraceForwarder
 from src.gateway.security.audit_trail import AuditEventType, AuditTrail
@@ -113,6 +116,10 @@ from src.gateway.query.models import AthenaRoleBindings
 from src.gateway.query.repository import (
     DatasourceRepository,
     DynamoDatasourceRepository,
+)
+from src.gateway.query.reconciliation import (
+    QueryLifecycleReconciler,
+    QueryReconciliationWorker,
 )
 from src.gateway.query.routes import QueryAPI, create_query_routes
 from src.gateway.query.service import QueryService
@@ -178,6 +185,7 @@ class GatewayComponents:
         default_factory=AthenaRoleBindings
     )
     query_service: QueryService | None = None
+    query_reconciliation_worker: QueryReconciliationWorker | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -238,7 +246,7 @@ def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComp
         )
         project_resolver = DynamoProjectRepository(persistence)
 
-    # --- Enterprise identity: SCIM provisioning + SAML SSO ---
+    # --- Enterprise identity: SCIM + ALB/Cognito-managed SAML federation ---
     scim_store = ScimStore(
         persistence=persistence,
         canonical_identity_required=(
@@ -247,7 +255,22 @@ def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComp
     )
     if persistence.enabled:
         asyncio.run(scim_store.initialize())
-    saml_service = SamlService(config=load_saml_config())
+    saml_service = SamlService(
+        config=load_saml_config(
+            deployment_profile=app_config.deployment_profile,
+            auth_mode=app_config.auth_mode,
+            canonical_identity_required=(
+                app_config.canonical_identity_required
+            ),
+            control_plane_only=app_config.control_plane_only,
+            aws_region=app_config.aws_region,
+            oidc_issuer=app_config.oidc_issuer,
+            oidc_audience=app_config.oidc_audience,
+            alb_signer_arn=app_config.alb_signer_arn,
+            alb_client_id=app_config.alb_client_id,
+            alb_issuer=app_config.alb_issuer,
+        )
+    )
 
     policy_resolver = PolicyHierarchyResolver(persistence=persistence)
     if persistence.enabled:
@@ -285,6 +308,7 @@ def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComp
     )
     datasource_repository: DatasourceRepository | None = None
     query_service: QueryService | None = None
+    query_reconciliation_worker: QueryReconciliationWorker | None = None
     if app_config.athena_query_enabled:
         datasource_repository = DynamoDatasourceRepository(
             persistence,
@@ -323,30 +347,44 @@ def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComp
                 app_config.athena_query_max_bytes_scanned
             ),
         )
+        athena_executor = AthenaExecutor(
+            limits=AthenaQueryLimits(
+                timeout_seconds=(
+                    app_config.athena_query_timeout_seconds
+                ),
+                max_rows=app_config.athena_query_max_rows,
+                max_result_bytes=(
+                    app_config.athena_query_max_result_bytes
+                ),
+                max_bytes_scanned=(
+                    app_config.athena_query_max_bytes_scanned
+                ),
+                poll_interval_seconds=(
+                    app_config.athena_query_poll_interval_seconds
+                ),
+            )
+        )
         query_service = QueryService(
             repository=datasource_repository,
             bindings=athena_role_bindings,
-            executor=AthenaExecutor(
-                limits=AthenaQueryLimits(
-                    timeout_seconds=(
-                        app_config.athena_query_timeout_seconds
-                    ),
-                    max_rows=app_config.athena_query_max_rows,
-                    max_result_bytes=(
-                        app_config.athena_query_max_result_bytes
-                    ),
-                    max_bytes_scanned=(
-                        app_config.athena_query_max_bytes_scanned
-                    ),
-                    poll_interval_seconds=(
-                        app_config.athena_query_poll_interval_seconds
-                    ),
-                )
-            ),
+            executor=athena_executor,
             audit_trail=audit_trail,
             require_durable_audit=True,
             admission=query_admission,
             require_durable_admission=True,
+        )
+        query_reconciliation_worker = QueryReconciliationWorker(
+            QueryLifecycleReconciler(
+                store=persistence,
+                repository=datasource_repository,
+                bindings=athena_role_bindings,
+                executor=athena_executor,
+                audit_trail=audit_trail,
+                claim_seconds=300,
+                page_size=5,
+            ),
+            interval_seconds=30,
+            max_pages=10,
         )
     event_dispatcher = EventDispatcher()
     # Forwards request traces to an embedding Ostiari when detected (OSTIARI_TRACES_URL
@@ -519,6 +557,9 @@ def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComp
         ensemble_config=ensemble_config,
         cost_tracker=cost_tracker,
         available_providers=None,
+        require_priced_mappings=(
+            app_config.deployment_profile == "production"
+        ),
     )
     rate_limiter = SlidingWindowRateLimiter(
         config=RateLimitConfig(),
@@ -639,6 +680,7 @@ def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComp
         datasource_repository=datasource_repository,
         athena_role_bindings=athena_role_bindings,
         query_service=query_service,
+        query_reconciliation_worker=query_reconciliation_worker,
     )
 
 
@@ -874,6 +916,12 @@ def build_starlette_app(app_config: AppConfig | None = None) -> Starlette:
     # startup mode. Fleet refresh can add or remove spokes after boot.
     monitor = comp.health_monitor
     dispatcher = comp.event_dispatcher
+    query_reconciliation_worker = (
+        comp.query_reconciliation_worker
+        if app_config.athena_query_enabled
+        and not app_config.control_plane_only
+        else None
+    )
 
     @contextlib.asynccontextmanager
     async def _lifespan(_app):
@@ -891,8 +939,12 @@ def build_starlette_app(app_config: AppConfig | None = None) -> Starlette:
                     "Spoke health monitor started (%d spokes)",
                     len(monitor.config.spokes),
                 )
+            if query_reconciliation_worker is not None:
+                await query_reconciliation_worker.start()
             yield
         finally:
+            if query_reconciliation_worker is not None:
+                await query_reconciliation_worker.stop()
             if dispatcher is not None:
                 await dispatcher.stop()
             if monitor is not None:
@@ -931,6 +983,13 @@ def build_starlette_app(app_config: AppConfig | None = None) -> Starlette:
         config_sync=config_sync,
         principal_resolver=comp.principal_resolver,
         require_canonical_principal=app_config.canonical_identity_required,
+    )
+
+    # Outermost: bounds admin bodies before authentication does work, protects
+    # ALB cookie sessions from CSRF, and decorates even auth-generated errors.
+    app.add_middleware(
+        ControlPlaneHTTPMiddleware,
+        production=app_config.deployment_profile == "production",
     )
 
     return app

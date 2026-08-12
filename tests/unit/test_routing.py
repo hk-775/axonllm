@@ -229,3 +229,31 @@ class TestCostOptimized:
         strategy = CostOptimizedStrategy()
         result = strategy.select(providers, health_tracker)
         assert result.provider == "b"
+
+    def test_resolves_rates_from_shared_pricing_table(self, health_tracker):
+        providers = [
+            ProviderModelMapping(provider="a", model_id="m1"),
+            ProviderModelMapping(provider="b", model_id="m2"),
+        ]
+        strategy = CostOptimizedStrategy(
+            {
+                "a": {"m1": TokenPricing(0.01, 0.02)},
+                "b": {"m2": TokenPricing(0.001, 0.002)},
+            }
+        )
+
+        assert strategy.select(providers, health_tracker).provider == "b"
+
+    def test_zero_placeholder_cannot_win(self, health_tracker):
+        providers = [
+            ProviderModelMapping(provider="a", model_id="placeholder"),
+            ProviderModelMapping(provider="b", model_id="priced"),
+        ]
+        strategy = CostOptimizedStrategy(
+            {
+                "a": {"placeholder": TokenPricing(0.0, 0.0)},
+                "b": {"priced": TokenPricing(0.01, 0.02)},
+            }
+        )
+
+        assert strategy.select(providers, health_tracker).provider == "b"

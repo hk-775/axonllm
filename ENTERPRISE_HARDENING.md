@@ -39,6 +39,8 @@ multi-tenant deployment:
   profiles;
 - event-loop-independent AgentCore lifecycle containment that exits the process
   when bootstrap or cleanup work outlives its deadline;
+- fenced periodic recovery for interrupted Athena query lifecycles, including
+  terminal audit replay and atomic reservation/slot reconciliation;
 - a separate retained/deletion-protected Cognito identity stack plus a strict
   schema-v2 first-adopter workflow for managed Cognito or existing OIDC, with
   restartable first-admin canonical bootstrap and no unauthenticated AgentCore
@@ -98,9 +100,11 @@ Cognito-authenticated web control plane.
 
 `AXON_ENABLED_PROVIDERS` is an optional comma-separated runtime provider
 allowlist. Providers outside it are neither advertised nor invoked, and empty or
-unknown values fail startup. The AgentCore stack sets it to `bedrock`, limiting
-that target to standard Bedrock mappings even if other provider metadata or
-credentials are present.
+unknown values fail startup. The AgentCore stack allowlists all thirteen
+supported providers. Bedrock and Mantle use the runtime role; direct HTTP
+providers are activated only when their required values load from the retained
+KMS-encrypted provider secret. The approved HTTPS prefix list must cover every
+configured provider destination.
 
 Both AWS stacks also inject the deployment account, FIFO outbox queue URL, and
 exact managed SNS and CloudWatch destination ARNs. Queue access participates in
@@ -314,9 +318,10 @@ These limitations are explicit and must not be represented as completed:
   Cognito-authenticated shared web control plane.
 - The query/control-plane implementation has no tagged release evidence or
   deployed Athena/control-plane canary yet.
-- A process lost after Athena starts can leave a nonterminal lifecycle record.
-  Admission slots expire and scan reservations are minute-window bounded, but
-  automatic historical lifecycle closure still needs a scheduled reconciler.
+- The periodic reconciler defers a running query when its datasource record or
+  exact deployment role binding is missing or unavailable. It does not release
+  accounting or invent a terminal Athena state; operators must restore the
+  authority record/binding and investigate repeated deferrals.
 - `GET /api/users` remains unavailable in canonical mode because the legacy
   aggregate has no safe tenant selector or canonical action mapping.
 

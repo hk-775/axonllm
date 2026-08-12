@@ -103,6 +103,11 @@ class CostTracker:
         self._last_usage_sync = float("-inf")
         self._usage_sync_task: asyncio.Task | None = None
 
+    def has_pricing(self, provider: str, model: str) -> bool:
+        """Return whether a provider/model has a usable billing rate."""
+        pricing = self.pricing_config.get(provider, {}).get(model)
+        return pricing is not None and pricing.is_billable
+
     async def _refresh_spend_state(
         self,
         scope: str,
@@ -299,7 +304,7 @@ class CostTracker:
         """
         provider_pricing = self.pricing_config.get(provider, {})
         pricing: TokenPricing | None = provider_pricing.get(model)
-        if pricing is None:
+        if pricing is None or not pricing.is_billable:
             return 0.0
 
         # Determine effective rates with fallback to prompt_token_cost

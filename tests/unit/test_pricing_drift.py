@@ -307,12 +307,8 @@ class TestYamlSkeleton:
         assert parsed["providers"]["openai"]["gpt-4"]["prompt_token_cost"] == 0.0
         assert parsed["providers"]["xai"]["grok-3"]["completion_token_cost"] == 0.0
 
-    def test_skeleton_round_trips_through_the_real_loader(self, tmp_path):
-        """Parsing the skeleton back must yield entries the audit accepts.
-
-        Otherwise the page hands the operator a fragment that leaves the drift
-        in place — the one outcome worse than showing nothing.
-        """
+    def test_zero_placeholders_remain_visibly_unpriced(self, tmp_path):
+        """A pasted TODO must not turn a red finding green before it is priced."""
         from src.gateway.config_loader import load_pricing_config
 
         registry = _registry(
@@ -324,8 +320,23 @@ class TestYamlSkeleton:
 
         report = audit_pricing(registry, load_pricing_config(str(path)))
 
-        assert report.unpriced == []
-        assert report.priced_mappings == 2
+        assert len(report.unpriced) == 2
+        assert report.priced_mappings == 0
+
+    def test_non_finite_or_negative_rates_are_not_priced(self):
+        registry = _registry(_model("gpt-4", ("openai", "gpt-4")))
+
+        for pricing in (
+            TokenPricing(float("nan"), 0.01),
+            TokenPricing(-0.01, 0.01),
+            TokenPricing(0.0, 0.0),
+        ):
+            report = audit_pricing(
+                registry,
+                {"openai": {"gpt-4": pricing}},
+            )
+            assert report.priced_mappings == 0
+            assert len(report.unpriced) == 1
 
     def test_duplicate_model_ids_appear_once(self):
         """Two gateway models can share a provider id; YAML keys cannot repeat."""
@@ -429,6 +440,19 @@ class TestPageRendering:
         assert "banner ok" in html
         assert "banner warn" not in html
         assert "have no price" not in html
+
+    def test_production_page_says_unpriced_mappings_are_blocked(self):
+        registry = _registry(_model("grok", ("xai", "grok-3")))
+
+        html = render_drift_page(
+            audit_pricing(registry, {}),
+            "config/pricing.yaml",
+            unpriced_mappings_blocked=True,
+        )
+
+        assert "Production routing excludes these mappings" in html
+        assert "configured model is unavailable" in html
+        assert "requests routed to these are recorded" not in html
 
     def test_fully_priced_with_leftovers_is_the_healthy_banner(self):
         """Everything billing correctly is not a warning, even with stale rows."""
@@ -585,16 +609,15 @@ class TestShippedPricingCoverage:
         """Not a coverage floor but an exact set, so a *new* unpriced mapping
         fails even though the count happens to stay the same.
 
-        These six are unpriced because no correct number exists to record, each
-        confirmed against the primary source: gemini-3-pro-preview is still
-        served but off Google's price list; the five bedrock-mantle gpt-5.x SKUs
-        are either absent from the AWS Price List in every region (5.5, 5.6-sol)
-        or listed only in us-gov-east-1 / us-gov-west-1 at GovCloud rates
-        (5.4, 5.6-luna, 5.6-terra). Filling any of them would replace a visible
-        gap with an invisible wrong bill.
+        These five Bedrock Mantle GPT-5.x SKUs have no verified commercial
+        us-east-1 rate: 5.5 and 5.6-sol are absent from the AWS Price List in
+        every region, while 5.4, 5.6-luna, and 5.6-terra are listed only in
+        us-gov-east-1 / us-gov-west-1 at GovCloud rates. Filling any of them
+        would replace a visible gap with an invisible wrong bill. Production
+        must keep these mappings unavailable until an operator supplies a
+        verified contract rate.
         """
         assert {(u.provider, u.model_id) for u in report.unpriced} == {
-            ("google_ai", "gemini-3-pro-preview"),
             ("bedrock-mantle", "openai.gpt-5.4"),
             ("bedrock-mantle", "openai.gpt-5.5"),
             ("bedrock-mantle", "openai.gpt-5.6-luna"),

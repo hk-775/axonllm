@@ -18,21 +18,22 @@ See also:
 
 | Surface | Purpose | Query behavior |
 |---|---|---|
-| Normal Starlette process | Chat, OpenAI-compatible APIs, admin APIs, SAML/SCIM, and web interfaces | Registers `POST /v1/query` when Athena query configuration is enabled |
-| AgentCore runtime | Authenticated action API for Bedrock-backed workloads | Exposes the `query` action when the shared `QueryService` is configured |
+| Normal Starlette process | Chat, OpenAI-compatible APIs, admin APIs, managed-SAML handoff, SCIM, and web interfaces | Registers `POST /v1/query` when Athena query configuration is enabled |
+| AgentCore runtime | Authenticated action API for all enabled providers, including Bedrock and Mantle | Exposes the `query` action when the shared `QueryService` is configured |
 | Shared-state control plane | Managed-Cognito HTTPS Fargate service for tenant administration | Exposes admin and datasource routes; `AXON_CONTROL_PLANE_ONLY=true` suppresses chat, model, and query execution routes |
 | Local seeded demo | Anonymous fictional-data evaluation | Development only; not a production or AgentCore deployment input |
 
-The control-plane stack imports the AgentCore table, data KMS key, event
-outbox, SNS topic, and CloudWatch event log. It creates no second authority
-table. Its task role has no Athena or STS assume-role permission, so a control
-plane compromise cannot invoke the query executor through that task.
+The control-plane stack uses AgentCore's verified `StateTableName` output and
+imports the data KMS key, event outbox, SNS topic, and CloudWatch event log. It
+creates no second authority table. Its task role has no Athena or STS
+assume-role permission, so a control plane compromise cannot invoke the query
+executor through that task.
 
 ## Feature Inventory
 
 | Area | Implemented capabilities |
 |---|---|
-| Identity | OIDC/JWKS, ALB OIDC, API keys, SAML 2.0, SCIM 2.0, managed Cognito first-adopter identity |
+| Identity | OIDC/JWKS, ALB OIDC, API keys, Cognito-managed SAML federation, SCIM 2.0, managed Cognito first-adopter identity |
 | Tenant RBAC | Canonical DynamoDB principals, project grants, service scopes, viewer/admin roles, audited platform break glass |
 | Query | Bounded Athena `SELECT`, HTTP and AgentCore entry points, deployment-bound IAM roles, datasource metadata administration |
 | Routing | Thirteen provider adapters, retry/fallback, round-robin, weighted, least-latency, cost-optimized, smart, and ensemble paths |
@@ -70,6 +71,34 @@ Canonical production requests use server-held authority:
 | `platform_admin` | Platform resources; tenant access requires audited break glass | Break glass only | No ordinary tenant project path |
 
 `query.mutate` remains an unconditional denial. There is no write-query action.
+
+## Managed SAML Login Flow
+
+The production SAML trust boundary is Cognito, not the AxonLLM process:
+
+1. An operator configures the enterprise SAML IdP on the retained Cognito user
+   pool and enables it on the ALB client. The IdP uses Cognito's SP entity ID and
+   SAML response endpoint.
+2. A browser requests the control plane or `GET /saml/login`. Because `/saml/*`
+   is not on the bypass rule, the ALB redirects an unauthenticated browser to
+   Cognito.
+3. Cognito owns AuthnRequest/RelayState and validates the signed SAML response or
+   assertion, issuer, audience, destination, recipient, time conditions, request
+   correlation, and replay.
+4. Cognito completes authorization code; the ALB establishes the secure browser
+   session and signs the OIDC identity headers delivered to AxonLLM.
+5. Middleware validates the exact regional ALB signer, client, key issuer, and
+   Cognito token issuer. The ALB identity header must equal token `sub`.
+6. AxonLLM resolves the exact Cognito `(issuer, sub)` to a canonical DynamoDB
+   principal and replaces all credential roles, groups, scopes, status, and
+   project grants with server-held authority.
+7. The SAML login route redirects only to a validated protected same-origin
+   path. `/saml/acs` and `/saml/metadata` always return `410`.
+
+Tenant-specific IdP metadata and signing certificates stay in Cognito. No SAML
+secret or assertion is injected into the application. Only `/scim/*` bypasses
+ALB Cognito. SCIM provisioning must use the Cognito issuer and Cognito `sub` as
+its immutable issuer/`externalId` pair when it creates the canonical principal.
 
 ## Datasource Administration Flow
 
@@ -116,7 +145,7 @@ principals are denied all `/admin/*` access.
 | Workgroup | Must be enabled, enforce its configuration, publish CloudWatch metrics, use an enforced KMS-encrypted S3 result location, and set a positive scan cutoff no greater than the AxonLLM limit |
 | Runtime bounds | Timeout, row count, compact serialized columns-and-rows result-set bytes, and bytes scanned; nonterminal work is cancelled on timeout or request cancellation |
 | Fleet admission | Atomic principal/project RPM, expiring concurrency slots, and worst-case aggregate scan reservations; enforcement fails closed |
-| Lifecycle | `request_id` is unique per tenant/project; accepted state, Athena execution id, and terminal outcome are durable |
+| Lifecycle | `request_id` is unique per tenant/project; accepted state, Athena execution id, and terminal outcome are durable; a fenced periodic worker reconciles interrupted records |
 | Audit | Durable request, result, and policy-rejection events; SQL is represented by SHA-256 rather than stored as a literal |
 
 Default limits are 30 seconds, 1,000 rows, a 1 MiB compact serialized
@@ -191,6 +220,12 @@ project context. `datasource_id` and `sql` are required.
 10. A durable success or failure `query_result` event is appended, then the
     response returns columns, rows, truncation, execution id, and statistics.
 
+If a process is lost, the periodic reconciler exclusively leases the expired
+lifecycle record. It closes accepted records, cancels or observes known Athena
+executions, atomically finalizes admission accounting, and replays pending
+terminal audit writes. A running record is deferred when its datasource or
+exact deployment binding cannot be proven.
+
 Malformed or unsafe SQL produces `query_rejected` before Athena starts.
 
 ## AgentCore Query Flow
@@ -246,7 +281,7 @@ Audit and event delivery serve different purposes:
 |---|---|
 | Audit trail | Tenant-qualified append-only records linked by SHA-256 hash chain |
 | Query audit | Durable request/result/rejection records containing query hashes and bounded execution statistics, not SQL literals |
-| Query lifecycle | Durable accepted/running/terminal state plus execution id; expiring distributed admission slots bound process loss |
+| Query lifecycle | Durable accepted/running/terminal state plus execution id; fenced periodic reconciliation closes interrupted work and replays pending audit |
 | Datasource audit | Durable redacted mutation request/result records; raw role ARNs are excluded from change data |
 | Security-event outbox | Tenant destination snapshot written to encrypted FIFO SQS before delivery |
 | Delivery worker | Bounded retries to HTTPS, FIFO SNS, or CloudWatch Logs |
@@ -271,7 +306,9 @@ Required inputs include:
 - exact Bedrock model/profile ARNs;
 - AgentCore HTTPS egress prefix list;
 - control-plane ingress and HTTPS egress prefix lists;
-- optional exact Athena role ARNs and query limits.
+- optional exact Athena role ARNs and query limits;
+- an optional protected SAML landing path, defaulting to
+  `/admin/dashboard`.
 
 `deploy-agentcore.sh` performs:
 
@@ -286,7 +323,9 @@ Required inputs include:
 
 The control plane is private-task Fargate behind an HTTPS ALB with Cognito
 authentication and a Route 53 alias. It is an administration surface, not a
-second data plane.
+second data plane. Tenant-specific SAML IdP metadata, app-client provider
+enablement, and canonical Cognito-subject provisioning are operator inputs and
+are not generated by the first-adopter deployer.
 
 ### External OIDC
 

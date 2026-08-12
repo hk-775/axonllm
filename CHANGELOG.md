@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The Google AI launch catalog no longer advertises a retired preview.**
+  Google's live model list no longer contains `gemini-3-pro-preview`; AxonLLM
+  now offers the listed, priced `gemini-2.5-pro` tier instead.
+
 ### Security
 
 - **All pinned workflow actions now run natively on Node 24.** Artifact
