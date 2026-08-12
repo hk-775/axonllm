@@ -1863,6 +1863,64 @@ def test_coordinator_worker_roles_are_separate_activity_pollers(
         synthesized_template,
         "AxonLLMLaunchCoordinatorExecutionRole",
     )
+    execution_encryption = next(
+        statement
+        for statement in execution_statements
+        if statement.get("Sid") == "EncryptLaunchCoordinatorExecutions"
+    )
+    assert _actions(execution_encryption) == {
+        "kms:Decrypt",
+        "kms:GenerateDataKey",
+    }
+    execution_encryption_conditions = execution_encryption["Condition"][
+        "StringEquals"
+    ]
+    assert execution_encryption_conditions["kms:CallerAccount"] == {
+        "Ref": "AWS::AccountId"
+    }
+    assert _literal_parts(
+        execution_encryption_conditions[
+            "kms:EncryptionContext:aws:states:stateMachineArn"
+        ]
+    ).endswith(":stateMachine:AxonLLMLaunchCoordinator")
+    assert "kms:ViaService" not in json.dumps(execution_encryption)
+
+    activity_encryption = next(
+        statement
+        for statement in execution_statements
+        if statement.get("Sid") == "EncryptLaunchCoordinatorActivities"
+    )
+    assert _actions(activity_encryption) == {
+        "kms:Decrypt",
+        "kms:GenerateDataKey",
+    }
+    activity_arns = activity_encryption["Condition"]["StringEquals"][
+        "kms:EncryptionContext:aws:states:activityArn"
+    ]
+    assert {
+        synthesized_template["Resources"][arn["Fn::GetAtt"][0]]["Properties"][
+            "Name"
+        ]
+        for arn in activity_arns
+    } == {
+        "axonllm-agentcore-launch-actions",
+        "axonllm-agentcore-launch-cleanup",
+    }
+    assert "kms:ViaService" not in json.dumps(activity_encryption)
+
+    log_encryption = next(
+        statement
+        for statement in execution_statements
+        if statement.get("Sid") == "EncryptLaunchCoordinatorLogDelivery"
+    )
+    assert _actions(log_encryption) == {"kms:GenerateDataKey"}
+    assert _literal_parts(
+        log_encryption["Condition"]["StringEquals"][
+            "kms:EncryptionContext:SourceArn"
+        ]
+    ).endswith(":logs:us-east-1::*")
+    assert "kms:ViaService" not in json.dumps(log_encryption)
+
     lease_statement = next(
         statement for statement in execution_statements if statement.get("Sid") == "AdvanceFencedLaunchLease"
     )
@@ -1992,6 +2050,44 @@ def test_cleanup_and_watchdog_are_durable_scheduled_and_actionable(
     assert operations == {"cleanup-expired", "watchdog"}
     assert len(target_roles) == 1
     assert len(dead_letter_queues) == 1
+
+    scheduler_statements = _role_statements(
+        synthesized_template,
+        "AxonLLMLaunchCoordinatorSchedulerRole",
+    )
+    scheduled_start = next(
+        statement
+        for statement in scheduler_statements
+        if statement.get("Sid") == "StartScheduledLaunchCoordinator"
+    )
+    assert _actions(scheduled_start) == {"states:StartExecution"}
+    assert _literal_parts(scheduled_start["Resource"]).endswith(
+        ":stateMachine:AxonLLMLaunchCoordinator"
+    )
+    assert not any(
+        statement.get("Sid") == "UseCoordinatorKeyViaStates"
+        for statement in scheduler_statements
+    )
+    payload_decrypt = next(
+        statement
+        for statement in scheduler_statements
+        if statement.get("Sid") == "DecryptBoundSchedulePayloads"
+    )
+    assert _actions(payload_decrypt) == {"kms:Decrypt"}
+    assert payload_decrypt["Resource"]["Fn::GetAtt"][1] == "Arn"
+    assert payload_decrypt["Condition"]["StringEquals"] == {
+        "kms:CallerAccount": {"Ref": "AWS::AccountId"}
+    }
+    schedule_arns = payload_decrypt["Condition"]["ArnEquals"][
+        "kms:EncryptionContext:aws:scheduler:schedule:arn"
+    ]
+    assert {
+        _literal_parts(arn).rsplit(":schedule/", 1)[1] for arn in schedule_arns
+    } == {
+        "axonllm-launch-coordinator/axonllm-launch-coordinator-cleanup",
+        "axonllm-launch-coordinator/axonllm-launch-coordinator-watchdog",
+    }
+    assert "kms:ViaService" not in json.dumps(payload_decrypt)
 
     queue = _resources(synthesized_template, "AWS::SQS::Queue")[0]
     assert queue["Properties"]["QueueName"] == ("axonllm-launch-coordinator-scheduler-dlq")
