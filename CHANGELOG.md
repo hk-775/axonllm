@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.7] - 2026-08-12
+
+### Fixed
+
+- **Cross-region Bedrock inference profiles authorize every destination.**
+  AgentCore setup now accepts concrete cross-region foundation-model ARNs while
+  keeping inference profiles and account-scoped resources region-bound, and
+  the deployment guidance requires the profile plus every destination ARN.
+- **The Google AI launch route works for new adopters.** Removed the unavailable
+  direct Gemini 2.5 Pro route while retaining Vertex AI access, aligned the
+  adapter and production certification with live Gemini 3.5 Flash, and updated
+  packaged configuration and documentation.
+- **Gemini 3 multi-round tool loops preserve signed continuation state.**
+  Required thought signatures now round-trip through opaque OpenAI tool-call
+  IDs, allowing tool results to continue without provider-specific public
+  request fields.
+
 ## [0.2.6] - 2026-08-12
 
 ### Added
