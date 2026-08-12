@@ -59,6 +59,8 @@ _LAUNCH_ACTION_SCHEMA = "axonllm.agentcore-launch-rehearsal-coordinator-action/v
 _LAUNCH_MAINTENANCE_SCHEMA = "axonllm.agentcore-launch-rehearsal-maintenance/v1"
 _LAUNCH_STATE_MACHINE_NAME = "AxonLLMLaunchCoordinator"
 _LAUNCH_SCHEDULE_GROUP_NAME = "axonllm-launch-coordinator"
+_LAUNCH_CLEANUP_SCHEDULE_NAME = "axonllm-launch-coordinator-cleanup"
+_LAUNCH_WATCHDOG_SCHEDULE_NAME = "axonllm-launch-coordinator-watchdog"
 _QUALIFICATION_MUTATION_AUTHORIZATION_TABLE_NAME = (
     "axonllm-qualification-mutation-authorizations"
 )
@@ -2215,10 +2217,58 @@ class AxonLLMReleaseFoundationStack(Stack):
                 resources=["*"],
             )
         )
-        self._grant_coordinator_key_use(
-            execution_role,
-            coordinator_key=coordinator_key,
-            service="states",
+        execution_role.add_to_policy(
+            iam.PolicyStatement(
+                sid="EncryptLaunchCoordinatorExecutions",
+                actions=[
+                    "kms:Decrypt",
+                    "kms:GenerateDataKey",
+                ],
+                resources=[coordinator_key.key_arn],
+                conditions={
+                    "StringEquals": {
+                        "kms:CallerAccount": self.account,
+                        "kms:EncryptionContext:aws:states:stateMachineArn": (
+                            state_machine_arn
+                        ),
+                    }
+                },
+            )
+        )
+        execution_role.add_to_policy(
+            iam.PolicyStatement(
+                sid="EncryptLaunchCoordinatorActivities",
+                actions=[
+                    "kms:Decrypt",
+                    "kms:GenerateDataKey",
+                ],
+                resources=[coordinator_key.key_arn],
+                conditions={
+                    "StringEquals": {
+                        "kms:CallerAccount": self.account,
+                        "kms:EncryptionContext:aws:states:activityArn": [
+                            action_activity.attr_arn,
+                            cleanup_activity.attr_arn,
+                        ],
+                    }
+                },
+            )
+        )
+        execution_role.add_to_policy(
+            iam.PolicyStatement(
+                sid="EncryptLaunchCoordinatorLogDelivery",
+                actions=["kms:GenerateDataKey"],
+                resources=[coordinator_key.key_arn],
+                conditions={
+                    "StringEquals": {
+                        "kms:CallerAccount": self.account,
+                        "kms:EncryptionContext:SourceArn": self.format_arn(
+                            service="logs",
+                            resource="*",
+                        ),
+                    }
+                },
+            )
         )
         self._ignore_cfn_lint_transact_write_items(execution_role)
 
@@ -2396,9 +2446,11 @@ class AxonLLMReleaseFoundationStack(Stack):
         )
         scheduler_role.add_to_policy(
             iam.PolicyStatement(
-                sid="StartExactLaunchCoordinatorVersion",
+                # Scheduler authorizes its templated StartExecution call
+                # against the base ARN even when the target is versioned.
+                sid="StartScheduledLaunchCoordinator",
                 actions=["states:StartExecution"],
-                resources=[version.attr_arn],
+                resources=[self._launch_state_machine_arn()],
             )
         )
         scheduler_role.add_to_policy(
@@ -2408,15 +2460,27 @@ class AxonLLMReleaseFoundationStack(Stack):
                 resources=[scheduler_dead_letter_queue.queue_arn],
             )
         )
-        self._grant_coordinator_key_use(
-            scheduler_role,
-            coordinator_key=coordinator_key,
-            service="states",
-        )
-        self._grant_coordinator_key_use(
-            scheduler_role,
-            coordinator_key=coordinator_key,
-            service="scheduler",
+        scheduler_role.add_to_policy(
+            iam.PolicyStatement(
+                sid="DecryptBoundSchedulePayloads",
+                actions=["kms:Decrypt"],
+                resources=[coordinator_key.key_arn],
+                conditions={
+                    "StringEquals": {
+                        "kms:CallerAccount": self.account,
+                    },
+                    "ArnEquals": {
+                        "kms:EncryptionContext:aws:scheduler:schedule:arn": [
+                            self._launch_schedule_arn(
+                                _LAUNCH_CLEANUP_SCHEDULE_NAME
+                            ),
+                            self._launch_schedule_arn(
+                                _LAUNCH_WATCHDOG_SCHEDULE_NAME
+                            ),
+                        ]
+                    },
+                },
+            )
         )
         self._grant_coordinator_key_use(
             scheduler_role,
@@ -2425,7 +2489,7 @@ class AxonLLMReleaseFoundationStack(Stack):
         )
         self._launch_schedule(
             "LaunchCoordinatorCleanupSchedule",
-            name="axonllm-launch-coordinator-cleanup",
+            name=_LAUNCH_CLEANUP_SCHEDULE_NAME,
             expression="rate(15 minutes)",
             operation="cleanup-expired",
             group=schedule_group,
@@ -2436,7 +2500,7 @@ class AxonLLMReleaseFoundationStack(Stack):
         )
         self._launch_schedule(
             "LaunchCoordinatorWatchdogSchedule",
-            name="axonllm-launch-coordinator-watchdog",
+            name=_LAUNCH_WATCHDOG_SCHEDULE_NAME,
             expression="rate(5 minutes)",
             operation="watchdog",
             group=schedule_group,
@@ -3116,6 +3180,13 @@ class AxonLLMReleaseFoundationStack(Stack):
             service="scheduler",
             resource="schedule-group",
             resource_name=_LAUNCH_SCHEDULE_GROUP_NAME,
+        )
+
+    def _launch_schedule_arn(self, name: str) -> str:
+        return self.format_arn(
+            service="scheduler",
+            resource="schedule",
+            resource_name=f"{_LAUNCH_SCHEDULE_GROUP_NAME}/{name}",
         )
 
     @staticmethod
