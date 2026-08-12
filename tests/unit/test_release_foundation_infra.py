@@ -1408,7 +1408,17 @@ def test_launch_coordinator_is_versioned_standard_and_dispatches_29_actions(
     assert properties["EncryptionConfiguration"]["KmsDataKeyReusePeriodSeconds"] == 300
     assert properties["LoggingConfiguration"]["Level"] == "ALL"
     assert properties["LoggingConfiguration"]["IncludeExecutionData"] is False
-    assert properties["LoggingConfiguration"]["Destinations"]
+    destinations = properties["LoggingConfiguration"]["Destinations"]
+    assert len(destinations) == 1
+    log_group_arn = destinations[0]["CloudWatchLogsLogGroup"]["LogGroupArn"]
+    assert set(log_group_arn) == {"Fn::GetAtt"}
+    log_group_logical_id, attribute = log_group_arn["Fn::GetAtt"]
+    assert attribute == "Arn"
+    log_group = synthesized_template["Resources"][log_group_logical_id]
+    assert log_group["Type"] == "AWS::Logs::LogGroup"
+    assert log_group["Properties"]["LogGroupName"] == (
+        "/aws/vendedlogs/states/AxonLLMLaunchCoordinator"
+    )
     assert properties["TracingConfiguration"] == {"Enabled": True}
     assert {tag["Key"]: tag["Value"] for tag in properties["Tags"]} == {
         "Application": "AxonLLM",

@@ -2298,7 +2298,7 @@ class AxonLLMReleaseFoundationStack(Stack):
                         stepfunctions.CfnStateMachine.LogDestinationProperty(
                             cloud_watch_logs_log_group=(
                                 stepfunctions.CfnStateMachine.CloudWatchLogsLogGroupProperty(
-                                    log_group_arn=(f"{log_group.log_group_arn}:*")
+                                    log_group_arn=log_group.log_group_arn
                                 )
                             )
                         )
