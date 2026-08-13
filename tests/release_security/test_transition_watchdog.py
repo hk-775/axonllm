@@ -209,6 +209,19 @@ def test_watchdog_workflow_remains_protected_and_serialized() -> None:
         "group": "axonllm-production",
         "labels": "axonllm-production-allowlisted",
     }
+    credential_step = next(
+        step
+        for step in job["steps"]
+        if str(step.get("uses", "")).startswith(
+            "aws-actions/configure-aws-credentials@"
+        )
+    )
+    assert credential_step["with"]["role-to-assume"] == (
+        "${{ secrets.AXON_AGENTCORE_TRANSITION_WATCHDOG_ROLE_ARN }}"
+    )
+    # The dedicated role is already bounded; duplicating it here exceeds STS's
+    # packed-policy limit before the watchdog can assume the role.
+    assert "inline-session-policy" not in credential_step["with"]
     assert validate_workflows.validate_workflow(WORKFLOW) == 3
 
 
