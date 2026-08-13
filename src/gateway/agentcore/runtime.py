@@ -134,6 +134,12 @@ class GatewayProtocol(Protocol):
         context: dict[str, Any],
     ) -> dict[str, Any] | AsyncIterator[dict[str, Any]]: ...
 
+    async def handle_embeddings(
+        self,
+        request_data: dict[str, Any],
+        context: dict[str, Any],
+    ) -> dict[str, Any]: ...
+
     async def handle_list_models(
         self,
         project_id: str | None = None,

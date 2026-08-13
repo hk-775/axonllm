@@ -50,6 +50,44 @@ class ClientAgent:
         result = await self.gateway_agent.handle_list_models(**kwargs)
         return result.get("models", [])
 
+    async def embeddings(
+        self,
+        model: str,
+        input_value: str | list[str],
+        *,
+        encoding_format: str = "float",
+        dimensions: int | None = None,
+        provider: str | None = None,
+        user: str | None = None,
+        user_id: str | None = None,
+        project_id: str | None = None,
+        authorized_project: Any | None = None,
+        tenant_id: str | None = None,
+        allow_legacy_project_lookup: bool = False,
+    ) -> dict:
+        """Create embeddings through the governed gateway data plane."""
+        request_data: dict[str, Any] = {
+            "model": model,
+            "input": input_value,
+            "encoding_format": encoding_format,
+        }
+        if dimensions is not None:
+            request_data["dimensions"] = dimensions
+        if user is not None:
+            request_data["user"] = user
+        context = self._build_context(
+            user_id=user_id,
+            project_id=project_id,
+            provider=provider,
+            authorized_project=authorized_project,
+            tenant_id=tenant_id,
+            allow_legacy_project_lookup=allow_legacy_project_lookup,
+        )
+        return await self.gateway_agent.handle_embeddings(
+            request_data,
+            context,
+        )
+
     async def chat(
         self,
         model: str,

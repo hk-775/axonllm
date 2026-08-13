@@ -12,12 +12,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import boto3
-from botocore.config import Config
 import yaml
 
 from src.gateway.provider_config import ProviderConfig
 from src.gateway.provider_routes import ProviderRoute
+
+try:
+    import boto3
+    from botocore.config import Config
+except ImportError:  # The embedded HTTP router does not require AWS.
+    boto3 = None
+    Config = None
 
 # Environment variable names for API keys per provider. Env vars take
 # precedence over any api_key in providers.yaml, so secrets stay out of config
@@ -42,10 +47,14 @@ _GCP_CREDENTIALS_JSON_ENV = "GCP_CREDENTIALS_JSON"
 _GOOGLE_CLOUD_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
 _GOOGLE_REFRESH_MARGIN_SECONDS = 300.0
 _GOOGLE_REFRESH_RETRY_SECONDS = 30.0
-_SECRETS_MANAGER_CONFIG = Config(
-    connect_timeout=3,
-    read_timeout=5,
-    retries={"mode": "standard", "total_max_attempts": 3},
+_SECRETS_MANAGER_CONFIG = (
+    Config(
+        connect_timeout=3,
+        read_timeout=5,
+        retries={"mode": "standard", "total_max_attempts": 3},
+    )
+    if Config is not None
+    else None
 )
 _BASE_URL_ENV_MAP = {
     "azure_openai": "AZURE_OPENAI_ENDPOINT",
@@ -568,6 +577,11 @@ def _load_provider_secret() -> dict[str, str]:
     secret_arn = os.environ.get(_PROVIDER_SECRET_ARN_ENV, "").strip()
     if not secret_arn:
         return {}
+    if boto3 is None or _SECRETS_MANAGER_CONFIG is None:
+        raise RuntimeError(
+            "Secrets Manager provider loading requires the "
+            "'axon-llm[aws]' extra"
+        )
     requested_version = os.environ.get(
         _PROVIDER_SECRET_VERSION_ENV,
         "",

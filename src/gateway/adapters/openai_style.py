@@ -17,6 +17,9 @@ from src.gateway.adapters.openai_responses import (
 from src.gateway.models import (
     ChatCompletionRequest,
     ChatCompletionResponse,
+    EmbeddingData,
+    EmbeddingRequest,
+    EmbeddingResponse,
     HealthStatus,
     ModelInfo,
     ProviderHealth,
@@ -54,6 +57,62 @@ class OpenAIStyleAdapter(ProviderAdapter):
     @classmethod
     def _prefers_responses_api(cls, model_id: str) -> bool:
         return cls._SUPPORTS_RESPONSES_API and is_responses_only_model(model_id)
+
+    async def translate_embedding_request(
+        self,
+        request: EmbeddingRequest,
+    ) -> dict:
+        if not self.supports_embeddings:
+            return await super().translate_embedding_request(request)
+        payload: dict = {
+            "model": request.model,
+            "input": request.input,
+            "encoding_format": request.encoding_format,
+        }
+        if request.dimensions is not None:
+            payload["dimensions"] = request.dimensions
+        if request.user is not None:
+            payload["user"] = request.user
+        return payload
+
+    def translate_embedding_response(
+        self,
+        provider_response: dict,
+    ) -> EmbeddingResponse:
+        if not self.supports_embeddings:
+            return super().translate_embedding_response(provider_response)
+        raw_data = provider_response.get("data")
+        if not isinstance(raw_data, list):
+            raise ValueError("provider embeddings response is missing data")
+        data: list[EmbeddingData] = []
+        for position, item in enumerate(raw_data):
+            if not isinstance(item, dict):
+                raise ValueError("provider embedding item must be an object")
+            embedding = item.get("embedding")
+            if not isinstance(embedding, (list, str)):
+                raise ValueError(
+                    "provider embedding must be a vector or base64 string"
+                )
+            data.append(
+                EmbeddingData(
+                    index=item.get("index", position),
+                    embedding=embedding,
+                )
+            )
+        usage_data = provider_response.get("usage") or {}
+        prompt_tokens = usage_data.get("prompt_tokens", 0)
+        total_tokens = usage_data.get("total_tokens", prompt_tokens)
+        return EmbeddingResponse(
+            id=provider_response.get("id", ""),
+            data=data,
+            usage=TokenUsage(
+                prompt_tokens=prompt_tokens,
+                completion_tokens=0,
+                total_tokens=total_tokens,
+            ),
+            model=provider_response.get("model", ""),
+            provider=self.PROVIDER_NAME,
+        )
 
     async def translate_request(
         self, request: ChatCompletionRequest, *, prompt_caching_enabled: bool = False

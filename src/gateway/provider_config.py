@@ -290,6 +290,30 @@ def build_provider_url(config: ProviderConfig, mapping: ProviderModelMapping) ->
     return builder(config, mapping)
 
 
+def build_provider_embedding_url(
+    config: ProviderConfig,
+    mapping: ProviderModelMapping,
+) -> str:
+    """Construct an embeddings URL for providers with a verified contract."""
+    if config.provider_name == "openai":
+        return f"{config.base_url}/v1/embeddings"
+    if config.provider_name == "azure_openai":
+        return (
+            f"{config.base_url}/openai/deployments/{mapping.model_id}"
+            "/embeddings?api-version=2024-02-01"
+        )
+    raise ProviderError(
+        status_code=501,
+        provider=config.provider_name,
+        message=(
+            f"Embeddings are not supported for provider "
+            f"'{config.provider_name}'"
+        ),
+        retryable=False,
+        provider_unavailable=False,
+    )
+
+
 _STREAM_URL_DISPATCH: dict[str, callable] = {
     "google_ai": _google_ai_stream_url,
     "vertex_ai": _vertex_ai_stream_url,

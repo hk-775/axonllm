@@ -892,27 +892,21 @@ class DynamoPersistence:
         revision: int,
     ) -> dict:
         """Serialize one authoritative, revisioned model registry document."""
+        from src.gateway.routing_config import RoutingConfigSnapshot
+
         revision = _require_revision(
             revision,
             name="model registry revision",
         )
         if not isinstance(config, dict):
             raise ValueError("model registry config must be a mapping")
-        try:
-            document = json.dumps(
-                config,
-                allow_nan=False,
-                separators=(",", ":"),
-                sort_keys=True,
-            )
-        except (TypeError, ValueError) as exc:
-            raise ValueError(
-                "model registry config must be JSON serializable"
-            ) from exc
+        snapshot = RoutingConfigSnapshot.from_config(
+            config,
+            revision=revision,
+        )
+        document = snapshot.document
         if len(document.encode("utf-8")) > _MODEL_REGISTRY_MAX_DOCUMENT_BYTES:
             raise ValueError("model registry exceeds the durable size limit")
-
-        import hashlib
 
         return {
             "PK": "MODEL_REGISTRY",
@@ -921,9 +915,7 @@ class DynamoPersistence:
             "schema_version": 1,
             "revision": revision,
             "document": document,
-            "document_sha256": hashlib.sha256(
-                document.encode("utf-8")
-            ).hexdigest(),
+            "document_sha256": snapshot.sha256,
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
 

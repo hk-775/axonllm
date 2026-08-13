@@ -108,6 +108,40 @@ class StreamChunk:
     usage: TokenUsage | None = None
 
 
+# --- Embeddings ---
+
+
+@dataclass
+class EmbeddingRequest:
+    """Normalized embeddings request routed across provider deployments."""
+
+    input: list[str]
+    model: str
+    encoding_format: str = "float"
+    dimensions: int | None = None
+    user: str | None = None
+
+
+@dataclass
+class EmbeddingData:
+    """One embedding vector in the same order as the corresponding input."""
+
+    index: int
+    embedding: list[float] | str
+
+
+@dataclass
+class EmbeddingResponse:
+    """Provider-neutral embeddings result."""
+
+    id: str
+    data: list[EmbeddingData]
+    usage: TokenUsage
+    model: str
+    provider: str
+    provider_model: str | None = None
+
+
 # --- Model Registry & Pricing ---
 
 

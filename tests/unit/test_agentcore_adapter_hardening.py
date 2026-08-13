@@ -19,7 +19,11 @@ from src.gateway.agentcore.runtime import (
     RuntimeReadiness,
     RuntimeServices,
 )
-from src.gateway.agentcore.schemas import REHEARSAL_SCHEMA
+from src.gateway.agentcore.schemas import (
+    InvocationAction,
+    REHEARSAL_SCHEMA,
+    parse_invocation_payload,
+)
 from src.gateway.auth.project_repository import (
     ProjectConfigConflict,
     ProjectStoreUnavailable,
@@ -182,9 +186,22 @@ class _AuditTrail:
 
 
 class _Gateway:
-    def __init__(self, chat_result: Any | None = None) -> None:
+    def __init__(
+        self,
+        chat_result: Any | None = None,
+        embeddings_result: Any | None = None,
+    ) -> None:
         self.chat_result = chat_result or {"id": "completion-1"}
+        self.embeddings_result = embeddings_result or {
+            "object": "list",
+            "data": [],
+            "model": "embedding-model",
+            "usage": {"prompt_tokens": 0, "total_tokens": 0},
+        }
         self.chat_calls: list[tuple[dict[str, Any], dict[str, Any]]] = []
+        self.embedding_calls: list[
+            tuple[dict[str, Any], dict[str, Any]]
+        ] = []
         self.list_calls: list[
             tuple[str | None, str | None, str | None, Project | None]
         ] = []
@@ -196,6 +213,14 @@ class _Gateway:
     ) -> Any:
         self.chat_calls.append((request_data, context))
         return self.chat_result
+
+    async def handle_embeddings(
+        self,
+        request_data: dict[str, Any],
+        context: dict[str, Any],
+    ) -> Any:
+        self.embedding_calls.append((request_data, context))
+        return self.embeddings_result
 
     async def handle_list_models(
         self,
@@ -321,6 +346,16 @@ def _chat_payload(**overrides: Any) -> dict[str, Any]:
         "action": "chat",
         "model": "claude-sonnet",
         "messages": [{"role": "user", "content": "hello"}],
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _embedding_payload(**overrides: Any) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "action": "embeddings",
+        "model": "embedding-model",
+        "input": ["hello", "world"],
     }
     payload.update(overrides)
     return payload
@@ -537,6 +572,87 @@ async def test_agentcore_config_refresh_failure_uses_loaded_config() -> None:
     assert result == {"id": "completion-1"}
     assert config_sync.calls == 1
     assert len(gateway.chat_calls) == 1
+
+
+def test_embedding_payload_is_parsed_without_identity_authority() -> None:
+    parsed = parse_invocation_payload(
+        _embedding_payload(
+            provider="openai",
+            encoding_format="base64",
+            dimensions=1536,
+            user="billing-subject",
+        )
+    )
+
+    assert parsed.action is InvocationAction.EMBEDDINGS
+    assert parsed.preferred_provider == "openai"
+    assert parsed.request_data == {
+        "model": "embedding-model",
+        "input": ["hello", "world"],
+        "encoding_format": "base64",
+        "dimensions": 1536,
+        "user": "billing-subject",
+    }
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"input": []},
+        {"input": ["valid", 3]},
+        {"encoding_format": "binary"},
+        {"dimensions": True},
+        {"dimensions": 65_537},
+        {"tenant_id": "attacker"},
+    ],
+)
+def test_embedding_payload_rejects_invalid_or_untrusted_fields(
+    overrides: dict[str, Any],
+) -> None:
+    with pytest.raises(AgentCoreAdapterError):
+        parse_invocation_payload(_embedding_payload(**overrides))
+
+
+@pytest.mark.asyncio
+async def test_embeddings_use_authenticated_inference_policy_and_context() -> None:
+    policy = _PolicyService()
+    services, gateway, verifier, _ = _runtime(
+        policy_service=policy,
+    )
+    adapter = AgentCoreAdapter(_StaticProvider(services))
+
+    result = await adapter.invoke(
+        _embedding_payload(provider="openai"),
+        _sdk_context(),
+    )
+
+    assert result == gateway.embeddings_result
+    assert verifier.tokens == [TOKEN]
+    assert policy.evaluations[0][1:] == (
+        "post",
+        "/v1/embeddings",
+    )
+    assert gateway.embedding_calls == [
+        (
+            {
+                "model": "embedding-model",
+                "input": ["hello", "world"],
+                "encoding_format": "float",
+            },
+            {
+                "user_id": "principal-123",
+                "project_id": "project-a",
+                "roles": ["tenant_member"],
+                "scopes": ["inference.invoke", "model.list"],
+                "tenant_id": "tenant-a",
+                "auth_method": "oidc_jwt",
+                "principal_id": "principal-123",
+                "authorization_version": 9,
+                "authorized_project": services.project_resolver.project,
+                "provider": "openai",
+            },
+        )
+    ]
 
 
 @pytest.mark.asyncio

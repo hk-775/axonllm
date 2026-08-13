@@ -1,8 +1,8 @@
 """Tests for the OpenAI-compatible ingress (task #8).
 
-Verifies /v1/chat/completions and /v1/models emit the shapes the OpenAI SDK
-expects, so a base_url swap is all a client needs. Uses a fake ClientAgent so
-these are fast unit tests independent of providers.
+Verifies /v1/chat/completions, /v1/responses, and /v1/models emit the shapes the
+OpenAI SDK expects, so a base_url swap is all a client needs. Uses a fake
+ClientAgent so these are fast unit tests independent of providers.
 """
 
 from __future__ import annotations
@@ -60,6 +60,9 @@ class _FakeClientAgent:
         self._record(model, user_id, project_id, smart_routing, tools, tool_choice,
                      top_p, stop, system, tenant_id, authorized_project,
                      allow_legacy_project_lookup)
+        self.last_call["messages"] = messages
+        self.last_call["temperature"] = temperature
+        self.last_call["max_tokens"] = max_tokens
         return {
             "id": "internal-1", "model": model or "auto-selected", "provider": "test",
             "content": "hello there",
@@ -75,6 +78,9 @@ class _FakeClientAgent:
         self._record(model, user_id, project_id, smart_routing, tools, tool_choice,
                      top_p, stop, system, tenant_id, authorized_project,
                      allow_legacy_project_lookup)
+        self.last_call["messages"] = messages
+        self.last_call["temperature"] = temperature
+        self.last_call["max_tokens"] = max_tokens
         if self.stream_chunks is not None:
             for chunk in self.stream_chunks:
                 yield chunk
@@ -101,6 +107,50 @@ class _FakeClientAgent:
             "allow_legacy_project_lookup": allow_legacy_project_lookup,
         }
         return [{"name": "claude-sonnet"}, {"name": "gpt-4"}]
+
+    async def embeddings(
+        self,
+        model,
+        input_value,
+        *,
+        encoding_format="float",
+        dimensions=None,
+        provider=None,
+        user=None,
+        user_id=None,
+        project_id=None,
+        authorized_project=None,
+        tenant_id=None,
+        allow_legacy_project_lookup=False,
+    ):
+        self.last_call = {
+            "action": "embeddings",
+            "model": model,
+            "input": input_value,
+            "encoding_format": encoding_format,
+            "dimensions": dimensions,
+            "provider": provider,
+            "user": user,
+            "user_id": user_id,
+            "project_id": project_id,
+            "authorized_project": authorized_project,
+            "tenant_id": tenant_id,
+            "allow_legacy_project_lookup": allow_legacy_project_lookup,
+        }
+        values = [input_value] if isinstance(input_value, str) else input_value
+        return {
+            "object": "list",
+            "data": [
+                {
+                    "object": "embedding",
+                    "index": index,
+                    "embedding": [float(index), 0.5],
+                }
+                for index, _ in enumerate(values)
+            ],
+            "model": model,
+            "usage": {"prompt_tokens": 4, "total_tokens": 4},
+        }
 
 
 def _make_client(auth_method="api_key", user_id="apikey:k1", project_id="proj-b",
@@ -253,6 +303,350 @@ class TestStreaming:
         assert agent.last_call["tenant_id"] == "tenant-stream"
         assert agent.last_call["authorized_project"] is None
         assert agent.last_call["allow_legacy_project_lookup"] is True
+
+
+class TestResponses:
+    def test_non_streaming_string_input_shape(self):
+        client, agent = _make_client()
+
+        response = client.post("/v1/responses", json={
+            "model": "claude-sonnet",
+            "input": "hello",
+        })
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["id"].startswith("resp_")
+        assert body["object"] == "response"
+        assert body["status"] == "completed"
+        assert body["store"] is False
+        assert body["output"][0]["type"] == "message"
+        assert body["output"][0]["content"][0]["type"] == "output_text"
+        assert body["output"][0]["content"][0]["text"] == "hello there"
+        assert body["usage"] == {
+            "input_tokens": 3,
+            "input_tokens_details": {"cached_tokens": 0},
+            "output_tokens": 2,
+            "output_tokens_details": {"reasoning_tokens": 0},
+            "total_tokens": 5,
+        }
+        assert agent.last_call["messages"] == [
+            {"role": "user", "content": "hello"},
+        ]
+
+    def test_instructions_sampling_and_function_tool_are_translated(self):
+        client, agent = _make_client()
+        response = client.post("/v1/responses", json={
+            "model": "m",
+            "instructions": "Be concise.",
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "weather?"}],
+            }],
+            "temperature": 0.2,
+            "top_p": 0.8,
+            "max_output_tokens": 120,
+            "tools": [{
+                "type": "function",
+                "name": "get_weather",
+                "description": "Get weather",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"city": {"type": "string"}},
+                },
+            }],
+            "tool_choice": {"type": "function", "name": "get_weather"},
+        })
+
+        assert response.status_code == 200
+        assert agent.last_call["system"] == "Be concise."
+        assert agent.last_call["messages"] == [
+            {"role": "user", "content": "weather?"},
+        ]
+        assert agent.last_call["temperature"] == 0.2
+        assert agent.last_call["top_p"] == 0.8
+        assert agent.last_call["max_tokens"] == 120
+        assert agent.last_call["tools"] == [{
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "description": "Get weather",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"city": {"type": "string"}},
+                },
+            },
+        }]
+        assert agent.last_call["tool_choice"] == {
+            "type": "function",
+            "function": {"name": "get_weather"},
+        }
+
+    def test_function_call_history_is_translated(self):
+        client, agent = _make_client()
+        response = client.post("/v1/responses", json={
+            "model": "m",
+            "input": [
+                {"role": "user", "content": "weather?"},
+                {
+                    "type": "function_call",
+                    "call_id": "call_abc",
+                    "name": "get_weather",
+                    "arguments": '{"city":"Paris"}',
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_abc",
+                    "output": "18C",
+                },
+            ],
+        })
+
+        assert response.status_code == 200
+        assert agent.last_call["messages"] == [
+            {"role": "user", "content": "weather?"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{
+                    "id": "call_abc",
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "arguments": '{"city":"Paris"}',
+                    },
+                }],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call_abc",
+                "content": "18C",
+            },
+        ]
+
+    def test_tool_call_response_is_a_function_call_output_item(self):
+        client, _ = _make_client(chat_extra={
+            "content": None,
+            "tool_calls": _TOOL_CALL,
+            "finish_reason": "tool_calls",
+        })
+        response = client.post("/v1/responses", json={
+            "model": "m",
+            "input": "weather?",
+            "tools": [{
+                "type": "function",
+                "name": "get_weather",
+                "parameters": {"type": "object", "properties": {}},
+            }],
+        })
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["status"] == "completed"
+        assert body["output"] == [{
+            "id": body["output"][0]["id"],
+            "call_id": "call_abc",
+            "type": "function_call",
+            "name": "get_weather",
+            "arguments": '{"city":"Paris"}',
+            "status": "completed",
+        }]
+
+    def test_auto_model_uses_smart_routing(self):
+        client, agent = _make_client()
+        response = client.post("/v1/responses", json={"input": "hello"})
+
+        assert response.status_code == 200
+        assert agent.last_call["model"] == ""
+        assert agent.last_call["smart_routing"] is True
+
+    def test_authenticated_tenant_is_forwarded(self):
+        client, agent = _make_client(
+            user_id="apikey:responses",
+            project_id="project-responses",
+            tenant_id="tenant-responses",
+        )
+        response = client.post("/v1/responses", json={
+            "model": "m",
+            "input": "hello",
+        })
+
+        assert response.status_code == 200
+        assert agent.last_call["user_id"] == "apikey:responses"
+        assert agent.last_call["project_id"] == "project-responses"
+        assert agent.last_call["tenant_id"] == "tenant-responses"
+
+    def test_stateful_fields_are_rejected_without_calling_router(self):
+        for field, value in (
+            ("previous_response_id", "resp_previous"),
+            ("conversation", "conv_123"),
+            ("store", True),
+            ("background", True),
+        ):
+            client, agent = _make_client()
+            response = client.post("/v1/responses", json={
+                "model": "m",
+                "input": "hello",
+                field: value,
+            })
+            assert response.status_code == 400, field
+            assert response.json()["error"]["type"] == "invalid_request_error"
+            assert agent.last_call == {}
+
+    def test_hosted_tool_is_rejected(self):
+        client, agent = _make_client()
+        response = client.post("/v1/responses", json={
+            "model": "m",
+            "input": "latest news",
+            "tools": [{"type": "web_search"}],
+        })
+
+        assert response.status_code == 400
+        assert "Only function tools" in response.json()["error"]["message"]
+        assert agent.last_call == {}
+
+    def test_streaming_emits_responses_events_in_sequence(self):
+        client, _ = _make_client()
+        events = []
+        with client.stream("POST", "/v1/responses", json={
+            "model": "m",
+            "input": "hello",
+            "stream": True,
+        }) as response:
+            assert response.status_code == 200
+            assert "text/event-stream" in response.headers["content-type"]
+            event_type = None
+            for line in response.iter_lines():
+                if line.startswith("event: "):
+                    event_type = line[7:]
+                elif line.startswith("data: "):
+                    payload = json.loads(line[6:])
+                    assert payload["type"] == event_type
+                    events.append(payload)
+
+        assert [event["sequence_number"] for event in events] == list(
+            range(len(events))
+        )
+        assert events[0]["type"] == "response.created"
+        assert events[1]["type"] == "response.in_progress"
+        assert events[-1]["type"] == "response.completed"
+        deltas = [
+            event["delta"]
+            for event in events
+            if event["type"] == "response.output_text.delta"
+        ]
+        assert "".join(deltas) == "one two three"
+        assert (
+            events[-1]["response"]["output"][0]["content"][0]["text"]
+            == "one two three"
+        )
+
+    def test_streaming_tool_call_uses_function_events(self):
+        client, _ = _make_client(stream_chunks=[
+            {"id": "i", "model": "m", "content": "", "tool_calls": _TOOL_CALL},
+            {
+                "id": "i",
+                "model": "m",
+                "content": "",
+                "finish_reason": "tool_calls",
+                "is_final": True,
+            },
+        ])
+        events = []
+        with client.stream("POST", "/v1/responses", json={
+            "model": "m",
+            "input": "weather?",
+            "stream": True,
+            "tools": [{
+                "type": "function",
+                "name": "get_weather",
+                "parameters": {"type": "object", "properties": {}},
+            }],
+        }) as response:
+            for line in response.iter_lines():
+                if line.startswith("data: "):
+                    events.append(json.loads(line[6:]))
+
+        event_types = [event["type"] for event in events]
+        assert "response.function_call_arguments.delta" in event_types
+        assert "response.function_call_arguments.done" in event_types
+        completed = events[-1]["response"]
+        assert completed["status"] == "completed"
+        assert completed["output"][0]["type"] == "function_call"
+        assert completed["output"][0]["call_id"] == "call_abc"
+
+
+class TestEmbeddings:
+    def test_embeddings_shape_and_order(self):
+        client, agent = _make_client()
+        response = client.post("/v1/embeddings", json={
+            "model": "text-embedding",
+            "input": ["first", "second"],
+        })
+
+        assert response.status_code == 200
+        assert response.json() == {
+            "object": "list",
+            "data": [
+                {
+                    "object": "embedding",
+                    "index": 0,
+                    "embedding": [0.0, 0.5],
+                },
+                {
+                    "object": "embedding",
+                    "index": 1,
+                    "embedding": [1.0, 0.5],
+                },
+            ],
+            "model": "text-embedding",
+            "usage": {"prompt_tokens": 4, "total_tokens": 4},
+        }
+        assert agent.last_call["input"] == ["first", "second"]
+
+    def test_embedding_options_and_identity_are_forwarded(self):
+        client, agent = _make_client(
+            user_id="apikey:embed",
+            project_id="project-embed",
+            tenant_id="tenant-embed",
+        )
+        response = client.post("/v1/embeddings", json={
+            "model": "text-embedding",
+            "input": "hello",
+            "encoding_format": "base64",
+            "dimensions": 256,
+            "user": "provider-user",
+        })
+
+        assert response.status_code == 200
+        assert agent.last_call == {
+            "action": "embeddings",
+            "model": "text-embedding",
+            "input": "hello",
+            "encoding_format": "base64",
+            "dimensions": 256,
+            "provider": None,
+            "user": "provider-user",
+            "user_id": "apikey:embed",
+            "project_id": "project-embed",
+            "authorized_project": None,
+            "tenant_id": "tenant-embed",
+            "allow_legacy_project_lookup": True,
+        }
+
+    def test_missing_model_and_token_arrays_are_rejected(self):
+        client, agent = _make_client()
+
+        missing = client.post("/v1/embeddings", json={"input": "hello"})
+        token_array = client.post("/v1/embeddings", json={
+            "model": "text-embedding",
+            "input": 123,
+        })
+
+        assert missing.status_code == 400
+        assert token_array.status_code == 400
+        assert agent.last_call == {}
 
 
 _WEATHER_TOOL = {

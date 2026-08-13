@@ -21,6 +21,7 @@ from .errors import AgentCoreAdapterError
 
 class InvocationAction(Enum):
     CHAT = "chat"
+    EMBEDDINGS = "embeddings"
     LIST_MODELS = "list_models"
     QUERY = "query"
     HEALTH = "health"
@@ -42,6 +43,16 @@ CHAT_FIELDS = frozenset(
         "stream",
         "tools",
         "tool_choice",
+    }
+)
+EMBEDDING_FIELDS = frozenset(
+    {
+        "model",
+        "provider",
+        "input",
+        "encoding_format",
+        "dimensions",
+        "user",
     }
 )
 SUPPORTED_CHAT_PROVIDERS = frozenset(
@@ -892,6 +903,8 @@ def parse_invocation_payload(
     allowed_fields = {"action", REHEARSAL_FIELD}
     if action is InvocationAction.CHAT:
         allowed_fields.update(CHAT_FIELDS)
+    elif action is InvocationAction.EMBEDDINGS:
+        allowed_fields.update(EMBEDDING_FIELDS)
     elif action is InvocationAction.QUERY:
         allowed_fields.update(QUERY_FIELDS)
     elif action is InvocationAction.UPDATE_TENANT_CONFIG:
@@ -912,6 +925,75 @@ def parse_invocation_payload(
             tenant_config_update=TenantConfigUpdateRequest.from_payload(
                 payload
             ),
+            rehearsal=rehearsal,
+        )
+    if action is InvocationAction.EMBEDDINGS:
+        preferred_provider = payload.get("provider")
+        if preferred_provider is not None:
+            preferred_provider = _identifier(
+                preferred_provider,
+                "provider",
+            )
+            if preferred_provider not in SUPPORTED_CHAT_PROVIDERS:
+                raise _invalid_payload(
+                    "Field 'provider' is not a supported provider."
+                )
+
+        model = _required_string(
+            payload.get("model"),
+            "model",
+            max_length=256,
+        )
+        input_value = payload.get("input")
+        if isinstance(input_value, str):
+            if not input_value:
+                raise _invalid_payload(
+                    "Field 'input' must not be empty."
+                )
+        elif isinstance(input_value, list):
+            if not input_value or not all(
+                isinstance(item, str) and item
+                for item in input_value
+            ):
+                raise _invalid_payload(
+                    "Field 'input' must be a non-empty list of non-empty strings."
+                )
+        else:
+            raise _invalid_payload(
+                "Field 'input' must be a string or a list of strings."
+            )
+
+        encoding_format = payload.get("encoding_format", "float")
+        if encoding_format not in {"float", "base64"}:
+            raise _invalid_payload(
+                "Field 'encoding_format' must be 'float' or 'base64'."
+            )
+        dimensions = payload.get("dimensions")
+        if dimensions is not None and (
+            isinstance(dimensions, bool)
+            or not isinstance(dimensions, int)
+            or not 1 <= dimensions <= 65_536
+        ):
+            raise _invalid_payload(
+                "Field 'dimensions' must be an integer between 1 and 65536."
+            )
+        user = payload.get("user")
+        if user is not None:
+            user = _required_string(user, "user", max_length=256)
+
+        request_data: dict[str, Any] = {
+            "model": model,
+            "input": input_value,
+            "encoding_format": encoding_format,
+        }
+        if dimensions is not None:
+            request_data["dimensions"] = dimensions
+        if user is not None:
+            request_data["user"] = user
+        return ParsedInvocation(
+            action=action,
+            request_data=request_data,
+            preferred_provider=preferred_provider,
             rehearsal=rehearsal,
         )
     if action is not InvocationAction.CHAT:

@@ -479,6 +479,11 @@ class AgentCoreAdapter:
                 policy_action, policy_resource = ("get", "/v1/models")
             elif parsed.action is InvocationAction.READINESS:
                 policy_action, policy_resource = ("get", "/ready")
+            elif parsed.action is InvocationAction.EMBEDDINGS:
+                policy_action, policy_resource = (
+                    "post",
+                    "/v1/embeddings",
+                )
             elif parsed.action is InvocationAction.QUERY:
                 policy_action, policy_resource = ("post", "/v1/query")
             elif parsed.action is InvocationAction.GET_TENANT_CONFIG:
@@ -539,6 +544,25 @@ class AgentCoreAdapter:
                 user_id=identity.principal.principal_id,
                 tenant_id=identity.tenant_id,
                 authorized_project=project,
+            )
+
+        if parsed.action is InvocationAction.EMBEDDINGS:
+            if parsed.request_data is None:
+                raise AgentCoreAdapterError(
+                    400,
+                    "invalid_payload",
+                    "Embeddings payload is required.",
+                )
+            return await runtime.gateway.handle_embeddings(
+                parsed.request_data,
+                _gateway_context(
+                    identity,
+                    project,
+                    preferred_provider=parsed.preferred_provider,
+                    rehearsal=parsed.rehearsal,
+                    rehearsal_binding=rehearsal_binding,
+                    rehearsal_ledger=rehearsal_ledger,
+                ),
             )
 
         if parsed.action is InvocationAction.GET_TENANT_CONFIG:

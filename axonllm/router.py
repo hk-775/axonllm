@@ -3,23 +3,19 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Iterable, Sequence
-from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, overload
-
-import yaml
 
 from src.gateway.models import (
     ChatCompletionRequest,
     ChatCompletionResponse,
+    EmbeddingRequest,
+    EmbeddingResponse,
     ModelSummary,
-    ProviderModelMapping,
     StreamChunk,
     ValidationError,
 )
-from src.gateway.router import AllProvidersExhaustedError, ProviderError
-from src.gateway.routing import NoHealthyProviderError
-from src.gateway.streaming import simulate_streaming
+from src.gateway.routing_runtime import RoutingRuntime
 
 if TYPE_CHECKING:
     from src.gateway.model_registry import ModelRegistry
@@ -141,6 +137,35 @@ class _Chat:
         self.completions = _Completions(owner)
 
 
+class _Embeddings:
+    def __init__(self, owner: AsyncRouter) -> None:
+        self._owner = owner
+
+    async def create(
+        self,
+        *,
+        model: str,
+        input: str | list[str],
+        encoding_format: Literal["float", "base64"] = "float",
+        dimensions: int | None = None,
+        user: str | None = None,
+        preferred_provider: str | None = None,
+    ) -> EmbeddingResponse:
+        """Create routed embeddings while preserving input order."""
+        values = [input] if isinstance(input, str) else input
+        request = EmbeddingRequest(
+            model=model,
+            input=values,
+            encoding_format=encoding_format,
+            dimensions=dimensions,
+            user=user,
+        )
+        return await self._owner._embed(
+            request,
+            preferred_provider=preferred_provider,
+        )
+
+
 class _Models:
     def __init__(self, owner: AsyncRouter) -> None:
         self._owner = owner
@@ -183,13 +208,23 @@ class AsyncRouter:
         provider_factory: MultiProviderFactory,
         model_registry: ModelRegistry,
         validator: RequestValidator,
+        runtime: RoutingRuntime | None = None,
     ) -> None:
-        self._router = router
-        self._provider_factory = provider_factory
-        self._model_registry = model_registry
-        self._validator = validator
+        self._runtime = runtime or RoutingRuntime(
+            router=router,
+            provider_factory=provider_factory,
+            model_registry=model_registry,
+            validator=validator,
+            owns_provider_factory=True,
+        )
+        # Compatibility aliases for integrations that need advanced inspection.
+        self._router = self._runtime.router
+        self._provider_factory = self._runtime.provider_factory
+        self._model_registry = self._runtime.model_registry
+        self._validator = self._runtime.validator
         self._closed = False
         self.chat = _Chat(self)
+        self.embeddings = _Embeddings(self)
         self.models = _Models(self)
 
     @classmethod
@@ -207,77 +242,42 @@ class AsyncRouter:
         require_priced_mappings: bool = False,
     ) -> AsyncRouter:
         """Build a router from strictly validated local configuration files."""
-        from src.gateway.config_loader import load_pricing_config
-        from src.gateway.cost_tracker import CostTracker
-        from src.gateway.health_tracker import ProviderHealthTracker
-        from src.gateway.model_registry import ModelRegistry
-        from src.gateway.multi_provider_factory import MultiProviderFactory
-        from src.gateway.provider_loader import load_provider_routes
-        from src.gateway.request_validator import RequestValidator
-        from src.gateway.router import Router
-
-        model_document = yaml.safe_load(
-            Path(models).read_text(encoding="utf-8")
-        )
-        if not isinstance(model_document, dict):
-            raise ValueError(
-                "model configuration must contain a YAML object"
-            )
-        registry = ModelRegistry.from_config(model_document)
-        pricing_config = (
-            load_pricing_config(str(pricing)) if pricing is not None else {}
-        )
-        cost_tracker = CostTracker(pricing_config)
-        routes = load_provider_routes(str(providers))
-        provider_set = (
-            frozenset(enabled_providers)
-            if enabled_providers is not None
-            else None
-        )
-        factory = MultiProviderFactory(
+        runtime = RoutingRuntime.from_files(
+            models=models,
+            providers=providers,
+            pricing=pricing,
+            enabled_providers=enabled_providers,
             bedrock_region=bedrock_region,
-            enabled_providers=provider_set,
-            provider_routes=routes,
+            max_retries=max_retries,
+            base_delay=base_delay,
+            cooldown_seconds=cooldown_seconds,
+            require_priced_mappings=require_priced_mappings,
         )
-        try:
-            router = Router(
-                registry,
-                ProviderHealthTracker(),
-                max_retries=max_retries,
-                base_delay=base_delay,
-                cooldown_seconds=cooldown_seconds,
-                cost_tracker=cost_tracker,
-                available_providers=factory.available_providers,
-                require_priced_mappings=require_priced_mappings,
-            )
-            validator = RequestValidator(registry)
-        except BaseException:
-            factory.close_credential_providers()
-            raise
         return cls(
-            router=router,
-            provider_factory=factory,
-            model_registry=registry,
-            validator=validator,
+            router=runtime.router,
+            provider_factory=runtime.provider_factory,
+            model_registry=runtime.model_registry,
+            validator=runtime.validator,
+            runtime=runtime,
         )
 
     @property
     def available_providers(self) -> frozenset[str]:
         """Providers with an enabled route in this router process."""
         self._ensure_open()
-        return self._provider_factory.available_providers
+        return self._runtime.available_providers
 
     def route_snapshot(self) -> list[dict]:
         """Return a secret-free snapshot of this process's concrete routes."""
         self._ensure_open()
-        return self._provider_factory.route_snapshot()
+        return self._runtime.route_snapshot()
 
     async def close(self) -> None:
         """Release HTTP sessions and refreshable credential providers."""
         if self._closed:
             return
         self._closed = True
-        await self._provider_factory.close()
+        await self._runtime.close()
 
     async def __aenter__(self) -> AsyncRouter:
         self._ensure_open()
@@ -301,127 +301,51 @@ class AsyncRouter:
         if errors:
             raise InvalidRequestError(errors)
         if request.stream:
-            return self._stream(
+            return self._runtime.stream(
                 request,
                 preferred_provider=preferred_provider,
             )
-        provider_fn = self._provider_factory.create(request)
-        return await self._router.execute_with_fallback(
+        return await self._runtime.complete(
             request,
-            provider_fn,
             preferred_provider=preferred_provider,
         )
 
-    def _stream_chain(
+    async def _embed(
         self,
-        model: str,
-        preferred_provider: str | None,
-    ) -> list[ProviderModelMapping]:
-        mappings = self._router.available_mappings(model)
-        if preferred_provider:
-            return sorted(
-                mappings,
-                key=lambda mapping: (
-                    mapping.provider != preferred_provider,
-                    mapping.fallback_order,
-                ),
-            )
-
-        strategy = self._router._get_strategy(model)
-        try:
-            initial = strategy.select(
-                mappings,
-                self._router.health_tracker,
-            )
-        except NoHealthyProviderError:
-            return sorted(mappings, key=lambda item: item.fallback_order)
-        return [
-            initial,
-            *sorted(
-                [
-                    mapping
-                    for mapping in mappings
-                    if mapping is not initial
-                ],
-                key=lambda item: item.fallback_order,
-            ),
-        ]
-
-    async def _stream(
-        self,
-        request: ChatCompletionRequest,
+        request: EmbeddingRequest,
         *,
         preferred_provider: str | None,
-    ) -> AsyncIterator[StreamChunk]:
-        attempts: list[dict] = []
-        for mapping in self._stream_chain(
-            request.model,
-            preferred_provider,
+    ) -> EmbeddingResponse:
+        self._ensure_open()
+        if not isinstance(request.model, str) or not request.model.strip():
+            raise ValueError("model must be a non-empty string")
+        model_config = self._model_registry.models.get(request.model)
+        if model_config is None:
+            raise ValueError(f"Unknown model: {request.model}")
+        if "embeddings" not in set(model_config.capabilities or []):
+            raise ValueError(
+                f"Model '{request.model}' is not configured for embeddings"
+            )
+        if (
+            not isinstance(request.input, list)
+            or not request.input
+            or not all(
+                isinstance(value, str) and value
+                for value in request.input
+            )
         ):
-            if not self._router.health_tracker.is_healthy(mapping.provider):
-                attempts.append(
-                    {
-                        "provider": mapping.provider,
-                        "status_code": 0,
-                        "message": "skipped (unhealthy)",
-                    }
-                )
-                continue
-
-            stream = self._provider_factory.execute_streaming(
-                request,
-                mapping,
+            raise ValueError(
+                "input must be a non-empty string or list of non-empty strings"
             )
-            try:
-                first = await stream.__anext__()
-            except StopAsyncIteration:
-                return
-            except ProviderError as exc:
-                attempts.append(
-                    {
-                        "provider": mapping.provider,
-                        "status_code": exc.status_code,
-                        "message": exc.message,
-                        **(
-                            {"route_id": exc.route_id}
-                            if exc.route_id
-                            else {}
-                        ),
-                    }
-                )
-                if exc.provider_unavailable is not False:
-                    self._router.health_tracker.mark_unhealthy(
-                        mapping.provider,
-                        self._router.cooldown_seconds,
-                    )
-                continue
-
-            first.model = request.model
-            yield first
-            try:
-                async for chunk in stream:
-                    chunk.model = request.model
-                    yield chunk
-            finally:
-                close = getattr(stream, "aclose", None)
-                if callable(close):
-                    await close()
-            return
-
-        # Some providers, including the boto3 Bedrock transport, do not expose
-        # native SSE. Preserve streaming semantics by routing one normal
-        # completion through the same fallback engine and chunking the result.
-        buffered_request = replace(request, stream=False)
-        provider_fn = self._provider_factory.create(buffered_request)
-        try:
-            response = await self._router.execute_with_fallback(
-                buffered_request,
-                provider_fn,
-                preferred_provider=preferred_provider,
-            )
-        except AllProvidersExhaustedError as exc:
-            raise AllProvidersExhaustedError(
-                [*attempts, *exc.attempts]
-            ) from exc
-        for chunk in simulate_streaming(response):
-            yield chunk
+        if request.encoding_format not in {"float", "base64"}:
+            raise ValueError("encoding_format must be 'float' or 'base64'")
+        if request.dimensions is not None and (
+            not isinstance(request.dimensions, int)
+            or isinstance(request.dimensions, bool)
+            or request.dimensions <= 0
+        ):
+            raise ValueError("dimensions must be a positive integer")
+        return await self._runtime.embed(
+            request,
+            preferred_provider=preferred_provider,
+        )

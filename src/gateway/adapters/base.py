@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 from src.gateway.models import (
     ChatCompletionRequest,
     ChatCompletionResponse,
+    EmbeddingRequest,
+    EmbeddingResponse,
     HealthStatus,
     ModelInfo,
     ProviderHealth,
@@ -23,6 +25,7 @@ class ProviderAdapter(ABC):
 
     PROVIDER_NAME: str = ""
     _MODELS: list[ModelInfo] = []
+    supports_embeddings: bool = False
 
     def validate_request(self, request: ChatCompletionRequest) -> None:
         """Reject provider-specific capability mismatches before transport."""
@@ -50,6 +53,24 @@ class ProviderAdapter(ABC):
     def stream_translator(self) -> Callable[[dict], StreamChunk]:
         """Return request-local stream translation state."""
         return self.translate_stream_chunk
+
+    async def translate_embedding_request(
+        self,
+        request: EmbeddingRequest,
+    ) -> dict:
+        """Translate an embeddings request when the provider supports it."""
+        raise NotImplementedError(
+            f"{self.PROVIDER_NAME or 'provider'} does not support embeddings"
+        )
+
+    def translate_embedding_response(
+        self,
+        provider_response: dict,
+    ) -> EmbeddingResponse:
+        """Translate an embeddings response when the provider supports it."""
+        raise NotImplementedError(
+            f"{self.PROVIDER_NAME or 'provider'} does not support embeddings"
+        )
 
     async def list_models(self) -> list[ModelInfo]:
         """Return available models from this provider."""

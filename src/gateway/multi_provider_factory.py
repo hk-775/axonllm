@@ -4,31 +4,19 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import importlib
 import logging
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import TYPE_CHECKING
 
-from src.gateway.adapters.ai21_adapter import AI21Adapter
-from src.gateway.adapters.anthropic_adapter import AnthropicAdapter
-from src.gateway.adapters.bedrock_adapter import BedrockAdapter
-from src.gateway.adapters.cohere_adapter import CohereAdapter
-from src.gateway.adapters.fireworks_adapter import FireworksAdapter
-from src.gateway.adapters.google_ai_adapter import GoogleAIAdapter
-from src.gateway.adapters.groq_adapter import GroqAdapter
-from src.gateway.adapters.mantle_adapter import MantleAdapter
-from src.gateway.adapters.openai_adapter import OpenAIAdapter
-from src.gateway.adapters.azure_adapter import AzureOpenAIAdapter
 from src.gateway.adapters.registry import AdapterRegistry
-from src.gateway.adapters.together_adapter import TogetherAdapter
-from src.gateway.adapters.vertex_adapter import VertexAIAdapter
-from src.gateway.adapters.xai_adapter import XAIAdapter
-from src.gateway.bedrock_provider import create_bedrock_provider_fn
 from src.gateway.http_client import HttpClient
-from src.gateway.mantle_provider import create_mantle_provider_fn
 from src.gateway.models import (
     ChatCompletionRequest,
     ChatCompletionResponse,
+    EmbeddingRequest,
+    EmbeddingResponse,
     ProviderModelMapping,
 )
 from src.gateway.provider_config import ProviderConfig
@@ -46,6 +34,78 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_ADAPTER_TYPES = {
+    "ai21": ("src.gateway.adapters.ai21_adapter", "AI21Adapter"),
+    "anthropic": (
+        "src.gateway.adapters.anthropic_adapter",
+        "AnthropicAdapter",
+    ),
+    "azure_openai": (
+        "src.gateway.adapters.azure_adapter",
+        "AzureOpenAIAdapter",
+    ),
+    "bedrock": (
+        "src.gateway.adapters.bedrock_adapter",
+        "BedrockAdapter",
+    ),
+    "bedrock-mantle": (
+        "src.gateway.adapters.mantle_adapter",
+        "MantleAdapter",
+    ),
+    "cohere": ("src.gateway.adapters.cohere_adapter", "CohereAdapter"),
+    "fireworks": (
+        "src.gateway.adapters.fireworks_adapter",
+        "FireworksAdapter",
+    ),
+    "google_ai": (
+        "src.gateway.adapters.google_ai_adapter",
+        "GoogleAIAdapter",
+    ),
+    "groq": ("src.gateway.adapters.groq_adapter", "GroqAdapter"),
+    "openai": ("src.gateway.adapters.openai_adapter", "OpenAIAdapter"),
+    "together": (
+        "src.gateway.adapters.together_adapter",
+        "TogetherAdapter",
+    ),
+    "vertex_ai": (
+        "src.gateway.adapters.vertex_adapter",
+        "VertexAIAdapter",
+    ),
+    "xai": ("src.gateway.adapters.xai_adapter", "XAIAdapter"),
+}
+
+
+def _load_adapter(module_name: str, class_name: str):
+    module = importlib.import_module(module_name)
+    adapter_type = getattr(module, class_name)
+    return adapter_type()
+
+
+def create_bedrock_provider_fn(*args, **kwargs):
+    """Import the AWS transport only when a Bedrock route is first used."""
+    try:
+        from src.gateway.bedrock_provider import (
+            create_bedrock_provider_fn as implementation,
+        )
+    except ImportError as exc:
+        raise RuntimeError(
+            "Bedrock routes require the 'axon-llm[aws]' extra"
+        ) from exc
+    return implementation(*args, **kwargs)
+
+
+def create_mantle_provider_fn(*args, **kwargs):
+    """Import the SigV4 Mantle transport only when its route is first used."""
+    try:
+        from src.gateway.mantle_provider import (
+            create_mantle_provider_fn as implementation,
+        )
+    except ImportError as exc:
+        raise RuntimeError(
+            "Bedrock Mantle routes require the 'axon-llm[aws]' extra"
+        ) from exc
+    return implementation(*args, **kwargs)
+
 
 class MultiProviderFactory:
     """Creates provider_fn callables that dispatch to the right backend.
@@ -60,21 +120,14 @@ class MultiProviderFactory:
         enabled_providers: frozenset[str] | None = None,
         provider_routes: list[ProviderRoute] | None = None,
     ) -> None:
-        # HTTP-based providers
         self._adapter_registry = AdapterRegistry()
-        self._adapter_registry.register("openai", OpenAIAdapter())
-        self._adapter_registry.register("anthropic", AnthropicAdapter())
-        self._adapter_registry.register("azure_openai", AzureOpenAIAdapter())
-        self._adapter_registry.register("vertex_ai", VertexAIAdapter())
-        self._adapter_registry.register("cohere", CohereAdapter())
-        self._adapter_registry.register("google_ai", GoogleAIAdapter())
-        self._adapter_registry.register("bedrock", BedrockAdapter())
-        self._adapter_registry.register("bedrock-mantle", MantleAdapter())
-        self._adapter_registry.register("xai", XAIAdapter())
-        self._adapter_registry.register("groq", GroqAdapter())
-        self._adapter_registry.register("together", TogetherAdapter())
-        self._adapter_registry.register("fireworks", FireworksAdapter())
-        self._adapter_registry.register("ai21", AI21Adapter())
+        for provider_name, (module_name, class_name) in _ADAPTER_TYPES.items():
+            self._adapter_registry.register_lazy(
+                provider_name,
+                lambda module_name=module_name, class_name=class_name: (
+                    _load_adapter(module_name, class_name)
+                ),
+            )
 
         self._provider_configs = provider_configs or {}
         self._enabled_providers = enabled_providers
@@ -475,6 +528,100 @@ class MultiProviderFactory:
                 prompt_caching_enabled=prompt_caching_enabled,
                 spoke=spoke,
             )
+
+        return _provider_fn
+
+    async def _execute_embedding_route(
+        self,
+        request: EmbeddingRequest,
+        mapping: ProviderModelMapping,
+    ) -> EmbeddingResponse:
+        try:
+            lease = self._route_pool.acquire(
+                mapping.provider,
+                mapping.model_id,
+            )
+        except NoAvailableRouteError as exc:
+            raise self._no_route_error(mapping, exc) from exc
+
+        started = time.monotonic()
+        settled = False
+        try:
+            adapter = self._adapter_registry.get(mapping.provider)
+            config = self._config_for_route(lease.route, None)
+            response = await self._http_client.execute_embeddings(
+                request,
+                mapping,
+                adapter,
+                config,
+            )
+        except ProviderError as exc:
+            self._route_pool.record_failure(lease, exc.status_code)
+            settled = True
+            raise self._routed_error(mapping, lease, exc) from exc
+        except Exception as exc:
+            self._route_pool.record_failure(lease, 0)
+            settled = True
+            wrapped = ProviderError(
+                502,
+                mapping.provider,
+                "Provider embeddings transport failed",
+            )
+            raise self._routed_error(mapping, lease, wrapped) from exc
+        else:
+            self._route_pool.record_success(
+                lease,
+                latency_ms=(time.monotonic() - started) * 1000,
+            )
+            settled = True
+            return response
+        finally:
+            if not settled:
+                self._route_pool.release(lease)
+
+    def create_embeddings(
+        self,
+        request: EmbeddingRequest,
+    ) -> Callable[[ProviderModelMapping], Awaitable[EmbeddingResponse]]:
+        """Return a route-aware embeddings provider function."""
+
+        async def _provider_fn(
+            mapping: ProviderModelMapping,
+        ) -> EmbeddingResponse:
+            if not self._route_allowed(mapping.provider):
+                raise ProviderError(
+                    status_code=503,
+                    provider=mapping.provider,
+                    message=(
+                        f"Provider '{mapping.provider}' is disabled or "
+                        "not configured in this deployment"
+                    ),
+                )
+            try:
+                adapter = self._adapter_registry.get(mapping.provider)
+            except KeyError:
+                raise ProviderError(
+                    status_code=501,
+                    provider=mapping.provider,
+                    message=(
+                        f"Embeddings are not supported for provider "
+                        f"'{mapping.provider}'"
+                    ),
+                    retryable=False,
+                    provider_unavailable=False,
+                ) from None
+            if not adapter.supports_embeddings:
+                raise ProviderError(
+                    status_code=501,
+                    provider=mapping.provider,
+                    message=(
+                        f"Embeddings are not supported for provider "
+                        f"'{mapping.provider}'"
+                    ),
+                    retryable=False,
+                    provider_unavailable=False,
+                )
+            return await self._execute_embedding_route(request, mapping)
 
         return _provider_fn
 

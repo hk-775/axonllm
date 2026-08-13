@@ -176,9 +176,24 @@ def test_create_admin_routes_returns_routes(admin_api):
     assert "/admin/users/{id:path}/budget" in paths
     assert "/admin/users/{id:path}" in paths
     assert "/admin/catalog" in paths
+    assert "/admin/runtime-config" in paths
     assert "/admin/models" in paths
     assert "/admin/policies" in paths
     assert "/admin/health" in paths
+
+
+def test_runtime_config_is_versioned_and_credential_free(client):
+    response = client.get("/admin/runtime-config")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["schema"] == "axonllm.routing-config/v1"
+    assert payload["revision"] == 0
+    assert payload["config"]["models"][0]["name"] == "gpt-4"
+    assert response.headers["cache-control"] == "no-store"
+    assert response.headers["x-axon-config-sha256"] == payload["sha256"]
+    assert "credential" not in response.text
+    assert "api_key" not in response.text
 
 
 def test_admin_api_with_initial_projects():

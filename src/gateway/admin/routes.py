@@ -131,6 +131,7 @@ from src.gateway.persistence import (
     PersistenceConflictError,
 )
 from src.gateway.provider_config import ProviderConfig
+from src.gateway.routing_config import RoutingConfigSnapshot
 from src.gateway.semantic_efficiency import SemanticEfficiencyEngine
 from .page_style import (
     BASE_STYLE,
@@ -2550,6 +2551,21 @@ class AdminAPI:
             headers=_revision_headers(self.model_registry.revision),
         )
 
+    async def runtime_config(self, request: Request) -> JSONResponse:
+        """Return the versioned, credential-free router configuration."""
+        await self._refresh_config()
+        snapshot = RoutingConfigSnapshot.from_registry(
+            self.model_registry
+        )
+        return JSONResponse(
+            snapshot.as_dict(),
+            headers={
+                **_revision_headers(snapshot.revision),
+                "Cache-Control": "no-store",
+                "X-Axon-Config-SHA256": snapshot.sha256,
+            },
+        )
+
     @staticmethod
     def _model_store_unavailable() -> JSONResponse:
         return JSONResponse(
@@ -3591,6 +3607,11 @@ def create_admin_routes(admin_api: AdminAPI) -> list[Route]:
         Route("/admin/users/{id:path}/efficiency", admin_api.user_efficiency, methods=["GET"]),
         Route("/admin/users/{id:path}", admin_api.get_user, methods=["GET"]),
         Route("/admin/catalog", admin_api.catalog, methods=["GET"]),
+        Route(
+            "/admin/runtime-config",
+            admin_api.runtime_config,
+            methods=["GET"],
+        ),
         Route("/admin/models", admin_api.list_models, methods=["GET"]),
         Route("/admin/models", admin_api.create_model, methods=["POST"]),
         Route("/admin/models/{name}", admin_api.update_model, methods=["PUT"]),

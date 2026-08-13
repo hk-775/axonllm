@@ -21,6 +21,7 @@ from src.gateway.models import (
     BudgetStatus,
     ChatCompletionRequest,
     ChatCompletionResponse,
+    EmbeddingRequest,
     EnsemblePreset,
     Project,
     ProviderModelMapping,
@@ -46,6 +47,7 @@ from src.gateway.router import (
 from src.gateway.session_manager import SessionManager
 from src.gateway.smart_routing import NoCandidateModelsError
 from src.gateway.streaming import simulate_streaming
+from src.gateway.routing_runtime import OpenedProviderStream
 
 if TYPE_CHECKING:
     from src.gateway.auth.policy_hierarchy import PolicyHierarchyResolver
@@ -58,6 +60,7 @@ if TYPE_CHECKING:
     from src.gateway.security.event_dispatcher import EventDispatcher
     from src.gateway.security.injection_detector import PromptInjectionDetector
     from src.gateway.security.pii_redactor import PIIRedactor, RedactionMapping
+    from src.gateway.routing_runtime import RoutingRuntime
 
 
 logger = logging.getLogger("gateway.agent")
@@ -67,6 +70,9 @@ logger = logging.getLogger("gateway.agent")
 _MAX_POLICY_BUFFER_BYTES = 8 * 1024 * 1024
 _MAX_STREAM_OUTPUT_BYTES = 8 * 1024 * 1024
 _PROVIDER_FAILURE_MESSAGE = "The provider request failed."
+_MAX_EMBEDDING_INPUTS = 2048
+_MAX_EMBEDDING_INPUT_BYTES = 512 * 1024
+_MAX_EMBEDDING_DIMENSIONS = 65_536
 
 
 # ---------------------------------------------------------------------------
@@ -201,6 +207,7 @@ class GatewayAgent:
         otlp_exporter: Any = None,
         semantic_cache: SemanticCache | None = None,
         persistence: DynamoPersistence | None = None,
+        routing_runtime: RoutingRuntime | None = None,
     ) -> None:
         self.router = router
         self.rate_limiter = rate_limiter
@@ -229,6 +236,7 @@ class GatewayAgent:
         self._otlp_exporter = otlp_exporter
         self._semantic_cache = semantic_cache
         self._persistence = persistence
+        self._routing_runtime = routing_runtime
 
     # ------------------------------------------------------------------
     # Public API
@@ -646,7 +654,13 @@ class GatewayAgent:
         try:
             prompt_caching_enabled = project.prompt_caching_enabled if project else False
 
-            if self.provider_fn_factory is not None:
+            if self._routing_runtime is not None:
+                provider_fn = self._routing_runtime.provider_fn(
+                    request,
+                    prompt_caching_enabled=prompt_caching_enabled,
+                    spoke=target_spoke,
+                )
+            elif self.provider_fn_factory is not None:
                 provider_fn = self.provider_fn_factory.create(
                     request, prompt_caching_enabled=prompt_caching_enabled,
                     spoke=target_spoke,
@@ -982,11 +996,19 @@ class GatewayAgent:
                         budget_reservation,
                         req_ctx=req_ctx,
                     )
-                response = await self.router.execute_with_fallback(
-                    request, provider_fn,
-                    preferred_provider=context.get("provider"),
-                    allowed_models=effective_allowed,
-                )
+                if self._routing_runtime is not None:
+                    response = await self._routing_runtime.complete(
+                        request,
+                        preferred_provider=context.get("provider"),
+                        allowed_models=effective_allowed,
+                        provider_fn=provider_fn,
+                    )
+                else:
+                    response = await self.router.execute_with_fallback(
+                        request, provider_fn,
+                        preferred_provider=context.get("provider"),
+                        allowed_models=effective_allowed,
+                    )
         except EnsembleAccessError as exc:
             await self._release_request_budget(
                 budget_reservation,
@@ -1350,7 +1372,10 @@ class GatewayAgent:
         Requires a ProviderFnFactory (owns the HttpClient.execute_streaming SSE
         path). Without one we fall back to the old select-then-simulate path.
         """
-        return self.provider_fn_factory is not None
+        return (
+            self._routing_runtime is not None
+            or self.provider_fn_factory is not None
+        )
 
     def _resolve_stream_chain(
         self, model: str, preferred_provider: str | None,
@@ -1861,7 +1886,11 @@ class GatewayAgent:
         while opening the stream. Usage, audit, trace, and quota accounting run
         on success, provider failure, and cancellation.
         """
-        factory = self.provider_fn_factory
+        factory = (
+            self.provider_fn_factory
+            if self.provider_fn_factory is not None
+            else getattr(self._routing_runtime, "provider_factory", None)
+        )
         assert factory is not None
 
         # Access-list enforcement (execute_with_fallback did this for the
@@ -1888,67 +1917,102 @@ class GatewayAgent:
             extract_last_user_prompt(request.messages), smart_routing_decision
         )
 
-        chain = self._resolve_stream_chain(request.model, preferred_provider)
-
         # --- Open the stream, falling back across providers pre-first-byte ---
         stream = None
         chosen = None
         open_errors: list[dict] = []
-        for mapping in chain:
-            if not self.router.health_tracker.is_healthy(mapping.provider):
-                open_errors.append({"provider": mapping.provider, "message": "skipped (unhealthy)"})
-                continue
-            try:
-                if callable(getattr(type(factory), "execute_streaming", None)):
-                    candidate = factory.execute_streaming(
-                        request,
-                        mapping,
-                        prompt_caching_enabled=prompt_caching_enabled,
-                        spoke=spoke,
+        if self._routing_runtime is not None:
+            opened = await self._routing_runtime.open_stream(
+                request,
+                preferred_provider=preferred_provider,
+                allowed_models=effective_allowed,
+                prompt_caching_enabled=prompt_caching_enabled,
+                spoke=spoke,
+            )
+            open_errors = list(opened.attempts)
+            if isinstance(opened, OpenedProviderStream):
+                stream = opened.stream
+                chosen = opened.mapping
+                first_chunk = opened.first_chunk
+        else:
+            chain = self._resolve_stream_chain(
+                request.model,
+                preferred_provider,
+            )
+            for mapping in chain:
+                if not self.router.health_tracker.is_healthy(mapping.provider):
+                    open_errors.append(
+                        {
+                            "provider": mapping.provider,
+                            "message": "skipped (unhealthy)",
+                        }
                     )
-                else:
-                    adapter = factory._adapter_registry.get(mapping.provider)
-                    config = factory.config_for(
-                        mapping.provider, spoke
-                    )  # region override
-                    if adapter is None or config is None:
-                        open_errors.append(
-                            {
-                                "provider": mapping.provider,
-                                "message": "no adapter/config",
-                            }
+                    continue
+                try:
+                    if callable(
+                        getattr(type(factory), "execute_streaming", None)
+                    ):
+                        candidate = factory.execute_streaming(
+                            request,
+                            mapping,
+                            prompt_caching_enabled=prompt_caching_enabled,
+                            spoke=spoke,
                         )
-                        continue
-                    candidate = factory._http_client.execute_streaming(
-                        request,
-                        mapping,
-                        adapter,
-                        config,
-                        prompt_caching_enabled=prompt_caching_enabled,
-                    )
-                # Prime the generator to surface a pre-stream provider error
-                # (non-2xx) here, so we can still fall back to the next provider.
-                first_chunk = await candidate.__anext__()
-                stream, chosen = candidate, mapping
-                break
-            except StopAsyncIteration:
-                stream, chosen, first_chunk = candidate, mapping, None
-                break
-            except Exception as exc:  # noqa: BLE001 — try the next provider
-                diagnostic: dict[str, object] = {
-                    "provider": mapping.provider,
-                    "error_type": type(exc).__name__,
-                }
-                status_code = getattr(exc, "status_code", None)
-                if isinstance(status_code, int):
-                    diagnostic["status_code"] = status_code
-                open_errors.append(diagnostic)
-                if getattr(exc, "provider_unavailable", None) is not False:
-                    self.router.health_tracker.mark_unhealthy(
-                        mapping.provider,
-                        getattr(self.router, "cooldown_seconds", 60),
-                    )
-                continue
+                    else:
+                        adapter = factory._adapter_registry.get(
+                            mapping.provider
+                        )
+                        config = factory.config_for(
+                            mapping.provider,
+                            spoke,
+                        )
+                        if adapter is None or config is None:
+                            open_errors.append(
+                                {
+                                    "provider": mapping.provider,
+                                    "message": "no adapter/config",
+                                }
+                            )
+                            continue
+                        candidate = factory._http_client.execute_streaming(
+                            request,
+                            mapping,
+                            adapter,
+                            config,
+                            prompt_caching_enabled=(
+                                prompt_caching_enabled
+                            ),
+                        )
+                    # Prime the generator to surface a pre-stream provider error
+                    # here, so fallback remains possible before client bytes.
+                    first_chunk = await candidate.__anext__()
+                    stream, chosen = candidate, mapping
+                    break
+                except StopAsyncIteration:
+                    stream, chosen, first_chunk = candidate, mapping, None
+                    break
+                except Exception as exc:  # noqa: BLE001
+                    diagnostic: dict[str, object] = {
+                        "provider": mapping.provider,
+                        "error_type": type(exc).__name__,
+                    }
+                    status_code = getattr(exc, "status_code", None)
+                    if isinstance(status_code, int):
+                        diagnostic["status_code"] = status_code
+                    open_errors.append(diagnostic)
+                    if (
+                        getattr(exc, "provider_unavailable", None)
+                        is not False
+                    ):
+                        self.router.health_tracker.mark_unhealthy(
+                            mapping.provider,
+                            getattr(
+                                self.router,
+                                "cooldown_seconds",
+                                60,
+                            ),
+                        )
+                    continue
 
         if chosen is None:
             # No candidate opened a native SSE stream. Run the normal provider
@@ -1957,13 +2021,30 @@ class GatewayAgent:
             logger.debug("true-streaming unavailable (%s); falling back to buffered "
                          "simulate-stream for model=%s", open_errors, request.model)
             try:
-                provider_fn = factory.create(
-                    request, prompt_caching_enabled=prompt_caching_enabled, spoke=spoke)
-                response = await self.router.execute_with_fallback(
-                    request, provider_fn,
-                    preferred_provider=preferred_provider,
-                    allowed_models=effective_allowed,
+                buffered_request = dataclasses.replace(
+                    request,
+                    stream=False,
                 )
+                if self._routing_runtime is not None:
+                    response = await self._routing_runtime.complete(
+                        buffered_request,
+                        preferred_provider=preferred_provider,
+                        allowed_models=effective_allowed,
+                        prompt_caching_enabled=prompt_caching_enabled,
+                        spoke=spoke,
+                    )
+                else:
+                    provider_fn = factory.create(
+                        buffered_request,
+                        prompt_caching_enabled=prompt_caching_enabled,
+                        spoke=spoke,
+                    )
+                    response = await self.router.execute_with_fallback(
+                        buffered_request,
+                        provider_fn,
+                        preferred_provider=preferred_provider,
+                        allowed_models=effective_allowed,
+                    )
             except Exception:  # noqa: BLE001 — genuine provider failure
                 logger.warning(
                     "buffered stream fallback failed req=%s model=%s",
@@ -3492,6 +3573,423 @@ class GatewayAgent:
             provider=response.provider,
             warnings=response.warnings + ["Response modified by guardrail"],
         )
+
+    async def handle_embeddings(
+        self,
+        request_data: dict,
+        context: dict,
+    ) -> dict:
+        """Run a governed embeddings request through the shared router."""
+        raw_input = request_data.get("input")
+        if isinstance(raw_input, str):
+            inputs = [raw_input]
+        elif isinstance(raw_input, list):
+            inputs = raw_input
+        else:
+            return _error_response(
+                400,
+                "invalid_request",
+                "Field 'input' must be a string or a list of strings.",
+                code="invalid_embedding_input",
+            )
+        if not inputs or len(inputs) > _MAX_EMBEDDING_INPUTS:
+            return _error_response(
+                400,
+                "invalid_request",
+                (
+                    "Field 'input' must contain between 1 and "
+                    f"{_MAX_EMBEDDING_INPUTS} strings."
+                ),
+                code="invalid_embedding_input",
+            )
+        if not all(isinstance(item, str) and item for item in inputs):
+            return _error_response(
+                400,
+                "invalid_request",
+                "Every embeddings input must be a non-empty string.",
+                code="invalid_embedding_input",
+            )
+        if (
+            sum(len(item.encode("utf-8")) for item in inputs)
+            > _MAX_EMBEDDING_INPUT_BYTES
+        ):
+            return _error_response(
+                413,
+                "invalid_request",
+                "Embeddings input exceeds the maximum request size.",
+                code="embedding_input_too_large",
+            )
+
+        model = request_data.get("model")
+        if not isinstance(model, str) or not model.strip():
+            return _error_response(
+                400,
+                "invalid_request",
+                "Field 'model' is required.",
+                code="model_required",
+            )
+        encoding_format = request_data.get("encoding_format", "float")
+        if encoding_format not in {"float", "base64"}:
+            return _error_response(
+                400,
+                "invalid_request",
+                "Field 'encoding_format' must be 'float' or 'base64'.",
+                code="invalid_encoding_format",
+            )
+        dimensions = request_data.get("dimensions")
+        if dimensions is not None and (
+            not isinstance(dimensions, int)
+            or isinstance(dimensions, bool)
+            or not 1 <= dimensions <= _MAX_EMBEDDING_DIMENSIONS
+        ):
+            return _error_response(
+                400,
+                "invalid_request",
+                (
+                    "Field 'dimensions' must be an integer between 1 and "
+                    f"{_MAX_EMBEDDING_DIMENSIONS}."
+                ),
+                code="invalid_dimensions",
+            )
+        user = request_data.get("user")
+        if user is not None and (
+            not isinstance(user, str) or not user.strip()
+        ):
+            return _error_response(
+                400,
+                "invalid_request",
+                "Field 'user' must be a non-empty string.",
+                code="invalid_user",
+            )
+
+        req_ctx = self._extract_context(context)
+        project = self._project_for_context(req_ctx)
+        if (
+            req_ctx.tenant_id is not None
+            and project is None
+            and not req_ctx.allow_legacy_project_lookup
+        ):
+            return _error_response(
+                404,
+                "not_found",
+                "The requested resource was not found.",
+                code="resource_not_found",
+            )
+
+        model_config = self.router.model_registry.models.get(model)
+        if model_config is None:
+            return _error_response(
+                404,
+                "not_found",
+                f"Model '{model}' not found.",
+                code="model_not_found",
+            )
+        if "embeddings" not in set(model_config.capabilities or []):
+            return _error_response(
+                400,
+                "invalid_request",
+                f"Model '{model}' is not configured for embeddings.",
+                code="model_capability_mismatch",
+            )
+        if not self._router_model_is_available(model):
+            return _error_response(
+                503,
+                "service_unavailable",
+                f"Model '{model}' is not available in this deployment.",
+                code="model_unavailable",
+            )
+
+        if project is not None and (
+            project.budget_limit is not None
+            or project.alert_threshold is not None
+        ):
+            self.cost_tracker.register_project(
+                project.project_id,
+                budget_limit=project.budget_limit,
+                alert_threshold=project.alert_threshold,
+                tenant_id=req_ctx.tenant_id,
+            )
+
+        estimated_tokens = sum(max(1, len(item) // 4) for item in inputs)
+        estimated_cost = self._estimate_models_cost(
+            {model},
+            prompt_tokens=estimated_tokens,
+            completion_tokens=0,
+        )
+        resolved_policy = None
+        if self._quota_enforcer is not None and self._policy_resolver is not None:
+            resolved_policy = await self._policy_resolver.resolve(
+                req_ctx.project_id,
+                tenant_id=req_ctx.tenant_id,
+                project=project,
+            )
+            quota_decision = await self._quota_enforcer.enforce_all(
+                project_id=req_ctx.project_id,
+                model=model,
+                provider=context.get("provider"),
+                max_tokens=None,
+                estimated_cost=estimated_cost,
+                policy=resolved_policy,
+                tenant_id=req_ctx.tenant_id,
+                project=project,
+            )
+            if not quota_decision.allowed:
+                return self._quota_error(quota_decision)
+
+        rate_result = await self.rate_limiter.check_rate_limit(
+            req_ctx.user_id,
+            req_ctx.project_id,
+            tenant_id=req_ctx.tenant_id,
+            project=project,
+        )
+        rate_limit_headers = {
+            "X-RateLimit-Limit": str(rate_result.limit),
+            "X-RateLimit-Remaining": str(rate_result.remaining),
+            "X-RateLimit-Reset": str(int(rate_result.reset_at.timestamp())),
+        }
+        if not rate_result.allowed:
+            if rate_result.retry_after_seconds is not None:
+                rate_limit_headers["Retry-After"] = str(
+                    rate_result.retry_after_seconds
+                )
+            response = _error_response(
+                429,
+                "rate_limit_error",
+                "Rate limit exceeded.",
+                code="rate_limit_exceeded",
+            )
+            response["_rate_limit_headers"] = rate_limit_headers
+            return response
+
+        if project and project.allowed_models and model not in project.allowed_models:
+            response = _error_response(
+                403,
+                "forbidden",
+                f"Model '{model}' is not allowed for this project.",
+                code="model_not_allowed",
+            )
+            response["_rate_limit_headers"] = rate_limit_headers
+            return response
+
+        try:
+            user_config = await self._user_config_for_context(req_ctx)
+        except RuntimeError:
+            response = _error_response(
+                503,
+                "service_unavailable",
+                "Tenant user configuration is temporarily unavailable.",
+                code="user_config_unavailable",
+            )
+            response["_rate_limit_headers"] = rate_limit_headers
+            return response
+        self.cost_tracker.register_user(
+            req_ctx.user_id,
+            budget_limit=user_config.get("budget_limit"),
+            alert_threshold=user_config.get("alert_threshold"),
+            tenant_id=req_ctx.tenant_id,
+        )
+        user_allowed = user_config.get("allowed_models")
+        if user_allowed and model not in user_allowed:
+            response = _error_response(
+                403,
+                "forbidden",
+                f"Model '{model}' is not allowed for this user.",
+                code="model_not_allowed",
+            )
+            response["_rate_limit_headers"] = rate_limit_headers
+            return response
+
+        project_budget: BudgetStatus | None = None
+        if project is not None:
+            project_budget = await self.cost_tracker.check_budget(
+                req_ctx.project_id,
+                tenant_id=req_ctx.tenant_id,
+            )
+            if project_budget.is_over_budget:
+                response = _error_response(
+                    429,
+                    "budget_exceeded",
+                    "The project has exceeded its budget.",
+                    code="budget_exceeded",
+                )
+                response["_rate_limit_headers"] = rate_limit_headers
+                return response
+        user_budget = await self.cost_tracker.check_user_budget(
+            req_ctx.user_id,
+            tenant_id=req_ctx.tenant_id,
+        )
+        if user_budget.is_over_budget:
+            response = _error_response(
+                429,
+                "budget_exceeded",
+                "The user has exceeded their budget.",
+                code="budget_exceeded",
+            )
+            response["_rate_limit_headers"] = rate_limit_headers
+            return response
+
+        request_id = f"req_{uuid.uuid4().hex}"
+        reservation: BudgetReservation | None = None
+        if self._request_has_budget(
+            project_budget,
+            user_budget,
+            resolved_policy,
+        ):
+            decision = await self._reserve_request_budget(
+                request_id=request_id,
+                req_ctx=req_ctx,
+                estimated_cost=estimated_cost,
+                project_budget=project_budget,
+                user_budget=user_budget,
+                resolved_policy=resolved_policy,
+            )
+            if not decision.allowed:
+                return self._quota_error(decision, rate_limit_headers)
+            reservation = decision.reservation
+
+        embedding_request = EmbeddingRequest(
+            input=inputs,
+            model=model,
+            encoding_format=encoding_format,
+            dimensions=dimensions,
+            user=user,
+        )
+        if self._routing_runtime is None:
+            await self._release_request_budget(
+                reservation,
+                req_ctx=req_ctx,
+            )
+            response = _error_response(
+                503,
+                "service_unavailable",
+                "The embeddings routing runtime is unavailable.",
+                code="routing_runtime_unavailable",
+            )
+            response["_rate_limit_headers"] = rate_limit_headers
+            return response
+
+        request_started = time.perf_counter()
+        try:
+            embedding_response = await self._routing_runtime.embed(
+                embedding_request,
+                preferred_provider=context.get("provider"),
+            )
+        except AllProvidersExhaustedError:
+            await self._release_request_budget(
+                reservation,
+                req_ctx=req_ctx,
+            )
+            response = _error_response(
+                502,
+                "provider_error",
+                _PROVIDER_FAILURE_MESSAGE,
+                code="all_providers_exhausted",
+            )
+            response["_rate_limit_headers"] = rate_limit_headers
+            return response
+        except Exception:
+            if reservation is not None:
+                await self._finalize_request_budget(
+                    reservation,
+                    actual_cost=reservation.amount,
+                    req_ctx=req_ctx,
+                )
+            logger.exception("embeddings request failed")
+            response = _error_response(
+                500,
+                "server_error",
+                "The embeddings request failed.",
+                code="embeddings_failed",
+            )
+            response["_rate_limit_headers"] = rate_limit_headers
+            return response
+
+        cost = self.cost_tracker.calculate_cost(
+            embedding_response.provider,
+            embedding_response.provider_model or embedding_response.model,
+            embedding_response.usage.prompt_tokens,
+            0,
+        )
+        usage_record = UsageRecord(
+            request_id=request_id,
+            project_id=req_ctx.project_id,
+            user_id=req_ctx.user_id,
+            tenant_id=req_ctx.tenant_id,
+            provider=embedding_response.provider,
+            model=model,
+            prompt_tokens=embedding_response.usage.prompt_tokens,
+            completion_tokens=0,
+            total_tokens=embedding_response.usage.total_tokens,
+            cost=cost,
+            timestamp=datetime.now(timezone.utc),
+            latency_ms=(time.perf_counter() - request_started) * 1000,
+            status="success",
+            provider_request_id=embedding_response.id,
+        )
+        reservation_totals = await self._finalize_request_budget(
+            reservation,
+            actual_cost=cost,
+            req_ctx=req_ctx,
+        )
+        if reservation_totals is None:
+            response = _error_response(
+                503,
+                "service_unavailable",
+                "Budget accounting could not be finalized.",
+                code="budget_finalization_failed",
+            )
+            response["_rate_limit_headers"] = rate_limit_headers
+            return response
+        await self.cost_tracker.record_usage(
+            usage_record,
+            skip_shared_scopes=self._reserved_cost_tracker_scopes(
+                reservation
+            ),
+        )
+        if reservation_totals:
+            self.cost_tracker.adopt_reserved_spend(
+                usage_record,
+                reservation_totals,
+            )
+        if (
+            self._quota_enforcer is not None
+            and not self._reservation_has_scope(reservation, "quota")
+        ):
+            await self._quota_enforcer.record_spend(
+                req_ctx.project_id,
+                cost,
+                budget_limit=(
+                    resolved_policy.budget_limit
+                    if resolved_policy
+                    else None
+                ),
+                tenant_id=req_ctx.tenant_id,
+            )
+        if self._trace_forwarder is not None:
+            await self._trace_forwarder.forward(usage_record)
+        if self._otlp_exporter is not None and not (
+            self._trace_forwarder is not None
+            and self._trace_forwarder.enabled
+        ):
+            self._otlp_exporter.export_usage(usage_record)
+
+        return {
+            "object": "list",
+            "data": [
+                {
+                    "object": "embedding",
+                    "index": item.index,
+                    "embedding": item.embedding,
+                }
+                for item in embedding_response.data
+            ],
+            "model": embedding_response.model,
+            "usage": {
+                "prompt_tokens": embedding_response.usage.prompt_tokens,
+                "total_tokens": embedding_response.usage.total_tokens,
+            },
+            "_rate_limit_headers": rate_limit_headers,
+        }
 
     async def handle_list_models(
         self,

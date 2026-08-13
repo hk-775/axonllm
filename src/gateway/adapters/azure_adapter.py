@@ -20,3 +20,4 @@ class AzureOpenAIAdapter(OpenAIStyleAdapter):
 
     PROVIDER_NAME = PROVIDER_NAME
     _MODELS = _AZURE_MODELS
+    supports_embeddings = True
