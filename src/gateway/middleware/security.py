@@ -3,8 +3,8 @@
 ``SecurityMiddleware`` retains the lightweight LLM endpoint marker used by the
 gateway. ``ControlPlaneHTTPMiddleware`` owns browser-facing HTTP controls that
 must run outside authentication so they also cover authentication failures:
-bounded request bodies, ALB-session CSRF protection, and production response
-headers.
+bounded request bodies, browser-session CSRF protection, and production
+response headers.
 """
 
 from __future__ import annotations
@@ -18,13 +18,20 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from src.gateway.auth.browser_session import (
+    BROWSER_AUTH_PATHS,
+    CSRF_COOKIE_NAME,
+    browser_session_cookie_values,
+    valid_session_token,
+)
+
 DEFAULT_REQUEST_MAX_BODY_BYTES = 1024 * 1024
 DEFAULT_ADMIN_MAX_BODY_BYTES = 64 * 1024
-CSRF_COOKIE_NAME = "__Host-axon-csrf"
 CSRF_HEADER_NAME = "x-axon-csrf-token"
 _CSRF_TOKEN_BYTES = 32
 _CSRF_TOKEN_LENGTH = 43
 _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+_CSRF_EXEMPT_UNSAFE_PATHS = frozenset({"/saml/acs"})
 _TOKEN_CHARACTERS = frozenset(
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
 )
@@ -108,6 +115,17 @@ def _is_alb_browser_request(scope: Scope) -> bool:
         and len(oidc_identities) == 1
         and oidc_tokens[0]
         and oidc_identities[0]
+    )
+
+
+def _is_app_browser_request(scope: Scope) -> bool:
+    """Identify an opaque application session even when credentials conflict."""
+    values = browser_session_cookie_values(
+        _header_values(scope, b"cookie")
+    )
+    return bool(
+        len(values) == 1
+        and valid_session_token(values[0])
     )
 
 
@@ -265,14 +283,21 @@ class ControlPlaneHTTPMiddleware:
         path = scope.get("path", "")
         method = scope.get("method", "GET").upper()
         admin_path = _is_admin_path(path)
-        alb_browser = _is_alb_browser_request(scope)
+        browser_session = (
+            _is_alb_browser_request(scope)
+            or _is_app_browser_request(scope)
+        )
+        auth_path = path in BROWSER_AUTH_PATHS
+        static_asset = (
+            path.startswith("/admin/static/")
+            or path.startswith("/chat/static/")
+        )
         csrf_cookie = _csrf_cookie(scope)
         csrf_to_set = (
             secrets.token_urlsafe(_CSRF_TOKEN_BYTES)
-            if admin_path
-            and method == "GET"
-            and alb_browser
-            and not path.startswith("/admin/static/")
+            if method == "GET"
+            and browser_session
+            and not static_asset
             and csrf_cookie is None
             else None
         )
@@ -286,8 +311,10 @@ class ControlPlaneHTTPMiddleware:
                     self.production
                     and admin_path
                     and not path.startswith("/admin/static/")
-                ) or csrf_to_set is not None:
+                ) or csrf_to_set is not None or auth_path:
                     headers["cache-control"] = "no-store"
+                if auth_path:
+                    headers["pragma"] = "no-cache"
                 if csrf_to_set is not None:
                     headers.append(
                         "set-cookie",
@@ -325,7 +352,11 @@ class ControlPlaneHTTPMiddleware:
                 )
                 return
 
-            if admin_path and alb_browser and not _csrf_request_is_valid(scope):
+            if (
+                browser_session
+                and path not in _CSRF_EXEMPT_UNSAFE_PATHS
+                and not _csrf_request_is_valid(scope)
+            ):
                 await JSONResponse(
                     status_code=403,
                     content={

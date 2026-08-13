@@ -454,6 +454,32 @@ jobs:
               raise SystemExit(
                   "managed setup is not bound to both verified images"
               )
+          control = setup["control_plane"]
+          endpoint_mode = control.get(
+              "endpoint_mode",
+              "custom-domain",
+          )
+          endpoint_contracts = {
+              "custom-domain": "alb-session-cookie",
+              "cloudfront": "browser-session-cookie",
+          }
+          credential_type = endpoint_contracts.get(endpoint_mode)
+          canaries = validation.get("canaries")
+          load = validation.get("load")
+          if (
+              credential_type is None
+              or not isinstance(canaries, list)
+              or not isinstance(load, dict)
+              or not isinstance(load.get("request"), dict)
+              or any(
+                  request.get("credentialType") != credential_type
+                  for request in [*canaries, load["request"]]
+              )
+          ):
+              raise SystemExit(
+                  "production validation credential type is not bound to "
+                  "the setup endpoint mode"
+              )
           if (
               certification.get("schemaVersion") != 1
               or certification.get("region") != "us-east-1"
@@ -703,6 +729,14 @@ jobs:
             .[$stack]
             | .ControlPlaneImageUri == $image
             and .QueryPlaneEnabled == "true"
+            and (.EndpointMode
+              | . == "custom-domain" or . == "cloudfront")
+            and (.ControlPlaneUrl
+              | type == "string" and length > 0)
+            and (.ControlPlaneDomainName
+              | type == "string" and length > 0)
+            and (.ControlPlaneAuthMode
+              | . == "alb-cognito" or . == "application-oidc")
             and (.ClusterArn | type == "string" and length > 0)
             and (.SubnetIds | type == "string" and length > 0)
             and (.TaskSecurityGroupId | type == "string" and length > 0)
@@ -735,14 +769,19 @@ jobs:
             "${work}/control-plane-canary-credentials.json" \
             "${cleanup}/control-plane-canary-sessions.json" <<'PY'
           import json
+          import os
           from pathlib import Path
           import sys
+          from urllib.parse import urlsplit
 
           from scripts.operations.prepare_control_plane_canary_sessions import (
               prepare_sessions,
           )
           from scripts.operations.run_production_validation import parse_config
           from src.gateway.agentcore_setup import AgentCoreSetupConfig
+          from src.gateway.deployment.agentcore_deploy import (
+              deployment_control_plane_domain,
+          )
 
           region = sys.argv[1]
           setup = AgentCoreSetupConfig.from_mapping(
@@ -751,9 +790,19 @@ jobs:
           validation = parse_config(
               json.loads(Path(sys.argv[3]).read_text(encoding="utf-8"))
           )
+          control_outputs = json.loads(
+              Path(sys.argv[5]).read_text(encoding="utf-8")
+          ).get("AxonLLMControlPlaneStack")
           if validation.target != "fargate":
               raise SystemExit(
                   "qualification control-plane validation must target Fargate"
+              )
+          if setup.control_plane is None or not isinstance(
+              control_outputs,
+              dict,
+          ):
+              raise SystemExit(
+                  "qualification control-plane endpoint binding is missing"
               )
 
           def request_for(category):
@@ -780,18 +829,75 @@ jobs:
           admin = request_for("tenant_admin_mutation_round_trip")
           cross = request_for("cross_tenant_denied")
           ungranted = request_for("ungranted_project_denied")
+          endpoint_contracts = {
+              "custom-domain": (
+                  "alb-cognito",
+                  "alb-session-cookie",
+              ),
+              "cloudfront": (
+                  "application-oidc",
+                  "browser-session-cookie",
+              ),
+          }
+          setup_mode = setup.control_plane.endpoint_mode
+          expected_custom_domain = (
+              deployment_control_plane_domain(
+                  setup.control_plane.domain_name,
+                  os.environ["QUALIFICATION_NAMESPACE"],
+              )
+              if setup_mode == "custom-domain"
+              and setup.control_plane.domain_name is not None
+              else None
+          )
+          output_mode = control_outputs.get("EndpointMode")
+          contract = endpoint_contracts.get(setup_mode)
+          control_url = control_outputs.get("ControlPlaneUrl")
+          control_domain = control_outputs.get(
+              "ControlPlaneDomainName"
+          )
+          control_auth_mode = control_outputs.get(
+              "ControlPlaneAuthMode"
+          )
+          parsed_url = (
+              urlsplit(control_url)
+              if isinstance(control_url, str)
+              else None
+          )
+          requests = (
+              member,
+              viewer,
+              admin,
+              cross,
+              ungranted,
+              validation.load.request,
+          )
           expected_path = f"/admin/projects/{setup.tenant.project_id}"
           if (
-              any(
+              contract is None
+              or output_mode != setup_mode
+              or control_auth_mode != contract[0]
+              or (
+                  setup_mode == "custom-domain"
+                  and expected_custom_domain != control_domain
+              )
+              or (
+                  setup_mode == "cloudfront"
+                  and setup.control_plane.domain_name is not None
+              )
+              or parsed_url is None
+              or parsed_url.scheme != "https"
+              or parsed_url.netloc != control_domain
+              or parsed_url.path
+              or parsed_url.query
+              or parsed_url.fragment
+              or control_url != f"https://{control_domain}"
+              or any(
+                  request.credential_type != contract[1]
+                  for request in requests
+              )
+              or any(
                   request.path != expected_path
-                  for request in (
-                      member,
-                      viewer,
-                      admin,
-                      cross,
-                      ungranted,
-                      validation.load.request,
-                  )
+                  for request in requests
               )
               or viewer.csrf_token_env is None
               or admin.csrf_token_env is None
@@ -834,6 +940,11 @@ jobs:
           import re
           import subprocess
           import sys
+          from urllib.parse import urlsplit
+
+          from src.gateway.deployment.agentcore_deploy import (
+              deployment_control_plane_domain,
+          )
 
           config_path = Path(sys.argv[1])
           setup_path = Path(sys.argv[2])
@@ -866,12 +977,67 @@ jobs:
                   "managed control-plane validation is malformed"
               )
           requests = [*canaries, load["request"]]
-          if any(
-              item.get("credentialType") != "alb-session-cookie"
-              for item in requests
+          endpoint_contracts = {
+              "custom-domain": (
+                  "alb-cognito",
+                  "alb-session-cookie",
+              ),
+              "cloudfront": (
+                  "application-oidc",
+                  "browser-session-cookie",
+              ),
+          }
+          setup_mode = control.get(
+              "endpoint_mode",
+              "custom-domain",
+          )
+          configured_domain = control.get("domain_name")
+          expected_custom_domain = (
+              deployment_control_plane_domain(
+                  configured_domain,
+                  os.environ["QUALIFICATION_NAMESPACE"],
+              )
+              if setup_mode == "custom-domain"
+              and isinstance(configured_domain, str)
+              else None
+          )
+          output_mode = deployed_control.get("EndpointMode")
+          contract = endpoint_contracts.get(setup_mode)
+          control_url = deployed_control.get("ControlPlaneUrl")
+          domain = deployed_control.get("ControlPlaneDomainName")
+          auth_mode = deployed_control.get("ControlPlaneAuthMode")
+          parsed_url = (
+              urlsplit(control_url)
+              if isinstance(control_url, str)
+              else None
+          )
+          if (
+              contract is None
+              or output_mode != setup_mode
+              or auth_mode != contract[0]
+              or (
+                  setup_mode == "custom-domain"
+                  and expected_custom_domain != domain
+              )
+              or (
+                  setup_mode == "cloudfront"
+                  and control.get("domain_name") is not None
+              )
+              or parsed_url is None
+              or parsed_url.scheme != "https"
+              or parsed_url.netloc != domain
+              or parsed_url.path
+              or parsed_url.query
+              or parsed_url.fragment
+              or control_url != f"https://{domain}"
+              or any(
+                  item.get("credentialType") != contract[1]
+                  for item in requests
+              )
           ):
               raise SystemExit(
-                  "Fargate validation requires short-lived ALB session cookies"
+                  "control-plane mode, URL, auth, and credential bindings "
+                  "do not match"
               )
           required = {item.get("credentialEnv") for item in requests}
           required.update(
@@ -899,12 +1065,9 @@ jobs:
               raise SystemExit(
                   "control-plane canary credentials do not match the scenario"
               )
-          domain = control.get("domain_name")
           target_group_arn = deployed_control.get("TargetGroupArn")
           if (
-              not isinstance(domain, str)
-              or not domain
-              or not isinstance(target_group_arn, str)
+              not isinstance(target_group_arn, str)
               or not target_group_arn
           ):
               raise SystemExit("control-plane target is missing")
@@ -917,7 +1080,7 @@ jobs:
                   "--config",
                   str(config_path),
                   "--base-url",
-                  f"https://{domain}",
+                  control_url,
                   "--output",
                   str(report_path),
                   "--target-group-arn",

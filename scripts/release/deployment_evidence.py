@@ -32,6 +32,18 @@ LAUNCH_REHEARSAL_SCHEMA = launch_rehearsal_evidence.REPORT_SCHEMA
 IDENTITY_STACK = "AxonLLMIdentityStack"
 AGENTCORE_STACK = "AxonLLMAgentCoreStack"
 CONTROL_PLANE_STACK = "AxonLLMControlPlaneStack"
+CUSTOM_DOMAIN = "custom-domain"
+CLOUDFRONT = "cloudfront"
+CONTROL_PLANE_ENDPOINT_CONTRACTS = {
+    CUSTOM_DOMAIN: {
+        "authMode": "alb-cognito",
+        "credentialType": "alb-session-cookie",
+    },
+    CLOUDFRONT: {
+        "authMode": "application-oidc",
+        "credentialType": "browser-session-cookie",
+    },
+}
 EXTERNAL_OIDC_STACK = "AxonLLMAgentCoreStack-external"
 EXTERNAL_OIDC_WORKFLOW = ".github/workflows/certify-agentcore-external-oidc.yml"
 LAUNCH_WORKFLOW = ".github/workflows/launch-agentcore-production.yml"
@@ -59,6 +71,10 @@ IMAGE = re.compile(
 )
 SAFE_OUTPUT_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9]{0,127}$")
 SAFE_VALUE = re.compile(r"^[^\x00-\x1f\x7f]+$")
+DNS_NAME = re.compile(
+    r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}"
+    r"[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$"
+)
 CANDIDATE_ENDPOINT = re.compile(r"^candidate_[0-9a-f]{32}$")
 SECRET_NAME = re.compile(
     r"(password|secretstring|secretvalue|token|credential|api[_-]?key)",
@@ -298,11 +314,16 @@ def _validate_stack_outputs(
     outputs = _object(value, f"{stack_name} outputs")
     result: dict[str, str] = {}
     for name, value in outputs.items():
+        inactive_identity_output = (
+            stack_name == IDENTITY_STACK
+            and name in {"AlbClientId", "ControlPlaneDomainName"}
+            and value == ""
+        )
         if (
             SAFE_OUTPUT_NAME.fullmatch(name) is None
             or (SECRET_NAME.search(name) and not name.endswith(("Arn", "Version")))
             or not isinstance(value, str)
-            or not value
+            or (not value and not inactive_identity_output)
             or value != value.strip()
             or len(value) > 16 * 1024
             or "\x00" in value
@@ -326,6 +347,106 @@ def _required_output(
     if value is None:
         raise DeploymentEvidenceError(f"{stack_name} output {name} is missing")
     return value
+
+
+def _control_plane_endpoint_binding(
+    *,
+    identity: dict[str, str],
+    control: dict[str, str],
+) -> dict[str, str]:
+    endpoint_mode = _required_output(
+        control,
+        "EndpointMode",
+        CONTROL_PLANE_STACK,
+    )
+    contract = CONTROL_PLANE_ENDPOINT_CONTRACTS.get(endpoint_mode)
+    if contract is None:
+        raise DeploymentEvidenceError(
+            "control-plane endpoint mode is unsupported"
+        )
+    url = _required_output(
+        control,
+        "ControlPlaneUrl",
+        CONTROL_PLANE_STACK,
+    )
+    domain = _required_output(
+        control,
+        "ControlPlaneDomainName",
+        CONTROL_PLANE_STACK,
+    )
+    auth_mode = _required_output(
+        control,
+        "ControlPlaneAuthMode",
+        CONTROL_PLANE_STACK,
+    )
+    try:
+        parsed = urlsplit(url)
+        port = parsed.port
+    except ValueError as exc:
+        raise DeploymentEvidenceError(
+            "control-plane endpoint outputs are inconsistent"
+        ) from exc
+    if (
+        DNS_NAME.fullmatch(domain) is None
+        or parsed.scheme != "https"
+        or parsed.hostname != domain
+        or parsed.netloc != domain
+        or port not in {None, 443}
+        or parsed.path
+        or parsed.query
+        or parsed.fragment
+        or url != f"https://{domain}"
+        or auth_mode != contract["authMode"]
+    ):
+        raise DeploymentEvidenceError(
+            "control-plane endpoint outputs are inconsistent"
+        )
+
+    identity_mode = identity.get("EndpointMode", CUSTOM_DOMAIN)
+    if identity_mode != endpoint_mode:
+        raise DeploymentEvidenceError(
+            "identity and control-plane endpoint modes do not match"
+        )
+    if endpoint_mode == CUSTOM_DOMAIN:
+        if (
+            _required_output(
+                identity,
+                "ControlPlaneDomainName",
+                IDENTITY_STACK,
+            )
+            != domain
+            or not _required_output(
+                identity,
+                "AlbClientId",
+                IDENTITY_STACK,
+            )
+            or "BrowserClientId" in control
+        ):
+            raise DeploymentEvidenceError(
+                "custom-domain endpoint is not bound to the ALB Cognito "
+                "client"
+            )
+    elif (
+        not _required_output(
+            control,
+            "BrowserClientId",
+            CONTROL_PLANE_STACK,
+        )
+        or any(
+            identity.get(name) not in {None, ""}
+            for name in ("AlbClientId", "ControlPlaneDomainName")
+        )
+    ):
+        raise DeploymentEvidenceError(
+            "CloudFront endpoint is not bound to the application OIDC client"
+        )
+    return {
+        "endpointMode": endpoint_mode,
+        "url": url,
+        "domainName": domain,
+        "authMode": auth_mode,
+        "credentialType": contract["credentialType"],
+    }
 
 
 def _runtime_provider_feature_matrix(
@@ -1023,6 +1144,7 @@ def _validate_production_validation(
     report: dict[str, Any],
     *,
     expected_base_url: str,
+    expected_credential_type: str,
     expected_target_group_arn: str,
 ) -> dict[str, Any]:
     claims = _object(
@@ -1088,6 +1210,8 @@ def _validate_production_validation(
             not isinstance(result, dict)
             or result.get("passed") is not True
             or result.get("baseUrl") != expected_base_url
+            or result.get("credentialType")
+            != expected_credential_type
             for result in results
         )
         or gates.get("status") != "PASS"
@@ -1097,6 +1221,7 @@ def _validate_production_validation(
             for category in REQUIRED_CONTROL_PLANE_CATEGORIES
         )
         or load.get("status") != "PASS"
+        or load.get("credentialType") != expected_credential_type
         or load.get("backingInstanceIdentityValidated") is not True
         or load.get("requestCountCompleted") != load.get("requestCountConfigured")
         or not isinstance(load.get("concurrency"), int)
@@ -1129,6 +1254,7 @@ def _production_validation(
     path: Path,
     *,
     expected_base_url: str,
+    expected_credential_type: str,
     expected_target_group_arn: str,
 ) -> dict[str, Any]:
     return _validate_production_validation(
@@ -1137,6 +1263,7 @@ def _production_validation(
             "production validation report",
         ),
         expected_base_url=expected_base_url,
+        expected_credential_type=expected_credential_type,
         expected_target_group_arn=expected_target_group_arn,
     )
 
@@ -2172,7 +2299,7 @@ def _validate_stack_bindings(
     provider: dict[str, Any],
     agentcore_image: str,
     fargate_image: str,
-) -> None:
+) -> dict[str, str]:
     for output in (
         "OidcIssuer",
         "OidcClientId",
@@ -2288,6 +2415,10 @@ def _validate_stack_bindings(
     )
     _required_output(control, "ClusterName", CONTROL_PLANE_STACK)
     _required_output(control, "ServiceName", CONTROL_PLANE_STACK)
+    return _control_plane_endpoint_binding(
+        identity=identity,
+        control=control,
+    )
 
 
 def _validate_deployment_projection(
@@ -2511,7 +2642,7 @@ def create_evidence(args: argparse.Namespace) -> dict[str, Any]:
     runtime = _stack_outputs(args.runtime_outputs, AGENTCORE_STACK)
     control = _stack_outputs(args.control_outputs, CONTROL_PLANE_STACK)
     provider = _provider_secret(args.provider_secret)
-    _validate_stack_bindings(
+    control_endpoint = _validate_stack_bindings(
         identity=identity,
         runtime=runtime,
         control=control,
@@ -2528,23 +2659,35 @@ def create_evidence(args: argparse.Namespace) -> dict[str, Any]:
         setup_runtime.get("enabled_providers") if isinstance(setup_runtime.get("enabled_providers"), list) else [],
         location="setup enabled providers",
     )
+    setup_endpoint_mode = setup_control.get(
+        "endpoint_mode",
+        CUSTOM_DOMAIN,
+    )
     control_domain = setup_control.get("domain_name")
     if (
         setup.get("identity_mode") != "managed-cognito"
         or setup.get("aws_region") != args.region
         or setup_runtime.get("verified_image_uri") != args.agentcore_image
         or setup_control.get("verified_image_uri") != args.fargate_image
-        or not isinstance(control_domain, str)
-        or not control_domain
         or setup_provider_features != runtime_provider_features
-        or _required_output(
-            identity,
-            "ControlPlaneDomainName",
-            IDENTITY_STACK,
+        or setup_endpoint_mode != control_endpoint["endpointMode"]
+        or (
+            setup_endpoint_mode == CUSTOM_DOMAIN
+            and (
+                not isinstance(control_domain, str)
+                or not control_domain
+                or control_domain != control_endpoint["domainName"]
+            )
         )
-        != control_domain
+        or (
+            setup_endpoint_mode == CLOUDFRONT
+            and control_domain is not None
+        )
     ):
-        raise DeploymentEvidenceError("setup configuration is not bound to the verified images")
+        raise DeploymentEvidenceError(
+            "setup configuration is not bound to the verified images and "
+            "control-plane endpoint"
+        )
 
     certification_config = _object(
         _read_json(args.certification_config),
@@ -2597,7 +2740,10 @@ def create_evidence(args: argparse.Namespace) -> dict[str, Any]:
     )
     production_validation = _production_validation(
         args.production_validation_report,
-        expected_base_url=f"https://{control_domain}",
+        expected_base_url=control_endpoint["url"],
+        expected_credential_type=(
+            control_endpoint["credentialType"]
+        ),
         expected_target_group_arn=_required_output(
             control,
             "TargetGroupArn",
@@ -2832,7 +2978,7 @@ def verify_evidence(args: argparse.Namespace) -> dict[str, Any]:
         CONTROL_PLANE_STACK,
     )
     provider = _validate_provider_secret(value["providerSecret"])
-    _validate_stack_bindings(
+    control_endpoint = _validate_stack_bindings(
         identity=identity,
         runtime=runtime,
         control=control_outputs,
@@ -2876,17 +3022,15 @@ def verify_evidence(args: argparse.Namespace) -> dict[str, Any]:
     )
     if production_certification != _redacted_certification(production_certification):
         raise DeploymentEvidenceError("production certification evidence is not redacted")
-    control_domain = _required_output(
-        identity,
-        "ControlPlaneDomainName",
-        IDENTITY_STACK,
-    )
     production_validation = _validate_production_validation(
         _object(
             value["productionValidation"],
             "production validation",
         ),
-        expected_base_url=f"https://{control_domain}",
+        expected_base_url=control_endpoint["url"],
+        expected_credential_type=(
+            control_endpoint["credentialType"]
+        ),
         expected_target_group_arn=_required_output(
             control_outputs,
             "TargetGroupArn",

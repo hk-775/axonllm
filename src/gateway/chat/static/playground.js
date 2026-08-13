@@ -5,6 +5,28 @@ const {
   useRef,
   useCallback
 } = React;
+const CSRF_COOKIE = '__Host-axon-csrf';
+function getCsrfToken() {
+  for (const part of document.cookie.split(';')) {
+    const cookie = part.trim();
+    if (cookie.startsWith(CSRF_COOKIE + '=')) {
+      return cookie.slice(CSRF_COOKIE.length + 1);
+    }
+  }
+  return '';
+}
+function appFetch(url, options) {
+  const requestOptions = Object.assign({}, options || {});
+  const method = (requestOptions.method || 'GET').toUpperCase();
+  const headers = Object.assign({}, requestOptions.headers || {});
+  if (!['GET', 'HEAD', 'OPTIONS'].includes(method)) {
+    const csrfToken = getCsrfToken();
+    if (csrfToken) headers['X-Axon-CSRF-Token'] = csrfToken;
+  }
+  requestOptions.headers = headers;
+  requestOptions.credentials = 'same-origin';
+  return fetch(url, requestOptions);
+}
 function getRoutingReason(modelConfig, provider) {
   if (!modelConfig) return '';
   const providers = modelConfig.providers || [];
@@ -28,7 +50,7 @@ function Playground() {
   const [text, setText] = useState('');
   const textareaRef = useRef(null);
   useEffect(() => {
-    fetch('/api/models').then(r => r.json()).then(data => {
+    appFetch('/api/models').then(r => r.json()).then(data => {
       setModels(data);
       if (data.length > 0) setSelectedModel(data[0].name);
     }).catch(() => {});
@@ -54,7 +76,7 @@ function Playground() {
     setMessages(prev => [...prev, userMsg]);
     setLoading(true);
     try {
-      const resp = await fetch('/api/chat', {
+      const resp = await appFetch('/api/chat', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json'

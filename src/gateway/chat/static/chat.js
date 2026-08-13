@@ -5,6 +5,28 @@ const {
   useRef,
   useCallback
 } = React;
+const CSRF_COOKIE = '__Host-axon-csrf';
+function getCsrfToken() {
+  for (const part of document.cookie.split(';')) {
+    const cookie = part.trim();
+    if (cookie.startsWith(CSRF_COOKIE + '=')) {
+      return cookie.slice(CSRF_COOKIE.length + 1);
+    }
+  }
+  return '';
+}
+function appFetch(url, options) {
+  const requestOptions = Object.assign({}, options || {});
+  const method = (requestOptions.method || 'GET').toUpperCase();
+  const headers = Object.assign({}, requestOptions.headers || {});
+  if (!['GET', 'HEAD', 'OPTIONS'].includes(method)) {
+    const csrfToken = getCsrfToken();
+    if (csrfToken) headers['X-Axon-CSRF-Token'] = csrfToken;
+  }
+  requestOptions.headers = headers;
+  requestOptions.credentials = 'same-origin';
+  return fetch(url, requestOptions);
+}
 
 /* ── ModelSelector Component ── */
 function ModelSelector({
@@ -180,7 +202,7 @@ function ChatApp() {
 
   // Fetch models and users on mount
   useEffect(() => {
-    fetch('/api/models').then(res => {
+    appFetch('/api/models').then(res => {
       if (!res.ok) throw new Error('Failed to fetch models');
       return res.json();
     }).then(data => {
@@ -193,7 +215,7 @@ function ChatApp() {
       setModelsError('Failed to load models');
       setModelsLoading(false);
     });
-    fetch('/api/users').then(res => res.ok ? res.json() : []).then(data => {
+    appFetch('/api/users').then(res => res.ok ? res.json() : []).then(data => {
       setUsers(data);
       if (data.length > 0) setSelectedUser(data[0]);
     }).catch(() => {});
@@ -227,7 +249,7 @@ function ChatApp() {
     };
     setMessages(prev => [...prev, assistantMessage]);
     try {
-      const response = await fetch('/api/chat/stream', {
+      const response = await appFetch('/api/chat/stream', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json'

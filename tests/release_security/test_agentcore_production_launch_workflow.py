@@ -416,6 +416,19 @@ def test_managed_stage_runs_reviewed_control_plane_validation() -> None:
     assert "tenant_admin_mutation_round_trip" in prepare_body
     assert "viewer_mutation_denied" in prepare_body
     assert "control-plane-canary-sessions.json" in prepare_body
+    for binding in (
+        "EndpointMode",
+        "ControlPlaneUrl",
+        "ControlPlaneDomainName",
+        "ControlPlaneAuthMode",
+        "alb-cognito",
+        "application-oidc",
+        "alb-session-cookie",
+        "browser-session-cookie",
+    ):
+        assert binding in prepare_body
+    assert "deployment_control_plane_domain" in prepare_body
+    assert 'os.environ["QUALIFICATION_NAMESPACE"]' in prepare_body
 
     validation_body = _step(
         "stage-managed",
@@ -424,6 +437,16 @@ def test_managed_stage_runs_reviewed_control_plane_validation() -> None:
     assert "run_production_validation.py" in validation_body
     assert "--target-group-arn" in validation_body
     assert 'overallStatus == "PASS"' in validation_body
+    assert "setup_mode = control.get(" in validation_body
+    assert '"endpoint_mode",' in validation_body
+    assert '"custom-domain"' in validation_body
+    assert '"cloudfront"' in validation_body
+    assert 'deployed_control.get("ControlPlaneUrl")' in validation_body
+    assert "deployment_control_plane_domain" in validation_body
+    assert 'os.environ["QUALIFICATION_NAMESPACE"]' in validation_body
+    assert '"--base-url",' in validation_body
+    assert "control_url," in validation_body
+    assert 'control_url = f"https://' not in validation_body
 
     cleanup_step = _step(
         "stage-managed",

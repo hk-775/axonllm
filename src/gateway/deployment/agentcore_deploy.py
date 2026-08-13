@@ -36,6 +36,8 @@ except ImportError:  # pragma: no cover - POSIX
     msvcrt = None  # type: ignore[assignment]
 
 from src.gateway.agentcore_setup import (
+    CLOUDFRONT,
+    CUSTOM_DOMAIN,
     DEFAULT_PROJECT_CLAIM,
     DEFAULT_TENANT_CLAIM,
     EXTERNAL_OIDC,
@@ -888,21 +890,26 @@ def _prefix_list_requirements(
         )
     ]
     if config.control_plane is not None:
-        requirements.extend(
-            [
+        if (
+            config.control_plane.endpoint_mode == CUSTOM_DOMAIN
+            and config.control_plane.approved_ingress_prefix_list_id
+            is not None
+        ):
+            requirements.append(
                 PrefixListRequirement(
                     prefix_list_id=(config.control_plane.approved_ingress_prefix_list_id),
                     location=("control_plane.approved_ingress_prefix_list_id"),
                     minimum_prefix_length=24,
                     maximum_total_addresses=65_536,
-                ),
+                )
+            )
+        requirements.append(
                 PrefixListRequirement(
                     prefix_list_id=(config.control_plane.approved_https_prefix_list_id),
                     location=("control_plane.approved_https_prefix_list_id"),
                     minimum_prefix_length=16,
                     maximum_total_addresses=1_048_576,
-                ),
-            ]
+                )
         )
     return tuple(requirements)
 
@@ -1149,27 +1156,43 @@ def _identity_parameters(
         if deployment_namespace is None
         else deployment_names(deployment_namespace).namespace
     )
-    domain_name = deployment_control_plane_domain(
-        control_plane.domain_name,
-        namespace,
-    )
     ses_from_email, ses_verified_domain = managed_ses_sender(config)
-    return {
+    parameters = {
         "HostedUiDomainPrefix": _managed_hosted_ui_domain_prefix(
             config,
             deployment_namespace=namespace,
         ),
-        "OAuthCallbackUrls": ",".join(
-            _deployment_oauth_callback_urls(
-                managed.oauth_callback_urls,
-                domain_name=domain_name,
-                deployment_namespace=namespace,
-            )
-        ),
-        "ControlPlaneDomainName": domain_name,
         "SesFromEmail": ses_from_email,
         "SesVerifiedDomain": ses_verified_domain,
     }
+    if control_plane.endpoint_mode == CLOUDFRONT:
+        parameters["EndpointMode"] = CLOUDFRONT
+    if control_plane.endpoint_mode == CUSTOM_DOMAIN:
+        if control_plane.domain_name is None:
+            raise AgentCoreDeploymentError(
+                "custom-domain control-plane hostname is missing"
+            )
+        domain_name = deployment_control_plane_domain(
+            control_plane.domain_name,
+            namespace,
+        )
+        parameters.update(
+            {
+                "OAuthCallbackUrls": ",".join(
+                    _deployment_oauth_callback_urls(
+                        managed.oauth_callback_urls,
+                        domain_name=domain_name,
+                        deployment_namespace=namespace,
+                    )
+                ),
+                "ControlPlaneDomainName": domain_name,
+            }
+        )
+    else:
+        parameters["OAuthCallbackUrls"] = ",".join(
+            managed.oauth_callback_urls
+        )
+    return parameters
 
 
 def identity_deploy_command(
@@ -1392,17 +1415,10 @@ def _control_plane_parameters(
     if control_plane is None:
         raise AgentCoreDeploymentError("control-plane settings are missing")
     names = _current_deployment_names() if deployment_namespace is None else deployment_names(deployment_namespace)
-    deployment_control_plane_domain(
-        control_plane.domain_name,
-        names.namespace,
-    )
     parameters = {
         "AgentCoreStackName": names.agentcore_stack,
         "IdentityStackName": names.identity_stack,
         "ControlPlaneVerifiedImageUri": (control_plane.verified_image_uri),
-        "CertificateArn": control_plane.certificate_arn,
-        "PublicHostedZoneId": (control_plane.public_hosted_zone_id),
-        "ApprovedIngressPrefixListId": (control_plane.approved_ingress_prefix_list_id),
         "ApprovedHttpsPrefixListId": (control_plane.approved_https_prefix_list_id),
         "SamlLoginPath": control_plane.saml_login_path,
         "PrimaryStateTableName": primary_state_table_name,
@@ -1411,6 +1427,42 @@ def _control_plane_parameters(
         "RecoveryApprovalId": recovery_approval_id,
         "DeploymentTransitionId": deployment_transition_id,
     }
+    if control_plane.endpoint_mode == CLOUDFRONT:
+        parameters["EndpointMode"] = CLOUDFRONT
+    if control_plane.endpoint_mode == CUSTOM_DOMAIN:
+        if (
+            control_plane.domain_name is None
+            or control_plane.certificate_arn is None
+            or control_plane.public_hosted_zone_id is None
+            or control_plane.approved_ingress_prefix_list_id is None
+        ):
+            raise AgentCoreDeploymentError(
+                "custom-domain control-plane settings are incomplete"
+            )
+        domain_name = deployment_control_plane_domain(
+            control_plane.domain_name,
+            names.namespace,
+        )
+        parameters.update(
+            {
+                "CertificateArn": control_plane.certificate_arn,
+                "ControlPlaneDomainName": domain_name,
+                "PublicHostedZoneId": (
+                    control_plane.public_hosted_zone_id
+                ),
+                "ApprovedIngressPrefixListId": (
+                    control_plane.approved_ingress_prefix_list_id
+                ),
+            }
+        )
+    elif control_plane.endpoint_mode == CLOUDFRONT:
+        parameters["AllowedViewerCidrs"] = ",".join(
+            control_plane.allowed_viewer_cidrs
+        )
+    else:  # pragma: no cover - setup validation owns the closed set
+        raise AgentCoreDeploymentError(
+            "unsupported control-plane endpoint mode"
+        )
     rehearsal_arn = validate_rehearsal_control_table_arn(
         aws_region=config.aws_region,
         deployment_namespace=names.namespace,
@@ -1576,7 +1628,21 @@ def _required_output(outputs: dict[str, str], name: str) -> str:
 
 def managed_identity_from_outputs(
     outputs: dict[str, str],
+    *,
+    expected_endpoint_mode: str | None = None,
 ) -> IdentityValues:
+    endpoint_mode = outputs.get("EndpointMode", CUSTOM_DOMAIN)
+    if endpoint_mode not in {CUSTOM_DOMAIN, CLOUDFRONT}:
+        raise AgentCoreDeploymentError(
+            "managed identity emitted an unexpected endpoint mode"
+        )
+    if (
+        expected_endpoint_mode is not None
+        and endpoint_mode != expected_endpoint_mode
+    ):
+        raise AgentCoreDeploymentError(
+            "managed identity endpoint mode does not match the reviewed setup"
+        )
     tenant_claim = _required_output(outputs, "TenantClaimName")
     project_claim = _required_output(outputs, "ProjectClaimName")
     if tenant_claim != DEFAULT_TENANT_CLAIM:
@@ -2189,6 +2255,15 @@ def _managed_identity_for_candidate(
             ),
             stack_name=IDENTITY_STACK,
         )
+        if config.control_plane is None:
+            raise AgentCoreDeploymentError(
+                "managed Cognito control-plane settings are missing"
+            )
+        _validate_stack_endpoint_mode(
+            identity_stack,
+            expected_endpoint_mode=config.control_plane.endpoint_mode,
+            stack_name=IDENTITY_STACK,
+        )
         identity_outputs = _outputs_from_stack(
             identity_stack,
             IDENTITY_STACK,
@@ -2199,7 +2274,14 @@ def _managed_identity_for_candidate(
         )
         print("Verified retained managed Cognito identity without updating it.")
 
-    identity = managed_identity_from_outputs(identity_outputs)
+    if config.control_plane is None:
+        raise AgentCoreDeploymentError(
+            "managed Cognito control-plane settings are missing"
+        )
+    identity = managed_identity_from_outputs(
+        identity_outputs,
+        expected_endpoint_mode=config.control_plane.endpoint_mode,
+    )
     if identity.user_pool_id is None:
         raise AgentCoreDeploymentError("managed identity did not return a user pool")
     cognito_client = boto3_session.client(
@@ -2520,7 +2602,14 @@ def _existing_identity(
     )
     if outputs is None:
         raise AgentCoreDeploymentError("managed identity stack does not exist")
-    return managed_identity_from_outputs(outputs)
+    if config.control_plane is None:
+        raise AgentCoreDeploymentError(
+            "managed Cognito control-plane settings are missing"
+        )
+    return managed_identity_from_outputs(
+        outputs,
+        expected_endpoint_mode=config.control_plane.endpoint_mode,
+    )
 
 
 def _control_plane_output_expectations(
@@ -2549,6 +2638,7 @@ def _validate_control_plane_outputs(
     *,
     runtime_outputs: Mapping[str, str],
     expected_image: str | None,
+    expected_endpoint_mode: str,
 ) -> None:
     expected = _control_plane_output_expectations(runtime_outputs)
     actual = {name: outputs.get(name) for name in expected}
@@ -2565,6 +2655,80 @@ def _validate_control_plane_outputs(
     _required_output(dict(outputs), "ServiceName")
     _required_output(dict(outputs), "TaskDefinitionArn")
     _required_output(dict(outputs), "TargetGroupArn")
+
+    endpoint_mode = outputs.get("EndpointMode")
+    if endpoint_mode is None:
+        if expected_endpoint_mode != CUSTOM_DOMAIN:
+            raise AgentCoreDeploymentError(
+                "control-plane outputs predate the requested endpoint architecture"
+            )
+        return
+    if endpoint_mode not in {CUSTOM_DOMAIN, CLOUDFRONT}:
+        raise AgentCoreDeploymentError(
+            "control-plane output has an invalid endpoint architecture"
+        )
+    if endpoint_mode != expected_endpoint_mode:
+        raise AgentCoreDeploymentError(
+            "control-plane endpoint architecture does not match the reviewed setup"
+        )
+
+    expected_auth_mode = (
+        "application-oidc"
+        if endpoint_mode == CLOUDFRONT
+        else "alb-cognito"
+    )
+    if outputs.get("ControlPlaneAuthMode") != expected_auth_mode:
+        raise AgentCoreDeploymentError(
+            "control-plane browser authentication mode is invalid"
+        )
+    expected_load_balancer_scheme = (
+        "internal"
+        if endpoint_mode == CLOUDFRONT
+        else "internet-facing"
+    )
+    if (
+        outputs.get("LoadBalancerScheme")
+        != expected_load_balancer_scheme
+    ):
+        raise AgentCoreDeploymentError(
+            "control-plane load-balancer exposure does not match its endpoint mode"
+        )
+
+    domain_name = _required_output(
+        dict(outputs),
+        "ControlPlaneDomainName",
+    )
+    control_plane_url = _required_output(
+        dict(outputs),
+        "ControlPlaneUrl",
+    )
+    if control_plane_url != f"https://{domain_name}":
+        raise AgentCoreDeploymentError(
+            "control-plane URL does not match its canonical hostname"
+        )
+
+    cloudfront_outputs = (
+        "BrowserClientId",
+        "DistributionId",
+        "DistributionDomainName",
+        "VpcOriginId",
+        "WebAclArn",
+    )
+    if endpoint_mode == CLOUDFRONT:
+        if not domain_name.endswith(".cloudfront.net"):
+            raise AgentCoreDeploymentError(
+                "CloudFront control-plane hostname is invalid"
+            )
+        if outputs.get("DistributionDomainName") != domain_name:
+            raise AgentCoreDeploymentError(
+                "CloudFront distribution hostname is not canonical"
+            )
+        for output_name in cloudfront_outputs:
+            _required_output(dict(outputs), output_name)
+    elif any(name in outputs for name in cloudfront_outputs):
+        raise AgentCoreDeploymentError(
+            "custom-domain control plane emitted CloudFront-only outputs"
+        )
 
 
 def _validate_candidate_version(
@@ -2621,6 +2785,28 @@ def _stack_parameters(
             raise AgentCoreDeploymentError(f"{stack_name} parameters are malformed")
         parameters[key] = value
     return parameters
+
+
+def _validate_stack_endpoint_mode(
+    stack: Mapping[str, Any],
+    *,
+    expected_endpoint_mode: str,
+    stack_name: str,
+) -> None:
+    if expected_endpoint_mode not in {CUSTOM_DOMAIN, CLOUDFRONT}:
+        raise AgentCoreDeploymentError(
+            "reviewed control-plane endpoint mode is invalid"
+        )
+    parameters = _stack_parameters(stack, stack_name=stack_name)
+    actual_endpoint_mode = parameters.get("EndpointMode", CUSTOM_DOMAIN)
+    if actual_endpoint_mode not in {CUSTOM_DOMAIN, CLOUDFRONT}:
+        raise AgentCoreDeploymentError(
+            f"{stack_name} has an invalid endpoint architecture"
+        )
+    if actual_endpoint_mode != expected_endpoint_mode:
+        raise AgentCoreDeploymentError(
+            f"{stack_name} endpoint architecture cannot be changed in place"
+        )
 
 
 def _validate_stack_parameters(
@@ -2820,6 +3006,7 @@ def _expected_promotion_metadata(
                 )
             ),
             "stackExisted": control_plane_stack is not None,
+            "targetEndpointMode": config.control_plane.endpoint_mode,
             "targetImage": config.control_plane.verified_image_uri,
         }
     metadata: dict[str, Any] = {
@@ -2887,6 +3074,15 @@ def _prepare_candidate_promotion(
         else None
     )
     if control_plane_stack is not None:
+        if config.control_plane is None:
+            raise AgentCoreDeploymentError(
+                "managed Cognito control-plane settings are missing"
+            )
+        _validate_stack_endpoint_mode(
+            control_plane_stack,
+            expected_endpoint_mode=config.control_plane.endpoint_mode,
+            stack_name=CONTROL_PLANE_STACK,
+        )
         _validate_control_plane_outputs(
             _outputs_from_stack(
                 control_plane_stack,
@@ -2894,6 +3090,7 @@ def _prepare_candidate_promotion(
             ),
             runtime_outputs=before,
             expected_image=None,
+            expected_endpoint_mode=config.control_plane.endpoint_mode,
         )
     metadata = _expected_promotion_metadata(
         before,
@@ -3173,6 +3370,11 @@ def deploy_control_plane(
         or not isinstance(control_metadata, dict)
         or config.control_plane is None
         or control_metadata.get("targetImage") != config.control_plane.verified_image_uri
+        or control_metadata.get(
+            "targetEndpointMode",
+            CUSTOM_DOMAIN,
+        )
+        != config.control_plane.endpoint_mode
         or metadata.get("region") != config.aws_region
     ):
         raise AgentCoreDeploymentError("promotion metadata is not bound to this control-plane deployment")
@@ -3234,6 +3436,12 @@ def deploy_control_plane(
         cloudformation_client,
         CONTROL_PLANE_STACK,
     )
+    if current_stack is not None:
+        _validate_stack_endpoint_mode(
+            current_stack,
+            expected_endpoint_mode=config.control_plane.endpoint_mode,
+            stack_name=CONTROL_PLANE_STACK,
+        )
     if control_metadata["stackExisted"]:
         if (
             current_stack is None
@@ -3258,6 +3466,9 @@ def deploy_control_plane(
                 current_outputs,
                 runtime_outputs=runtime_outputs,
                 expected_image=control_metadata["targetImage"],
+                expected_endpoint_mode=(
+                    config.control_plane.endpoint_mode
+                ),
             )
             _write_private_json(
                 outputs_dir / "control-plane-outputs.json",
@@ -3284,6 +3495,9 @@ def deploy_control_plane(
                 current_outputs,
                 runtime_outputs=runtime_outputs,
                 expected_image=control_metadata["targetImage"],
+                expected_endpoint_mode=(
+                    config.control_plane.endpoint_mode
+                ),
             )
             _write_private_json(
                 outputs_dir / "control-plane-outputs.json",
@@ -3315,6 +3529,7 @@ def deploy_control_plane(
         outputs,
         runtime_outputs=runtime_outputs,
         expected_image=control_metadata["targetImage"],
+        expected_endpoint_mode=config.control_plane.endpoint_mode,
     )
     after_stack = _existing_stack(
         cloudformation_client,
@@ -3337,7 +3552,13 @@ def deploy_control_plane(
     )
     if any(after_parameters.get(name) != value for name, value in target_parameters.items()):
         raise AgentCoreDeploymentError("control-plane stack is not bound to the reviewed parameters")
-    print(f"Control plane: https://{config.control_plane.domain_name}")
+    print(
+        "Control plane: "
+        + _required_output(
+            dict(outputs),
+            "ControlPlaneUrl",
+        )
+    )
 
 
 def _cloudformation_role(
@@ -3546,6 +3767,16 @@ def _reconcile_control_plane_transition(
         CONTROL_PLANE_STACK,
         allow_failed_creation=not control["stackExisted"],
     )
+    target_endpoint_mode = control.get(
+        "targetEndpointMode",
+        CUSTOM_DOMAIN,
+    )
+    if stack is not None:
+        _validate_stack_endpoint_mode(
+            stack,
+            expected_endpoint_mode=target_endpoint_mode,
+            stack_name=CONTROL_PLANE_STACK,
+        )
     if control["stackExisted"]:
         if (
             stack is None
@@ -3621,6 +3852,7 @@ def _reconcile_control_plane_transition(
             outputs,
             runtime_outputs=runtime_outputs,
             expected_image=control["targetImage"],
+            expected_endpoint_mode=target_endpoint_mode,
         )
     _delete_new_control_plane(
         cloudformation_client,
@@ -3785,19 +4017,33 @@ def _promotion_metadata(path: Path) -> dict[str, Any]:
             raise AgentCoreDeploymentError("promotion metadata is malformed")
         control = value.get("controlPlane")
         if control is not None:
+            required_control_fields = {
+                "previousParameters",
+                "previousStackId",
+                "stackExisted",
+                "targetImage",
+            }
             if (
                 not isinstance(control, dict)
-                or set(control)
-                != {
-                    "previousParameters",
-                    "previousStackId",
-                    "stackExisted",
-                    "targetImage",
+                or frozenset(control)
+                not in {
+                    frozenset(required_control_fields),
+                    frozenset(
+                        {
+                            *required_control_fields,
+                            "targetEndpointMode",
+                        }
+                    ),
                 }
                 or not isinstance(control.get("stackExisted"), bool)
                 or not isinstance(control.get("targetImage"), str)
                 or not control["targetImage"]
                 or any(character.isspace() for character in control["targetImage"])
+                or control.get(
+                    "targetEndpointMode",
+                    CUSTOM_DOMAIN,
+                )
+                not in {CUSTOM_DOMAIN, CLOUDFRONT}
             ):
                 raise AgentCoreDeploymentError("promotion metadata is malformed")
             previous_parameters = control.get("previousParameters")

@@ -160,6 +160,18 @@ def test_chat_generated_assets_are_current_and_valid_javascript() -> None:
         assert syntax.returncode == 0, syntax.stdout + syntax.stderr
 
 
+def test_chat_clients_echo_csrf_for_unsafe_session_requests() -> None:
+    for name in ("chat", "playground", "routing"):
+        source = (CHAT_ROOT / f"{name}.jsx").read_text(encoding="utf-8")
+        compiled = (STATIC_ROOT / f"{name}.js").read_text(
+            encoding="utf-8"
+        )
+        for content in (source, compiled):
+            assert "const CSRF_COOKIE = '__Host-axon-csrf';" in content
+            assert "headers['X-Axon-CSRF-Token'] = csrfToken;" in content
+            assert "requestOptions.credentials = 'same-origin';" in content
+
+
 def test_chat_static_route_serves_only_the_build_allowlist() -> None:
     app = Starlette(routes=create_chat_routes(ChatAPI(object())))
 

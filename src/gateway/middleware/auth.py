@@ -1,10 +1,11 @@
 """Multi-strategy authentication middleware for AxonLLM.
 
 Priority chain:
-1. X-Amzn-Oidc-Data header (ALB OIDC JWT)
-2. Authorization: Bearer <token> (OIDC JWT or API key if prefixed axon_)
-3. X-Api-Key header
-4. Anonymous -> 401
+1. Application browser session cookie (CloudFront mode)
+2. X-Amzn-Oidc-Data header (ALB OIDC JWT)
+3. Authorization: Bearer <token> (OIDC JWT or API key if prefixed axon_)
+4. X-Api-Key header
+5. Anonymous -> 401
 """
 
 from __future__ import annotations
@@ -14,13 +15,21 @@ from typing import TYPE_CHECKING, Protocol
 
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
-from starlette.responses import JSONResponse, Response
+from starlette.responses import JSONResponse, RedirectResponse, Response
 
+from src.gateway.auth.browser_session import (
+    BROWSER_AUTH_PATHS,
+    SESSION_COOKIE_NAME,
+    BrowserSessionUnavailable,
+    browser_session_cookie_values,
+    valid_session_token,
+)
 from src.gateway.config_sync import RegionTopologyUnavailable
 from src.gateway.models import AuthMethod, RequestContext
 
 if TYPE_CHECKING:
     from src.gateway.auth.api_key_service import APIKeyService
+    from src.gateway.auth.browser_session import BrowserSessionService
     from src.gateway.auth.oidc_service import OIDCService
     from src.gateway.auth.principal import PrincipalResolver
 
@@ -45,6 +54,38 @@ SAML_HANDOFF_PATHS = frozenset(
         "/saml/metadata",
     }
 )
+
+APP_AUTHENTICATED_UI_PATHS = frozenset(
+    {
+        "/admin/dashboard",
+        "/chat",
+        "/playground",
+        "/routing",
+    }
+)
+
+
+def _is_browser_navigation(request: Request) -> bool:
+    """Distinguish a document navigation from API and fetch/XHR requests."""
+    if request.method.upper() != "GET":
+        return False
+    path = request.url.path
+    if (
+        path.startswith("/api/")
+        or path.startswith("/v1/")
+        or path.startswith("/scim/")
+        or request.headers.get("x-requested-with", "").lower()
+        == "xmlhttprequest"
+    ):
+        return False
+    fetch_mode = request.headers.get("sec-fetch-mode")
+    fetch_dest = request.headers.get("sec-fetch-dest")
+    if fetch_mode is not None and fetch_mode.lower() != "navigate":
+        return False
+    if fetch_dest is not None and fetch_dest.lower() != "document":
+        return False
+    accepted = ",".join(request.headers.getlist("accept")).lower()
+    return "text/html" in accepted
 
 
 def _is_site_asset(path: str) -> bool:
@@ -91,6 +132,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         config_sync: object | None = None,
         principal_resolver: PrincipalResolver | None = None,
         require_canonical_principal: bool = False,
+        browser_session_service: BrowserSessionService | None = None,
     ):
         super().__init__(app)
         self.oidc_service = oidc_service
@@ -105,6 +147,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         self.config_sync = config_sync
         self.principal_resolver = principal_resolver
         self.require_canonical_principal = require_canonical_principal
+        self.browser_session_service = browser_session_service
 
     async def dispatch(self, request: Request, call_next) -> Response:
         # Skip auth for public paths and static assets.
@@ -113,12 +156,20 @@ class AuthMiddleware(BaseHTTPMiddleware):
         # tombstones.  Do not exempt the whole /saml/* namespace: a future
         # endpoint must be authenticated unless it is explicitly reviewed.
         path = request.url.path
+        app_authenticated_ui = bool(
+            self.browser_session_service is not None
+            and path in APP_AUTHENTICATED_UI_PATHS
+        )
         if (
-            path in self.public_paths
+            (path in self.public_paths and not app_authenticated_ui)
             or path.startswith("/admin/static")
             or path.startswith("/chat/static")
             or path.startswith("/scim/")
             or path in SAML_HANDOFF_PATHS
+            or (
+                self.browser_session_service is not None
+                and path in BROWSER_AUTH_PATHS
+            )
             or _is_site_asset(path)
         ):
             request.state.context = RequestContext(
@@ -132,8 +183,15 @@ class AuthMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         context = None
+        request.state.browser_session_authenticated = False
 
-        # 1. ALB OIDC headers. Their presence is authoritative: an invalid or
+        # Credential families are mutually exclusive. Presence is
+        # authoritative: malformed browser/ALB material cannot fall through to
+        # a bearer token or API key supplied alongside it.
+        browser_tokens = browser_session_cookie_values(
+            request.headers.getlist("cookie")
+        )
+        browser_auth_attempted = bool(browser_tokens)
         # ambiguous ALB credential must not fall through to another auth method.
         alb_tokens = request.headers.getlist("x-amzn-oidc-data")
         alb_identities = request.headers.getlist("x-amzn-oidc-identity")
@@ -144,13 +202,55 @@ class AuthMiddleware(BaseHTTPMiddleware):
             authorization_headers or api_key_headers
         )
         competing_credentials = (
-            (alb_auth_attempted and header_auth_attempted)
+            sum(
+                (
+                    bool(browser_auth_attempted),
+                    bool(alb_auth_attempted),
+                    bool(authorization_headers),
+                    bool(api_key_headers),
+                )
+            )
+            > 1
             or (authorization_headers and api_key_headers)
             or len(authorization_headers) > 1
             or len(api_key_headers) > 1
+            or len(browser_tokens) > 1
         )
+
+        # 1. CloudFront application browser session.
         if (
-            alb_auth_attempted
+            browser_auth_attempted
+            and not competing_credentials
+            and len(browser_tokens) == 1
+            and valid_session_token(browser_tokens[0])
+            and self.browser_session_service is not None
+        ):
+            try:
+                context = await self.browser_session_service.authenticate(
+                    browser_tokens[0]
+                )
+            except BrowserSessionUnavailable:
+                logger.exception("Browser session authority is unavailable")
+                return JSONResponse(
+                    status_code=503,
+                    content={
+                        "error": {
+                            "type": "service_unavailable",
+                            "code": "browser_session_unavailable",
+                            "message": (
+                                "Browser authentication is temporarily "
+                                "unavailable."
+                            ),
+                        }
+                    },
+                )
+            request.state.browser_session_authenticated = context is not None
+
+        # 2. ALB OIDC headers.
+        if (
+            context is None
+            and not browser_auth_attempted
+            and alb_auth_attempted
             and not competing_credentials
             and self.oidc_service
             and len(alb_tokens) == 1
@@ -163,9 +263,10 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 expected_subject=alb_identities[0],
             )
 
-        # 2. Authorization: Bearer <token>
+        # 3. Authorization: Bearer <token>
         if (
             context is None
+            and not browser_auth_attempted
             and not alb_auth_attempted
             and not competing_credentials
             and len(authorization_headers) == 1
@@ -182,9 +283,10 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 elif self.oidc_service:
                     context = await self.oidc_service.validate_oidc_jwt(token)
 
-        # 3. X-Api-Key header
+        # 4. X-Api-Key header
         if (
             context is None
+            and not browser_auth_attempted
             and not alb_auth_attempted
             and not competing_credentials
             and not authorization_headers
@@ -194,17 +296,65 @@ class AuthMiddleware(BaseHTTPMiddleware):
             if api_key_header and api_key_header == api_key_header.strip():
                 context = await self._authenticate_api_key(api_key_header)
 
-        # 4. No credentials — reject (or allow in LOG_ONLY mode)
+        # 5. No credentials - redirect browser document navigations in app
+        # session mode, otherwise preserve JSON 401 semantics for APIs/XHR.
         if context is None:
             if self.mode == "ENFORCE":
+                if (
+                    self.browser_session_service is not None
+                    and not alb_auth_attempted
+                    and not header_auth_attempted
+                    and not competing_credentials
+                    and _is_browser_navigation(request)
+                ):
+                    return_to = path
+                    if request.url.query:
+                        return_to = f"{return_to}?{request.url.query}"
+                    try:
+                        location = (
+                            self.browser_session_service.login_url(return_to)
+                        )
+                    except ValueError:
+                        location = (
+                            self.browser_session_service.login_url()
+                        )
+                    response = RedirectResponse(location, status_code=302)
+                    if browser_auth_attempted:
+                        response.delete_cookie(
+                            SESSION_COOKIE_NAME,
+                            path="/",
+                            secure=True,
+                            httponly=True,
+                            samesite="lax",
+                        )
+                    response.headers["cache-control"] = "no-store"
+                    response.headers["pragma"] = "no-cache"
+                    return response
+                error: dict[str, str] = {
+                    "type": "authentication_error",
+                    "message": (
+                        "Missing or invalid credentials. Provide a Bearer "
+                        "token or X-Api-Key header."
+                    ),
+                }
+                if self.browser_session_service is not None:
+                    try:
+                        login_url = (
+                            self.browser_session_service.login_url(path)
+                        )
+                    except ValueError:
+                        login_url = (
+                            self.browser_session_service.login_url()
+                        )
+                    error.update(
+                        {
+                            "code": "browser_login_required",
+                            "login_url": login_url,
+                        }
+                    )
                 return JSONResponse(
                     status_code=401,
-                    content={
-                        "error": {
-                            "type": "authentication_error",
-                            "message": "Missing or invalid credentials. Provide a Bearer token or X-Api-Key header.",
-                        }
-                    },
+                    content={"error": error},
                 )
             else:
                 context = RequestContext(

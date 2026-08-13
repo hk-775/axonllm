@@ -20,6 +20,9 @@ SCHEMA_VERSION = 2
 MANAGED_COGNITO = "managed-cognito"
 EXTERNAL_OIDC = "external-oidc"
 IDENTITY_MODES = (MANAGED_COGNITO, EXTERNAL_OIDC)
+CUSTOM_DOMAIN = "custom-domain"
+CLOUDFRONT = "cloudfront"
+CONTROL_PLANE_ENDPOINT_MODES = (CUSTOM_DOMAIN, CLOUDFRONT)
 DEFAULT_TENANT_CLAIM = "custom:tenant_id"
 DEFAULT_PROJECT_CLAIM = "custom:project_id"
 DEFAULT_SAML_LOGIN_PATH = "/admin/dashboard"
@@ -183,6 +186,44 @@ def _https_url(
     if discovery and not parsed.path.endswith("/.well-known/openid-configuration"):
         raise AgentCoreSetupError(f"{name} must end with /.well-known/openid-configuration")
     return value
+
+
+def _viewer_cidrs(value: Any, name: str) -> tuple[str, ...]:
+    if not isinstance(value, list) or not value:
+        raise AgentCoreSetupError(f"{name} must be a non-empty array")
+    if len(value) > 64:
+        raise AgentCoreSetupError(f"{name} must contain at most 64 CIDRs")
+
+    networks: list[ipaddress.IPv4Network] = []
+    for index, raw_cidr in enumerate(value):
+        cidr = _required_string(
+            raw_cidr,
+            f"{name}[{index}]",
+            max_length=64,
+        )
+        try:
+            network = ipaddress.ip_network(cidr, strict=True)
+        except ValueError as exc:
+            raise AgentCoreSetupError(
+                f"{name}[{index}] must be a canonical IP network"
+            ) from exc
+        if not isinstance(network, ipaddress.IPv4Network):
+            raise AgentCoreSetupError(
+                f"{name}[{index}] must be an IPv4 network"
+            )
+        if (
+            not network.is_global
+            or network.is_multicast
+            or network.prefixlen < 24
+        ):
+            raise AgentCoreSetupError(
+                f"{name}[{index}] must be a public IPv4 network no broader "
+                "than /24"
+            )
+        if any(network.overlaps(existing) for existing in networks):
+            raise AgentCoreSetupError(f"{name} must not contain overlapping CIDRs")
+        networks.append(network)
+    return tuple(str(network) for network in networks)
 
 
 def _oauth_identifier(value: Any, name: str) -> str:
@@ -750,12 +791,14 @@ class ManagedCognitoSetup:
 class ControlPlaneSetup:
     """Managed-Cognito web control-plane deployment inputs."""
 
-    domain_name: str
+    endpoint_mode: str
     verified_image_uri: str
-    certificate_arn: str
-    public_hosted_zone_id: str
-    approved_ingress_prefix_list_id: str
     approved_https_prefix_list_id: str
+    domain_name: str | None = None
+    certificate_arn: str | None = None
+    public_hosted_zone_id: str | None = None
+    approved_ingress_prefix_list_id: str | None = None
+    allowed_viewer_cidrs: tuple[str, ...] = ()
     scim_tenants_secret_arn: str | None = None
     saml_login_path: str = DEFAULT_SAML_LOGIN_PATH
 
@@ -769,28 +812,23 @@ class ControlPlaneSetup:
         value = _strict_object(
             raw,
             "control_plane",
-            required={
+            required={"verified_image_uri", "approved_https_prefix_list_id"},
+            optional={
+                "endpoint_mode",
                 "domain_name",
-                "verified_image_uri",
                 "certificate_arn",
                 "public_hosted_zone_id",
                 "approved_ingress_prefix_list_id",
-                "approved_https_prefix_list_id",
-            },
-            optional={
+                "allowed_viewer_cidrs",
                 "scim_tenants_secret_arn",
                 "saml_login_path",
             },
         )
-        domain_name = _required_string(
-            value["domain_name"],
-            "control_plane.domain_name",
-            max_length=253,
-        )
-        if _DOMAIN_NAME_PATTERN.fullmatch(domain_name) is None:
+        endpoint_mode = value.get("endpoint_mode", CUSTOM_DOMAIN)
+        if endpoint_mode not in CONTROL_PLANE_ENDPOINT_MODES:
             raise AgentCoreSetupError(
-                "control_plane.domain_name must be a lowercase fully "
-                "qualified DNS hostname"
+                "control_plane.endpoint_mode must be 'custom-domain' or "
+                "'cloudfront'"
             )
         image = _required_string(
             value["verified_image_uri"],
@@ -802,62 +840,115 @@ class ControlPlaneSetup:
                 "control_plane.verified_image_uri must be an immutable "
                 f"private ECR digest URI in {aws_region}"
             )
-        certificate_arn = _required_string(
-            value["certificate_arn"],
-            "control_plane.certificate_arn",
-            max_length=512,
-        )
-        certificate_match = _ACM_CERTIFICATE_ARN_PATTERN.fullmatch(
-            certificate_arn
-        )
-        if (
-            certificate_match is None
-            or certificate_match.group("region") != aws_region
-        ):
-            raise AgentCoreSetupError(
-                "control_plane.certificate_arn must be a regional ACM "
-                f"certificate ARN in {aws_region}"
-            )
-        public_hosted_zone_id = _required_string(
-            value["public_hosted_zone_id"],
-            "control_plane.public_hosted_zone_id",
+        approved_https_prefix_list_id = _required_string(
+            value["approved_https_prefix_list_id"],
+            "control_plane.approved_https_prefix_list_id",
             max_length=64,
         )
-        if (
-            _HOSTED_ZONE_PATTERN.fullmatch(public_hosted_zone_id)
-            is None
-        ):
+        if _PREFIX_LIST_PATTERN.fullmatch(approved_https_prefix_list_id) is None:
             raise AgentCoreSetupError(
-                "control_plane.public_hosted_zone_id must be a Route 53 "
-                "public hosted-zone ID"
+                "control_plane.approved_https_prefix_list_id must be an EC2 "
+                "managed prefix list ID"
             )
-        prefix_lists: dict[str, str] = {}
-        for field_name in (
+
+        domain_name = None
+        certificate_arn = None
+        public_hosted_zone_id = None
+        approved_ingress_prefix_list_id = None
+        allowed_viewer_cidrs: tuple[str, ...] = ()
+        custom_fields = {
+            "domain_name",
+            "certificate_arn",
+            "public_hosted_zone_id",
             "approved_ingress_prefix_list_id",
-            "approved_https_prefix_list_id",
-        ):
-            prefix_list_id = _required_string(
-                value[field_name],
-                f"control_plane.{field_name}",
+        }
+        if endpoint_mode == CUSTOM_DOMAIN:
+            missing = custom_fields.difference(value)
+            if missing:
+                raise AgentCoreSetupError(
+                    "custom-domain control_plane is missing required fields: "
+                    + ", ".join(sorted(missing))
+                )
+            if "allowed_viewer_cidrs" in value:
+                raise AgentCoreSetupError(
+                    "custom-domain control_plane forbids allowed_viewer_cidrs"
+                )
+            domain_name = _required_string(
+                value["domain_name"],
+                "control_plane.domain_name",
+                max_length=253,
+            )
+            if _DOMAIN_NAME_PATTERN.fullmatch(domain_name) is None:
+                raise AgentCoreSetupError(
+                    "control_plane.domain_name must be a lowercase fully "
+                    "qualified DNS hostname"
+                )
+            certificate_arn = _required_string(
+                value["certificate_arn"],
+                "control_plane.certificate_arn",
+                max_length=512,
+            )
+            certificate_match = _ACM_CERTIFICATE_ARN_PATTERN.fullmatch(
+                certificate_arn
+            )
+            if (
+                certificate_match is None
+                or certificate_match.group("region") != aws_region
+            ):
+                raise AgentCoreSetupError(
+                    "control_plane.certificate_arn must be a regional ACM "
+                    f"certificate ARN in {aws_region}"
+                )
+            public_hosted_zone_id = _required_string(
+                value["public_hosted_zone_id"],
+                "control_plane.public_hosted_zone_id",
                 max_length=64,
             )
-            if _PREFIX_LIST_PATTERN.fullmatch(prefix_list_id) is None:
+            if _HOSTED_ZONE_PATTERN.fullmatch(public_hosted_zone_id) is None:
                 raise AgentCoreSetupError(
-                    f"control_plane.{field_name} must be an EC2 managed "
-                    "prefix list ID"
+                    "control_plane.public_hosted_zone_id must be a Route 53 "
+                    "public hosted-zone ID"
                 )
-            prefix_lists[field_name] = prefix_list_id
+            approved_ingress_prefix_list_id = _required_string(
+                value["approved_ingress_prefix_list_id"],
+                "control_plane.approved_ingress_prefix_list_id",
+                max_length=64,
+            )
+            if (
+                _PREFIX_LIST_PATTERN.fullmatch(
+                    approved_ingress_prefix_list_id
+                )
+                is None
+            ):
+                raise AgentCoreSetupError(
+                    "control_plane.approved_ingress_prefix_list_id must be an "
+                    "EC2 managed prefix list ID"
+                )
+        else:
+            present = custom_fields.intersection(value)
+            if present:
+                raise AgentCoreSetupError(
+                    "cloudfront control_plane forbids custom-domain fields: "
+                    + ", ".join(sorted(present))
+                )
+            if aws_region != "us-east-1":
+                raise AgentCoreSetupError(
+                    "cloudfront control_plane currently requires aws_region "
+                    "'us-east-1' for its global WAF and distribution"
+                )
+            allowed_viewer_cidrs = _viewer_cidrs(
+                value.get("allowed_viewer_cidrs"),
+                "control_plane.allowed_viewer_cidrs",
+            )
         return cls(
+            endpoint_mode=endpoint_mode,
             domain_name=domain_name,
             verified_image_uri=image,
             certificate_arn=certificate_arn,
             public_hosted_zone_id=public_hosted_zone_id,
-            approved_ingress_prefix_list_id=(
-                prefix_lists["approved_ingress_prefix_list_id"]
-            ),
-            approved_https_prefix_list_id=(
-                prefix_lists["approved_https_prefix_list_id"]
-            ),
+            approved_ingress_prefix_list_id=approved_ingress_prefix_list_id,
+            approved_https_prefix_list_id=approved_https_prefix_list_id,
+            allowed_viewer_cidrs=allowed_viewer_cidrs,
             scim_tenants_secret_arn=_optional_secret_arn(
                 value.get("scim_tenants_secret_arn"),
                 "control_plane.scim_tenants_secret_arn",
@@ -1042,8 +1133,23 @@ class AgentCoreSetupConfig:
                 value["managed_cognito"].pop("ses_verified_domain")
         if self.control_plane is None:
             value.pop("control_plane")
-        elif value["control_plane"]["scim_tenants_secret_arn"] is None:
-            value["control_plane"].pop("scim_tenants_secret_arn")
+        else:
+            value["control_plane"]["allowed_viewer_cidrs"] = list(
+                self.control_plane.allowed_viewer_cidrs
+            )
+            if self.control_plane.endpoint_mode == CUSTOM_DOMAIN:
+                value["control_plane"].pop("endpoint_mode")
+            for optional_field in (
+                "domain_name",
+                "certificate_arn",
+                "public_hosted_zone_id",
+                "approved_ingress_prefix_list_id",
+                "scim_tenants_secret_arn",
+            ):
+                if value["control_plane"][optional_field] is None:
+                    value["control_plane"].pop(optional_field)
+            if not self.control_plane.allowed_viewer_cidrs:
+                value["control_plane"].pop("allowed_viewer_cidrs")
         if self.external_oidc is None:
             value.pop("external_oidc")
         value["runtime"]["bedrock_invoke_resource_arns"] = list(self.runtime.bedrock_invoke_resource_arns)
@@ -1207,17 +1313,13 @@ def config_from_args(args: argparse.Namespace) -> AgentCoreSetupConfig:
                     "ses_verified_domain": args.ses_verified_domain,
                 }
             )
+        endpoint_mode = (
+            args.control_plane_endpoint_mode or CUSTOM_DOMAIN
+        )
         mapping["control_plane"] = {
-            "domain_name": args.control_plane_domain_name,
+            "endpoint_mode": endpoint_mode,
             "verified_image_uri": (
                 args.control_plane_verified_image_uri
-            ),
-            "certificate_arn": args.control_plane_certificate_arn,
-            "public_hosted_zone_id": (
-                args.control_plane_public_hosted_zone_id
-            ),
-            "approved_ingress_prefix_list_id": (
-                args.control_plane_approved_ingress_prefix_list_id
             ),
             "approved_https_prefix_list_id": (
                 args.control_plane_approved_https_prefix_list_id
@@ -1226,6 +1328,32 @@ def config_from_args(args: argparse.Namespace) -> AgentCoreSetupConfig:
                 args.control_plane_saml_login_path
             ),
         }
+        if endpoint_mode == CUSTOM_DOMAIN:
+            mapping["control_plane"].update(
+                {
+                    "domain_name": args.control_plane_domain_name,
+                    "certificate_arn": (
+                        args.control_plane_certificate_arn
+                    ),
+                    "public_hosted_zone_id": (
+                        args.control_plane_public_hosted_zone_id
+                    ),
+                    "approved_ingress_prefix_list_id": (
+                        args.control_plane_approved_ingress_prefix_list_id
+                    ),
+                }
+            )
+        else:
+            viewer_cidrs = list(
+                args.control_plane_allowed_viewer_cidr or []
+            )
+            if not viewer_cidrs:
+                viewer_cidrs = _comma_values(
+                    os.environ.get(
+                        "AXON_CONTROL_PLANE_ALLOWED_VIEWER_CIDRS"
+                    )
+                )
+            mapping["control_plane"]["allowed_viewer_cidrs"] = viewer_cidrs
         if args.control_plane_scim_tenants_secret_arn:
             mapping["control_plane"]["scim_tenants_secret_arn"] = (
                 args.control_plane_scim_tenants_secret_arn
@@ -1475,6 +1603,15 @@ def add_setup_subcommands(subparsers: argparse._SubParsersAction) -> None:
         help="Verified SES domain matching --ses-from-email",
     )
     agentcore.add_argument(
+        "--control-plane-endpoint-mode",
+        choices=CONTROL_PLANE_ENDPOINT_MODES,
+        default=_env("AXON_CONTROL_PLANE_ENDPOINT_MODE"),
+        help=(
+            "Use a custom Route 53/ACM hostname or an AWS-generated "
+            "CloudFront hostname"
+        ),
+    )
+    agentcore.add_argument(
         "--control-plane-domain-name",
         default=_env("AXON_CONTROL_PLANE_DOMAIN_NAME"),
     )
@@ -1500,6 +1637,13 @@ def add_setup_subcommands(subparsers: argparse._SubParsersAction) -> None:
         "--control-plane-approved-https-prefix-list-id",
         default=_env(
             "AXON_CONTROL_PLANE_APPROVED_HTTPS_PREFIX_LIST_ID"
+        ),
+    )
+    agentcore.add_argument(
+        "--control-plane-allowed-viewer-cidr",
+        action="append",
+        help=(
+            "CloudFront viewer CIDR; repeat for each reviewed public network"
         ),
     )
     agentcore.add_argument(

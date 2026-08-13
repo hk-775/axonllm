@@ -1,13 +1,14 @@
 """Managed Cognito federation contract for enterprise SAML login.
 
-AxonLLM is not a SAML service provider.  Production browser authentication is
-owned by the control-plane ALB and its Cognito user pool:
+AxonLLM is not a SAML service provider. Production browser authentication is
+owned by Cognito and the selected control-plane endpoint:
 
 * Cognito validates the SAML protocol, signatures, issuer, audience,
   destination, recipient, timestamps, request correlation, and replay.
-* Cognito and the ALB own RelayState and the secure browser session.
-* AxonLLM validates the ALB-signed OIDC identity and resolves all authority
-  through its canonical principal repository.
+* Cognito owns RelayState. Custom-domain mode uses the ALB session; CloudFront
+  mode exchanges the code with S256 PKCE and stores only an opaque app session.
+* AxonLLM validates the resulting OIDC identity and resolves all authority
+  through the canonical principal repository.
 
 Accepting a SAML assertion in this process would create a second session and
 identity authority without a distributed request/replay store or session-key
@@ -20,10 +21,13 @@ import os
 import re
 from dataclasses import dataclass
 from typing import Mapping
-from urllib.parse import unquote, urlsplit, urlunsplit
+from urllib.parse import unquote, urlencode, urlsplit, urlunsplit
 
 MANAGED_COGNITO_MODE = "managed-cognito"
+CUSTOM_DOMAIN_ENDPOINT_MODE = "custom-domain"
+CLOUDFRONT_ENDPOINT_MODE = "cloudfront"
 DEFAULT_LOGIN_PATH = "/admin/dashboard"
+APP_LOGIN_PATH = "/auth/login"
 MAX_RETURN_TO_BYTES = 2048
 
 LEGACY_DIRECT_SAML_ENV_VARS = frozenset(
@@ -44,7 +48,7 @@ _AWS_DNS_SUFFIXES = {
 }
 _INVALID_PERCENT_ESCAPE = re.compile(r"%(?![0-9A-Fa-f]{2})")
 _REGION_PATTERN = re.compile(r"^[a-z0-9-]{3,32}$")
-_RESERVED_LOGIN_PREFIXES = ("/saml", "/scim", "/oauth2")
+_RESERVED_LOGIN_PREFIXES = ("/auth", "/saml", "/scim", "/oauth2")
 _NON_LOGIN_PATHS = frozenset({"/", "/health", "/ready"})
 
 
@@ -68,6 +72,8 @@ class SamlConfig:
     alb_signer_arn: str = ""
     alb_client_id: str = ""
     alb_issuer: str = ""
+    endpoint_mode: str = CUSTOM_DOMAIN_ENDPOINT_MODE
+    browser_auth_client_id: str = ""
     legacy_direct_configuration: bool = False
 
     @property
@@ -88,21 +94,41 @@ class SamlConfig:
             return "managed SAML federation requires canonical identity"
         if not self.control_plane_only:
             return "managed SAML federation is available only on the control plane"
-        if not _is_alb_trust_config(
-            signer_arn=self.alb_signer_arn,
-            client_id=self.alb_client_id,
-            issuer=self.alb_issuer,
-            region=self.aws_region,
-        ):
-            return "the regional ALB trust configuration is invalid"
+        if self.endpoint_mode not in {
+            CUSTOM_DOMAIN_ENDPOINT_MODE,
+            CLOUDFRONT_ENDPOINT_MODE,
+        }:
+            return "the control-plane endpoint mode is invalid"
+        partition = _partition_for_region(self.aws_region)
+        if self.endpoint_mode == CUSTOM_DOMAIN_ENDPOINT_MODE:
+            if not _is_alb_trust_config(
+                signer_arn=self.alb_signer_arn,
+                client_id=self.alb_client_id,
+                issuer=self.alb_issuer,
+                region=self.aws_region,
+            ):
+                return "the regional ALB trust configuration is invalid"
+            partition = self.alb_signer_arn.split(":", 2)[1]
         if not _is_cognito_issuer(
             self.oidc_issuer,
             region=self.aws_region,
-            partition=self.alb_signer_arn.split(":", 2)[1],
+            partition=partition,
         ):
             return "managed SAML federation requires a Cognito OIDC issuer"
-        if not self.oidc_audience or self.oidc_audience != self.alb_client_id:
-            return "the OIDC audience must match the ALB Cognito client"
+        if self.endpoint_mode == CUSTOM_DOMAIN_ENDPOINT_MODE:
+            if (
+                not self.oidc_audience
+                or self.oidc_audience != self.alb_client_id
+            ):
+                return "the OIDC audience must match the ALB Cognito client"
+        elif (
+            not self.browser_auth_client_id
+            or self.oidc_audience != self.browser_auth_client_id
+        ):
+            return (
+                "the OIDC audience must match the public browser "
+                "Cognito client"
+            )
         try:
             _safe_local_target(self.login_path)
         except SamlError:
@@ -129,10 +155,13 @@ class SamlService:
         return self._config.configuration_error
 
     def login_target(self, return_to: str | None = None) -> str:
-        """Return a local protected route where the ALB starts authentication."""
+        """Return the ALB route or app login route that starts Cognito auth."""
         if not self.enabled:
             raise SamlError("managed Cognito SAML federation is unavailable")
-        return _safe_local_target(return_to or self._config.login_path)
+        target = _safe_local_target(return_to or self._config.login_path)
+        if self._config.endpoint_mode == CLOUDFRONT_ENDPOINT_MODE:
+            return f"{APP_LOGIN_PATH}?{urlencode({'return_to': target})}"
+        return target
 
     def handle_acs(self, _saml_response_b64: str) -> None:
         """Reject direct assertions; Cognito is the only SAML protocol endpoint."""
@@ -159,6 +188,8 @@ def load_saml_config(
     alb_signer_arn: str = "",
     alb_client_id: str = "",
     alb_issuer: str = "",
+    endpoint_mode: str = CUSTOM_DOMAIN_ENDPOINT_MODE,
+    browser_auth_client_id: str = "",
     environ: Mapping[str, str] | None = None,
 ) -> SamlConfig:
     """Load only the application-side managed-federation switch and target.
@@ -184,11 +215,21 @@ def load_saml_config(
         alb_signer_arn=alb_signer_arn,
         alb_client_id=alb_client_id,
         alb_issuer=alb_issuer,
+        endpoint_mode=endpoint_mode,
+        browser_auth_client_id=browser_auth_client_id,
         legacy_direct_configuration=any(
             values.get(name, "").strip()
             for name in LEGACY_DIRECT_SAML_ENV_VARS
         ),
     )
+
+
+def _partition_for_region(region: str) -> str:
+    if region.startswith("cn-"):
+        return "aws-cn"
+    if region.startswith("us-gov-"):
+        return "aws-us-gov"
+    return "aws"
 
 
 def _is_https_url(value: str) -> bool:

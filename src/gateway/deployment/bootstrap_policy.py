@@ -11,7 +11,7 @@ BOUNDARY_NAME_PREFIX = "AxonLLMAgentCoreServiceBoundary"
 BOOTSTRAP_BOUNDARY_NAME_PREFIX = "AxonLLMAgentCoreBootstrapBoundary"
 EXECUTION_POLICY_PART_COUNT = 3
 IAM_MANAGED_POLICY_SIZE_LIMIT = 6_144
-_EXECUTION_POLICY_TARGET_SIZE = 5_500
+_EXECUTION_POLICY_TARGET_SIZE = 5_900
 
 PRODUCTION_QUALIFIER = "axprod"
 QUALIFICATION_QUALIFIER = "axqual"
@@ -249,9 +249,45 @@ _REGIONAL_ACTIONS = (
     "sqs:SetQueueAttributes",
     "sqs:TagQueue",
     "sqs:UntagQueue",
+    "wafv2:CreateIPSet",
+    "wafv2:CreateWebACL",
+    "wafv2:DeleteIPSet",
+    "wafv2:DeleteWebACL",
+    "wafv2:GetIPSet",
+    "wafv2:GetWebACL",
+    "wafv2:GetWebACLForResource",
+    "wafv2:ListIPSets",
+    "wafv2:ListTagsForResource",
+    "wafv2:ListWebACLs",
+    "wafv2:TagResource",
+    "wafv2:UntagResource",
+    "wafv2:UpdateIPSet",
+    "wafv2:UpdateWebACL",
 )
 
 _GLOBAL_ACTIONS = (
+    "cloudfront:CreateDistribution",
+    "cloudfront:CreateDistributionWithTags",
+    "cloudfront:CreateFunction",
+    "cloudfront:CreateVpcOrigin",
+    "cloudfront:DeleteDistribution",
+    "cloudfront:DeleteFunction",
+    "cloudfront:DeleteVpcOrigin",
+    "cloudfront:DescribeFunction",
+    "cloudfront:GetDistribution",
+    "cloudfront:GetDistributionConfig",
+    "cloudfront:GetFunction",
+    "cloudfront:GetVpcOrigin",
+    "cloudfront:ListDistributions",
+    "cloudfront:ListFunctions",
+    "cloudfront:ListTagsForResource",
+    "cloudfront:ListVpcOrigins",
+    "cloudfront:PublishFunction",
+    "cloudfront:TagResource",
+    "cloudfront:UntagResource",
+    "cloudfront:UpdateDistribution",
+    "cloudfront:UpdateFunction",
+    "cloudfront:UpdateVpcOrigin",
     "route53:ChangeResourceRecordSets",
     "route53:GetChange",
     "route53:GetHostedZone",
@@ -808,6 +844,7 @@ def policy_document(
                     "StringEquals": {
                         "iam:AWSServiceName": [
                             "bedrock-agentcore.amazonaws.com",
+                            "cloudfront.amazonaws.com",
                             "ecs.amazonaws.com",
                             "ecs.application-autoscaling.amazonaws.com",
                             "email.cognito-idp.amazonaws.com",
@@ -850,6 +887,7 @@ def _split_oversized_statement(
     for action in actions:
         candidate = {
             **statement,
+            "Sid": f"{sid}Part{len(chunks) + 1}",
             "Action": [*current, action],
         }
         if (

@@ -73,17 +73,26 @@ def identity_template(tmp_path_factory: pytest.TempPathFactory) -> dict:
 
 def test_identity_inputs_are_explicit_https_values(identity_template):
     parameters = identity_template["Parameters"]
+    assert parameters["EndpointMode"] == {
+        "Type": "String",
+        "Default": "custom-domain",
+        "AllowedValues": ["custom-domain", "cloudfront"],
+        "Description": (
+            "Control-plane endpoint architecture. Existing deployments "
+            "default to custom-domain."
+        ),
+    }
     assert "Default" not in parameters["HostedUiDomainPrefix"]
     assert "Default" not in parameters["OAuthCallbackUrls"]
-    assert "Default" not in parameters["ControlPlaneDomainName"]
+    assert parameters["ControlPlaneDomainName"]["Default"] == ""
     assert "Default" not in parameters["SesFromEmail"]
     assert "Default" not in parameters["SesVerifiedDomain"]
     assert parameters["HostedUiDomainPrefix"]["MinLength"] == 3
     assert parameters["HostedUiDomainPrefix"]["MaxLength"] == 63
     assert parameters["OAuthCallbackUrls"]["Type"] == "CommaDelimitedList"
     assert parameters["OAuthCallbackUrls"]["AllowedPattern"].startswith("^https://")
-    assert parameters["ControlPlaneDomainName"]["AllowedPattern"].endswith(
-        r"[a-z]{2,63}$"
+    assert parameters["ControlPlaneDomainName"]["AllowedPattern"].startswith(
+        r"^(?:|"
     )
     assert parameters["SesFromEmail"]["AllowedPattern"].startswith(
         r"^[^@\s]+@"
@@ -215,6 +224,7 @@ def test_confidential_alb_client_has_its_own_exact_callback(
         "axonllm-control-plane-alb",
     )
     client = client_resource["Properties"]
+    assert client_resource["Condition"] == "CustomDomainEndpoint"
     assert client_resource["DeletionPolicy"] == "Retain"
     assert client_resource["UpdateReplacePolicy"] == "Retain"
     assert client["GenerateSecret"] is True
@@ -300,9 +310,19 @@ def test_hosted_ui_and_standard_oidc_outputs_are_retained(identity_template):
         "HostedUiDomainName",
         "TenantClaimName",
         "ProjectClaimName",
+        "EndpointMode",
     } <= set(outputs)
     assert outputs["TenantClaimName"]["Value"] == "custom:tenant_id"
     assert outputs["ProjectClaimName"]["Value"] == "custom:project_id"
+    assert outputs["EndpointMode"]["Value"] == {"Ref": "EndpointMode"}
+    assert outputs["AlbClientId"]["Value"]["Fn::If"][0] == (
+        "CustomDomainEndpoint"
+    )
+    assert outputs["ControlPlaneDomainName"]["Value"]["Fn::If"] == [
+        "CustomDomainEndpoint",
+        {"Ref": "ControlPlaneDomainName"},
+        "",
+    ]
 
 
 def test_identity_stack_creates_no_iam_or_lambda_resources(identity_template):

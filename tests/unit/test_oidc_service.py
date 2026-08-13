@@ -222,6 +222,84 @@ class TestValidateOIDCJWT:
         assert context.issuer == service._config.issuer
         assert context.subject == "user-1"
 
+    def test_id_token_requires_matching_nonce(
+        self,
+        service,
+        rsa_signing_material,
+    ):
+        _cache_signing_key(service, rsa_signing_material)
+        token = _signed_token(
+            service._config,
+            rsa_signing_material,
+            nonce="one-time-nonce",
+            token_use="id",
+        )
+
+        accepted = asyncio.run(
+            service.validate_id_token(
+                token,
+                expected_nonce="one-time-nonce",
+            )
+        )
+        rejected = asyncio.run(
+            service.validate_id_token(
+                token,
+                expected_nonce="different-nonce",
+            )
+        )
+
+        assert accepted is not None
+        assert rejected is None
+
+    def test_id_token_rejects_explicit_access_token(
+        self,
+        service,
+        rsa_signing_material,
+    ):
+        _cache_signing_key(service, rsa_signing_material)
+        token = _signed_token(
+            service._config,
+            rsa_signing_material,
+            nonce="one-time-nonce",
+            token_use="access",
+        )
+
+        assert (
+            asyncio.run(
+                service.validate_id_token(
+                    token,
+                    expected_nonce="one-time-nonce",
+                )
+            )
+            is None
+        )
+
+    @pytest.mark.parametrize("subject", ["", "   ", True])
+    def test_id_token_rejects_invalid_subject(
+        self,
+        service,
+        rsa_signing_material,
+        subject,
+    ):
+        _cache_signing_key(service, rsa_signing_material)
+        token = _signed_token(
+            service._config,
+            rsa_signing_material,
+            sub=subject,
+            nonce="one-time-nonce",
+            token_use="id",
+        )
+
+        assert (
+            asyncio.run(
+                service.validate_id_token(
+                    token,
+                    expected_nonce="one-time-nonce",
+                )
+            )
+            is None
+        )
+
     def test_preserves_valid_es256_flow(self, service):
         private_key = ec.generate_private_key(ec.SECP256R1())
         private_pem = private_key.private_bytes(
