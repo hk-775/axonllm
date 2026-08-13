@@ -11,6 +11,12 @@ import re
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
+from src.gateway.routing_config_contract import (
+    ROUTING_CONFIG_SIGNING_MODES,
+    routing_config_signing_key_region,
+    validate_routing_config_signing_key_arn,
+)
+
 
 _MAX_ATHENA_QUERY_BINDINGS_CHARACTERS = 2_048
 CONTROL_PLANE_ENDPOINT_MODES = frozenset(
@@ -275,6 +281,8 @@ class AppConfig:
     # storage; startup refuses an in-memory-only configuration.
     canonical_identity_required: bool = False
     durable_persistence_enabled: bool = False
+    routing_config_signing_mode: str = "disabled"
+    routing_config_signing_key_arn: str = ""
     # Semantic cache. Off by default at the gateway level *as well as* per
     # project: a project flag can only take effect once an embedder exists, and
     # building one costs a Bedrock dependency at startup. Both must say yes.
@@ -464,6 +472,35 @@ class AppConfig:
             raise ValueError(
                 "deployment_profile must be 'development' or 'production'"
             )
+        if (
+            self.routing_config_signing_mode
+            not in ROUTING_CONFIG_SIGNING_MODES
+        ):
+            raise ValueError(
+                "routing_config_signing_mode must be 'disabled', "
+                "'verify', or 'sign-verify'"
+            )
+        if self.routing_config_signing_key_arn:
+            validate_routing_config_signing_key_arn(
+                self.routing_config_signing_key_arn
+            )
+            if (
+                routing_config_signing_key_region(
+                    self.routing_config_signing_key_arn
+                )
+                != self.aws_region
+            ):
+                raise ValueError(
+                    "routing configuration signing key region must match "
+                    "aws_region"
+                )
+        if (
+            self.routing_config_signing_mode != "disabled"
+            and not self.routing_config_signing_key_arn
+        ):
+            raise RuntimeError(
+                "routing configuration signing requires an exact KMS key ARN"
+            )
         if not isinstance(self.athena_query_bindings, str):
             raise ValueError("athena_query_bindings must be JSON text")
         if (
@@ -613,6 +650,18 @@ class AppConfig:
             raise RuntimeError(
                 "production profile requires "
                 "LLM_ROUTER_DYNAMODB_ENABLED=true"
+            )
+        if self.routing_config_signing_mode == "disabled":
+            raise RuntimeError(
+                "production profile requires signed routing configuration"
+            )
+        if (
+            self.control_plane_only
+            and self.routing_config_signing_mode != "sign-verify"
+        ):
+            raise RuntimeError(
+                "production control planes require routing signature "
+                "write authority"
             )
 
     @property

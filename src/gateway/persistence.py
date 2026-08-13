@@ -27,6 +27,20 @@ from src.gateway.models import (
     SpendCounterState,
     UsageRecord,
 )
+from src.gateway.routing_config import (
+    RoutingConfigSnapshot,
+)
+from src.gateway.routing_config_contract import (
+    ROUTING_CONFIG_SIGNATURE_SCHEMA,
+    ROUTING_CONFIG_SIGNING_MODES,
+    routing_config_signing_key_region,
+    validate_routing_config_signing_key_arn,
+)
+from src.gateway.routing_config_signing import (
+    KmsRoutingConfigAuthenticator,
+    RoutingConfigRollbackError,
+    RoutingConfigSignatureError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -128,6 +142,11 @@ class DynamoPersistence:
         self,
         table_name: str | None = None,
         region: str = "us-east-1",
+        routing_config_signing_mode: str | None = None,
+        routing_config_signing_key_arn: str | None = None,
+        routing_config_authenticator: (
+            KmsRoutingConfigAuthenticator | None
+        ) = None,
     ):
         # Table name comes from AXON_DYNAMODB_TABLE so the app and the CDK stack
         # agree on a single source of truth. The CDK provisions a table by this
@@ -138,6 +157,60 @@ class DynamoPersistence:
             or os.environ.get("AXON_DYNAMODB_TABLE", "axonllm-state")
         )
         self._region = region
+        self._routing_config_signing_mode = (
+            routing_config_signing_mode
+            if routing_config_signing_mode is not None
+            else os.environ.get(
+                "AXON_ROUTING_CONFIG_SIGNING_MODE",
+                "disabled",
+            )
+        ).strip().lower()
+        if (
+            self._routing_config_signing_mode
+            not in ROUTING_CONFIG_SIGNING_MODES
+        ):
+            raise ValueError(
+                "routing configuration signing mode is invalid"
+            )
+        self._routing_config_signing_key_arn = (
+            routing_config_signing_key_arn
+            if routing_config_signing_key_arn is not None
+            else os.environ.get(
+                "AXON_ROUTING_CONFIG_SIGNING_KEY_ARN",
+                "",
+            )
+        ).strip()
+        if self._routing_config_signing_key_arn:
+            validate_routing_config_signing_key_arn(
+                self._routing_config_signing_key_arn
+            )
+            if (
+                routing_config_signing_key_region(
+                    self._routing_config_signing_key_arn
+                )
+                != region
+            ):
+                raise ValueError(
+                    "routing configuration signing key region does not "
+                    "match the persistence region"
+                )
+        if self._routing_config_signing_mode == "disabled":
+            self._routing_config_authenticator = None
+        else:
+            if not self._routing_config_signing_key_arn:
+                raise RuntimeError(
+                    "routing configuration signing requires a KMS key ARN"
+                )
+            self._routing_config_authenticator = (
+                routing_config_authenticator
+                or KmsRoutingConfigAuthenticator(
+                    self._routing_config_signing_key_arn,
+                    region=region,
+                )
+            )
+        self._authenticated_routing_snapshot: (
+            RoutingConfigSnapshot | None
+        ) = None
         self._enabled = os.environ.get(
             "LLM_ROUTER_DYNAMODB_ENABLED", "false"
         ).lower() == "true"
@@ -165,6 +238,16 @@ class DynamoPersistence:
     def enabled(self) -> bool:
         """Whether DynamoDB persistence is active."""
         return self._enabled
+
+    @property
+    def routing_config_signing_mode(self) -> str:
+        return self._routing_config_signing_mode
+
+    @property
+    def authenticated_routing_snapshot(
+        self,
+    ) -> RoutingConfigSnapshot | None:
+        return self._authenticated_routing_snapshot
 
     def _record_write_failure(self, what: str, ident: str) -> None:
         """Log a dropped write at ERROR and remember it for the health probe.
@@ -892,8 +975,6 @@ class DynamoPersistence:
         revision: int,
     ) -> dict:
         """Serialize one authoritative, revisioned model registry document."""
-        from src.gateway.routing_config import RoutingConfigSnapshot
-
         revision = _require_revision(
             revision,
             name="model registry revision",
@@ -919,24 +1000,79 @@ class DynamoPersistence:
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
 
+    @staticmethod
+    def serialize_signed_model_registry(
+        snapshot: RoutingConfigSnapshot,
+    ) -> dict:
+        """Serialize one signed schema-v2 routing snapshot."""
+        if not snapshot.is_signed:
+            raise ValueError(
+                "signed model registry serialization requires a signature"
+            )
+        if (
+            len(snapshot.document.encode("utf-8"))
+            > _MODEL_REGISTRY_MAX_DOCUMENT_BYTES
+        ):
+            raise ValueError(
+                "model registry exceeds the durable size limit"
+            )
+        return {
+            "PK": "MODEL_REGISTRY",
+            "SK": "CONFIG",
+            "entity_type": "model_registry",
+            "schema_version": 2,
+            "revision": snapshot.revision,
+            "document": snapshot.document,
+            "document_sha256": snapshot.sha256,
+            "signature_schema": ROUTING_CONFIG_SIGNATURE_SCHEMA,
+            "signing_key_arn": snapshot.signing_key_arn,
+            "signing_algorithm": snapshot.signing_algorithm,
+            "signature": snapshot.signature_b64,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+
     async def save_model_registry(
         self,
         config: dict,
         *,
         expected_revision: int,
-    ) -> int:
-        """CAS the complete model registry and return its new revision."""
+    ) -> RoutingConfigSnapshot:
+        """CAS and return one complete authenticated routing snapshot."""
         if not self._enabled:
             raise RuntimeError("model registry persistence is disabled")
+        if self._routing_config_signing_mode == "verify":
+            raise RuntimeError(
+                "routing configuration persistence is verification-only"
+            )
         expected = _require_revision(
             expected_revision,
             name="expected model registry revision",
         )
         next_revision = expected + 1
-        item = self.serialize_model_registry(
+        snapshot = RoutingConfigSnapshot.from_config(
             config,
             revision=next_revision,
         )
+        if (
+            len(snapshot.document.encode("utf-8"))
+            > _MODEL_REGISTRY_MAX_DOCUMENT_BYTES
+        ):
+            raise ValueError(
+                "model registry exceeds the durable size limit"
+            )
+        if self._routing_config_signing_mode == "sign-verify":
+            authenticator = self._routing_config_authenticator
+            if authenticator is None:
+                raise RuntimeError(
+                    "routing configuration signing is not configured"
+                )
+            snapshot = await authenticator.sign(snapshot)
+            item = self.serialize_signed_model_registry(snapshot)
+        else:
+            item = self.serialize_model_registry(
+                config,
+                revision=next_revision,
+            )
 
         def _put() -> None:
             kwargs: dict = {"Item": item}
@@ -950,14 +1086,22 @@ class DynamoPersistence:
                     {
                         "ConditionExpression": (
                             "entity_type = :entity_type AND "
-                            "#revision = :expected"
+                            "#revision = :expected AND "
+                            "#schema_version = :expected_schema"
                         ),
                         "ExpressionAttributeNames": {
                             "#revision": "revision",
+                            "#schema_version": "schema_version",
                         },
                         "ExpressionAttributeValues": {
                             ":entity_type": "model_registry",
                             ":expected": expected,
+                            ":expected_schema": (
+                                2
+                                if self._routing_config_signing_mode
+                                == "sign-verify"
+                                else 1
+                            ),
                         },
                     }
                 )
@@ -972,14 +1116,153 @@ class DynamoPersistence:
                 ) from exc
             self._record_write_failure("model registry", "CONFIG")
             raise RuntimeError("model registry write failed") from exc
-        return next_revision
+        if snapshot.is_signed:
+            self._authenticated_routing_snapshot = snapshot
+        return snapshot
+
+    @staticmethod
+    def _deserialize_model_registry_item(
+        item: dict,
+    ) -> tuple[RoutingConfigSnapshot, int]:
+        if item.get("entity_type") != "model_registry":
+            raise RuntimeError("model registry row is malformed")
+        schema_version = item.get("schema_version")
+        if schema_version not in (1, 2):
+            raise RuntimeError("model registry row is malformed")
+        try:
+            revision = _require_revision(
+                item.get("revision"),
+                name="model registry revision",
+            )
+        except ValueError as exc:
+            raise RuntimeError("model registry row is malformed") from exc
+        if revision < 1:
+            raise RuntimeError("model registry row is malformed")
+        document = item.get("document")
+        digest = item.get("document_sha256")
+        try:
+            if schema_version == 1:
+                snapshot = RoutingConfigSnapshot.from_document(
+                    document,
+                    revision=revision,
+                    sha256=digest,
+                )
+            else:
+                if (
+                    item.get("signature_schema")
+                    != ROUTING_CONFIG_SIGNATURE_SCHEMA
+                ):
+                    raise ValueError(
+                        "routing configuration signature schema is invalid"
+                    )
+                snapshot = RoutingConfigSnapshot.from_document(
+                    document,
+                    revision=revision,
+                    sha256=digest,
+                    signing_key_arn=item.get("signing_key_arn"),
+                    signing_algorithm=item.get("signing_algorithm"),
+                    signature_b64=item.get("signature"),
+                )
+        except (TypeError, ValueError) as exc:
+            message = str(exc)
+            if "checksum" in message:
+                raise RuntimeError(
+                    "model registry document checksum mismatch"
+                ) from exc
+            raise RuntimeError("model registry row is malformed") from exc
+        return snapshot, schema_version
+
+    def _enforce_routing_revision(
+        self,
+        snapshot: RoutingConfigSnapshot,
+        *,
+        after_revision: int | None,
+    ) -> None:
+        if (
+            after_revision is not None
+            and snapshot.revision < after_revision
+        ):
+            raise RoutingConfigRollbackError(
+                "routing configuration revision moved backward"
+            )
+        authenticated = self._authenticated_routing_snapshot
+        if authenticated is None:
+            return
+        if snapshot.revision < authenticated.revision:
+            raise RoutingConfigRollbackError(
+                "routing configuration revision moved backward"
+            )
+        if (
+            snapshot.revision == authenticated.revision
+            and snapshot != authenticated
+        ):
+            raise RoutingConfigRollbackError(
+                "routing configuration revision was rewritten"
+            )
+
+    async def _migrate_unsigned_model_registry(
+        self,
+        snapshot: RoutingConfigSnapshot,
+    ) -> RoutingConfigSnapshot:
+        authenticator = self._routing_config_authenticator
+        if authenticator is None:
+            raise RoutingConfigSignatureError(
+                "routing configuration verification is not configured"
+            )
+        signed = await authenticator.sign(snapshot)
+        item = self.serialize_signed_model_registry(signed)
+
+        def _put() -> None:
+            self._get_table().put_item(
+                Item=item,
+                ConditionExpression=(
+                    "entity_type = :entity_type AND "
+                    "#revision = :expected AND "
+                    "schema_version = :legacy_schema AND "
+                    "document_sha256 = :document_sha256"
+                ),
+                ExpressionAttributeNames={
+                    "#revision": "revision",
+                },
+                ExpressionAttributeValues={
+                    ":entity_type": "model_registry",
+                    ":expected": snapshot.revision,
+                    ":legacy_schema": 1,
+                    ":document_sha256": snapshot.sha256,
+                },
+            )
+
+        try:
+            await asyncio.to_thread(_put)
+        except Exception as exc:
+            if self._api_key_condition_failed(exc, 0):
+                raise PersistenceConflictError(
+                    "model registry changed during signature migration"
+                ) from exc
+            self._record_write_failure(
+                "model registry signature migration",
+                "CONFIG",
+            )
+            raise RuntimeError(
+                "model registry signature migration failed"
+            ) from exc
+        self._authenticated_routing_snapshot = signed
+        return signed
 
     async def load_model_registry_snapshot(
         self,
-    ) -> tuple[dict, int] | None:
-        """Strongly load the durable model registry, or None when none exists."""
+        *,
+        after_revision: int | None = None,
+        _migration_retry: bool = True,
+    ) -> RoutingConfigSnapshot | None:
+        """Strongly load and authenticate the durable routing snapshot."""
         if not self._enabled:
             raise RuntimeError("model registry persistence is disabled")
+        if after_revision is not None:
+            after_revision = _require_revision(
+                after_revision,
+                name="current model registry revision",
+            )
 
         def _get() -> dict | None:
             return self._get_table().get_item(
@@ -997,40 +1280,43 @@ class DynamoPersistence:
             raise RuntimeError("model registry read failed") from exc
         if item is None:
             return None
-        if (
-            item.get("entity_type") != "model_registry"
-            or item.get("schema_version") != 1
-        ):
-            raise RuntimeError("model registry row is malformed")
-        try:
-            revision = _require_revision(
-                item.get("revision"),
-                name="model registry revision",
+        snapshot, schema_version = self._deserialize_model_registry_item(
+            item
+        )
+        self._enforce_routing_revision(
+            snapshot,
+            after_revision=after_revision,
+        )
+        if self._routing_config_signing_mode == "disabled":
+            return snapshot
+        if schema_version == 1:
+            if self._routing_config_signing_mode != "sign-verify":
+                raise RoutingConfigSignatureError(
+                    "routing configuration snapshot is unsigned"
+                )
+            try:
+                return await self._migrate_unsigned_model_registry(
+                    snapshot
+                )
+            except PersistenceConflictError:
+                if not _migration_retry:
+                    raise
+                return await self.load_model_registry_snapshot(
+                    after_revision=after_revision,
+                    _migration_retry=False,
+                )
+
+        authenticated = self._authenticated_routing_snapshot
+        if authenticated == snapshot:
+            return snapshot
+        authenticator = self._routing_config_authenticator
+        if authenticator is None:
+            raise RoutingConfigSignatureError(
+                "routing configuration verification is not configured"
             )
-        except ValueError as exc:
-            raise RuntimeError("model registry row is malformed") from exc
-        if revision < 1:
-            raise RuntimeError("model registry row is malformed")
-
-        document = item.get("document")
-        digest = item.get("document_sha256")
-        if not isinstance(document, str) or not isinstance(digest, str):
-            raise RuntimeError("model registry row is malformed")
-
-        import hashlib
-
-        if (
-            hashlib.sha256(document.encode("utf-8")).hexdigest()
-            != digest
-        ):
-            raise RuntimeError("model registry document checksum mismatch")
-        try:
-            config = json.loads(document)
-        except json.JSONDecodeError as exc:
-            raise RuntimeError("model registry document is malformed") from exc
-        if not isinstance(config, dict):
-            raise RuntimeError("model registry document is malformed")
-        return config, revision
+        await authenticator.verify(snapshot)
+        self._authenticated_routing_snapshot = snapshot
+        return snapshot
 
     def _config_version_operation(self) -> dict:
         return {

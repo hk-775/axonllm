@@ -174,6 +174,7 @@ class TestBuildStaletteApp:
             "ready": True,
             "dependencies": {
                 "persistence": "disabled",
+                "routing_configuration": "ready",
                 "security_event_outbox": "disabled",
             },
         }
@@ -205,6 +206,31 @@ class TestBuildStaletteApp:
             middleware_kwargs["config_sync"]._model_registry
             is admin_api.model_registry
         )
+
+    def test_readiness_reports_degraded_routing_without_stopping_lkg(
+        self,
+        minimal_app_config: AppConfig,
+    ):
+        from starlette.testclient import TestClient
+
+        app = build_starlette_app(minimal_app_config)
+        admin_api = next(
+            route.endpoint.__self__
+            for route in app.routes
+            if getattr(route, "path", None) == "/admin/models"
+        )
+        admin_api._config_sync._routing_sync_error = (
+            "signature_verification_failed"
+        )
+
+        response = TestClient(app).get("/ready")
+
+        assert response.status_code == 200
+        assert response.json()["status"] == "degraded"
+        assert response.json()["ready"] is True
+        assert response.json()["dependencies"][
+            "routing_configuration"
+        ] == "degraded"
 
 
 class TestPersistenceReadiness:

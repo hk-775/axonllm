@@ -1103,8 +1103,9 @@ Legacy identity is available only under
 `AXON_DEPLOYMENT_PROFILE=development`. The shipped container uses the
 `production` profile, which refuses startup unless all three of
 `AXON_AUTH_MODE=ENFORCE`, `LLM_ROUTER_DYNAMODB_ENABLED=true`, and
-`AXON_REQUIRE_CANONICAL_IDENTITY=true` are active. Provision every OIDC and
-API-key principal first. The complete record shape and rollout procedure are in
+`AXON_REQUIRE_CANONICAL_IDENTITY=true` are active, and unless routing snapshots
+are verified with an exact KMS key ARN. Provision every OIDC and API-key
+principal first. The complete record shape and rollout procedure are in
 [ENTERPRISE_HARDENING.md](ENTERPRISE_HARDENING.md).
 
 #### Auth modes
@@ -1904,6 +1905,18 @@ With `LLM_ROUTER_DYNAMODB_ENABLED=true`, an admin write takes effect immediately
 process is the source of truth — which is fine for a single node and is why the
 routes don't require a table.
 
+Production model-registry writes are KMS-signed before their DynamoDB CAS.
+Routers verify the exact key before adopting a revision, reject live rollback
+or same-revision rewrites, and retain the authenticated last-known-good
+snapshot when synchronization fails. Readiness remains available for inference
+but reports `routing_configuration: degraded`. The shipped control planes set
+`AXON_ROUTING_CONFIG_SIGNING_MODE=sign-verify`; AgentCore sets `verify`.
+Before a verify-only AgentCore runtime is created or updated, its CloudFormation
+stack runs a VPC-isolated one-shot signer. That custom resource seeds packaged
+defaults when no row exists, migrates a checksum-only row, or verifies an
+existing signed row. Its exact-key `kms:Sign` permission is not granted to the
+long-lived runtime.
+
 Two rules are worth knowing because they are the difference between an endpoint
 that works and one that only looks like it does:
 
@@ -2198,6 +2211,8 @@ Two more caveats worth knowing before you rely on this layer:
 | `AXON_NO_BROWSER` | `false` | Stop `serve_dashboard.py` opening the pricing-coverage page when models are unpriced (already skipped when stdout is not a tty) |
 | `LLM_ROUTER_DYNAMODB_ENABLED` | `false` | Enable DynamoDB persistence |
 | `AXON_DYNAMODB_TABLE` | `axonllm-state` | DynamoDB table name (must match the provisioned table) |
+| `AXON_ROUTING_CONFIG_SIGNING_MODE` | `disabled` | Routing snapshot trust mode: `disabled` for local development, `verify` for data-plane routers, or `sign-verify` for control planes. Production rejects `disabled` |
+| `AXON_ROUTING_CONFIG_SIGNING_KEY_ARN` | — | Exact asymmetric KMS key ARN used for `ECDSA_SHA_256` routing signatures; required whenever signing is enabled |
 | `AXON_ATHENA_QUERY_ENABLED` | `false` | Register query services; deployment code derives this from a non-empty exact role-binding list |
 | `AXON_ATHENA_QUERY_BINDINGS` | `[]` | JSON allowlist of exact `tenant_id`, `project_id`, and concrete `role_arn` tuples; AgentCore limits the compact value to 2,048 characters |
 | `AXON_ATHENA_QUERY_TIMEOUT_SECONDS` | `30` | Bounded Athena execution deadline, at most 300 seconds |
@@ -2215,7 +2230,7 @@ Two more caveats worth knowing before you rely on this layer:
 | `AXON_CONTROL_PLANE_ONLY` | `false` | Suppress chat, model, and query execution routes while retaining tenant administration routes |
 | `AXON_SERVER_PORT` | `8000` | Server port |
 | `AXON_AUTH_MODE` | `ENFORCE` | Auth enforcement: `ENFORCE` (default, fail-closed) or `LOG_ONLY` (local dev) |
-| `AXON_DEPLOYMENT_PROFILE` | `production`; the demo entrypoint selects `development` | Runtime security profile. `development` is the only profile that permits legacy identity; `production` fails startup without canonical identity, ENFORCE auth, and DynamoDB |
+| `AXON_DEPLOYMENT_PROFILE` | `production`; the demo entrypoint selects `development` | Runtime security profile. `development` is the only profile that permits legacy identity; `production` fails startup without canonical identity, ENFORCE auth, DynamoDB, and signed routing configuration |
 | `AXON_REQUIRE_CANONICAL_IDENTITY` | `false` (configuration), `true` (container) | Require every credential to resolve to an active server-held tenant principal. Because ordinary startup defaults to the production profile, leaving this false prevents startup |
 | `AXON_OIDC_ISSUER` | — | Exact OIDC token issuer URL; required for direct OIDC and AgentCore |
 | `AXON_OIDC_AUDIENCE` | — | Expected OIDC audience; required for direct OIDC and AgentCore |

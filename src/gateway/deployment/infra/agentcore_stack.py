@@ -506,6 +506,344 @@ def handler(event, _context):
     return _result(physical_id, quiesced_at)
 """
 
+_ROUTING_CONFIG_SEEDER = """\
+import base64
+import binascii
+from datetime import datetime, timezone
+import hashlib
+import json
+import re
+import zlib
+
+import boto3
+from botocore.exceptions import ClientError
+
+
+dynamodb = boto3.client("dynamodb")
+kms = boto3.client("kms")
+
+_PHYSICAL_ID = "AxonLLMRoutingConfigSeeder"
+_MAX_DOCUMENT_BYTES = 350 * 1024
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_SIGNATURE_SCHEMA = "axonllm.routing-config-signature/v1"
+_CONFIG_SCHEMA = "axonllm.routing-config/v1"
+_ALGORITHM = "ECDSA_SHA_256"
+
+
+def _string(item, name):
+    value = item.get(name)
+    if not isinstance(value, dict) or set(value) != {"S"}:
+        raise RuntimeError("routing configuration row is malformed")
+    result = value["S"]
+    if not isinstance(result, str):
+        raise RuntimeError("routing configuration row is malformed")
+    return result
+
+
+def _number(item, name):
+    value = item.get(name)
+    if not isinstance(value, dict) or set(value) != {"N"}:
+        raise RuntimeError("routing configuration row is malformed")
+    raw = value["N"]
+    if (
+        not isinstance(raw, str)
+        or not raw.isdigit()
+        or int(raw) < 1
+    ):
+        raise RuntimeError("routing configuration row is malformed")
+    return int(raw)
+
+
+def _canonical_document(document, expected_digest):
+    try:
+        encoded = document.encode("utf-8")
+    except (AttributeError, UnicodeError) as exc:
+        raise RuntimeError(
+            "routing configuration document is malformed"
+        ) from exc
+    if len(encoded) > _MAX_DOCUMENT_BYTES:
+        raise RuntimeError("routing configuration document is too large")
+    try:
+        value = json.loads(document)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            "routing configuration document is malformed"
+        ) from exc
+    if (
+        not isinstance(value, dict)
+        or not isinstance(value.get("models"), list)
+        or json.dumps(
+            value,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        != document
+    ):
+        raise RuntimeError(
+            "routing configuration document is not canonical"
+        )
+    digest = hashlib.sha256(encoded).hexdigest()
+    if digest != expected_digest or _SHA256.fullmatch(digest) is None:
+        raise RuntimeError(
+            "routing configuration document checksum mismatch"
+        )
+    return digest
+
+
+def _signing_digest(revision, document_digest):
+    payload = json.dumps(
+        {
+            "document_sha256": document_digest,
+            "revision": revision,
+            "schema": _CONFIG_SCHEMA,
+            "signature_schema": _SIGNATURE_SCHEMA,
+        },
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(payload).digest()
+
+
+def _signature_bytes(value):
+    try:
+        signature = base64.b64decode(value, validate=True)
+    except (ValueError, binascii.Error) as exc:
+        raise RuntimeError(
+            "routing configuration signature is malformed"
+        ) from exc
+    if (
+        not signature
+        or len(signature) > 512
+        or base64.b64encode(signature).decode("ascii") != value
+    ):
+        raise RuntimeError(
+            "routing configuration signature is malformed"
+        )
+    return signature
+
+
+def _load(table_name):
+    response = dynamodb.get_item(
+        TableName=table_name,
+        Key={
+            "PK": {"S": "MODEL_REGISTRY"},
+            "SK": {"S": "CONFIG"},
+        },
+        ConsistentRead=True,
+    )
+    item = response.get("Item")
+    if item is None:
+        return None
+    if not isinstance(item, dict):
+        raise RuntimeError("routing configuration row is malformed")
+    return item
+
+
+def _verify_existing(item, key_arn):
+    if (
+        _string(item, "entity_type") != "model_registry"
+        or _number(item, "schema_version") != 2
+        or _string(item, "signature_schema") != _SIGNATURE_SCHEMA
+        or _string(item, "signing_key_arn") != key_arn
+        or _string(item, "signing_algorithm") != _ALGORITHM
+    ):
+        raise RuntimeError("routing configuration signature is malformed")
+    revision = _number(item, "revision")
+    document = _string(item, "document")
+    document_digest = _string(item, "document_sha256")
+    _canonical_document(document, document_digest)
+    signature = _signature_bytes(_string(item, "signature"))
+    response = kms.verify(
+        KeyId=key_arn,
+        Message=_signing_digest(revision, document_digest),
+        MessageType="DIGEST",
+        Signature=signature,
+        SigningAlgorithm=_ALGORITHM,
+    )
+    if (
+        response.get("KeyId") != key_arn
+        or response.get("SigningAlgorithm") != _ALGORITHM
+        or response.get("SignatureValid") is not True
+    ):
+        raise RuntimeError(
+            "routing configuration signature verification failed"
+        )
+    return revision
+
+
+def _initial_document(encoded):
+    try:
+        compressed = base64.b64decode(encoded, validate=True)
+        decompressor = zlib.decompressobj()
+        document_bytes = decompressor.decompress(
+            compressed,
+            _MAX_DOCUMENT_BYTES + 1,
+        )
+        if (
+            len(document_bytes) > _MAX_DOCUMENT_BYTES
+            or not decompressor.eof
+            or decompressor.unused_data
+            or decompressor.unconsumed_tail
+        ):
+            raise ValueError("invalid compressed payload")
+        document_bytes += decompressor.flush()
+        document = document_bytes.decode("utf-8")
+    except (
+        ValueError,
+        binascii.Error,
+        UnicodeError,
+        zlib.error,
+    ) as exc:
+        raise RuntimeError(
+            "initial routing configuration is malformed"
+        ) from exc
+    digest = hashlib.sha256(document_bytes).hexdigest()
+    _canonical_document(document, digest)
+    return document, digest
+
+
+def _candidate(item, encoded):
+    if item is None:
+        document, digest = _initial_document(encoded)
+        return document, digest, 1, None
+    if _string(item, "entity_type") != "model_registry":
+        raise RuntimeError("routing configuration row is malformed")
+    schema_version = _number(item, "schema_version")
+    if schema_version == 2:
+        return None
+    if schema_version != 1:
+        raise RuntimeError("routing configuration row is malformed")
+    revision = _number(item, "revision")
+    document = _string(item, "document")
+    digest = _string(item, "document_sha256")
+    _canonical_document(document, digest)
+    return document, digest, revision, item
+
+
+def _sign(key_arn, revision, document_digest):
+    response = kms.sign(
+        KeyId=key_arn,
+        Message=_signing_digest(revision, document_digest),
+        MessageType="DIGEST",
+        SigningAlgorithm=_ALGORITHM,
+    )
+    signature = response.get("Signature")
+    if (
+        response.get("KeyId") != key_arn
+        or response.get("SigningAlgorithm") != _ALGORITHM
+        or not isinstance(signature, bytes)
+        or not signature
+    ):
+        raise RuntimeError("KMS returned invalid routing signature metadata")
+    return base64.b64encode(signature).decode("ascii")
+
+
+def _put(
+    table_name,
+    key_arn,
+    document,
+    document_digest,
+    revision,
+    signature,
+    legacy,
+):
+    request = {
+        "TableName": table_name,
+        "Item": {
+            "PK": {"S": "MODEL_REGISTRY"},
+            "SK": {"S": "CONFIG"},
+            "entity_type": {"S": "model_registry"},
+            "schema_version": {"N": "2"},
+            "revision": {"N": str(revision)},
+            "document": {"S": document},
+            "document_sha256": {"S": document_digest},
+            "signature_schema": {"S": _SIGNATURE_SCHEMA},
+            "signing_key_arn": {"S": key_arn},
+            "signing_algorithm": {"S": _ALGORITHM},
+            "signature": {"S": signature},
+            "updated_at": {
+                "S": datetime.now(timezone.utc).isoformat()
+            },
+        },
+    }
+    if legacy is None:
+        request["ConditionExpression"] = (
+            "attribute_not_exists(PK) AND attribute_not_exists(SK)"
+        )
+    else:
+        request.update(
+            {
+                "ConditionExpression": (
+                    "entity_type = :entity_type AND "
+                    "#revision = :revision AND "
+                    "schema_version = :legacy_schema AND "
+                    "document_sha256 = :document_sha256"
+                ),
+                "ExpressionAttributeNames": {
+                    "#revision": "revision",
+                },
+                "ExpressionAttributeValues": {
+                    ":entity_type": {"S": "model_registry"},
+                    ":revision": {"N": str(revision)},
+                    ":legacy_schema": {"N": "1"},
+                    ":document_sha256": {"S": document_digest},
+                },
+            }
+        )
+    dynamodb.put_item(**request)
+
+
+def handler(event, _context):
+    properties = event.get("ResourceProperties", {})
+    table_name = properties.get("TableName")
+    key_arn = properties.get("KeyArn")
+    encoded = properties.get("InitialRoutingConfigZlibBase64")
+    if event.get("RequestType") == "Delete":
+        return {"PhysicalResourceId": _PHYSICAL_ID}
+    if not all(
+        isinstance(value, str) and value
+        for value in (table_name, key_arn, encoded)
+    ):
+        raise RuntimeError("routing configuration seed properties are invalid")
+
+    current = _load(table_name)
+    candidate = _candidate(current, encoded)
+    if candidate is None:
+        revision = _verify_existing(current, key_arn)
+        return {
+            "PhysicalResourceId": _PHYSICAL_ID,
+            "Data": {"Revision": str(revision), "Status": "verified"},
+        }
+
+    document, document_digest, revision, legacy = candidate
+    signature = _sign(key_arn, revision, document_digest)
+    try:
+        _put(
+            table_name,
+            key_arn,
+            document,
+            document_digest,
+            revision,
+            signature,
+            legacy,
+        )
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") != (
+            "ConditionalCheckFailedException"
+        ):
+            raise
+        revision = _verify_existing(_load(table_name), key_arn)
+        status = "verified_after_conflict"
+    else:
+        status = "seeded" if legacy is None else "migrated"
+    return {
+        "PhysicalResourceId": _PHYSICAL_ID,
+        "Data": {"Revision": str(revision), "Status": status},
+    }
+"""
+
 
 @dataclass(frozen=True)
 class AthenaInfrastructureConfig:
@@ -1011,6 +1349,22 @@ class AxonLLMAgentCoreStack(Stack):
                 "deployment verification gate"
             ),
         )
+        initial_routing_config = CfnParameter(
+            self,
+            "InitialRoutingConfigZlibBase64",
+            type="String",
+            min_length=1,
+            max_length=4096,
+            allowed_pattern=r"^[A-Za-z0-9+/]+={0,2}$",
+            constraint_description=(
+                "must be canonical base64 containing the zlib-compressed "
+                "initial routing configuration"
+            ),
+            description=(
+                "Validated packaged routing defaults used only when the "
+                "signed model registry has not been initialized"
+            ),
+        )
         enabled_providers = CfnParameter(
             self,
             "EnabledProviders",
@@ -1260,6 +1614,16 @@ class AxonLLMAgentCoreStack(Stack):
                 subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS
             ),
         )
+        kms_endpoint = vpc.add_interface_endpoint(
+            "KmsEndpoint",
+            service=ec2.InterfaceVpcEndpointAwsService.KMS,
+            open=False,
+            private_dns_enabled=True,
+            security_groups=[endpoint_security_group],
+            subnets=ec2.SubnetSelection(
+                subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS
+            ),
+        )
         athena_endpoint = None
         sts_endpoint = None
         if query_config.enabled:
@@ -1290,6 +1654,21 @@ class AxonLLMAgentCoreStack(Stack):
             alias=f"alias/axonllm/agentcore-data{physical_suffix}",
             description="Encrypts AxonLLM AgentCore state and logs",
             enable_key_rotation=True,
+            removal_policy=removal_policy,
+            pending_window=Duration.days(30),
+        )
+        routing_config_signing_key = kms.Key(
+            self,
+            "RoutingConfigSigningKey",
+            alias=(
+                f"alias/axonllm/agentcore-routing-config"
+                f"{physical_suffix}"
+            ),
+            description=(
+                "Signs AxonLLM AgentCore routing configuration snapshots"
+            ),
+            key_spec=kms.KeySpec.ECC_NIST_P256,
+            key_usage=kms.KeyUsage.SIGN_VERIFY,
             removal_policy=removal_policy,
             pending_window=Duration.days(30),
         )
@@ -1929,6 +2308,10 @@ class AxonLLMAgentCoreStack(Stack):
                 "AXON_BEDROCK_REGION": self.region,
                 "LLM_ROUTER_DYNAMODB_ENABLED": "true",
                 "AXON_DYNAMODB_TABLE": selected_state_table_name,
+                "AXON_ROUTING_CONFIG_SIGNING_MODE": "verify",
+                "AXON_ROUTING_CONFIG_SIGNING_KEY_ARN": (
+                    routing_config_signing_key.key_arn
+                ),
                 "AXON_EVENT_OUTBOX_QUEUE_URL": event_outbox_queue.queue_url,
                 "AXON_SECURITY_EVENT_SNS_TOPIC_ARN": (
                     security_event_topic.topic_arn
@@ -2034,6 +2417,20 @@ class AxonLLMAgentCoreStack(Stack):
                     selected_state_table_arn,
                     f"{selected_state_table_arn}/index/*",
                 ],
+            )
+        )
+        runtime.add_to_role_policy(
+            iam.PolicyStatement(
+                sid="VerifyRoutingConfiguration",
+                actions=["kms:Verify"],
+                resources=[routing_config_signing_key.key_arn],
+            )
+        )
+        kms_endpoint.add_to_policy(
+            iam.PolicyStatement(
+                principals=[runtime.role],
+                actions=["kms:Verify"],
+                resources=[routing_config_signing_key.key_arn],
             )
         )
         if rehearsal_control_table_arn is not None:
@@ -2364,10 +2761,134 @@ class AxonLLMAgentCoreStack(Stack):
         recovery_guard_resource.add_dependency(
             cfn_recovery_transaction_deny_policy
         )
+        routing_seed_security_group = ec2.SecurityGroup(
+            self,
+            "RoutingConfigSeederSecurityGroup",
+            vpc=vpc,
+            allow_all_outbound=False,
+            description=(
+                "One-shot signed routing configuration bootstrap egress"
+            ),
+        )
+        routing_seed_security_group.add_egress_rule(
+            ec2.Peer.ipv4(vpc.vpc_cidr_block),
+            ec2.Port.udp(53),
+            "DNS to the VPC resolver",
+        )
+        routing_seed_security_group.add_egress_rule(
+            ec2.Peer.ipv4(vpc.vpc_cidr_block),
+            ec2.Port.tcp(53),
+            "DNS fallback to the VPC resolver",
+        )
+        routing_seed_security_group.add_egress_rule(
+            ec2.Peer.prefix_list(
+                dynamodb_prefix_list.get_response_field(
+                    "PrefixLists.0.PrefixListId"
+                )
+            ),
+            ec2.Port.tcp(443),
+            "DynamoDB through the VPC gateway endpoint",
+        )
+        endpoint_security_group.add_ingress_rule(
+            routing_seed_security_group,
+            ec2.Port.tcp(443),
+            "HTTPS from the routing configuration seeder",
+        )
+        routing_seed_security_group.add_egress_rule(
+            endpoint_security_group,
+            ec2.Port.tcp(443),
+            "KMS through the private interface endpoint",
+        )
+        routing_seed_handler_logs = logs.LogGroup(
+            self,
+            "RoutingConfigSeederHandlerLogs",
+            encryption_key=data_key,
+            retention=logs.RetentionDays.ONE_YEAR,
+            removal_policy=removal_policy,
+        )
+        routing_seed_handler = lambda_.Function(
+            self,
+            "RoutingConfigSeederHandler",
+            description=(
+                "Seeds or migrates the KMS-signed routing configuration"
+            ),
+            runtime=lambda_.Runtime.PYTHON_3_12,
+            handler="index.handler",
+            code=lambda_.Code.from_inline(_ROUTING_CONFIG_SEEDER),
+            timeout=Duration.seconds(60),
+            memory_size=256,
+            log_group=routing_seed_handler_logs,
+            vpc=vpc,
+            vpc_subnets=ec2.SubnetSelection(
+                subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS
+            ),
+            security_groups=[routing_seed_security_group],
+        )
+        routing_seed_handler.add_to_role_policy(
+            iam.PolicyStatement(
+                sid="SeedRoutingConfiguration",
+                actions=["dynamodb:GetItem", "dynamodb:PutItem"],
+                resources=[selected_state_table_arn],
+            )
+        )
+        routing_seed_handler.add_to_role_policy(
+            iam.PolicyStatement(
+                sid="SignAndVerifyRoutingConfiguration",
+                actions=["kms:Sign", "kms:Verify"],
+                resources=[routing_config_signing_key.key_arn],
+            )
+        )
+        kms_endpoint.add_to_policy(
+            iam.PolicyStatement(
+                principals=[routing_seed_handler.role],
+                actions=["kms:Sign", "kms:Verify"],
+                resources=[routing_config_signing_key.key_arn],
+            )
+        )
+        routing_seed_provider_logs = logs.LogGroup(
+            self,
+            "RoutingConfigSeederProviderLogs",
+            encryption_key=data_key,
+            retention=logs.RetentionDays.ONE_YEAR,
+            removal_policy=removal_policy,
+        )
+        routing_seed_provider = cr.Provider(
+            self,
+            "RoutingConfigSeederProvider",
+            on_event_handler=routing_seed_handler,
+            log_group=routing_seed_provider_logs,
+        )
+        routing_seed = CustomResource(
+            self,
+            "RoutingConfigSeeder",
+            service_token=routing_seed_provider.service_token,
+            properties={
+                "DeploymentToken": (
+                    candidate_endpoint_name.value_as_string
+                ),
+                "InitialRoutingConfigZlibBase64": (
+                    initial_routing_config.value_as_string
+                ),
+                "KeyArn": routing_config_signing_key.key_arn,
+                "TableName": selected_state_table_name,
+            },
+        )
+        routing_seed_resource = routing_seed.node.default_child
+        if not isinstance(routing_seed_resource, CfnResource):
+            raise TypeError(
+                "routing configuration seeder has no CloudFormation child"
+            )
+        routing_seed_resource.add_dependency(recovery_guard_resource)
+        for endpoint in (dynamodb_endpoint, kms_endpoint):
+            endpoint_resource = endpoint.node.default_child
+            if not isinstance(endpoint_resource, ec2.CfnVPCEndpoint):
+                raise TypeError("routing seeder endpoint is malformed")
+            routing_seed_resource.add_dependency(endpoint_resource)
         cfn_runtime = runtime.node.default_child
         if not isinstance(cfn_runtime, agentcore.CfnRuntime):
             raise TypeError("AgentCore runtime has no CfnRuntime child")
         cfn_runtime.add_dependency(recovery_guard_resource)
+        cfn_runtime.add_dependency(routing_seed_resource)
 
         production_endpoint = runtime.add_endpoint(
             "production",
@@ -2730,6 +3251,15 @@ class AxonLLMAgentCoreStack(Stack):
             export_name=Fn.join(
                 ":",
                 [self.stack_name, "DataKeyArn"],
+            ),
+        )
+        CfnOutput(
+            self,
+            "RoutingConfigSigningKeyArn",
+            value=routing_config_signing_key.key_arn,
+            export_name=Fn.join(
+                ":",
+                [self.stack_name, "RoutingConfigSigningKeyArn"],
             ),
         )
         CfnOutput(

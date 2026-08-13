@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 from copy import deepcopy
 import json
 import os
@@ -9,6 +10,7 @@ from pathlib import Path
 import subprocess
 import sys
 from types import SimpleNamespace
+import zlib
 
 import pytest
 
@@ -779,6 +781,21 @@ def test_deploy_commands_pass_only_validated_standard_oidc_inputs(tmp_path):
     assert "AxonLLMAgentCoreStack:OidcProjectClaim=" in joined
     assert "AxonLLMAgentCoreStack:BedrockInvokeResourceArns=" in joined
     assert ("AxonLLMAgentCoreStack:AlarmNotificationEmail=admin@example.com") in runtime_command
+    routing_parameter = next(
+        value
+        for value in runtime_command
+        if value.startswith(
+            "AxonLLMAgentCoreStack:InitialRoutingConfigZlibBase64="
+        )
+    )
+    encoded_routing = routing_parameter.split("=", 1)[1]
+    routing_config = json.loads(
+        zlib.decompress(
+            base64.b64decode(encoded_routing, validate=True)
+        )
+    )
+    assert routing_config["models"]
+    assert len(encoded_routing) <= 4096
     assert "broadening" in runtime_command
     assert "client_secret" not in joined.casefold()
 

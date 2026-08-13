@@ -329,7 +329,7 @@ Stakeholders who need visibility into LLM spend and assurance that usage complie
 
 | ID | Requirement | Details |
 |----|-------------|---------|
-| FR-P1 | **DynamoDB persistence** | Optional single-table persistence enabled by `LLM_ROUTER_DYNAMODB_ENABLED=true`. It stores projects, user configuration, usage and spend, policy and quota state, event destinations, audit chains, API keys and canonical principals, SCIM state, convergence counters, and shared rate/budget admission state. Canonical multi-tenant mode requires it. |
+| FR-P1 | **DynamoDB persistence** | Optional single-table persistence enabled by `LLM_ROUTER_DYNAMODB_ENABLED=true`. It stores projects, user configuration, usage and spend, policy and quota state, event destinations, audit chains, API keys and canonical principals, SCIM state, convergence counters, and shared rate/budget admission state. Production model-registry rows are revisioned and KMS-signed; routers retain an authenticated last-known-good snapshot and report degraded synchronization rather than stopping inference. Canonical multi-tenant mode requires persistence. |
 | FR-P2 | **State recovery and convergence** | Startup and bounded refresh paths restore persisted configuration and usage. Canonical authority uses strongly consistent point reads or tenant queries; project/config, Cedar, SCIM, and API-key revocation versions converge replicas without trusting process-local authority. |
 | FR-P3 | **PAY_PER_REQUEST billing** | DynamoDB table uses on-demand billing to match the serverless deployment model. |
 
@@ -1193,6 +1193,8 @@ so invoke it as `uv run axon <subcommand>` (or activate the venv first):
 |----------|---------|-------------|
 | `LLM_ROUTER_DYNAMODB_ENABLED` | `false` | Enable DynamoDB persistence |
 | `AXON_DYNAMODB_TABLE` | `axonllm-state` | Table name |
+| `AXON_ROUTING_CONFIG_SIGNING_MODE` | `disabled` | `verify` on routers or `sign-verify` on control planes; production rejects `disabled` |
+| `AXON_ROUTING_CONFIG_SIGNING_KEY_ARN` | — | Exact asymmetric KMS key ARN for `ECDSA_SHA_256` routing snapshot signatures |
 
 **Athena query**
 

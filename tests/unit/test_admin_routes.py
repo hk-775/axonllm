@@ -614,6 +614,7 @@ class TestHealth:
         data = resp.json()
         assert data["status"] == "ok"
         assert data["runtime"] == "running"
+        assert data["routing_configuration"] is None
 
     def test_health_includes_provider_status(self, client):
         resp = client.get("/admin/health")
@@ -628,6 +629,33 @@ class TestHealth:
         resp = client.get("/admin/health")
         data = resp.json()
         assert data["providers"]["openai"] == "unhealthy"
+
+    def test_health_reports_routing_synchronization_degradation(
+        self,
+        admin_api,
+        client,
+    ):
+        class _DegradedSync:
+            routing_config_status = {
+                "status": "degraded",
+                "revision": 4,
+                "sha256": "a" * 64,
+                "signed": True,
+                "error": "signature_verification_failed",
+            }
+
+            async def refresh_if_stale(self):
+                return False
+
+        admin_api._config_sync = _DegradedSync()
+
+        response = client.get("/admin/health")
+
+        assert response.status_code == 200
+        assert response.json()["status"] == "degraded"
+        assert response.json()["routing_configuration"]["error"] == (
+            "signature_verification_failed"
+        )
 
 
 # ── Semantic cache ───────────────────────────────────────────────────

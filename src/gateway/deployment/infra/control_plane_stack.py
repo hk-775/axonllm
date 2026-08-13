@@ -714,6 +714,14 @@ class AxonLLMControlPlaneStack(Stack):
             "AgentCoreDataKey",
             imported(agentcore_stack_name, "DataKeyArn"),
         )
+        routing_config_signing_key = kms.Key.from_key_arn(
+            self,
+            "AgentCoreRoutingConfigSigningKey",
+            imported(
+                agentcore_stack_name,
+                "RoutingConfigSigningKeyArn",
+            ),
+        )
         scim_tenants_secret = (
             secretsmanager.Secret.from_secret_complete_arn(
                 self,
@@ -985,6 +993,14 @@ class AxonLLMControlPlaneStack(Stack):
             security_groups=[endpoint_security_group],
             subnets=private_subnets,
         )
+        kms_endpoint = vpc.add_interface_endpoint(
+            "KmsEndpoint",
+            service=ec2.InterfaceVpcEndpointAwsService.KMS,
+            open=False,
+            private_dns_enabled=True,
+            security_groups=[endpoint_security_group],
+            subnets=private_subnets,
+        )
         sns_endpoint = vpc.add_interface_endpoint(
             "SnsEndpoint",
             service=ec2.InterfaceVpcEndpointAwsService.SNS,
@@ -1173,6 +1189,13 @@ class AxonLLMControlPlaneStack(Stack):
                 ],
             )
         )
+        task_role.add_to_principal_policy(
+            iam.PolicyStatement(
+                sid="SignAndVerifyRoutingConfiguration",
+                actions=["kms:Sign", "kms:Verify"],
+                resources=[routing_config_signing_key.key_arn],
+            )
+        )
         if rehearsal_control_table_arn is not None:
             task_role.add_to_principal_policy(
                 iam.PolicyStatement(
@@ -1356,6 +1379,10 @@ class AxonLLMControlPlaneStack(Stack):
                 "AXON_AWS_ACCOUNT_ID": self.account,
                 "LLM_ROUTER_DYNAMODB_ENABLED": "true",
                 "AXON_DYNAMODB_TABLE": selected_state_table_name,
+                "AXON_ROUTING_CONFIG_SIGNING_MODE": "sign-verify",
+                "AXON_ROUTING_CONFIG_SIGNING_KEY_ARN": (
+                    routing_config_signing_key.key_arn
+                ),
                 "AXON_EVENT_OUTBOX_QUEUE_URL": event_outbox_queue.queue_url,
                 "AXON_SECURITY_EVENT_SNS_TOPIC_ARN": (security_event_topic.topic_arn),
                 "AXON_SECURITY_EVENT_LOG_GROUP_ARN": (security_event_log_group_arn),
@@ -2126,6 +2153,13 @@ class AxonLLMControlPlaneStack(Stack):
                     selected_state_table_arn,
                     f"{selected_state_table_arn}/index/*",
                 ],
+            )
+        )
+        kms_endpoint.add_to_policy(
+            iam.PolicyStatement(
+                principals=[task_role],
+                actions=["kms:Sign", "kms:Verify"],
+                resources=[routing_config_signing_key.key_arn],
             )
         )
         if rehearsal_control_table_arn is not None:

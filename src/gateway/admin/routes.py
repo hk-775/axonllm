@@ -1986,6 +1986,7 @@ class AdminAPI:
 
     async def health(self, request: Request) -> JSONResponse:
         """Per-provider health status and runtime agent status."""
+        await self._refresh_config()
         models = self.model_registry.list_models()
         providers: set[str] = set()
         for m in models:
@@ -2006,11 +2007,22 @@ class AdminAPI:
             persistence_health = await self._persistence.health_status()
             if persistence_health.get("enabled") and persistence_health.get("reachable") is False:
                 overall = "degraded"
+        routing_health = getattr(
+            self._config_sync,
+            "routing_config_status",
+            None,
+        )
+        if (
+            isinstance(routing_health, dict)
+            and routing_health.get("status") == "degraded"
+        ):
+            overall = "degraded"
 
         return JSONResponse({
             "status": overall,
             "providers": provider_health,
             "persistence": persistence_health,
+            "routing_configuration": routing_health,
             "runtime": "running",
         })
 
@@ -2554,8 +2566,21 @@ class AdminAPI:
     async def runtime_config(self, request: Request) -> JSONResponse:
         """Return the versioned, credential-free router configuration."""
         await self._refresh_config()
-        snapshot = RoutingConfigSnapshot.from_registry(
-            self.model_registry
+        active_snapshot = getattr(
+            self._config_sync,
+            "active_routing_snapshot",
+            None,
+        )
+        snapshot = (
+            active_snapshot
+            if (
+                isinstance(active_snapshot, RoutingConfigSnapshot)
+                and active_snapshot.revision
+                == self.model_registry.revision
+            )
+            else RoutingConfigSnapshot.from_registry(
+                self.model_registry
+            )
         )
         return JSONResponse(
             snapshot.as_dict(),
@@ -2600,21 +2625,25 @@ class AdminAPI:
 
     def _publish_model_registry(
         self,
-        config: dict,
-        revision: int,
+        snapshot: RoutingConfigSnapshot,
     ) -> None:
         """Publish a complete committed snapshot to every local route reader."""
-        self.model_registry.replace_config(
-            config,
-            revision=revision,
+        snapshot.apply(self.model_registry)
+        note_snapshot = getattr(
+            self._config_sync,
+            "note_local_model_snapshot",
+            None,
         )
+        if callable(note_snapshot):
+            note_snapshot(snapshot)
+            return
         note_revision = getattr(
             self._config_sync,
             "note_local_model_revision",
             None,
         )
         if callable(note_revision):
-            note_revision(revision)
+            note_revision(snapshot.revision)
 
     async def _reload_model_registry(self) -> int | None:
         if self._persistence is None or not self._persistence.enabled:
@@ -2630,9 +2659,8 @@ class AdminAPI:
             snapshot = await loader()
             if snapshot is None:
                 return None
-            config, revision = snapshot
-            self._publish_model_registry(config, revision)
-            return revision
+            self._publish_model_registry(snapshot)
+            return snapshot.revision
         except Exception:
             logger.warning(
                 "Failed to reload the model registry after a conflict",
@@ -2656,10 +2684,11 @@ class AdminAPI:
             if not callable(saver):
                 return None, self._model_store_unavailable()
             try:
-                revision = await saver(
+                snapshot = await saver(
                     config,
                     expected_revision=expected_revision,
                 )
+                revision = snapshot.revision
                 revision = _next_revision(
                     revision,
                     expected_revision,
@@ -2679,8 +2708,12 @@ class AdminAPI:
             # the checked-in bootstrap file. Production startup already
             # requires durable persistence.
             revision = expected_revision + 1
+            snapshot = RoutingConfigSnapshot.from_config(
+                config,
+                revision=revision,
+            )
 
-        self._publish_model_registry(config, revision)
+        self._publish_model_registry(snapshot)
         return revision, None
 
     @staticmethod

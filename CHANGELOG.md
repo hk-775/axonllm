@@ -15,6 +15,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Accepted the v0.3 product boundary: a mandatory control plane and one router
   core delivered as an embedded package, standalone gateway, and thin
   AgentCore Runtime adapter.
+- Added KMS-signed, revisioned routing snapshots with automatic migration of
+  checksum-only model-registry rows, monotonic live adoption, and
+  last-known-good routing during control-plane or signature-verification
+  outages.
+
+### Security
+
+- Production routing configuration now requires an exact asymmetric KMS key.
+  Control planes receive only sign/verify authority, AgentCore receives
+  verify-only authority, and all three deployed paths use private KMS
+  endpoints. A CloudFormation-owned one-shot signer initializes or migrates
+  AgentCore routing state before the verify-only runtime updates.
 
 ### Fixed
 

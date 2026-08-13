@@ -216,6 +216,8 @@ class TestLoadAppConfig:
         assert config.alb_issuer == ""
         assert config.oidc_tenant_claim == "custom:tenant_id"
         assert config.oidc_project_claim == "custom:project_id"
+        assert config.routing_config_signing_mode == "disabled"
+        assert config.routing_config_signing_key_arn == ""
 
     def test_env_overrides(self, monkeypatch):
         monkeypatch.setenv("AWS_DEFAULT_REGION", "eu-west-1")
@@ -265,6 +267,67 @@ class TestLoadAppConfig:
         monkeypatch.setenv("AXON_ENABLED_PROVIDERS", value)
 
         with pytest.raises(ValueError, match="PROVIDERS|providers"):
+            load_app_config()
+
+    def test_routing_signing_configuration_is_exact_and_explicit(
+        self,
+        monkeypatch,
+    ):
+        key_arn = (
+            "arn:aws:kms:us-east-1:123456789012:"
+            "key/11111111-2222-3333-4444-555555555555"
+        )
+        monkeypatch.setenv("AWS_DEFAULT_REGION", "us-east-1")
+        monkeypatch.setenv("AXON_DEPLOYMENT_PROFILE", "development")
+        monkeypatch.setenv(
+            "AXON_ROUTING_CONFIG_SIGNING_MODE",
+            "verify",
+        )
+        monkeypatch.setenv(
+            "AXON_ROUTING_CONFIG_SIGNING_KEY_ARN",
+            key_arn,
+        )
+
+        config = load_app_config()
+
+        assert config.routing_config_signing_mode == "verify"
+        assert config.routing_config_signing_key_arn == key_arn
+
+    @pytest.mark.parametrize(
+        ("mode", "key_arn", "message"),
+        [
+            ("invalid", "", "signing_mode"),
+            ("verify", "", "exact KMS key ARN"),
+            ("verify", "alias/axonllm", "full KMS key ARN"),
+            (
+                "verify",
+                (
+                    "arn:aws:kms:us-west-2:123456789012:"
+                    "key/11111111-2222-3333-4444-555555555555"
+                ),
+                "region",
+            ),
+        ],
+    )
+    def test_invalid_routing_signing_configuration_fails_closed(
+        self,
+        monkeypatch,
+        mode,
+        key_arn,
+        message,
+    ):
+        monkeypatch.setenv("AXON_DEPLOYMENT_PROFILE", "development")
+        monkeypatch.setenv("AWS_DEFAULT_REGION", "us-east-1")
+        monkeypatch.setenv(
+            "AXON_ROUTING_CONFIG_SIGNING_MODE",
+            mode,
+        )
+        monkeypatch.setenv(
+            "AXON_ROUTING_CONFIG_SIGNING_KEY_ARN",
+            key_arn,
+        )
+
+        with pytest.raises((RuntimeError, ValueError), match=message):
             load_app_config()
 
 

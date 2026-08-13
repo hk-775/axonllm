@@ -702,7 +702,7 @@ def test_default_templates_have_no_rehearsal_wiring(
         for logical_id, resource in template["Resources"].items()
         if resource.get("DeletionPolicy") == "Retain" and resource.get("UpdateReplacePolicy") == "Retain"
     }
-    assert len(retained) == (13 if target == "agentcore" else 5)
+    assert len(retained) == (16 if target == "agentcore" else 5)
     if target == "agentcore":
         table = _resources(
             template,

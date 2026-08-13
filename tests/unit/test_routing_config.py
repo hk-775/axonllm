@@ -9,6 +9,9 @@ from src.gateway.routing_config import (
     ROUTING_CONFIG_SCHEMA,
     RoutingConfigSnapshot,
 )
+from src.gateway.routing_config_contract import (
+    ROUTING_CONFIG_SIGNATURE_SCHEMA,
+)
 
 
 CONFIG = {
@@ -73,4 +76,52 @@ def test_snapshot_rejects_partial_or_invalid_configuration() -> None:
                 ]
             },
             revision=1,
+        )
+
+
+def test_signed_snapshot_binds_revision_digest_and_exact_key() -> None:
+    key_arn = (
+        "arn:aws:kms:us-west-2:123456789012:"
+        "key/11111111-2222-3333-4444-555555555555"
+    )
+    snapshot = RoutingConfigSnapshot.from_config(
+        CONFIG,
+        revision=9,
+    ).with_signature(
+        signing_key_arn=key_arn,
+        signature=b"test-signature",
+    )
+
+    value = snapshot.as_dict()
+
+    assert snapshot.is_signed is True
+    assert snapshot.signing_digest == snapshot.signing_digest
+    assert b'"revision":9' in snapshot.signing_payload
+    assert snapshot.sha256.encode("ascii") in snapshot.signing_payload
+    assert value["signature"] == {
+        "schema": ROUTING_CONFIG_SIGNATURE_SCHEMA,
+        "key_arn": key_arn,
+        "algorithm": "ECDSA_SHA_256",
+        "value": "dGVzdC1zaWduYXR1cmU=",
+    }
+
+
+def test_persisted_snapshot_must_be_canonical_and_complete() -> None:
+    snapshot = RoutingConfigSnapshot.from_config(CONFIG, revision=2)
+
+    with pytest.raises(ValueError, match="not canonical"):
+        RoutingConfigSnapshot.from_document(
+            '{"models": []}',
+            revision=2,
+            sha256=snapshot.sha256,
+        )
+    with pytest.raises(ValueError, match="incomplete"):
+        RoutingConfigSnapshot(
+            revision=snapshot.revision,
+            document=snapshot.document,
+            sha256=snapshot.sha256,
+            signing_key_arn=(
+                "arn:aws:kms:us-west-2:123456789012:"
+                "key/11111111-2222-3333-4444-555555555555"
+            ),
         )

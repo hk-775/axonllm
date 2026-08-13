@@ -158,6 +158,9 @@ The AgentCore stack provides:
 - a private regional ECR image identified by `@sha256`;
 - canonical identity and enforced authentication;
 - a KMS-encrypted DynamoDB table with deletion protection and PITR;
+- a retained asymmetric routing-signature key and a VPC-isolated one-shot
+  signer that seeds, migrates, or verifies the model-registry row before the
+  verify-only runtime updates;
 - daily AWS Backup at 05:30 UTC, 30-day cold transition, 365-day deletion, and
   governance-mode Vault Lock enforcing 30-365 day retention;
 - a KMS-encrypted FIFO security-event outbox and DLQ retained for 14 days;
@@ -1082,6 +1085,10 @@ npx cdk synth AxonLLMAgentCoreStack \
   -c deployment_target=agentcore -c region="$AWS_REGION"
 
 export CANDIDATE_ENDPOINT_NAME='candidate_<32-lowercase-hex-characters>'
+export INITIAL_ROUTING_CONFIG_ZLIB_BASE64="$(
+  uv run python -c \
+    'from src.gateway.deployment.agentcore_deploy import initial_routing_config_zlib_base64; print(initial_routing_config_zlib_base64())'
+)"
 
 npx cdk deploy AxonLLMAgentCoreStack \
   -c deployment_target=agentcore -c region="$AWS_REGION" \
@@ -1096,6 +1103,7 @@ npx cdk deploy AxonLLMAgentCoreStack \
   --parameters AxonLLMAgentCoreStack:BedrockInvokeResourceArns="$BEDROCK_INVOKE_RESOURCE_ARNS" \
   --parameters AxonLLMAgentCoreStack:AlarmNotificationEmail="$ALARM_NOTIFICATION_EMAIL" \
   --parameters AxonLLMAgentCoreStack:CandidateEndpointName="$CANDIDATE_ENDPOINT_NAME" \
+  --parameters AxonLLMAgentCoreStack:InitialRoutingConfigZlibBase64="$INITIAL_ROUTING_CONFIG_ZLIB_BASE64" \
   --parameters AxonLLMAgentCoreStack:PublishCandidateEndpoint=true \
   --parameters AxonLLMAgentCoreStack:PublishProductionEndpoint=false
 ```

@@ -380,7 +380,7 @@ def test_task_egress_and_aws_endpoints_are_explicitly_bounded(
             "AWS::EC2::VPCEndpoint",
         )
     ]
-    assert len(aws_endpoints) == 3
+    assert len(aws_endpoints) == 4
     assert all(
         endpoint["VpcEndpointType"] == "Interface"
         and endpoint["PrivateDnsEnabled"] is True
@@ -405,6 +405,11 @@ def test_task_egress_and_aws_endpoints_are_explicitly_bounded(
         endpoint
         for endpoint in aws_endpoints
         if endpoint["ServiceName"].endswith(".logs")
+    )
+    kms_endpoint = next(
+        endpoint
+        for endpoint in aws_endpoints
+        if endpoint["ServiceName"].endswith(".kms")
     )
     sqs_statement = sqs_endpoint["PolicyDocument"]["Statement"][0]
     assert _actions(sqs_statement) == {
@@ -432,6 +437,11 @@ def test_task_egress_and_aws_endpoints_are_explicitly_bounded(
     )
     assert "SecurityEventLogGroup" in json.dumps(
         logs_statement["Resource"][1]
+    )
+    kms_statement = kms_endpoint["PolicyDocument"]["Statement"][0]
+    assert _actions(kms_statement) == {"kms:Sign", "kms:Verify"}
+    assert kms_statement["Resource"]["Fn::GetAtt"][0].startswith(
+        "RoutingConfigSigningKey"
     )
 
 
@@ -705,6 +715,12 @@ def test_production_oidc_is_conditional_and_bound_to_the_alb(
     assert environment["AXON_AWS_ACCOUNT_ID"] == {
         "Ref": "AWS::AccountId"
     }
+    assert environment["AXON_ROUTING_CONFIG_SIGNING_MODE"] == (
+        "sign-verify"
+    )
+    assert environment["AXON_ROUTING_CONFIG_SIGNING_KEY_ARN"][
+        "Fn::GetAtt"
+    ][0].startswith("RoutingConfigSigningKey")
     selected_table = environment["AXON_DYNAMODB_TABLE"]["Fn::If"]
     assert selected_table[:2] == [
         "UseRecoveredState",
@@ -860,8 +876,19 @@ def test_state_is_kms_encrypted_protected_and_backed_up(
     assert table["DeletionPolicy"] == "Retain"
 
     keys = _resources(synthesized_template, "AWS::KMS::Key")
-    assert len(keys) == 2
-    assert all(key["Properties"]["EnableKeyRotation"] is True for key in keys)
+    assert len(keys) == 3
+    signing_key = next(
+        key
+        for key in keys
+        if key["Properties"].get("KeyUsage") == "SIGN_VERIFY"
+    )
+    assert signing_key["Properties"]["KeySpec"] == "ECC_NIST_P256"
+    assert "EnableKeyRotation" not in signing_key["Properties"]
+    encryption_keys = [key for key in keys if key is not signing_key]
+    assert all(
+        key["Properties"]["EnableKeyRotation"] is True
+        for key in encryption_keys
+    )
     assert all(key["DeletionPolicy"] == "Retain" for key in keys)
 
     vault = _one_resource(synthesized_template, "AWS::Backup::BackupVault")
@@ -1135,6 +1162,15 @@ def test_task_role_has_item_permissions_for_atomic_state_transactions(
     }
     assert "dynamodb:TransactGetItems" not in all_actions
     assert "dynamodb:TransactWriteItems" not in all_actions
+    routing_key = next(
+        statement
+        for statement in statements
+        if statement.get("Sid") == "SignAndVerifyRoutingConfiguration"
+    )
+    assert _actions(routing_key) == {"kms:Sign", "kms:Verify"}
+    assert routing_key["Resource"]["Fn::GetAtt"][0].startswith(
+        "RoutingConfigSigningKey"
+    )
 
     publish = next(
         statement

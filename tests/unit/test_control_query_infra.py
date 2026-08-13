@@ -325,7 +325,7 @@ def test_agentcore_query_env_iam_and_endpoints_share_one_allowlist(
     assert environment["AWS_STS_REGIONAL_ENDPOINTS"] == "regional"
 
     endpoints = _resources(template, "AWS::EC2::VPCEndpoint")
-    assert len(endpoints) == 8
+    assert len(endpoints) == 9
     athena = _interface_endpoint(template, ".athena")
     sts = _interface_endpoint(template, ".sts")
     for endpoint in (athena, sts):
@@ -392,6 +392,7 @@ def test_agentcore_exports_only_the_existing_canonical_authority(
     exported = {
         "StateTableName",
         "DataKeyArn",
+        "RoutingConfigSigningKeyArn",
         "SecurityEventOutboxQueueArn",
         "SecurityEventOutboxQueueUrl",
         "SecurityEventTopicArn",
@@ -425,6 +426,12 @@ def test_control_plane_imports_state_and_never_creates_another_table(
     ]
     assert "StateTableName" in json.dumps(table_selector[2])
     assert environment["AXON_CONTROL_PLANE_ONLY"] == "true"
+    assert environment["AXON_ROUTING_CONFIG_SIGNING_MODE"] == (
+        "sign-verify"
+    )
+    assert "RoutingConfigSigningKeyArn" in json.dumps(
+        environment["AXON_ROUTING_CONFIG_SIGNING_KEY_ARN"]
+    )
     assert environment["AXON_SAML_FEDERATION_MODE"] == "managed-cognito"
     assert environment["AXON_SAML_LOGIN_PATH"] == {
         "Ref": "SamlLoginPath"
@@ -512,11 +519,34 @@ def test_control_plane_kms_access_is_service_and_context_bound(
         for statement in statements
         if any(action.startswith("kms:") for action in _actions(statement))
     ]
-    assert len(kms_statements) == 2
+    assert len(kms_statements) == 3
+    routing_statement = next(
+        statement
+        for statement in kms_statements
+        if "kms:Sign" in _actions(statement)
+    )
+    assert _actions(routing_statement) == {"kms:Sign", "kms:Verify"}
+    assert routing_statement["Sid"] == (
+        "SignAndVerifyRoutingConfiguration"
+    )
+    assert "RoutingConfigSigningKeyArn" in json.dumps(
+        routing_statement["Resource"]
+    )
+    kms_endpoint = _interface_endpoint(template, ".kms")
+    endpoint_statement = kms_endpoint["PolicyDocument"]["Statement"][0]
+    assert _actions(endpoint_statement) == {"kms:Sign", "kms:Verify"}
+    assert "RoutingConfigSigningKeyArn" in json.dumps(
+        endpoint_statement["Resource"]
+    )
+    service_kms_statements = [
+        statement
+        for statement in kms_statements
+        if statement is not routing_statement
+    ]
     assert all(
         _actions(statement)
         == {"kms:Decrypt", "kms:GenerateDataKey*"}
-        for statement in kms_statements
+        for statement in service_kms_statements
     )
     assert not any(
         action in {"kms:Encrypt", "kms:ReEncrypt*"}
@@ -526,13 +556,13 @@ def test_control_plane_kms_access_is_service_and_context_bound(
     assert all(
         statement["Resource"] != "*"
         and "DataKeyArn" in json.dumps(statement["Resource"])
-        for statement in kms_statements
+        for statement in service_kms_statements
     )
 
     def for_service(service: str) -> dict:
         matches = [
             statement
-            for statement in kms_statements
+            for statement in service_kms_statements
             if f"{service}." in json.dumps(
                 statement["Condition"]["StringEquals"][
                     "kms:ViaService"
@@ -1201,13 +1231,14 @@ def test_control_plane_retains_bindings_but_has_no_query_execution_authority(
 ):
     template = query_templates["control-plane"]
     endpoints = _resources(template, "AWS::EC2::VPCEndpoint")
-    assert len(endpoints) == 7
+    assert len(endpoints) == 8
     services = {
         str(endpoint["Properties"]["ServiceName"])
         for endpoint in endpoints
     }
     assert not any("athena" in service for service in services)
     assert not any(service.endswith(".sts") for service in services)
+    assert any(service.endswith(".kms") for service in services)
 
     task_policy = next(
         resource
@@ -1322,7 +1353,7 @@ def test_managed_control_plane_authorizes_exact_launch_worker_principals(
     execution_role_marker = "LaunchWorkerExecutionRole"
 
     endpoints = _resources(template, "AWS::EC2::VPCEndpoint")
-    assert len(endpoints) == 14
+    assert len(endpoints) == 15
     interface_services = {
         str(endpoint["Properties"]["ServiceName"])
         for endpoint in endpoints

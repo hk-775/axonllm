@@ -680,6 +680,11 @@ def test_cloudfront_config_loader_requires_public_cognito_contract(
         "AXON_AUTH_MODE": "ENFORCE",
         "AXON_REQUIRE_CANONICAL_IDENTITY": "true",
         "LLM_ROUTER_DYNAMODB_ENABLED": "true",
+        "AXON_ROUTING_CONFIG_SIGNING_MODE": "sign-verify",
+        "AXON_ROUTING_CONFIG_SIGNING_KEY_ARN": (
+            "arn:aws:kms:us-east-1:123456789012:"
+            "key/11111111-2222-3333-4444-555555555555"
+        ),
         "AXON_CONTROL_PLANE_ONLY": "true",
         "AXON_CONTROL_PLANE_ENDPOINT_MODE": "cloudfront",
         "AXON_CONTROL_PLANE_URL": PUBLIC_URL,

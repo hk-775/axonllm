@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import time
 
+import pytest
 from starlette.applications import Starlette
 from starlette.testclient import TestClient
 
@@ -17,6 +19,11 @@ from src.gateway.model_registry import ModelRegistry
 from src.gateway.persistence import (
     DynamoPersistence,
     PersistenceConflictError,
+)
+from src.gateway.routing_config import RoutingConfigSnapshot
+from src.gateway.routing_config_signing import (
+    RoutingConfigRollbackError,
+    RoutingConfigSignatureError,
 )
 from src.gateway.router import Router
 from tests.unit.test_persistence_cas_foundations import (
@@ -42,11 +49,69 @@ BASE_CONFIG = {
         }
     ]
 }
+KEY_ARN = (
+    "arn:aws:kms:us-west-2:123456789012:"
+    "key/11111111-2222-3333-4444-555555555555"
+)
+
+
+class _Authenticator:
+    def __init__(self, key_arn: str = KEY_ARN) -> None:
+        self.key_arn = key_arn
+        self.sign_count = 0
+        self.verify_count = 0
+        self.available = True
+
+    @staticmethod
+    def _signature(snapshot: RoutingConfigSnapshot) -> bytes:
+        return b"test:" + snapshot.signing_digest
+
+    async def sign(
+        self,
+        snapshot: RoutingConfigSnapshot,
+    ) -> RoutingConfigSnapshot:
+        self.sign_count += 1
+        if not self.available:
+            raise RoutingConfigSignatureError(
+                "routing configuration signing is unavailable"
+            )
+        return snapshot.with_signature(
+            signing_key_arn=self.key_arn,
+            signature=self._signature(snapshot),
+        )
+
+    async def verify(self, snapshot: RoutingConfigSnapshot) -> None:
+        self.verify_count += 1
+        if not self.available:
+            raise RoutingConfigSignatureError(
+                "routing configuration verification is unavailable"
+            )
+        if (
+            snapshot.signing_key_arn != self.key_arn
+            or snapshot.signature != self._signature(snapshot)
+        ):
+            raise RoutingConfigSignatureError(
+                "routing configuration signature is invalid"
+            )
 
 
 class _Persistence(DynamoPersistence):
-    def __init__(self, client: _CasDynamoClient) -> None:
-        super().__init__(table_name="model-registry-test")
+    def __init__(
+        self,
+        client: _CasDynamoClient,
+        *,
+        mode: str = "disabled",
+        authenticator: _Authenticator | None = None,
+    ) -> None:
+        super().__init__(
+            table_name="model-registry-test",
+            region="us-west-2",
+            routing_config_signing_mode=mode,
+            routing_config_signing_key_arn=(
+                KEY_ARN if mode != "disabled" else ""
+            ),
+            routing_config_authenticator=authenticator,
+        )
         self._enabled = True
         self._table = _CasTable(client)
 
@@ -93,22 +158,21 @@ async def test_model_registry_document_is_revisioned_and_cas_protected() -> None
     second = _Persistence(client)
 
     assert await first.load_model_registry_snapshot() is None
-    assert (
-        await first.save_model_registry(
-            BASE_CONFIG,
-            expected_revision=0,
-        )
-        == 1
+    first_snapshot = await first.save_model_registry(
+        BASE_CONFIG,
+        expected_revision=0,
     )
-    assert await first.load_model_registry_snapshot() == (BASE_CONFIG, 1)
+    assert first_snapshot.revision == 1
+    loaded = await first.load_model_registry_snapshot()
+    assert loaded is not None
+    assert loaded.config == BASE_CONFIG
+    assert loaded.revision == 1
 
-    assert (
-        await first.save_model_registry(
-            _candidate("winner", "winner-id"),
-            expected_revision=1,
-        )
-        == 2
+    winner = await first.save_model_registry(
+        _candidate("winner", "winner-id"),
+        expected_revision=1,
     )
+    assert winner.revision == 2
     try:
         await second.save_model_registry(
             _candidate("stale", "stale-id"),
@@ -119,10 +183,10 @@ async def test_model_registry_document_is_revisioned_and_cas_protected() -> None
     else:
         raise AssertionError("a stale registry write was accepted")
 
-    assert await first.load_model_registry_snapshot() == (
-        _candidate("winner", "winner-id"),
-        2,
-    )
+    loaded = await first.load_model_registry_snapshot()
+    assert loaded is not None
+    assert loaded.config == _candidate("winner", "winner-id")
+    assert loaded.revision == 2
 
 
 async def test_fleet_refresh_atomically_rebuilds_live_router_mappings() -> None:
@@ -213,7 +277,7 @@ def test_file_defaults_are_fallback_until_a_durable_snapshot_exists(
         def __init__(self, snapshot):
             self.snapshot = snapshot
 
-        async def load_model_registry_snapshot(self):
+        async def load_model_registry_snapshot(self, **_kwargs):
             return self.snapshot
 
     fallback = _load_runtime_model_registry(
@@ -222,13 +286,56 @@ def test_file_defaults_are_fallback_until_a_durable_snapshot_exists(
     )
     durable = _load_runtime_model_registry(
         str(path),
-        _Snapshots((_candidate("durable", "durable-id"), 7)),
+        _Snapshots(
+            RoutingConfigSnapshot.from_config(
+                _candidate("durable", "durable-id"),
+                revision=7,
+            )
+        ),
     )
 
     assert fallback.revision == 0
     assert set(fallback.models) == {"default-model"}
     assert durable.revision == 7
     assert set(durable.models) == {"durable"}
+
+
+def test_signing_control_plane_initializes_the_first_durable_snapshot(
+    tmp_path,
+) -> None:
+    path = tmp_path / "models.yaml"
+    defaults = ModelRegistry.from_config(BASE_CONFIG)
+    path.write_text(defaults.pretty_print(), encoding="utf-8")
+    persistence = _Persistence(
+        _CasDynamoClient(),
+        mode="sign-verify",
+        authenticator=_Authenticator(),
+    )
+
+    registry = _load_runtime_model_registry(
+        str(path),
+        persistence,
+    )
+
+    assert registry.revision == 1
+    assert persistence.authenticated_routing_snapshot is not None
+    assert persistence.authenticated_routing_snapshot.is_signed is True
+
+
+def test_verification_only_runtime_requires_an_initialized_snapshot(
+    tmp_path,
+) -> None:
+    path = tmp_path / "models.yaml"
+    defaults = ModelRegistry.from_config(BASE_CONFIG)
+    path.write_text(defaults.pretty_print(), encoding="utf-8")
+    persistence = _Persistence(
+        _CasDynamoClient(),
+        mode="verify",
+        authenticator=_Authenticator(),
+    )
+
+    with pytest.raises(RuntimeError, match="not initialized"):
+        _load_runtime_model_registry(str(path), persistence)
 
 
 def test_failed_durable_write_does_not_change_live_routes() -> None:
@@ -259,18 +366,8 @@ async def test_invalid_new_snapshot_is_never_partially_adopted() -> None:
     class _InvalidSnapshot:
         enabled = True
 
-        async def load_model_registry_snapshot(self):
-            return (
-                {
-                    "models": [
-                        {
-                            "name": "invalid",
-                            "description": "missing providers",
-                        }
-                    ]
-                },
-                1,
-            )
+        async def load_model_registry_snapshot(self, **_kwargs):
+            raise RuntimeError("invalid routing snapshot")
 
     registry = ModelRegistry.from_config(BASE_CONFIG)
     sync = ConfigSyncService(
@@ -291,3 +388,216 @@ async def test_invalid_new_snapshot_is_never_partially_adopted() -> None:
     assert set(registry.models) == {"default-model"}
     assert sync.active_routing_snapshot == active
     assert sync._last_model_check == float("-inf")
+    assert sync.routing_config_status["status"] == "degraded"
+
+
+async def test_signed_snapshot_is_verified_once_and_cached() -> None:
+    client = _CasDynamoClient()
+    signer = _Authenticator()
+    writer = _Persistence(
+        client,
+        mode="sign-verify",
+        authenticator=signer,
+    )
+    signed = await writer.save_model_registry(
+        BASE_CONFIG,
+        expected_revision=0,
+    )
+    assert signed.is_signed is True
+    assert client.rows[("MODEL_REGISTRY", "CONFIG")][
+        "schema_version"
+    ] == 2
+
+    verifier = _Authenticator()
+    reader = _Persistence(
+        client,
+        mode="verify",
+        authenticator=verifier,
+    )
+    first = await reader.load_model_registry_snapshot()
+    second = await reader.load_model_registry_snapshot(
+        after_revision=1
+    )
+
+    assert first == signed
+    assert second == signed
+    assert verifier.verify_count == 1
+
+
+async def test_unsigned_writer_cannot_downgrade_a_signed_row() -> None:
+    client = _CasDynamoClient()
+    writer = _Persistence(
+        client,
+        mode="sign-verify",
+        authenticator=_Authenticator(),
+    )
+    await writer.save_model_registry(
+        BASE_CONFIG,
+        expected_revision=0,
+    )
+
+    unsigned = _Persistence(client)
+    with pytest.raises(PersistenceConflictError):
+        await unsigned.save_model_registry(
+            _candidate("downgrade", "downgrade-id"),
+            expected_revision=1,
+        )
+
+
+async def test_tampered_or_wrong_key_snapshot_is_rejected() -> None:
+    client = _CasDynamoClient()
+    writer = _Persistence(
+        client,
+        mode="sign-verify",
+        authenticator=_Authenticator(),
+    )
+    await writer.save_model_registry(
+        BASE_CONFIG,
+        expected_revision=0,
+    )
+    row = client.rows[("MODEL_REGISTRY", "CONFIG")]
+    tampered = RoutingConfigSnapshot.from_config(
+        _candidate("tampered", "tampered-id"),
+        revision=1,
+    )
+    row["document"] = tampered.document
+    row["document_sha256"] = tampered.sha256
+
+    reader = _Persistence(
+        client,
+        mode="verify",
+        authenticator=_Authenticator(),
+    )
+    with pytest.raises(RoutingConfigSignatureError, match="invalid"):
+        await reader.load_model_registry_snapshot()
+
+    row["signing_key_arn"] = (
+        "arn:aws:kms:us-west-2:123456789012:"
+        "key/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    )
+    with pytest.raises(RoutingConfigSignatureError, match="invalid"):
+        await reader.load_model_registry_snapshot()
+
+
+async def test_legacy_snapshot_is_migrated_only_by_a_signing_writer() -> None:
+    client = _CasDynamoClient()
+    client.rows[("MODEL_REGISTRY", "CONFIG")] = (
+        DynamoPersistence.serialize_model_registry(
+            BASE_CONFIG,
+            revision=4,
+        )
+    )
+    verifier = _Persistence(
+        client,
+        mode="verify",
+        authenticator=_Authenticator(),
+    )
+    with pytest.raises(RoutingConfigSignatureError, match="unsigned"):
+        await verifier.load_model_registry_snapshot()
+
+    signer = _Persistence(
+        client,
+        mode="sign-verify",
+        authenticator=_Authenticator(),
+    )
+    migrated = await signer.load_model_registry_snapshot()
+
+    assert migrated is not None
+    assert migrated.revision == 4
+    assert migrated.is_signed is True
+    assert client.rows[("MODEL_REGISTRY", "CONFIG")][
+        "schema_version"
+    ] == 2
+
+
+async def test_authenticated_router_rejects_revision_rollback() -> None:
+    client = _CasDynamoClient()
+    writer = _Persistence(
+        client,
+        mode="sign-verify",
+        authenticator=_Authenticator(),
+    )
+    await writer.save_model_registry(
+        BASE_CONFIG,
+        expected_revision=0,
+    )
+    revision_one = copy.deepcopy(
+        client.rows[("MODEL_REGISTRY", "CONFIG")]
+    )
+    await writer.save_model_registry(
+        _candidate("newer", "newer-id"),
+        expected_revision=1,
+    )
+    reader = _Persistence(
+        client,
+        mode="verify",
+        authenticator=_Authenticator(),
+    )
+    current = await reader.load_model_registry_snapshot()
+    assert current is not None
+    assert current.revision == 2
+
+    alternate = await _Authenticator().sign(
+        RoutingConfigSnapshot.from_config(
+            _candidate("rewritten", "rewritten-id"),
+            revision=2,
+        )
+    )
+    client.rows[("MODEL_REGISTRY", "CONFIG")] = (
+        DynamoPersistence.serialize_signed_model_registry(alternate)
+    )
+    with pytest.raises(
+        RoutingConfigRollbackError,
+        match="rewritten",
+    ):
+        await reader.load_model_registry_snapshot(
+            after_revision=2
+        )
+
+    client.rows[("MODEL_REGISTRY", "CONFIG")] = revision_one
+    with pytest.raises(RoutingConfigRollbackError):
+        await reader.load_model_registry_snapshot(
+            after_revision=2
+        )
+
+
+async def test_signature_outage_retains_lkg_and_reports_degraded() -> None:
+    class _Snapshots:
+        enabled = True
+
+        def __init__(self) -> None:
+            self.fail = True
+
+        async def load_model_registry_snapshot(self, **_kwargs):
+            if self.fail:
+                raise RoutingConfigSignatureError(
+                    "verification unavailable"
+                )
+            return RoutingConfigSnapshot.from_config(
+                _candidate("recovered", "recovered-id"),
+                revision=1,
+            )
+
+    persistence = _Snapshots()
+    registry = ModelRegistry.from_config(BASE_CONFIG)
+    sync = ConfigSyncService(
+        projects={},
+        user_configs={},
+        cost_tracker=CostTracker(pricing_config={}),
+        persistence=persistence,
+        model_registry=registry,
+    )
+    sync._known_version = 0
+    sync._last_version_check = time.monotonic()
+    active = sync.active_routing_snapshot
+
+    assert await sync.refresh_if_stale() is False
+    assert sync.active_routing_snapshot == active
+    assert sync.routing_config_status["error"] == (
+        "signature_verification_failed"
+    )
+
+    persistence.fail = False
+    assert await sync.refresh_if_stale() is True
+    assert registry.revision == 1
+    assert sync.routing_config_status["status"] == "synchronized"

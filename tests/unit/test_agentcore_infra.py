@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import base64
+import copy
+import hashlib
 import json
 import os
 from pathlib import Path
 import subprocess
 import sys
 import types
+import zlib
 
 import pytest
 
@@ -27,6 +31,7 @@ _DOCKERFILE = _INFRA / "agentcore-image" / "Dockerfile"
 _REQUIRED_PARAMETERS = {
     "AlarmNotificationEmail",
     "CandidateEndpointName",
+    "InitialRoutingConfigZlibBase64",
     "OidcIssuer",
     "OidcDiscoveryUrl",
     "OidcClientIds",
@@ -225,6 +230,11 @@ def test_deployment_inputs_are_required_and_bedrock_arns_are_concrete(
     candidate = parameters["CandidateEndpointName"]
     assert candidate["AllowedPattern"] == "^candidate_[0-9a-f]{32}$"
     assert candidate["MinLength"] == candidate["MaxLength"] == 42
+    routing_config = parameters["InitialRoutingConfigZlibBase64"]
+    assert routing_config["MaxLength"] == 4096
+    assert routing_config["AllowedPattern"] == (
+        "^[A-Za-z0-9+/]+={0,2}$"
+    )
 
 
 def test_recovery_parameters_are_scoped_and_phase_gated(
@@ -294,7 +304,7 @@ def test_runtime_uses_two_private_azs_and_explicit_security_groups(
     )
 
 
-def test_endpoint_ingress_is_only_from_the_runtime_security_group(
+def test_endpoint_ingress_is_only_from_runtime_and_routing_seeder_groups(
     synthesized_template,
 ):
     runtime_group_id, runtime_group = _logical_resource(
@@ -307,22 +317,38 @@ def test_endpoint_ingress_is_only_from_the_runtime_security_group(
         "AWS::EC2::SecurityGroup",
         "Private AWS service endpoints",
     )
+    seeder_group_id, _ = _logical_resource(
+        synthesized_template,
+        "AWS::EC2::SecurityGroup",
+        "One-shot signed routing configuration bootstrap",
+    )
     assert "SecurityGroupIngress" not in endpoint_group["Properties"]
 
     ingress = _resources(
         synthesized_template,
         "AWS::EC2::SecurityGroupIngress",
     )
-    assert len(ingress) == 1
-    rule = ingress[0]["Properties"]
-    assert rule["Description"] == "HTTPS from the AgentCore runtime"
-    assert rule["FromPort"] == rule["ToPort"] == 443
-    assert rule["GroupId"] == {
-        "Fn::GetAtt": [endpoint_group_id, "GroupId"]
+    assert len(ingress) == 2
+    rules = {
+        rule["Properties"]["Description"]: rule["Properties"]
+        for rule in ingress
     }
-    assert rule["SourceSecurityGroupId"] == {
-        "Fn::GetAtt": [runtime_group_id, "GroupId"]
+    assert set(rules) == {
+        "HTTPS from the AgentCore runtime",
+        "HTTPS from the routing configuration seeder",
     }
+    assert all(
+        rule["FromPort"] == rule["ToPort"] == 443
+        and rule["GroupId"]
+        == {"Fn::GetAtt": [endpoint_group_id, "GroupId"]}
+        for rule in rules.values()
+    )
+    assert rules["HTTPS from the AgentCore runtime"][
+        "SourceSecurityGroupId"
+    ] == {"Fn::GetAtt": [runtime_group_id, "GroupId"]}
+    assert rules["HTTPS from the routing configuration seeder"][
+        "SourceSecurityGroupId"
+    ] == {"Fn::GetAtt": [seeder_group_id, "GroupId"]}
 
     security_group_resources = {
         logical_id: resource
@@ -366,11 +392,90 @@ def test_endpoint_ingress_is_only_from_the_runtime_security_group(
     }
 
 
+def test_routing_seeder_precedes_the_verify_only_runtime(
+    synthesized_template,
+):
+    resources = synthesized_template["Resources"]
+    runtime = next(
+        resource
+        for resource in resources.values()
+        if resource["Type"] == "AWS::BedrockAgentCore::Runtime"
+    )
+    environment = runtime["Properties"]["EnvironmentVariables"]
+    assert environment["AXON_ROUTING_CONFIG_SIGNING_MODE"] == "verify"
+    assert any(
+        dependency.startswith("RoutingConfigSeeder")
+        for dependency in runtime["DependsOn"]
+    )
+
+    seeder_id, seeder = next(
+        (logical_id, resource)
+        for logical_id, resource in resources.items()
+        if resource["Type"] == "AWS::CloudFormation::CustomResource"
+        and logical_id.startswith("RoutingConfigSeeder")
+    )
+    assert seeder_id
+    assert seeder["Properties"]["DeploymentToken"] == {
+        "Ref": "CandidateEndpointName"
+    }
+    assert seeder["Properties"][
+        "InitialRoutingConfigZlibBase64"
+    ] == {"Ref": "InitialRoutingConfigZlibBase64"}
+    assert "RecoveryGuard" in seeder["DependsOn"]
+    assert any(
+        dependency.startswith("VpcDynamoDbEndpoint")
+        for dependency in seeder["DependsOn"]
+    )
+    assert any(
+        dependency.startswith("VpcKmsEndpoint")
+        for dependency in seeder["DependsOn"]
+    )
+
+    handler = next(
+        resource
+        for resource in resources.values()
+        if resource["Type"] == "AWS::Lambda::Function"
+        and resource["Properties"].get("Description")
+        == "Seeds or migrates the KMS-signed routing configuration"
+    )
+    vpc_config = handler["Properties"]["VpcConfig"]
+    assert len(vpc_config["SecurityGroupIds"]) == 1
+    assert vpc_config["SecurityGroupIds"][0]["Fn::GetAtt"][
+        0
+    ].startswith("RoutingConfigSeederSecurityGroup")
+    assert all(
+        subnet["Ref"].startswith("VpcRuntimeSubnet")
+        for subnet in vpc_config["SubnetIds"]
+    )
+
+    seeder_policy = next(
+        resource
+        for logical_id, resource in resources.items()
+        if logical_id.startswith(
+            "RoutingConfigSeederHandlerServiceRoleDefaultPolicy"
+        )
+    )
+    statements = {
+        statement["Sid"]: statement
+        for statement in seeder_policy["Properties"]["PolicyDocument"][
+            "Statement"
+        ]
+        if "Sid" in statement
+    }
+    assert _actions(statements["SeedRoutingConfiguration"]) == {
+        "dynamodb:GetItem",
+        "dynamodb:PutItem",
+    }
+    assert _actions(
+        statements["SignAndVerifyRoutingConfiguration"]
+    ) == {"kms:Sign", "kms:Verify"}
+
+
 def test_service_endpoints_are_private_and_resource_scoped(
     synthesized_template,
 ):
     endpoints = _resources(synthesized_template, "AWS::EC2::VPCEndpoint")
-    assert len(endpoints) == 6
+    assert len(endpoints) == 7
     gateway = next(
         endpoint
         for endpoint in endpoints
@@ -410,6 +515,11 @@ def test_service_endpoints_are_private_and_resource_scoped(
             ".secretsmanager"
         )
     )
+    kms_interface = next(
+        endpoint["Properties"]
+        for endpoint in interfaces
+        if endpoint["Properties"]["ServiceName"].endswith(".kms")
+    )
 
     assert len(gateway["RouteTableIds"]) == 2
     assert all(
@@ -425,13 +535,14 @@ def test_service_endpoints_are_private_and_resource_scoped(
         dynamodb_statement["Resource"]
     )
 
-    assert len(interfaces) == 5
+    assert len(interfaces) == 6
     for interface in (
         bedrock_interface,
         sqs_interface,
         sns_interface,
         logs_interface,
         secrets_interface,
+        kms_interface,
     ):
         assert interface["PrivateDnsEnabled"] is True
         assert len(interface["SubnetIds"]) == 2
@@ -444,6 +555,30 @@ def test_service_endpoints_are_private_and_resource_scoped(
     assert bedrock_statement["Resource"] == {
         "Ref": "BedrockInvokeResourceArns"
     }
+    kms_statements = kms_interface["PolicyDocument"]["Statement"]
+    assert len(kms_statements) == 2
+    runtime_kms = next(
+        statement
+        for statement in kms_statements
+        if _actions(statement) == {"kms:Verify"}
+    )
+    seeder_kms = next(
+        statement
+        for statement in kms_statements
+        if _actions(statement) == {"kms:Sign", "kms:Verify"}
+    )
+    assert runtime_kms["Resource"]["Fn::GetAtt"][0].startswith(
+        "RoutingConfigSigningKey"
+    )
+    assert runtime_kms["Principal"]["AWS"]["Fn::GetAtt"][0].startswith(
+        "RuntimeExecutionRole"
+    )
+    assert seeder_kms["Resource"]["Fn::GetAtt"][0].startswith(
+        "RoutingConfigSigningKey"
+    )
+    assert seeder_kms["Principal"]["AWS"]["Fn::GetAtt"][0].startswith(
+        "RoutingConfigSeederHandlerServiceRole"
+    )
     sqs_statement = sqs_interface["PolicyDocument"]["Statement"][0]
     assert _actions(sqs_statement) == _SQS_ACTIONS
     assert sqs_statement["Resource"]["Fn::GetAtt"][0].startswith(
@@ -543,6 +678,10 @@ def test_runtime_enforces_jwt_identity_and_bounded_lifecycle(
         "Ref": "ProviderSecretVersion"
     }
     assert environment["LLM_ROUTER_DYNAMODB_ENABLED"] == "true"
+    assert environment["AXON_ROUTING_CONFIG_SIGNING_MODE"] == "verify"
+    assert environment["AXON_ROUTING_CONFIG_SIGNING_KEY_ARN"][
+        "Fn::GetAtt"
+    ][0].startswith("RoutingConfigSigningKey")
     assert environment["AXON_DYNAMODB_TABLE"]["Fn::If"][:2] == [
         "UseRecoveredState",
         {"Ref": "RuntimeStateTableName"},
@@ -716,7 +855,7 @@ def test_runtime_role_is_scoped_and_supports_state_transactions(
         for statement in statements
         if any(action.startswith("kms:") for action in _actions(statement))
     ]
-    assert len(kms_statements) == 3
+    assert len(kms_statements) == 4
 
     def kms_statement(sid: str) -> dict:
         return next(
@@ -740,6 +879,12 @@ def test_runtime_role_is_scoped_and_supports_state_transactions(
     )
     assert "AWS::URLSuffix" in json.dumps(
         secret_condition["kms:ViaService"]
+    )
+
+    routing_key = kms_statement("VerifyRoutingConfiguration")
+    assert _actions(routing_key) == {"kms:Verify"}
+    assert routing_key["Resource"]["Fn::GetAtt"][0].startswith(
+        "RoutingConfigSigningKey"
     )
 
     queue_key = kms_statement("UseSecurityEventOutboxKey")
@@ -779,6 +924,7 @@ def test_runtime_role_is_scoped_and_supports_state_transactions(
     assert all(
         "DataKey" in json.dumps(statement["Resource"])
         for statement in kms_statements
+        if statement["Sid"] != "VerifyRoutingConfiguration"
     )
 
     security_log_write = next(
@@ -828,6 +974,280 @@ def test_runtime_role_is_scoped_and_supports_state_transactions(
         "Ref": "AWS::AccountId"
     }
     assert "aws:SourceArn" in trust["Condition"]["ArnLike"]
+
+
+class _RoutingSeederClientError(RuntimeError):
+    def __init__(self) -> None:
+        self.response = {
+            "Error": {"Code": "ConditionalCheckFailedException"}
+        }
+        super().__init__("conditional write failed")
+
+
+class _RoutingSeederDynamo:
+    def __init__(self, item: dict | None = None) -> None:
+        self.item = copy.deepcopy(item)
+        self.conflict_once = False
+        self.put_requests: list[dict] = []
+
+    def get_item(self, **_request) -> dict:
+        return (
+            {}
+            if self.item is None
+            else {"Item": copy.deepcopy(self.item)}
+        )
+
+    def put_item(self, **request) -> dict:
+        self.put_requests.append(copy.deepcopy(request))
+        if self.conflict_once:
+            self.conflict_once = False
+            self.item = copy.deepcopy(request["Item"])
+            raise _RoutingSeederClientError()
+        condition = request["ConditionExpression"]
+        if condition.startswith("attribute_not_exists"):
+            if self.item is not None:
+                raise _RoutingSeederClientError()
+        elif (
+            self.item is None
+            or self.item.get("schema_version") != {"N": "1"}
+            or self.item.get("revision")
+            != request["ExpressionAttributeValues"][":revision"]
+            or self.item.get("document_sha256")
+            != request["ExpressionAttributeValues"][":document_sha256"]
+        ):
+            raise _RoutingSeederClientError()
+        self.item = copy.deepcopy(request["Item"])
+        return {}
+
+
+class _RoutingSeederKms:
+    def __init__(self) -> None:
+        self.sign_requests: list[dict] = []
+        self.verify_requests: list[dict] = []
+
+    @staticmethod
+    def _signature(message: bytes) -> bytes:
+        return b"test-signature:" + message
+
+    def sign(self, **request) -> dict:
+        self.sign_requests.append(copy.deepcopy(request))
+        return {
+            "KeyId": request["KeyId"],
+            "SigningAlgorithm": request["SigningAlgorithm"],
+            "Signature": self._signature(request["Message"]),
+        }
+
+    def verify(self, **request) -> dict:
+        self.verify_requests.append(copy.deepcopy(request))
+        return {
+            "KeyId": request["KeyId"],
+            "SigningAlgorithm": request["SigningAlgorithm"],
+            "SignatureValid": request["Signature"]
+            == self._signature(request["Message"]),
+        }
+
+
+def _routing_seeder_properties() -> dict[str, str]:
+    document = json.dumps(
+        {"models": []},
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return {
+        "DeploymentToken": "candidate_" + "a" * 32,
+        "InitialRoutingConfigZlibBase64": base64.b64encode(
+            zlib.compress(document.encode("utf-8"), level=9)
+        ).decode("ascii"),
+        "KeyArn": (
+            "arn:aws:kms:us-east-1:123456789012:"
+            "key/11111111-2222-3333-4444-555555555555"
+        ),
+        "TableName": "axonllm-agentcore-state",
+    }
+
+
+def _routing_seeder_handler(
+    synthesized_template: dict,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    dynamodb: _RoutingSeederDynamo,
+    kms: _RoutingSeederKms,
+):
+    handler = next(
+        resource
+        for resource in _resources(
+            synthesized_template,
+            "AWS::Lambda::Function",
+        )
+        if resource["Properties"].get("Description")
+        == "Seeds or migrates the KMS-signed routing configuration"
+    )
+    clients = {"dynamodb": dynamodb, "kms": kms}
+    monkeypatch.setitem(
+        sys.modules,
+        "boto3",
+        types.SimpleNamespace(client=lambda name: clients[name]),
+    )
+    botocore = types.ModuleType("botocore")
+    exceptions = types.ModuleType("botocore.exceptions")
+    exceptions.ClientError = _RoutingSeederClientError
+    botocore.exceptions = exceptions
+    monkeypatch.setitem(sys.modules, "botocore", botocore)
+    monkeypatch.setitem(sys.modules, "botocore.exceptions", exceptions)
+    namespace: dict[str, object] = {}
+    exec(
+        compile(
+            handler["Properties"]["Code"]["ZipFile"],
+            "routing_config_seeder.py",
+            "exec",
+        ),
+        namespace,
+    )
+    return namespace["handler"]
+
+
+def test_routing_seeder_seeds_and_reverifies_the_exact_key(
+    synthesized_template,
+    monkeypatch,
+):
+    dynamodb = _RoutingSeederDynamo()
+    kms = _RoutingSeederKms()
+    handler = _routing_seeder_handler(
+        synthesized_template,
+        monkeypatch,
+        dynamodb=dynamodb,
+        kms=kms,
+    )
+    properties = _routing_seeder_properties()
+
+    created = handler(
+        {
+            "RequestType": "Create",
+            "ResourceProperties": properties,
+        },
+        None,
+    )
+    verified = handler(
+        {
+            "RequestType": "Update",
+            "ResourceProperties": properties,
+        },
+        None,
+    )
+
+    assert created["Data"] == {"Revision": "1", "Status": "seeded"}
+    assert verified["Data"] == {
+        "Revision": "1",
+        "Status": "verified",
+    }
+    assert dynamodb.item["schema_version"] == {"N": "2"}
+    assert dynamodb.item["signing_key_arn"] == {
+        "S": properties["KeyArn"]
+    }
+    assert len(kms.sign_requests) == 1
+    assert len(kms.verify_requests) == 1
+
+
+def test_routing_seeder_migrates_legacy_and_handles_a_seed_race(
+    synthesized_template,
+    monkeypatch,
+):
+    document = json.dumps(
+        {"models": []},
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    legacy = {
+        "PK": {"S": "MODEL_REGISTRY"},
+        "SK": {"S": "CONFIG"},
+        "entity_type": {"S": "model_registry"},
+        "schema_version": {"N": "1"},
+        "revision": {"N": "4"},
+        "document": {"S": document},
+        "document_sha256": {
+            "S": hashlib.sha256(document.encode("utf-8")).hexdigest()
+        },
+    }
+    dynamodb = _RoutingSeederDynamo(legacy)
+    kms = _RoutingSeederKms()
+    handler = _routing_seeder_handler(
+        synthesized_template,
+        monkeypatch,
+        dynamodb=dynamodb,
+        kms=kms,
+    )
+    properties = _routing_seeder_properties()
+
+    migrated = handler(
+        {
+            "RequestType": "Update",
+            "ResourceProperties": properties,
+        },
+        None,
+    )
+
+    assert migrated["Data"] == {
+        "Revision": "4",
+        "Status": "migrated",
+    }
+    assert dynamodb.item["schema_version"] == {"N": "2"}
+
+    raced_dynamodb = _RoutingSeederDynamo()
+    raced_dynamodb.conflict_once = True
+    raced_kms = _RoutingSeederKms()
+    raced_handler = _routing_seeder_handler(
+        synthesized_template,
+        monkeypatch,
+        dynamodb=raced_dynamodb,
+        kms=raced_kms,
+    )
+    raced = raced_handler(
+        {
+            "RequestType": "Create",
+            "ResourceProperties": properties,
+        },
+        None,
+    )
+    assert raced["Data"] == {
+        "Revision": "1",
+        "Status": "verified_after_conflict",
+    }
+
+
+def test_routing_seeder_rejects_a_tampered_signed_row(
+    synthesized_template,
+    monkeypatch,
+):
+    dynamodb = _RoutingSeederDynamo()
+    kms = _RoutingSeederKms()
+    handler = _routing_seeder_handler(
+        synthesized_template,
+        monkeypatch,
+        dynamodb=dynamodb,
+        kms=kms,
+    )
+    properties = _routing_seeder_properties()
+    handler(
+        {
+            "RequestType": "Create",
+            "ResourceProperties": properties,
+        },
+        None,
+    )
+    dynamodb.item["signature"] = {
+        "S": base64.b64encode(b"tampered").decode("ascii")
+    }
+
+    with pytest.raises(RuntimeError, match="verification failed"):
+        handler(
+            {
+                "RequestType": "Update",
+                "ResourceProperties": properties,
+            },
+            None,
+        )
 
 
 def test_recovery_guard_blocks_access_and_checks_runtime_and_control_plane(
@@ -1135,8 +1555,19 @@ def test_state_and_backups_are_encrypted_retained_and_recoverable(
     assert table["UpdateReplacePolicy"] == "Retain"
 
     keys = _resources(synthesized_template, "AWS::KMS::Key")
-    assert len(keys) == 2
-    assert all(key["Properties"]["EnableKeyRotation"] is True for key in keys)
+    assert len(keys) == 3
+    signing_key = next(
+        key
+        for key in keys
+        if key["Properties"].get("KeyUsage") == "SIGN_VERIFY"
+    )
+    assert signing_key["Properties"]["KeySpec"] == "ECC_NIST_P256"
+    assert "EnableKeyRotation" not in signing_key["Properties"]
+    encryption_keys = [key for key in keys if key is not signing_key]
+    assert all(
+        key["Properties"]["EnableKeyRotation"] is True
+        for key in encryption_keys
+    )
     assert all(key["DeletionPolicy"] == "Retain" for key in keys)
 
     vault = _one_resource(
@@ -1337,6 +1768,9 @@ def test_security_event_outbox_is_fifo_encrypted_and_redriven(
     assert outputs["DataKeyArn"]["Value"]["Fn::GetAtt"][0].startswith(
         "DataKey"
     )
+    assert outputs["RoutingConfigSigningKeyArn"]["Value"][
+        "Fn::GetAtt"
+    ][0].startswith("RoutingConfigSigningKey")
     assert outputs["ProviderSecretArn"]["Value"]["Ref"].startswith(
         "ProviderCredentials"
     )
@@ -1378,7 +1812,7 @@ def test_encrypted_logs_and_alarm_delivery_have_service_permissions(
         )
         if log_group["DeletionPolicy"] == "Retain"
     ]
-    assert len(retained_logs) == 5
+    assert len(retained_logs) == 7
     assert all(
         log_group["Properties"]["RetentionInDays"] == 365
         for log_group in retained_logs

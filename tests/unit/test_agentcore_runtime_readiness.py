@@ -29,6 +29,7 @@ from src.gateway.agentcore.runtime import (
     build_runtime_services,
 )
 from src.gateway.auth.cedar_policy import CedarPolicyService
+from src.gateway.model_registry import ModelRegistry
 from src.gateway.models import AuthMethod, RequestContext
 
 
@@ -137,6 +138,26 @@ async def test_failed_dependency_probe_fails_startup_and_closes_runtime() -> Non
         await provider.get()
     await provider.close()
     assert close_calls == ["provider_http"]
+
+
+@pytest.mark.asyncio
+async def test_degraded_dependency_keeps_lkg_runtime_ready() -> None:
+    async def degraded() -> str:
+        return "degraded"
+
+    report = await _services(
+        checks=(
+            RuntimeDependency(
+                "routing_configuration",
+                degraded,
+                degraded,
+            ),
+        )
+    ).check_readiness(0.1)
+
+    assert report.ready is True
+    assert report.as_dict()["status"] == "degraded"
+    assert report.dependencies["routing_configuration"] == "degraded"
 
 
 @pytest.mark.asyncio
@@ -905,9 +926,26 @@ async def test_production_runtime_probes_and_closes_owned_resources(
         ),
         health_monitor=HealthMonitor(),
         event_dispatcher=EventDispatcher(),
-        policies=policies,
-        persistence=Persistence(),
-        multi_factory=SimpleNamespace(_http_client=HttpClient()),
+            policies=policies,
+            persistence=Persistence(),
+            registry=ModelRegistry.from_config(
+                {
+                    "models": [
+                        {
+                            "name": "runtime-test",
+                            "description": "runtime test",
+                            "routing_strategy": "round-robin",
+                            "providers": [
+                                {
+                                    "provider": "openai",
+                                    "model_id": "runtime-test",
+                                }
+                            ],
+                        }
+                    ]
+                }
+            ),
+            multi_factory=SimpleNamespace(_http_client=HttpClient()),
         audit_trail=SimpleNamespace(durable_enabled=True),
         query_service=query_service,
         query_reconciliation_worker=QueryWorker(),
@@ -948,6 +986,7 @@ async def test_production_runtime_probes_and_closes_owned_resources(
         "runtime": "ready",
         "identity_provider": "ready",
         "principal_store": "ready",
+        "routing_configuration": "ready",
         "security_event_outbox": "ready",
         "query_reconciliation": "ready",
     }
@@ -956,6 +995,7 @@ async def test_production_runtime_probes_and_closes_owned_resources(
         "runtime": "ready",
         "identity_provider": "ready",
         "principal_store": "ready",
+        "routing_configuration": "ready",
         "security_event_outbox": "ready",
         "query_reconciliation": "ready",
     }
