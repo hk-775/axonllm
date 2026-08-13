@@ -133,16 +133,16 @@ endpoint, model set, or capacity group resets stale health.
 `MultiProviderFactory.route_snapshot()` returns route health, load, and adaptive
 weights without credentials, custom headers, or private parameters.
 
-## Ostiari Operation
+## Fleet Scope
 
-When AxonLLM is embedded in Ostiari, Ostiari is the durable desired-state owner:
+Adaptive route measurements and capacity counters are currently process-local.
+Each standalone worker or AgentCore replica learns from its own network path and
+traffic. Fleet configuration, request rate limits, and budgets can converge
+through shared persistence, but provider health, route health, in-flight
+capacity, and adaptive weights are not coordinated between replicas.
 
-- route records and private material are tenant-scoped;
-- private material is encrypted at rest;
-- operators create, update, disable, and push routes from the Providers page;
-- gateways hot-reload the complete catalog without a restart;
-- only the authenticated gateway configuration channel carries resolved secrets;
-- runtime snapshots returned to operators are secret-free.
-
-AxonLLM owns the process-local measurements because latency, connection
-saturation, and endpoint reachability differ between gateway instances.
+Consequently, `max_concurrency` and `capacity_limit` bound one process, not an
+entire provider account across the fleet. The deferred Phase 4 milestone in the
+PRD covers shared provider-capacity leases, aggregated routing signals, and
+fleet-wide adaptive decisions. Until that work is complete, describe this
+feature as process-local adaptive route selection with provider fallback.

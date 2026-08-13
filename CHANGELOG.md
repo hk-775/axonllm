@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added the stable `axonllm.AsyncRouter` embedded API over the existing
+  multi-provider routing engine, including fallback, streaming, model
+  discovery, route inspection, and explicit async cleanup.
+- Accepted the v0.3 product boundary: a mandatory control plane and one router
+  core delivered as an embedded package, standalone gateway, and thin
+  AgentCore Runtime adapter.
+
+### Fixed
+
+- Made shipped-configuration tests independent of the gitignored local
+  `config/providers.yaml` that operators create for provider credentials.
+
 ## [0.2.9] - 2026-08-12
 
 ### Changed

@@ -59,7 +59,7 @@ jobs:
       - name: Lint
         run: >-
           uv run --frozen --no-sync ruff check --no-cache
-          src tests agentcore_agent.py serve_dashboard.py
+          axonllm src tests agentcore_agent.py serve_dashboard.py
 
       - name: Run tests
         run: uv run --frozen --no-sync pytest tests -q --tb=short

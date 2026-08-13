@@ -1547,6 +1547,17 @@ call. With no URL and no registered sink, the forwarder is inert.
 
 ### Phase 4: Intelligence
 
+- [ ] Fleet-wide adaptive load balancing — **deferred; not a public-beta
+      blocker**. Today `ProviderRoutePool` adapts among one logical provider's
+      concrete routes using process-local latency, error, recovery, and in-flight
+      signals. Provider selection, provider health, route capacity, and adaptive
+      learning are not coordinated across replicas. The fleet milestone includes
+      unified cross-provider/route scoring, provider rate-limit feedback,
+      controlled exploration, control-plane aggregation with versioned guidance,
+      shared provider-quota and concurrency leases, equivalent AgentCore and
+      standalone behavior, decision telemetry, and load/failure certification.
+      Until then, the supported claim is **process-local adaptive route selection
+      with provider fallback**, not fleet-wide adaptive load balancing.
 - [ ] Adaptive routing (ML-driven provider selection based on historical
       performance) — *the write half only*. `feedback_tracker.py` records an
       outcome for every smart-routing decision and `bootstrap.py` reloads that

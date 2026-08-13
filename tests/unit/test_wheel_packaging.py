@@ -25,6 +25,11 @@ def _build_wheel(tmp_path: Path) -> Path:
         project / "src",
         ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
     )
+    shutil.copytree(
+        _REPO / "axonllm",
+        project / "axonllm",
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+    )
 
     output = tmp_path / "dist"
     environment = os.environ.copy()
@@ -111,6 +116,9 @@ def test_clean_wheel_launchers_and_assets_work_outside_repository(tmp_path):
     ) in entry_points
 
     required = {
+        "axonllm/__init__.py",
+        "axonllm/py.typed",
+        "axonllm/router.py",
         "src/gateway/admin/static/index.html",
         "src/gateway/chat/static/index.html",
         "src/gateway/deployment/infra/app.py",
@@ -196,14 +204,23 @@ def test_clean_wheel_launchers_and_assets_work_outside_repository(tmp_path):
 
         from starlette.testclient import TestClient
 
+        import axonllm
+        from axonllm import AsyncRouter
         from src.gateway import cli
         from src.gateway import local_demo
         from src.gateway import local_server
         from src.gateway.deployment import agentcore_deploy
 
         installed = Path(os.environ["WHEEL_PURELIB"]).resolve()
-        for module in (cli, local_demo, local_server, agentcore_deploy):
+        for module in (
+            axonllm,
+            cli,
+            local_demo,
+            local_server,
+            agentcore_deploy,
+        ):
             assert Path(module.__file__).resolve().is_relative_to(installed)
+        assert AsyncRouter.__module__ == "axonllm.router"
 
         invocation_dir = Path.cwd()
         custom_config = invocation_dir / "custom" / "models.yaml"

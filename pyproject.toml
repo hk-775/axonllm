@@ -1,7 +1,7 @@
 [project]
 name = "axon-llm"
 version = "0.2.9"
-description = "AxonLLM — The neural control plane for enterprise LLMs"
+description = "Open-source multi-provider LLM gateway and control plane"
 requires-python = ">=3.11"
 license = "MIT-0"
 keywords = ["llm", "gateway", "ai", "routing", "enterprise", "bedrock", "openai", "anthropic"]
@@ -86,15 +86,16 @@ pythonpath = ["."]
 requires = ["setuptools==83.0.0"]
 build-backend = "setuptools.build_meta"
 
-# The codebase imports everything as `src.gateway.*` (65 modules), so the
-# installed package root is `src`. Package it explicitly rather than via
-# find(where=["src"]) — the latter installs a top-level `gateway` that then
-# fails on its own internal `from src.gateway...` imports when run out-of-tree.
+# The implementation still imports `src.gateway.*` internally, while new
+# consumers import the stable `axonllm` facade. Package both roots explicitly.
+# Using find(where=["src"]) would install a top-level `gateway` that fails on
+# its internal `from src.gateway...` imports when run out-of-tree.
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["src*"]
+include = ["axonllm*", "src*"]
 
 [tool.setuptools.package-data]
+"axonllm" = ["py.typed"]
 "src.gateway" = [
     "py.typed",
     "admin/static/*",

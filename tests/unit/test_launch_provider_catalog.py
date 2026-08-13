@@ -121,7 +121,8 @@ def test_repository_config_is_an_exact_mirror_of_packaged_runtime() -> None:
     root_files = {
         path.name: path.read_bytes()
         for path in _ROOT_CONFIG.iterdir()
-        if path.is_file()
+        # Gitignored operator credentials are not a packaged runtime asset.
+        if path.is_file() and path.name != "providers.yaml"
     }
 
     assert root_files == packaged_files
