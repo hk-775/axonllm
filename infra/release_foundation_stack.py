@@ -14,6 +14,7 @@ from aws_cdk import (
     Duration,
     RemovalPolicy,
     Stack,
+    Tags,
     aws_cloudwatch as cloudwatch,
     aws_cloudwatch_actions as cloudwatch_actions,
     aws_dynamodb as dynamodb,
@@ -49,6 +50,14 @@ _PRODUCTION_CDK_QUALIFIER = "axprod"
 _QUALIFICATION_CDK_QUALIFIER = "axqual"
 _CDK_EXECUTION_POLICY_PART_COUNT = 3
 _EXTERNAL_CDK_QUALIFIER = "axext"
+_RELEASE_FOUNDATION_CDK_QUALIFIER = "axrel"
+_RELEASE_FOUNDATION_EXECUTION_POLICY_PART_COUNT = 5
+_RELEASE_FOUNDATION_EXECUTION_POLICY_PREFIX = (
+    "AxonLLMReleaseFoundationCloudFormationExecution"
+)
+_RELEASE_FOUNDATION_SERVICE_BOUNDARY_PREFIX = (
+    "AxonLLMReleaseFoundationRoleBoundary"
+)
 _OWNER_EXPIRY_INDEX_NAME = "owner-expiry"
 _REHEARSAL_EVIDENCE_PREFIX = "agentcore-production/rehearsal"
 _QUALIFICATION_TEARDOWN_EVIDENCE_PREFIX = "agentcore-production/qualification-teardown"
@@ -158,6 +167,26 @@ class AxonLLMReleaseFoundationStack(Stack):
         super().__init__(scope, construct_id, **kwargs)
         if self.region != "us-east-1":
             raise ValueError("AxonLLM release foundation must be deployed in us-east-1")
+        foundation_boundary = iam.ManagedPolicy.from_managed_policy_arn(
+            self,
+            "RequiredReleaseFoundationRoleBoundary",
+            self.format_arn(
+                service="iam",
+                region="",
+                resource="policy",
+                resource_name=(
+                    f"{_RELEASE_FOUNDATION_SERVICE_BOUNDARY_PREFIX}-"
+                    f"{_RELEASE_FOUNDATION_CDK_QUALIFIER}-{self.region}"
+                ),
+            ),
+        )
+        iam.PermissionsBoundary.of(self).apply(foundation_boundary)
+        for key, value in {
+            "Application": "AxonLLM",
+            "Environment": "production",
+            "AxonLLMTrustDomain": _RELEASE_FOUNDATION_CDK_QUALIFIER,
+        }.items():
+            Tags.of(self).add(key, value)
 
         fargate_state_table_name = CfnParameter(
             self,
@@ -192,6 +221,9 @@ class AxonLLMReleaseFoundationStack(Stack):
         github_subjects = {
             "signing": f"{github_subject_prefix}:ref:refs/tags/v*",
             "release": f"{github_subject_prefix}:environment:release",
+            "foundation": (
+                f"{github_subject_prefix}:environment:release-foundation"
+            ),
             "production": (f"{github_subject_prefix}:environment:production"),
             "deploy": (f"{github_subject_prefix}:environment:agentcore-production-deploy"),
             "evidence": (f"{github_subject_prefix}:environment:agentcore-production-evidence"),
@@ -322,6 +354,9 @@ class AxonLLMReleaseFoundationStack(Stack):
                 resources=[evidence_bucket.arn_for_objects("*")],
             )
         )
+        if evidence_bucket.policy is None:
+            raise ValueError("deployment evidence bucket policy is required")
+        evidence_bucket.policy.apply_removal_policy(RemovalPolicy.RETAIN)
 
         repositories = {
             target: self._release_repository(
@@ -337,6 +372,24 @@ class AxonLLMReleaseFoundationStack(Stack):
             url=f"https://{_GITHUB_OIDC_ISSUER}",
             client_ids=["sts.amazonaws.com"],
             removal_policy=RemovalPolicy.RETAIN,
+        )
+
+        foundation_deployer = iam.Role(
+            self,
+            "ReleaseFoundationDeployRole",
+            role_name="AxonLLMReleaseFoundationDeployRole",
+            description=(
+                "Updates only the AxonLLM release foundation through its "
+                "dedicated bounded CDK trust domain"
+            ),
+            assumed_by=self._github_principal(
+                github_provider,
+                subject=github_subjects["foundation"],
+            ),
+            max_session_duration=Duration.hours(1),
+        )
+        self._grant_release_foundation_deployment_access(
+            foundation_deployer,
         )
 
         signer = iam.Role(
@@ -584,6 +637,11 @@ class AxonLLMReleaseFoundationStack(Stack):
         )
         CfnOutput(
             self,
+            "ReleaseFoundationDeployRoleArn",
+            value=foundation_deployer.role_arn,
+        )
+        CfnOutput(
+            self,
             "ReleaseSignerRoleArn",
             value=signer.role_arn,
         )
@@ -736,6 +794,139 @@ class AxonLLMReleaseFoundationStack(Stack):
             self,
             "AgentCoreRepositoryUri",
             value=repositories["agentcore"].repository_uri,
+        )
+
+    def _grant_release_foundation_deployment_access(
+        self,
+        role: iam.Role,
+    ) -> None:
+        cdk_role_arns = [
+            self.format_arn(
+                service="iam",
+                region="",
+                resource="role",
+                resource_name=(
+                    f"cdk-{_RELEASE_FOUNDATION_CDK_QUALIFIER}-{purpose}-"
+                    f"role-{self.account}-{self.region}"
+                ),
+            )
+            for purpose in (
+                "deploy",
+                "file-publishing",
+                "image-publishing",
+                "lookup",
+            )
+        ]
+        assumable_cdk_role_arns = cdk_role_arns[:2]
+        cloudformation_role_arn = self.format_arn(
+            service="iam",
+            region="",
+            resource="role",
+            resource_name=(
+                f"cdk-{_RELEASE_FOUNDATION_CDK_QUALIFIER}-cfn-exec-role-"
+                f"{self.account}-{self.region}"
+            ),
+        )
+        role.add_to_policy(
+            iam.PolicyStatement(
+                sid="UseBoundedReleaseFoundationCdkRoles",
+                actions=["sts:AssumeRole"],
+                resources=assumable_cdk_role_arns,
+            )
+        )
+        role.add_to_policy(
+            iam.PolicyStatement(
+                sid="InspectBoundedReleaseFoundationCdkRoles",
+                actions=[
+                    "iam:GetRole",
+                    "iam:ListAttachedRolePolicies",
+                    "iam:ListRolePolicies",
+                    "iam:ListRoleTags",
+                ],
+                resources=[*cdk_role_arns, cloudformation_role_arn],
+            )
+        )
+        policy_names = [
+            *(
+                f"{_RELEASE_FOUNDATION_EXECUTION_POLICY_PREFIX}-"
+                f"{_RELEASE_FOUNDATION_CDK_QUALIFIER}-{self.region}-"
+                f"part{part}"
+                for part in range(
+                    1,
+                    _RELEASE_FOUNDATION_EXECUTION_POLICY_PART_COUNT + 1,
+                )
+            ),
+            (
+                "AxonLLMReleaseFoundationBootstrapBoundary-"
+                f"{_RELEASE_FOUNDATION_CDK_QUALIFIER}-{self.region}"
+            ),
+            (
+                f"{_RELEASE_FOUNDATION_SERVICE_BOUNDARY_PREFIX}-"
+                f"{_RELEASE_FOUNDATION_CDK_QUALIFIER}-{self.region}"
+            ),
+        ]
+        role.add_to_policy(
+            iam.PolicyStatement(
+                sid="InspectReleaseFoundationPolicyContracts",
+                actions=[
+                    "iam:GetPolicy",
+                    "iam:GetPolicyVersion",
+                    "iam:ListPolicyTags",
+                    "iam:ListPolicyVersions",
+                ],
+                resources=[
+                    self.format_arn(
+                        service="iam",
+                        region="",
+                        resource="policy",
+                        resource_name=name,
+                    )
+                    for name in policy_names
+                ],
+            )
+        )
+        role.add_to_policy(
+            iam.PolicyStatement(
+                sid="InspectReleaseFoundationStacks",
+                actions=[
+                    "cloudformation:DescribeStacks",
+                    "cloudformation:GetTemplate",
+                ],
+                resources=[
+                    self.format_arn(
+                        service="cloudformation",
+                        resource="stack",
+                        resource_name=f"{name}/*",
+                    )
+                    for name in (
+                        "AxonLLMReleaseFoundationStack",
+                        f"AxonLLMToolkit-{_RELEASE_FOUNDATION_CDK_QUALIFIER}",
+                    )
+                ],
+            )
+        )
+        role.add_to_policy(
+            iam.PolicyStatement(
+                sid="ReadReleaseFoundationBootstrapVersion",
+                actions=["ssm:GetParameter"],
+                resources=[
+                    self.format_arn(
+                        service="ssm",
+                        resource="parameter",
+                        resource_name=(
+                            "cdk-bootstrap/"
+                            f"{_RELEASE_FOUNDATION_CDK_QUALIFIER}/version"
+                        ),
+                    )
+                ],
+            )
+        )
+        role.add_to_policy(
+            iam.PolicyStatement(
+                sid="ConfirmReleaseFoundationAccount",
+                actions=["sts:GetCallerIdentity"],
+                resources=["*"],
+            )
         )
 
     def _release_repository(

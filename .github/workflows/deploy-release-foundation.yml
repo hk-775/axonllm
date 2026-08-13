@@ -1,0 +1,387 @@
+name: Deploy bounded release foundation
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Prepare or execute the commit-bound change set
+        required: true
+        type: choice
+        options:
+          - prepare
+          - execute
+      change_id:
+        description: Approved change identifier
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: axonllm-release-foundation
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-east-1
+  UV_VERSION: "0.10.7"
+
+jobs:
+  deploy:
+    name: Verify and deploy release foundation
+    runs-on:
+      group: axonllm-production
+      labels: axonllm-production-allowlisted
+    timeout-minutes: 60
+    environment: release-foundation
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Check out protected foundation source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          clean: true
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.sha }}
+
+      - name: Require protected main and approved change
+        env:
+          CHANGE_ID: ${{ inputs.change_id }}
+        run: |
+          set -euo pipefail
+          [[ "${GITHUB_REF}" == "refs/heads/main" ]]
+          [[ "${GITHUB_WORKFLOW_REF}" == "${GITHUB_REPOSITORY}/.github/workflows/deploy-release-foundation.yml@refs/heads/main" ]]
+          [[ "$(git rev-parse HEAD)" == "${GITHUB_SHA}" ]]
+          [[ -z "$(git status --porcelain)" ]]
+          [[ "${CHANGE_ID}" =~ ^[A-Za-z0-9][A-Za-z0-9._:/-]{2,127}$ ]]
+
+      - name: Require successful CI for exact source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          response="${RUNNER_TEMP}/foundation-ci-runs.json"
+          gh api \
+            --method GET \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs" \
+            -f "head_sha=${GITHUB_SHA}" \
+            -f status=completed \
+            -f per_page=100 \
+            >"${response}"
+          jq -e --arg commit "${GITHUB_SHA}" '
+            [.workflow_runs[] | select(
+              .head_sha == $commit
+              and .event == "push"
+              and .status == "completed"
+              and .conclusion == "success"
+            )] | length > 0
+          ' "${response}" >/dev/null
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+
+      - name: Set up supported Node for CDK
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: "22"
+
+      - name: Install locked foundation tooling
+        run: |
+          set -euo pipefail
+          python -m pip install --no-deps "uv==${UV_VERSION}"
+          npm ci \
+            --prefix src/gateway/deployment/infra \
+            --ignore-scripts \
+            --no-audit \
+            --no-fund
+          infra_python="${RUNNER_TEMP}/foundation-infra-venv/bin/python"
+          uv venv --python 3.12 "${RUNNER_TEMP}/foundation-infra-venv"
+          uv pip sync \
+            --python "${infra_python}" \
+            --require-hashes \
+            infra/requirements.txt
+          test -x "${infra_python}"
+          test -x src/gateway/deployment/infra/node_modules/.bin/cdk
+
+      - name: Synthesize and validate bounded foundation template
+        env:
+          CDK_CONTEXT_JSON: >-
+            {"account":"${{ vars.AXON_AWS_ACCOUNT_ID }}","deployment_target":"release-foundation","region":"us-east-1"}
+          CDK_OUTDIR: ${{ runner.temp }}/foundation-cdk.out
+          JSII_RUNTIME_PACKAGE_CACHE_ROOT: ${{ runner.temp }}/foundation-jsii
+          PYTHONPYCACHEPREFIX: ${{ runner.temp }}/foundation-pycache
+        run: |
+          set -euo pipefail
+          infra_python="${RUNNER_TEMP}/foundation-infra-venv/bin/python"
+          (
+            cd infra
+            "${infra_python}" app.py
+          )
+          template="${CDK_OUTDIR}/AxonLLMReleaseFoundationStack.template.json"
+          test -f "${template}"
+          jq -e '
+            .Parameters.BootstrapVersion.Default
+              == "/cdk-bootstrap/axrel/version"
+            and ([.. | strings | select(contains("hnb659fds"))] | length == 0)
+            and ([.Resources[] | select(.Type == "AWS::IAM::Role")] | length == 18)
+            and all(
+              .Resources[];
+              .Type != "AWS::IAM::Role"
+              or (
+                (.Properties.PermissionsBoundary | tostring)
+                  | contains("AxonLLMReleaseFoundationRoleBoundary-axrel-us-east-1")
+              )
+            )
+          ' "${template}" >/dev/null
+          "${infra_python}" -m cfnlint -i W3005 -t "${template}"
+
+      - name: Configure bounded foundation credentials through OIDC
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with:
+          allowed-account-ids: ${{ vars.AXON_AWS_ACCOUNT_ID }}
+          aws-region: us-east-1
+          mask-aws-account-id: true
+          role-duration-seconds: 3600
+          role-session-name: AxonLLMReleaseFoundation-${{ github.run_id }}-${{ github.run_attempt }}
+          role-to-assume: ${{ secrets.AXON_RELEASE_FOUNDATION_DEPLOY_ROLE_ARN }}
+          unset-current-credentials: true
+
+      - name: Verify exact caller and bounded bootstrap
+        env:
+          AWS_ACCOUNT_ID: ${{ vars.AXON_AWS_ACCOUNT_ID }}
+          DEPLOY_ROLE_ARN: ${{ secrets.AXON_RELEASE_FOUNDATION_DEPLOY_ROLE_ARN }}
+        run: |
+          set -euo pipefail
+          session_name="AxonLLMReleaseFoundation-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          role_name=${DEPLOY_ROLE_ARN##*/}
+          caller=$(aws sts get-caller-identity --output json --no-cli-pager)
+          jq -e \
+            --arg account "${AWS_ACCOUNT_ID}" \
+            --arg arn "arn:aws:sts::${AWS_ACCOUNT_ID}:assumed-role/${role_name}/${session_name}" '
+            .Account == $account and .Arn == $arn
+          ' <<<"${caller}" >/dev/null
+          python -m src.gateway.deployment.release_foundation_bootstrap \
+            verify \
+            --region us-east-1
+
+      - name: Preserve reviewed live foundation parameters
+        run: |
+          set -euo pipefail
+          parameters="${RUNNER_TEMP}/foundation-parameters.json"
+          aws cloudformation describe-stacks \
+            --stack-name AxonLLMReleaseFoundationStack \
+            --query 'Stacks[0].Parameters' \
+            --output json \
+            --no-cli-pager \
+            >"${parameters}"
+          jq -e '
+            map({key: .ParameterKey, value: .ParameterValue}) as $values
+            | ($values | map(select(.key != "BootstrapVersion")) | length) == 10
+            and (
+              $values
+              | map(select(.key == "BootstrapVersion"))
+              | length
+            ) == 1
+            and (
+              [
+                "AgentCoreStateTableName",
+                "ExternalOidcProviderSourceKmsKeyArn",
+                "ExternalOidcProviderSourceSecretArn",
+                "FargateStateTableName",
+                "GitHubOidcSubjectPrefix",
+                "LaunchAlarmEmail",
+                "ProductionProviderSourceKmsKeyArn",
+                "ProductionProviderSourceSecretArn",
+                "QualificationProviderSourceKmsKeyArn",
+                "QualificationProviderSourceSecretArn"
+              ]
+              - ($values | map(.key))
+              | length
+            ) == 0
+            and all($values[]; (.value | type == "string" and length > 0))
+          ' "${parameters}" >/dev/null
+          chmod 0600 "${parameters}"
+
+      - name: Prepare commit-bound foundation change set
+        if: inputs.operation == 'prepare'
+        env:
+          CDK_CLI: ${{ github.workspace }}/src/gateway/deployment/infra/node_modules/.bin/cdk
+          INFRA_PYTHON: ${{ runner.temp }}/foundation-infra-venv/bin/python
+        run: |
+          set -euo pipefail
+          parameters="${RUNNER_TEMP}/foundation-parameters.json"
+          parameter() {
+            jq -er --arg name "$1" '
+              .[] | select(.ParameterKey == $name) | .ParameterValue
+            ' "${parameters}"
+          }
+          fargate_table=$(parameter FargateStateTableName)
+          agentcore_table=$(parameter AgentCoreStateTableName)
+          production_secret=$(parameter ProductionProviderSourceSecretArn)
+          production_key=$(parameter ProductionProviderSourceKmsKeyArn)
+          qualification_secret=$(parameter QualificationProviderSourceSecretArn)
+          qualification_key=$(parameter QualificationProviderSourceKmsKeyArn)
+          external_secret=$(parameter ExternalOidcProviderSourceSecretArn)
+          external_key=$(parameter ExternalOidcProviderSourceKmsKeyArn)
+          github_subject=$(parameter GitHubOidcSubjectPrefix)
+          alarm_email=$(parameter LaunchAlarmEmail)
+          (
+            cd infra
+            "${CDK_CLI}" deploy AxonLLMReleaseFoundationStack \
+              --app "${INFRA_PYTHON} app.py" \
+              -c deployment_target=release-foundation \
+              -c region=us-east-1 \
+              -c cdk_qualifier=axrel \
+              --lookups false \
+              --method prepare-change-set \
+              --change-set-name "AxonLLMReleaseFoundation-${GITHUB_SHA}" \
+              --parameters "AxonLLMReleaseFoundationStack:FargateStateTableName=${fargate_table}" \
+              --parameters "AxonLLMReleaseFoundationStack:AgentCoreStateTableName=${agentcore_table}" \
+              --parameters "AxonLLMReleaseFoundationStack:ProductionProviderSourceSecretArn=${production_secret}" \
+              --parameters "AxonLLMReleaseFoundationStack:ProductionProviderSourceKmsKeyArn=${production_key}" \
+              --parameters "AxonLLMReleaseFoundationStack:QualificationProviderSourceSecretArn=${qualification_secret}" \
+              --parameters "AxonLLMReleaseFoundationStack:QualificationProviderSourceKmsKeyArn=${qualification_key}" \
+              --parameters "AxonLLMReleaseFoundationStack:ExternalOidcProviderSourceSecretArn=${external_secret}" \
+              --parameters "AxonLLMReleaseFoundationStack:ExternalOidcProviderSourceKmsKeyArn=${external_key}" \
+              --parameters "AxonLLMReleaseFoundationStack:GitHubOidcSubjectPrefix=${github_subject}" \
+              --parameters "AxonLLMReleaseFoundationStack:LaunchAlarmEmail=${alarm_email}" \
+              --parameters "AxonLLMReleaseFoundationStack:BootstrapVersion=/cdk-bootstrap/axrel/version" \
+              --require-approval never
+          )
+
+      - name: Publish reviewable foundation change set
+        if: inputs.operation == 'prepare'
+        run: |
+          set -euo pipefail
+          change_set="AxonLLMReleaseFoundation-${GITHUB_SHA}"
+          review="${RUNNER_TEMP}/foundation-change-set.json"
+          aws cloudformation describe-change-set \
+            --stack-name AxonLLMReleaseFoundationStack \
+            --change-set-name "${change_set}" \
+            --include-property-values \
+            --output json \
+            --no-cli-pager \
+            >"${review}"
+          jq -e \
+            --arg name "${change_set}" \
+            --arg role "arn:aws:iam::${{ vars.AXON_AWS_ACCOUNT_ID }}:role/cdk-axrel-cfn-exec-role-${{ vars.AXON_AWS_ACCOUNT_ID }}-us-east-1" '
+            .ChangeSetName == $name
+            and .StackName == "AxonLLMReleaseFoundationStack"
+            and .Status == "CREATE_COMPLETE"
+            and .ExecutionStatus == "AVAILABLE"
+            and .RoleARN == $role
+          ' "${review}" >/dev/null
+          jq '{
+            ChangeSetName,
+            StackName,
+            Status,
+            ExecutionStatus,
+            RoleARN,
+            Parameters,
+            Changes
+          }' "${review}"
+
+      - name: Validate reviewed foundation change set
+        if: inputs.operation == 'execute'
+        run: |
+          set -euo pipefail
+          change_set="AxonLLMReleaseFoundation-${GITHUB_SHA}"
+          review="${RUNNER_TEMP}/foundation-change-set.json"
+          aws cloudformation describe-change-set \
+            --stack-name AxonLLMReleaseFoundationStack \
+            --change-set-name "${change_set}" \
+            --include-property-values \
+            --output json \
+            --no-cli-pager \
+            >"${review}"
+          jq -e \
+            --slurpfile live "${RUNNER_TEMP}/foundation-parameters.json" \
+            --arg name "${change_set}" \
+            --arg role "arn:aws:iam::${{ vars.AXON_AWS_ACCOUNT_ID }}:role/cdk-axrel-cfn-exec-role-${{ vars.AXON_AWS_ACCOUNT_ID }}-us-east-1" '
+            .ChangeSetName == $name
+            and .StackName == "AxonLLMReleaseFoundationStack"
+            and .Status == "CREATE_COMPLETE"
+            and .ExecutionStatus == "AVAILABLE"
+            and .RoleARN == $role
+            and (
+              [
+                .Parameters[]
+                | select(.ParameterKey == "BootstrapVersion")
+                | .ParameterValue
+              ]
+              == ["/cdk-bootstrap/axrel/version"]
+            )
+            and (
+              (
+                $live[0]
+                | map(
+                    if .ParameterKey == "BootstrapVersion"
+                    then .ParameterValue = "/cdk-bootstrap/axrel/version"
+                    else .
+                    end
+                  )
+                | sort_by(.ParameterKey)
+              )
+              == (
+                .Parameters
+                | map({ParameterKey, ParameterValue})
+                | sort_by(.ParameterKey)
+              )
+            )
+          ' "${review}" >/dev/null
+
+      - name: Execute reviewed foundation change set
+        if: inputs.operation == 'execute'
+        env:
+          CDK_CLI: ${{ github.workspace }}/src/gateway/deployment/infra/node_modules/.bin/cdk
+          INFRA_PYTHON: ${{ runner.temp }}/foundation-infra-venv/bin/python
+        run: |
+          set -euo pipefail
+          (
+            cd infra
+            "${CDK_CLI}" deploy AxonLLMReleaseFoundationStack \
+              --app "${INFRA_PYTHON} app.py" \
+              -c deployment_target=release-foundation \
+              -c region=us-east-1 \
+              -c cdk_qualifier=axrel \
+              --lookups false \
+              --method execute-change-set \
+              --change-set-name "AxonLLMReleaseFoundation-${GITHUB_SHA}" \
+              --require-approval never \
+              --outputs-file "${RUNNER_TEMP}/foundation-outputs.json"
+          )
+
+      - name: Verify migrated stack authority
+        if: inputs.operation == 'execute'
+        env:
+          AWS_ACCOUNT_ID: ${{ vars.AXON_AWS_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          stack=$(aws cloudformation describe-stacks \
+            --stack-name AxonLLMReleaseFoundationStack \
+            --output json \
+            --no-cli-pager)
+          jq -e \
+            --arg role "arn:aws:iam::${AWS_ACCOUNT_ID}:role/cdk-axrel-cfn-exec-role-${AWS_ACCOUNT_ID}-us-east-1" '
+            .Stacks | length == 1
+            and .[0].StackStatus == "UPDATE_COMPLETE"
+            and .[0].EnableTerminationProtection == true
+            and .[0].RoleARN == $role
+            and (
+              [
+                .[0].Parameters[]
+                | select(.ParameterKey == "BootstrapVersion")
+                | .ParameterValue
+              ]
+              == ["/cdk-bootstrap/axrel/version"]
+            )
+          ' <<<"${stack}" >/dev/null
+          python -m src.gateway.deployment.release_foundation_bootstrap \
+            verify \
+            --region us-east-1
