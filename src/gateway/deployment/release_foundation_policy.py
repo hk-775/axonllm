@@ -985,6 +985,10 @@ def execution_policy_document(
         f"arn:{partition}:s3:::"
         f"cdk-{FOUNDATION_QUALIFIER}-assets-{account_id}-{region}"
     )
+    bootstrap_parameter = (
+        f"arn:{partition}:ssm:{region}:{account_id}:"
+        f"parameter/cdk-bootstrap/{FOUNDATION_QUALIFIER}/version"
+    )
     return {
         "Version": "2012-10-17",
         "Statement": [
@@ -1009,6 +1013,15 @@ def execution_policy_document(
                     "s3:ListBucket",
                 ],
                 "Resource": [asset_bucket, f"{asset_bucket}/*"],
+            },
+            {
+                "Sid": "ReadDedicatedCdkBootstrapVersion",
+                "Effect": "Allow",
+                "Action": [
+                    "ssm:GetParameter",
+                    "ssm:GetParameters",
+                ],
+                "Resource": bootstrap_parameter,
             },
             {
                 "Sid": "CreateBoundedFoundationRoles",
