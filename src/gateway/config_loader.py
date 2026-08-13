@@ -77,6 +77,59 @@ def load_app_config() -> AppConfig:
         alb_signer_arn=os.environ.get("AXON_ALB_SIGNER_ARN", ""),
         alb_client_id=os.environ.get("AXON_ALB_CLIENT_ID", ""),
         alb_issuer=os.environ.get("AXON_ALB_ISSUER", ""),
+        control_plane_endpoint_mode=os.environ.get(
+            "AXON_CONTROL_PLANE_ENDPOINT_MODE",
+            "custom-domain",
+        ).strip().lower(),
+        control_plane_public_url=(
+            os.environ.get("AXON_CONTROL_PLANE_URL")
+            or os.environ.get("AXON_CONTROL_PLANE_PUBLIC_URL")
+            or os.environ.get("AXON_BROWSER_AUTH_PUBLIC_URL")
+            or ""
+        ),
+        cognito_hosted_ui_url=(
+            os.environ.get("AXON_COGNITO_HOSTED_UI_URL")
+            or os.environ.get("AXON_COGNITO_HOSTED_UI_BASE_URL", "")
+        ),
+        browser_auth_mode=os.environ.get(
+            "AXON_BROWSER_AUTH_MODE",
+            "",
+        ).strip().lower(),
+        browser_auth_client_id=os.environ.get(
+            "AXON_BROWSER_AUTH_CLIENT_ID",
+            os.environ.get("AXON_OIDC_AUDIENCE", ""),
+        ),
+        browser_auth_authorization_endpoint=os.environ.get(
+            "AXON_BROWSER_AUTH_AUTHORIZATION_ENDPOINT",
+            "",
+        ),
+        browser_auth_token_endpoint=os.environ.get(
+            "AXON_BROWSER_AUTH_OAUTH_EXCHANGE_URL",
+            "",
+        ),
+        browser_auth_logout_endpoint=os.environ.get(
+            "AXON_BROWSER_AUTH_LOGOUT_ENDPOINT",
+            "",
+        ),
+        browser_auth_redirect_uri=os.environ.get(
+            "AXON_BROWSER_AUTH_REDIRECT_URI",
+            "",
+        ),
+        browser_auth_signed_out_uri=os.environ.get(
+            "AXON_BROWSER_AUTH_SIGNED_OUT_URI",
+            "",
+        ),
+        browser_session_max_seconds=_load_int(
+            "AXON_BROWSER_AUTH_SESSION_TTL_SECONDS",
+            _load_int(
+                "AXON_BROWSER_SESSION_MAX_SECONDS",
+                8 * 60 * 60,
+            ),
+        ),
+        browser_auth_flow_ttl_seconds=_load_int(
+            "AXON_BROWSER_AUTH_FLOW_TTL_SECONDS",
+            600,
+        ),
         auth_mode=_load_auth_mode(),
         canonical_identity_required=os.environ.get(
             "AXON_REQUIRE_CANONICAL_IDENTITY", "false"

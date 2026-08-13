@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hmac
 import ipaddress
 import json
 import logging
@@ -173,50 +174,7 @@ class OIDCService:
     async def validate_oidc_jwt(self, token: str) -> RequestContext | None:
         """Validate standard OIDC Bearer JWT using JWKS discovery."""
         try:
-            issuer = self._validated_oidc_issuer()
-            audience = self._validated_oidc_audience()
-            if issuer is None or audience is None or not self._valid_direct_oidc_token(token):
-                return None
-
-            header = self._decode_jwt_header(token)
-            if header is None:
-                return None
-
-            kid = header.get("kid")
-            alg = header.get("alg")
-            if not self._valid_direct_oidc_kid(kid):
-                return None
-            if alg not in DIRECT_OIDC_ALGORITHMS:
-                return None
-
-            jwks = await self._get_jwks()
-            if jwks is None:
-                return None
-
-            observed_generation = self._jwks_generation
-            key = self._find_key(jwks, kid)
-            if key is None:
-                jwks = await self._refresh_jwks_for_unknown_kid(
-                    kid,
-                    issuer=issuer,
-                    observed_generation=observed_generation,
-                )
-                if jwks is None:
-                    return None
-                key = self._find_key(jwks, kid)
-                if key is None:
-                    return None
-            if not self._jwk_supports_algorithm(key, alg):
-                return None
-
-            claims = self._verify_and_decode(
-                token,
-                key,
-                algorithms=[alg],
-                audience=audience,
-                issuer=issuer,
-                required_claims=("iss", "aud", "exp", "sub"),
-            )
+            claims = await self._validate_direct_oidc_claims(token)
             if claims is None:
                 return None
 
@@ -229,6 +187,104 @@ class OIDCService:
         except Exception:
             logger.debug("OIDC JWT validation failed")
             return None
+
+    async def validate_id_token(
+        self,
+        token: str,
+        *,
+        expected_nonce: str | None = None,
+    ) -> RequestContext | None:
+        """Validate an authorization-code ID token and its one-time nonce."""
+        try:
+            if expected_nonce is not None and (
+                not isinstance(expected_nonce, str)
+                or not expected_nonce
+                or len(expected_nonce.encode("utf-8")) > 512
+            ):
+                return None
+            claims = await self._validate_direct_oidc_claims(token)
+            if claims is None:
+                return None
+
+            # This path is for the Cognito browser client. Cognito marks ID and
+            # access tokens explicitly, so absence is not accepted either.
+            if claims.get("token_use") != "id":
+                return None
+            if expected_nonce is not None:
+                nonce = claims.get("nonce")
+                if (
+                    not isinstance(nonce, str)
+                    or not hmac.compare_digest(nonce, expected_nonce)
+                ):
+                    return None
+            return self._map_claims_to_context(claims)
+        except Exception:
+            logger.debug("OIDC ID token validation failed")
+            return None
+
+    async def _validate_direct_oidc_claims(
+        self,
+        token: str,
+    ) -> dict | None:
+        """Return verified direct-OIDC claims shared by bearer and ID tokens."""
+        issuer = self._validated_oidc_issuer()
+        audience = self._validated_oidc_audience()
+        if (
+            issuer is None
+            or audience is None
+            or not self._valid_direct_oidc_token(token)
+        ):
+            return None
+
+        header = self._decode_jwt_header(token)
+        if header is None:
+            return None
+
+        kid = header.get("kid")
+        alg = header.get("alg")
+        if not self._valid_direct_oidc_kid(kid):
+            return None
+        if alg not in DIRECT_OIDC_ALGORITHMS:
+            return None
+
+        jwks = await self._get_jwks()
+        if jwks is None:
+            return None
+
+        observed_generation = self._jwks_generation
+        key = self._find_key(jwks, kid)
+        if key is None:
+            jwks = await self._refresh_jwks_for_unknown_kid(
+                kid,
+                issuer=issuer,
+                observed_generation=observed_generation,
+            )
+            if jwks is None:
+                return None
+            key = self._find_key(jwks, kid)
+            if key is None:
+                return None
+        if not self._jwk_supports_algorithm(key, alg):
+            return None
+
+        claims = self._verify_and_decode(
+            token,
+            key,
+            algorithms=[alg],
+            audience=audience,
+            issuer=issuer,
+            required_claims=("iss", "aud", "exp", "sub"),
+        )
+        if claims is None:
+            return None
+        subject = claims.get("sub")
+        if (
+            not isinstance(subject, str)
+            or not subject.strip()
+            or len(subject.encode("utf-8")) > 2048
+        ):
+            return None
+        return claims
 
     def _decode_jwt_header(self, token: str) -> dict | None:
         """Decode JWT header without verification (to get kid/alg)."""

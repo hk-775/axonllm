@@ -118,6 +118,12 @@ PROJECT_PATH_PATTERN = re.compile(r"/admin/projects/[^/]{1,256}")
 CSRF_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9_-]{43}")
 CSRF_COOKIE_NAME = "__Host-axon-csrf"
 CSRF_HEADER_NAME = "X-Axon-CSRF-Token"
+COOKIE_CREDENTIAL_TYPES = frozenset(
+    {
+        "alb-session-cookie",
+        "browser-session-cookie",
+    }
+)
 TARGET_GROUP_ARN_PATTERN = re.compile(
     r"arn:aws(?:-[a-z]+)*:elasticloadbalancing:[a-z0-9-]+:"
     r"[0-9]{12}:targetgroup/[A-Za-z0-9-]{1,32}/[0-9a-f]{16}"
@@ -403,14 +409,14 @@ def _parse_request(
         )
     credential_type = request.get("credentialType", "bearer")
     if credential_type not in {
-        "alb-session-cookie",
+        *COOKIE_CREDENTIAL_TYPES,
         "bearer",
         "x-api-key",
     }:
         raise ConfigurationError(
             "invalid_configuration",
-            f"{location}.credentialType must be alb-session-cookie, bearer, "
-            "or x-api-key",
+            f"{location}.credentialType must be alb-session-cookie, "
+            "browser-session-cookie, bearer, or x-api-key",
         )
 
     csrf_token_env = request.get("csrfTokenEnv")
@@ -423,7 +429,8 @@ def _parse_request(
             f"{location}.csrfTokenEnv must be an uppercase environment name",
         )
     cookie_backed_write = (
-        credential_type == "alb-session-cookie" and method in WRITE_METHODS
+        credential_type in COOKIE_CREDENTIAL_TYPES
+        and method in WRITE_METHODS
     )
     if cookie_backed_write and csrf_token_env is None:
         raise ConfigurationError(
@@ -758,12 +765,12 @@ def parse_config(value: Any) -> ValidationConfig:
             "canary category",
         )
     if target == "fargate" and any(
-        canary.request.credential_type != "alb-session-cookie"
+        canary.request.credential_type not in COOKIE_CREDENTIAL_TYPES
         for canary in canaries
     ):
         raise ConfigurationError(
             "invalid_canary_contract",
-            "Fargate canaries must use short-lived ALB session cookies",
+            "Fargate canaries must use short-lived browser session cookies",
         )
     round_trip_canaries = [
         canary
@@ -822,11 +829,26 @@ def parse_config(value: Any) -> ValidationConfig:
         )
     if (
         target == "fargate"
-        and load_request.credential_type != "alb-session-cookie"
+        and load_request.credential_type not in COOKIE_CREDENTIAL_TYPES
     ):
         raise ConfigurationError(
             "invalid_canary_contract",
-            "Fargate load must use a short-lived ALB session cookie",
+            "Fargate load must use a short-lived browser session cookie",
+        )
+    if (
+        target == "fargate"
+        and {
+            load_request.credential_type,
+            *(canary.request.credential_type for canary in canaries),
+        }
+        not in (
+            {"alb-session-cookie"},
+            {"browser-session-cookie"},
+        )
+    ):
+        raise ConfigurationError(
+            "invalid_canary_contract",
+            "Fargate canaries and load must use one credential type",
         )
     request_count = _integer(
         raw_load.get("requestCount"),
@@ -1303,7 +1325,7 @@ def _credential_headers(
         headers["Authorization"] = f"Bearer {credential}"
     elif request.credential_type == "x-api-key":
         headers["X-Api-Key"] = credential
-    else:
+    elif request.credential_type in COOKIE_CREDENTIAL_TYPES:
         cookie_parts = [
             part.strip()
             for part in credential.split(";")
@@ -1319,6 +1341,8 @@ def _credential_headers(
             cookie_parts.append(f"{CSRF_COOKIE_NAME}={csrf_token}")
             headers[CSRF_HEADER_NAME] = csrf_token
         headers["Cookie"] = "; ".join(cookie_parts)
+    else:  # pragma: no cover - configuration parsing owns the closed set
+        raise CredentialUnavailable("credential_type_unsupported")
     return headers
 
 
@@ -2388,6 +2412,7 @@ def _skipped_load(
         "status": "SKIPPED",
         "reason": reason,
         "scope": "distinct-configured-http-endpoints",
+        "credentialType": config.load.request.credential_type,
         "requestCountConfigured": config.load.request_count,
         "requestCountCompleted": 0,
         "concurrency": config.load.concurrency,
@@ -2543,6 +2568,7 @@ def run_load(
         "scope": "distinct-configured-http-endpoints",
         "method": config.load.request.method,
         "path": config.load.request.path,
+        "credentialType": config.load.request.credential_type,
         "expectedStatuses": list(
             config.load.request.expected_statuses
         ),

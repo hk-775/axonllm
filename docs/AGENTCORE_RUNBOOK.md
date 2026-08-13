@@ -10,6 +10,8 @@ stack, bounded Athena query path, shared-state Fargate control plane, and
 schema-v2 first-adopter deployment workflow are implemented.
 `DynamoPersistence` provides canonical per-tenant SCIM version and strongly
 consistent snapshot reads used during startup and runtime convergence.
+Managed-Cognito control planes support either the existing custom Route 53/ACM
+endpoint or an AWS-generated CloudFront endpoint with no adopter-owned domain.
 
 The release workflow records Fargate and AgentCore as distinct schema-v3
 targets, controlled publication copies both signed OCI archives to immutable
@@ -282,10 +284,40 @@ native call that holds the GIL.
 ### Shared-State Control Plane
 
 `AxonLLMControlPlaneStack` runs a separate verified AMD64 server image on
-private Fargate tasks behind an HTTPS ALB, Cognito authentication, and a stable
-Route 53 alias. It uses AgentCore's verified `StateTableName` output and imports
-the data key, outbox, SNS topic, and CloudWatch event log. It creates no second
-DynamoDB table.
+private Fargate tasks and uses AgentCore's verified `StateTableName` output. It
+imports the data key, outbox, SNS topic, and CloudWatch event log and creates no
+second DynamoDB table.
+
+The reviewed `control_plane.endpoint_mode` selects one of two contracts:
+
+| Mode | Public endpoint | Browser authentication | Required ingress inputs |
+|---|---|---|---|
+| `custom-domain` (default) | Internet-facing TLS ALB with a Route 53 alias | ALB Cognito authorization-code session | Domain, regional ACM certificate, public hosted-zone id, and ingress prefix list |
+| `cloudfront` | AWS-generated `*.cloudfront.net` distribution, IPv6 disabled, WAF allowlist, CloudFront VPC origin, internal HTTP ALB | Application Cognito authorization code with S256 PKCE and an opaque DynamoDB session | One or more reviewed public IPv4 viewer CIDRs |
+
+Both modes require the verified control-plane image and the control-plane HTTPS
+egress prefix list. CloudFront mode currently requires `us-east-1`; its viewer
+list accepts at most 64 canonical, nonoverlapping, globally routable IPv4
+networks no broader than `/24`. WAF blocks all other viewers and applies a
+per-viewer rate limit. CloudFront caching is disabled, viewer-supplied ALB OIDC
+headers are removed before origin forwarding, and the internal ALB accepts
+origin traffic only inside the dedicated VPC.
+
+The AWS-managed `cloudfront.net` certificate does not permit selecting a custom
+minimum viewer TLS policy. Use `custom-domain` when policy requires enforcing
+TLS 1.2 or newer at the CloudFront viewer boundary.
+
+CloudFront mode creates a secretless Cognito browser client whose callback is
+the generated `/auth/callback` URL. AxonLLM stores one-time OAuth state, nonce,
+and PKCE verifier records in the encrypted state table, binds state to the
+initiating browser with a short-lived Secure/HttpOnly host cookie, validates
+the returned ID token and nonce, and issues `__Host-axon-session` as a Secure,
+HttpOnly, SameSite=Lax opaque cookie. Only its SHA-256 key is stored. The
+server-held session has an eight-hour absolute limit, revision-fenced
+refresh-token rotation, DynamoDB TTL, and fail-closed storage behavior. Unsafe
+cookie-backed requests require the matching `__Host-axon-csrf` double-submit
+token; sign-out is a CSRF-protected `POST /auth/logout` and clears the browser
+cookies.
 
 The stack sets `AXON_CONTROL_PLANE_ONLY=true`. It retains tenant admin,
 datasource, managed-SAML handoff, SCIM, health, and readiness routes while
@@ -294,14 +326,16 @@ it receives the same role-binding metadata so datasource writes can be
 validated, its task role and endpoints grant no Athena or STS execution
 authority.
 
-A higher-priority ALB rule forwards only `/scim/*` without Cognito because SCIM
-authenticates its own bearer token. Every `/saml/*` route remains behind the
-default ALB Cognito action. The stack optionally injects the complete
-`AXON_SCIM_TENANTS` value, sets
+A higher-priority ALB rule forwards only `/scim/*` without Cognito in
+`custom-domain` mode because SCIM authenticates its own bearer token. In
+`cloudfront` mode all paths traverse CloudFront/WAF and AxonLLM leaves only the
+reviewed SCIM and browser-auth paths outside ordinary session authentication.
+The stack optionally injects the complete `AXON_SCIM_TENANTS` value, sets
 `AXON_SAML_FEDERATION_MODE=managed-cognito`, and passes a validated
 `AXON_SAML_LOGIN_PATH`. It never receives SAML metadata, certificates, or
-assertions. Cognito is the SAML SP, the ALB owns the browser session, and
-AxonLLM accepts only the resulting ALB-signed OIDC identity.
+assertions. Cognito is the SAML SP. The ALB owns the browser session in
+`custom-domain` mode; AxonLLM owns only an opaque session after validating the
+Cognito ID token in `cloudfront` mode.
 
 ## Release Evidence
 
@@ -692,16 +726,20 @@ deployment verification, choose one identity path. There is no unauthenticated
 AgentCore mode.
 
 The generated first-adopter file uses schema version 2. In managed-Cognito
-mode, its `control_plane` object is required; schema-v1 files must be regenerated
-or migrated before deployment.
+mode, its `control_plane` object is required and may select `custom-domain` or
+`cloudfront`; schema-v1 files must be regenerated or migrated before
+deployment. The default remains `custom-domain` so existing setup files retain
+their behavior.
 
 ### Managed Cognito
 
 The managed option creates `AxonLLMIdentityStack` separately from the runtime.
-Its user pool, public AgentCore client, confidential ALB client, and hosted
-domain are retained and deletion protected. Self-signup and direct password/SRP
-client flows are disabled; TOTP MFA is required. The AgentCore client has no
-secret and supports authorization code only.
+Its user pool, public AgentCore client, and hosted domain are retained and
+deletion protected. `custom-domain` also creates the confidential ALB client;
+`cloudfront` instead creates its secretless browser client in the control-plane
+stack after the generated distribution hostname is known. Self-signup and
+direct password/SRP client flows are disabled; TOTP MFA is required. Public
+clients have no secret and support authorization code only.
 
 Set the common release and network inputs, then generate a reviewable setup
 file:
@@ -711,12 +749,10 @@ export AWS_DEFAULT_REGION=us-east-1
 export AXON_VERIFIED_IMAGE_URI='123456789012.dkr.ecr.us-east-1.amazonaws.com/axonllm/agentcore@sha256:<verified-arm64-digest>'
 export AXON_BEDROCK_INVOKE_RESOURCE_ARNS='arn:aws:bedrock:us-east-1::foundation-model/<model-id>'
 export AXON_APPROVED_HTTPS_PREFIX_LIST_ID='pl-0123456789abcdef0'
-export AXON_CONTROL_PLANE_DOMAIN_NAME='admin.example.com'
 export AXON_CONTROL_PLANE_VERIFIED_IMAGE_URI='123456789012.dkr.ecr.us-east-1.amazonaws.com/axonllm/fargate@sha256:<verified-amd64-digest>'
-export AXON_CONTROL_PLANE_CERTIFICATE_ARN='arn:aws:acm:us-east-1:123456789012:certificate/<id>'
-export AXON_CONTROL_PLANE_PUBLIC_HOSTED_ZONE_ID='Z0123456789EXAMPLE'
-export AXON_CONTROL_PLANE_APPROVED_INGRESS_PREFIX_LIST_ID='pl-0123456789abcdef1'
 export AXON_CONTROL_PLANE_APPROVED_HTTPS_PREFIX_LIST_ID='pl-0123456789abcdef2'
+export AXON_CONTROL_PLANE_ENDPOINT_MODE='cloudfront'
+export AXON_CONTROL_PLANE_ALLOWED_VIEWER_CIDRS='<reviewed-public-ip>/32'
 export AXON_COGNITO_SES_FROM_EMAIL='no-reply@example.com'
 export AXON_COGNITO_SES_VERIFIED_DOMAIN='example.com'
 # Optional SCIM credential map and managed-SAML landing path:
@@ -738,12 +774,24 @@ uv run axon setup agentcore \
   --output axonllm-agentcore.json
 ```
 
-The hosted-UI prefix must be globally available. The control-plane domain must
-be a stable lowercase hostname in the supplied public Route 53 zone; its ACM
-certificate must be regional. The control-plane image is a verified AMD64
-digest, distinct from the AgentCore ARM64 digest. Ingress and HTTPS egress use
-the supplied managed prefix lists. Every callback is HTTPS. The adopting OAuth
-client must generate a verifier and send
+Repeat `--control-plane-allowed-viewer-cidr` instead of the comma-separated
+environment value when generating the setup interactively. For the existing
+custom-domain architecture, omit `AXON_CONTROL_PLANE_ENDPOINT_MODE` and
+`AXON_CONTROL_PLANE_ALLOWED_VIEWER_CIDRS`, then set:
+
+```bash
+export AXON_CONTROL_PLANE_DOMAIN_NAME='admin.example.com'
+export AXON_CONTROL_PLANE_CERTIFICATE_ARN='arn:aws:acm:us-east-1:123456789012:certificate/<id>'
+export AXON_CONTROL_PLANE_PUBLIC_HOSTED_ZONE_ID='Z0123456789EXAMPLE'
+export AXON_CONTROL_PLANE_APPROVED_INGRESS_PREFIX_LIST_ID='pl-0123456789abcdef1'
+```
+
+The hosted-UI prefix must be globally available. CloudFront mode supplies its
+own hostname and certificate, so it forbids domain, ACM, Route 53, and ingress
+prefix-list fields. Custom-domain mode requires all four. The control-plane
+image is a verified AMD64 digest, distinct from the AgentCore ARM64 digest.
+Every callback is HTTPS. The adopting AgentCore OAuth client must generate a
+verifier and send
 `code_challenge_method=S256`; AxonLLM does not ship an OAuth callback
 application. Invoke AgentCore with the returned **ID token**, which carries
 `custom:tenant_id` and `custom:project_id`. Do not substitute the Cognito access
@@ -767,8 +815,9 @@ the service provider:
    signed response or assertion.
 2. Configure the IdP with Cognito's SP entity ID and SAML response endpoint, not
    AxonLLM `/saml/acs` or `/saml/metadata`.
-3. Enable the SAML IdP on the confidential ALB client and on the public PKCE
-   client if federated users also invoke AgentCore.
+3. Enable the SAML IdP on the confidential ALB client for `custom-domain`, or
+   on the generated control-plane browser client for `cloudfront`. Also enable
+   it on the public AgentCore client if federated users invoke AgentCore.
 4. Verify Cognito attribute mappings, certificate rotation, logout, and
    IdP-initiated and SP-initiated policy according to the enterprise IdP.
 5. Provision canonical principals using the exact Cognito issuer and Cognito
@@ -780,13 +829,16 @@ first-adopter deployer creates the retained pool and clients but does not ingest
 IdP metadata. Cognito validates SAML signature, issuer, audience, destination,
 recipient, timestamps, request correlation, replay, and RelayState. SAML
 groups, roles, tenant values, and project values do not grant AxonLLM authority;
-the canonical principal and project records do.
+the canonical principal and project records do. Production qualification
+requires the Cognito-native provider for its ephemeral canary users and permits
+additional browser-client providers only when Cognito reports each one as a
+configured SAML provider.
 
-`GET /saml/login` is only a safe local handoff. An unauthenticated request is
-first intercepted by the ALB and sent through Cognito; after authentication the
-route redirects to the configured protected landing path. `/saml/acs` and
-`/saml/metadata` are permanent `410` tombstones for the retired direct-SP
-surface.
+`GET /saml/login` is only a safe local handoff. In custom-domain mode the ALB
+starts Cognito authentication. In CloudFront mode the route sends the browser
+to `/auth/login`, which starts the application PKCE flow and returns only to a
+validated protected same-origin path. `/saml/acs` and `/saml/metadata` are
+permanent `410` tombstones for the retired direct-SP surface.
 
 The deployer sends the initial invitation through Cognito, never handles a
 temporary password, and refuses to reassign an existing user to another tenant
@@ -911,6 +963,12 @@ It installs hash-pinned CDK dependencies when needed. Without `--yes`, CDK
 retains its security-change approval prompt; noninteractive runs must explicitly
 pass `--yes` after review.
 
+Endpoint architecture is immutable for an existing retained identity or
+control-plane stack. The deployer reads the persisted `EndpointMode` parameter,
+treats legacy stacks without it as `custom-domain`, and refuses an in-place
+switch. Deploy a new reviewed namespace/stack and migrate deliberately when
+changing architecture.
+
 `--bootstrap-cdk` is a one-time account/region operation and requires a
 dedicated IAM bootstrap principal. That principal must be able to identify the
 account, create/read the customer-managed policy
@@ -930,6 +988,11 @@ canonical live policy documents with the repository and requires the CDK
 CloudFormation execution role to have exactly that set and no inline policy.
 Missing, additional, or drifted policy state fails before deployment. Do not
 substitute `AdministratorAccess`.
+The bounded execution policy includes the exact CloudFront distribution,
+function, VPC-origin, WAFv2, and CloudFront service-linked-role actions needed
+by generated-endpoint mode. Re-run the reviewed `--bootstrap-cdk` operation
+when an older account has the pre-CloudFront policy set; routine deployment
+correctly rejects that policy drift.
 
 The first-adopter operation is restartable:
 
@@ -1138,13 +1201,17 @@ Before traffic:
    unavailable datasource/binding is deferred without accounting release.
 8. Verify the datasource role trust names the exact runtime role and permits
    `sts:AssumeRole`, `sts:TagSession`, and `sts:SetSourceIdentity`.
-9. For managed Cognito, verify the stable control-plane hostname, ALB login,
-   datasource admin RBAC, shared AgentCore table, suppressed data routes, and
-   absence of Athena/STS task authority. For SAML, also verify Cognito SP
-   metadata and certificate rollover, signed assertion rejection, issuer,
-   audience, destination/recipient and time rejection, request/replay handling,
-   safe RelayState, exact Cognito issuer/`sub` canonical resolution, and that
-   `/saml/*` never matches the unauthenticated listener rule.
+9. For managed Cognito, verify the canonical control-plane URL, datasource
+   admin RBAC, shared AgentCore table, suppressed data routes, and absence of
+   Athena/STS task authority. For custom-domain, verify Route 53, TLS, ALB
+   Cognito, and the ingress prefix list. For CloudFront, verify the generated
+   hostname, IPv4-only WAF allowlist/rate limit, disabled caching, stripped ALB
+   identity headers, VPC origin, internal ALB, S256 PKCE, opaque cross-replica
+   session refresh, CSRF rejection, and POST logout. For SAML, also verify
+   Cognito SP metadata and certificate rollover, signed assertion rejection,
+   issuer, audience, destination/recipient and time rejection, request/replay
+   handling, safe return targets, and exact Cognito issuer/`sub` canonical
+   resolution.
 10. Verify failures for missing/invalid tokens, payload identity fields, inactive
    membership, missing grants, cross-tenant projects, and missing service scopes.
 11. Exercise streaming and any response control that requires buffering.

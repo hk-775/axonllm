@@ -210,6 +210,18 @@ def test_trivy_exception_is_narrow_and_expires() -> None:
                 "expired_at": "2027-08-07T00:00:00Z",
             },
             {
+                "id": "AWS-0013",
+                "paths": [
+                    "AxonLLMControlPlaneStack.template.json",
+                ],
+                "statement": (
+                    "The AWS-managed cloudfront.net certificate does not "
+                    "permit a custom minimum viewer TLS policy; strict TLS "
+                    "1.2 enforcement requires custom-domain mode."
+                ),
+                "expired_at": "2027-08-13T00:00:00Z",
+            },
+            {
                 "id": "AWS-0132",
                 "paths": [
                     "AxonLLMStack.template.json",

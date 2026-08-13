@@ -27,9 +27,11 @@ REGION = "us-east-1"
 USER_POOL_ID = "us-east-1_CANARY"
 ISSUER = f"https://cognito-idp.{REGION}.amazonaws.com/{USER_POOL_ID}"
 CONTROL_HOST = "control.axon.example.com"
+CLOUDFRONT_HOST = "d111111abcdef8.cloudfront.net"
 HOSTED_UI_HOST = "axonllm-123456789012.auth.us-east-1.amazoncognito.com"
 CERTIFICATION_CLIENT = "certification-client"
 ALB_CLIENT = "alb-client"
+BROWSER_CLIENT = "browser-client"
 PUBLIC_CLIENT = "public-client"
 CLIENT_SECRET = "certification-secret-never-persist"
 ALB_CLIENT_SECRET = "alb-secret-never-persist"
@@ -39,9 +41,10 @@ VIEWER_CSRF = "v" * 43
 ADMIN_CSRF = "a" * 43
 
 
-def _identity_outputs() -> dict[str, Any]:
-    return {
-        sessions.IDENTITY_STACK: {
+def _identity_outputs(
+    endpoint_mode: str = sessions.CUSTOM_DOMAIN,
+) -> dict[str, Any]:
+    outputs = {
             "UserPoolId": USER_POOL_ID,
             "OidcIssuer": ISSUER,
             "OidcDiscoveryUrl": (
@@ -50,26 +53,57 @@ def _identity_outputs() -> dict[str, Any]:
             "OidcClientId": PUBLIC_CLIENT,
             "OidcAudience": PUBLIC_CLIENT,
             "CertificationClientId": CERTIFICATION_CLIENT,
-            "AlbClientId": ALB_CLIENT,
-            "ControlPlaneDomainName": CONTROL_HOST,
+            "EndpointMode": endpoint_mode,
             "HostedUiDomain": f"https://{HOSTED_UI_HOST}",
             "HostedUiDomainName": HOSTED_UI_HOST,
             "TenantClaimName": "custom:tenant_id",
             "ProjectClaimName": "custom:project_id",
         }
-    }
+    if endpoint_mode == sessions.CUSTOM_DOMAIN:
+        outputs.update(
+            {
+                "AlbClientId": ALB_CLIENT,
+                "ControlPlaneDomainName": CONTROL_HOST,
+            }
+        )
+    else:
+        outputs.update(
+            {
+                "AlbClientId": "",
+                "ControlPlaneDomainName": "",
+            }
+        )
+    return {sessions.IDENTITY_STACK: outputs}
 
 
-def _control_outputs() -> dict[str, Any]:
-    return {
-        sessions.CONTROL_PLANE_STACK: {
+def _control_outputs(
+    endpoint_mode: str = sessions.CUSTOM_DOMAIN,
+) -> dict[str, Any]:
+    host = (
+        CONTROL_HOST
+        if endpoint_mode == sessions.CUSTOM_DOMAIN
+        else CLOUDFRONT_HOST
+    )
+    outputs = {
             "RecoveryCutoverMode": "normal",
             "PrimaryStateTableName": TABLE_NAME,
             "SelectedRuntimeStateTableName": TABLE_NAME,
             "LoadBalancerDnsName": (
                 "axonllm-control-1234567890.us-east-1.elb.amazonaws.com"
             ),
+            "EndpointMode": endpoint_mode,
+            "ControlPlaneUrl": f"https://{host}",
+            "ControlPlaneDomainName": host,
+            "ControlPlaneAuthMode": (
+                sessions.ALB_COGNITO
+                if endpoint_mode == sessions.CUSTOM_DOMAIN
+                else sessions.APPLICATION_OIDC
+            ),
         }
+    if endpoint_mode == sessions.CLOUDFRONT:
+        outputs["BrowserClientId"] = BROWSER_CLIENT
+    return {
+        sessions.CONTROL_PLANE_STACK: outputs
     }
 
 
@@ -106,6 +140,7 @@ class _DeterministicRandom:
 class _Cognito:
     def __init__(self) -> None:
         self.users: dict[str, dict[str, Any]] = {}
+        self.identity_providers: dict[str, str] = {}
         self.created: list[dict[str, Any]] = []
         self.deleted: list[str] = []
         self.signed_out: list[str] = []
@@ -126,17 +161,38 @@ class _Cognito:
                     ],
                 }
             }
-        assert kwargs["ClientId"] == ALB_CLIENT
-        return {
-            "UserPoolClient": {
-                "ClientId": ALB_CLIENT,
-                "ClientSecret": ALB_CLIENT_SECRET,
-                "AllowedOAuthFlowsUserPoolClient": True,
-                "AllowedOAuthFlows": ["code"],
-                "CallbackURLs": [
+        client_id = kwargs["ClientId"]
+        assert client_id in {ALB_CLIENT, BROWSER_CLIENT}
+        browser = {
+            "ClientId": client_id,
+            "AllowedOAuthFlowsUserPoolClient": True,
+            "AllowedOAuthFlows": ["code"],
+            "CallbackURLs": [
+                (
                     f"https://{CONTROL_HOST}/oauth2/idpresponse"
-                ],
-                "SupportedIdentityProviders": ["COGNITO"],
+                    if client_id == ALB_CLIENT
+                    else f"https://{CLOUDFRONT_HOST}/auth/callback"
+                )
+            ],
+            "SupportedIdentityProviders": ["COGNITO"],
+        }
+        if client_id == ALB_CLIENT:
+            browser["ClientSecret"] = ALB_CLIENT_SECRET
+        else:
+            browser["LogoutURLs"] = [
+                f"https://{CLOUDFRONT_HOST}/auth/signed-out"
+            ]
+        return {"UserPoolClient": browser}
+
+    def describe_identity_provider(self, **kwargs):
+        assert kwargs["UserPoolId"] == USER_POOL_ID
+        provider_name = kwargs["ProviderName"]
+        if provider_name not in self.identity_providers:
+            raise _AwsError("ResourceNotFoundException")
+        return {
+            "IdentityProvider": {
+                "ProviderName": provider_name,
+                "ProviderType": self.identity_providers[provider_name],
             }
         }
 
@@ -342,26 +398,44 @@ def _valid_browser_result(
     *,
     role: str,
     cookie_base: str = "AWSELBAuthSessionCookie",
+    endpoint_mode: str = sessions.CUSTOM_DOMAIN,
 ) -> sessions.BrowserResult:
-    start = f"https://{CONTROL_HOST}{sessions.PROBE_PATH}"
+    application_mode = endpoint_mode == sessions.CLOUDFRONT
+    control_host = CLOUDFRONT_HOST if application_mode else CONTROL_HOST
+    client_id = BROWSER_CLIENT if application_mode else ALB_CLIENT
+    callback_path = (
+        "/auth/callback"
+        if application_mode
+        else "/oauth2/idpresponse"
+    )
+    start = f"https://{control_host}{sessions.PROBE_PATH}"
     csrf = (
         VIEWER_CSRF
         if role == "viewer"
         else ADMIN_CSRF if role == "admin" else role[0] * 43
     )
-    if role == "viewer":
-        alb_cookies = (
+    if application_mode:
+        session_cookies = (
+            _cookie(
+                sessions.APPLICATION_SESSION_COOKIE_NAME,
+                f"{role}-session",
+                domain=control_host,
+            ),
+        )
+    elif role == "viewer":
+        session_cookies = (
             _cookie(f"{cookie_base}-1", "viewer-fragment-1"),
             _cookie(f"{cookie_base}-0", "viewer-fragment-0"),
         )
     else:
-        alb_cookies = (_cookie(cookie_base, f"{role}-session"),)
+        session_cookies = (_cookie(cookie_base, f"{role}-session"),)
     return sessions.BrowserResult(
         cookies=(
-            *alb_cookies,
+            *session_cookies,
             _cookie(
                 sessions.CSRF_COOKIE_NAME,
                 csrf,
+                domain=control_host,
                 http_only=False,
             ),
         ),
@@ -369,14 +443,16 @@ def _valid_browser_result(
             start,
             (
                 f"https://{HOSTED_UI_HOST}/oauth2/authorize"
-                f"?client_id={ALB_CLIENT}&response_type=code"
+                f"?client_id={client_id}&response_type=code"
+                f"&redirect_uri=https%3A%2F%2F{control_host}"
+                f"{callback_path.replace('/', '%2F')}"
             ),
             (
                 f"https://{HOSTED_UI_HOST}/login"
-                f"?client_id={ALB_CLIENT}"
+                f"?client_id={client_id}"
             ),
             (
-                f"https://{CONTROL_HOST}/oauth2/idpresponse"
+                f"https://{control_host}{callback_path}"
                 "?code=opaque"
             ),
             start,
@@ -387,18 +463,34 @@ def _valid_browser_result(
 
 
 class _Browser:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        endpoint_mode: str = sessions.CUSTOM_DOMAIN,
+    ) -> None:
         self.calls: list[dict[str, Any]] = []
         self.fail_role: str | None = None
         self.results: dict[str, sessions.BrowserResult] = {
-            "member": _valid_browser_result(role="member"),
-            "viewer": _valid_browser_result(role="viewer"),
+            "member": _valid_browser_result(
+                role="member",
+                endpoint_mode=endpoint_mode,
+            ),
+            "viewer": _valid_browser_result(
+                role="viewer",
+                endpoint_mode=endpoint_mode,
+            ),
             "admin": _valid_browser_result(
                 role="admin",
                 cookie_base="AxonLLMControlPlaneSession",
+                endpoint_mode=endpoint_mode,
             ),
-            "cross": _valid_browser_result(role="cross"),
-            "ungranted": _valid_browser_result(role="ungranted"),
+            "cross": _valid_browser_result(
+                role="cross",
+                endpoint_mode=endpoint_mode,
+            ),
+            "ungranted": _valid_browser_result(
+                role="ungranted",
+                endpoint_mode=endpoint_mode,
+            ),
         }
 
     def acquire(self, **kwargs):
@@ -418,16 +510,19 @@ class _Browser:
         return self.results[role]
 
 
-def _paths(tmp_path: Path) -> dict[str, Any]:
+def _paths(
+    tmp_path: Path,
+    endpoint_mode: str = sessions.CUSTOM_DOMAIN,
+) -> dict[str, Any]:
     return {
         "region": REGION,
         "identity_outputs": _write(
             tmp_path / "identity.json",
-            _identity_outputs(),
+            _identity_outputs(endpoint_mode),
         ),
         "control_plane_outputs": _write(
             tmp_path / "control.json",
-            _control_outputs(),
+            _control_outputs(endpoint_mode),
         ),
         "tenant_id": "tenant-a",
         "project_id": "project-a",
@@ -452,14 +547,15 @@ def _paths(tmp_path: Path) -> dict[str, Any]:
 def _prepare(
     tmp_path: Path,
     *,
+    endpoint_mode: str = sessions.CUSTOM_DOMAIN,
     factory: _Factory | None = None,
     browser: _Browser | None = None,
     **overrides: Any,
 ) -> tuple[dict[str, Any], _Factory, _Browser, dict[str, Any]]:
-    values = _paths(tmp_path)
+    values = _paths(tmp_path, endpoint_mode)
     values.update(overrides)
     factory = factory or _Factory()
-    browser = browser or _Browser()
+    browser = browser or _Browser(endpoint_mode)
     result = sessions.prepare_sessions(
         **values,
         aws_factory=factory,
@@ -632,6 +728,306 @@ def test_prepare_and_cleanup_browser_backed_sessions(
         credentials_output=paths["credentials_output"],
         aws_factory=factory,
     ) == {"removed": False}
+
+
+def test_prepare_cloudfront_application_oidc_sessions(
+    tmp_path: Path,
+) -> None:
+    result, factory, browser, paths = _prepare(
+        tmp_path,
+        endpoint_mode=sessions.CLOUDFRONT,
+    )
+
+    assert result["userCount"] == 5
+    credentials = json.loads(
+        paths["credentials_output"].read_text(encoding="utf-8")
+    )
+    expected_sessions = {
+        "AXON_CANARY_MEMBER_SESSION_COOKIE": "member",
+        "AXON_CANARY_VIEWER_SESSION_COOKIE": "viewer",
+        "AXON_CANARY_TENANT_ADMIN_SESSION_COOKIE": "admin",
+        "AXON_CANARY_CROSS_TENANT_SESSION_COOKIE": "cross",
+        "AXON_CANARY_UNGRANTED_PROJECT_SESSION_COOKIE": "ungranted",
+    }
+    for name, role in expected_sessions.items():
+        assert credentials[name] == (
+            f"{sessions.APPLICATION_SESSION_COOKIE_NAME}={role}-session"
+        )
+    assert credentials["AXON_CANARY_VIEWER_CSRF_TOKEN"] == VIEWER_CSRF
+    assert (
+        credentials["AXON_CANARY_TENANT_ADMIN_CSRF_TOKEN"]
+        == ADMIN_CSRF
+    )
+    assert all(
+        call["start_url"]
+        == f"https://{CLOUDFRONT_HOST}{sessions.PROBE_PATH}"
+        and call["control_host"] == CLOUDFRONT_HOST
+        for call in browser.calls
+    )
+    assert len(factory.cognito.users) == 5
+
+
+def test_cloudfront_client_allows_configured_saml_provider(
+    tmp_path: Path,
+) -> None:
+    factory = _Factory()
+    factory.cognito.identity_providers["EnterpriseSaml"] = "SAML"
+    describe = factory.cognito.describe_user_pool_client
+
+    def federated_client(**kwargs):
+        response = describe(**kwargs)
+        if kwargs["ClientId"] == BROWSER_CLIENT:
+            response["UserPoolClient"]["SupportedIdentityProviders"].append(
+                "EnterpriseSaml"
+            )
+        return response
+
+    factory.cognito.describe_user_pool_client = federated_client
+    result, _, _, _ = _prepare(
+        tmp_path,
+        endpoint_mode=sessions.CLOUDFRONT,
+        factory=factory,
+    )
+
+    assert result["userCount"] == 5
+
+
+@pytest.mark.parametrize("provider_type", ["OIDC", "Google"])
+def test_cloudfront_client_rejects_non_saml_provider(
+    tmp_path: Path,
+    provider_type: str,
+) -> None:
+    factory = _Factory()
+    factory.cognito.identity_providers["UnapprovedProvider"] = provider_type
+    describe = factory.cognito.describe_user_pool_client
+
+    def federated_client(**kwargs):
+        response = describe(**kwargs)
+        if kwargs["ClientId"] == BROWSER_CLIENT:
+            response["UserPoolClient"]["SupportedIdentityProviders"].append(
+                "UnapprovedProvider"
+            )
+        return response
+
+    factory.cognito.describe_user_pool_client = federated_client
+    with pytest.raises(
+        sessions.CanarySessionError,
+        match="browser identity providers are not production-safe",
+    ):
+        _prepare(
+            tmp_path,
+            endpoint_mode=sessions.CLOUDFRONT,
+            factory=factory,
+        )
+
+
+def test_cloudfront_client_rejects_unknown_saml_provider(
+    tmp_path: Path,
+) -> None:
+    factory = _Factory()
+    describe = factory.cognito.describe_user_pool_client
+
+    def federated_client(**kwargs):
+        response = describe(**kwargs)
+        if kwargs["ClientId"] == BROWSER_CLIENT:
+            response["UserPoolClient"]["SupportedIdentityProviders"].append(
+                "MissingProvider"
+            )
+        return response
+
+    factory.cognito.describe_user_pool_client = federated_client
+    with pytest.raises(
+        sessions.CanarySessionError,
+        match="cannot verify managed Cognito identity providers",
+    ):
+        _prepare(
+            tmp_path,
+            endpoint_mode=sessions.CLOUDFRONT,
+            factory=factory,
+        )
+
+
+@pytest.mark.parametrize(
+    "providers",
+    [
+        [],
+        ["EnterpriseSaml"],
+        ["COGNITO", "COGNITO"],
+    ],
+)
+def test_cloudfront_client_rejects_invalid_provider_list(
+    tmp_path: Path,
+    providers: list[str],
+) -> None:
+    factory = _Factory()
+    factory.cognito.identity_providers["EnterpriseSaml"] = "SAML"
+    describe = factory.cognito.describe_user_pool_client
+
+    def invalid_client(**kwargs):
+        response = describe(**kwargs)
+        if kwargs["ClientId"] == BROWSER_CLIENT:
+            response["UserPoolClient"][
+                "SupportedIdentityProviders"
+            ] = providers
+        return response
+
+    factory.cognito.describe_user_pool_client = invalid_client
+    with pytest.raises(
+        sessions.CanarySessionError,
+        match="browser identity providers are not production-safe",
+    ):
+        _prepare(
+            tmp_path,
+            endpoint_mode=sessions.CLOUDFRONT,
+            factory=factory,
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        (
+            "CallbackURLs",
+            [f"https://{CLOUDFRONT_HOST}/oauth2/idpresponse"],
+        ),
+        (
+            "LogoutURLs",
+            [f"https://{CLOUDFRONT_HOST}/signed-out"],
+        ),
+    ],
+)
+def test_cloudfront_client_requires_exact_callback_and_logout(
+    tmp_path: Path,
+    field: str,
+    value: list[str],
+) -> None:
+    factory = _Factory()
+    describe = factory.cognito.describe_user_pool_client
+
+    def mismatched_client(**kwargs):
+        response = describe(**kwargs)
+        if kwargs["ClientId"] == BROWSER_CLIENT:
+            response["UserPoolClient"][field] = value
+        return response
+
+    factory.cognito.describe_user_pool_client = mismatched_client
+    with pytest.raises(
+        sessions.CanarySessionError,
+        match="browser client configuration is not production-safe",
+    ):
+        _prepare(
+            tmp_path,
+            endpoint_mode=sessions.CLOUDFRONT,
+            factory=factory,
+        )
+
+
+def test_cloudfront_client_must_be_public(
+    tmp_path: Path,
+) -> None:
+    factory = _Factory()
+    describe = factory.cognito.describe_user_pool_client
+
+    def confidential_client(**kwargs):
+        response = describe(**kwargs)
+        if kwargs["ClientId"] == BROWSER_CLIENT:
+            response["UserPoolClient"]["ClientSecret"] = (
+                "unexpected-client-secret"
+            )
+        return response
+
+    factory.cognito.describe_user_pool_client = confidential_client
+    with pytest.raises(
+        sessions.CanarySessionError,
+        match="browser client configuration is not production-safe",
+    ):
+        _prepare(
+            tmp_path,
+            endpoint_mode=sessions.CLOUDFRONT,
+            factory=factory,
+        )
+
+
+def test_cloudfront_browser_requires_exact_callback(
+    tmp_path: Path,
+) -> None:
+    browser = _Browser(sessions.CLOUDFRONT)
+    result = browser.results["viewer"]
+    browser.results["viewer"] = sessions.BrowserResult(
+        cookies=result.cookies,
+        navigation_urls=tuple(
+            url.replace("/auth/callback", "/oauth2/idpresponse")
+            for url in result.navigation_urls
+        ),
+        final_url=result.final_url,
+        final_status=result.final_status,
+    )
+
+    with pytest.raises(
+        sessions.CanarySessionError,
+        match="exact Cognito callback",
+    ):
+        _prepare(
+            tmp_path,
+            endpoint_mode=sessions.CLOUDFRONT,
+            browser=browser,
+        )
+
+
+def test_cloudfront_browser_requires_exact_redirect_uri(
+    tmp_path: Path,
+) -> None:
+    browser = _Browser(sessions.CLOUDFRONT)
+    result = browser.results["viewer"]
+    browser.results["viewer"] = sessions.BrowserResult(
+        cookies=result.cookies,
+        navigation_urls=tuple(
+            url.replace(
+                "%2Fauth%2Fcallback",
+                "%2Foauth2%2Fidpresponse",
+            )
+            for url in result.navigation_urls
+        ),
+        final_url=result.final_url,
+        final_status=result.final_status,
+    )
+
+    with pytest.raises(
+        sessions.CanarySessionError,
+        match="deployed browser client",
+    ):
+        _prepare(
+            tmp_path,
+            endpoint_mode=sessions.CLOUDFRONT,
+            browser=browser,
+        )
+
+
+def test_cloudfront_browser_requires_application_session_cookie(
+    tmp_path: Path,
+) -> None:
+    browser = _Browser(sessions.CLOUDFRONT)
+    result = browser.results["viewer"]
+    browser.results["viewer"] = sessions.BrowserResult(
+        cookies=tuple(
+            cookie
+            for cookie in result.cookies
+            if cookie.name != sessions.APPLICATION_SESSION_COOKIE_NAME
+        ),
+        navigation_urls=result.navigation_urls,
+        final_url=result.final_url,
+        final_status=result.final_status,
+    )
+
+    with pytest.raises(
+        sessions.CanarySessionError,
+        match="application session cookie is missing",
+    ):
+        _prepare(
+            tmp_path,
+            endpoint_mode=sessions.CLOUDFRONT,
+            browser=browser,
+        )
 
 
 def test_partial_browser_failure_rolls_back_all_owned_resources(
@@ -942,7 +1338,7 @@ def test_control_plane_outputs_fail_closed(
                 final_url=result.final_url,
                 final_status=result.final_status,
             ),
-            "deployed ALB client",
+            "deployed browser client",
         ),
         (
             lambda result: sessions.BrowserResult(

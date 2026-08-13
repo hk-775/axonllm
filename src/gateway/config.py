@@ -7,10 +7,103 @@ Modules import from this file instead of hardcoding values.
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass, field
+from urllib.parse import urlsplit
 
 
 _MAX_ATHENA_QUERY_BINDINGS_CHARACTERS = 2_048
+CONTROL_PLANE_ENDPOINT_MODES = frozenset(
+    {"custom-domain", "cloudfront"}
+)
+MAX_BROWSER_SESSION_SECONDS = 8 * 60 * 60
+
+
+def _normalized_https_origin(value: str, field_name: str) -> str:
+    """Return one configured HTTPS origin without a path or user info."""
+    if not isinstance(value, str) or value != value.strip():
+        raise ValueError(f"{field_name} must be an HTTPS origin")
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except (UnicodeError, ValueError) as exc:
+        raise ValueError(f"{field_name} must be an HTTPS origin") from exc
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in ("", "/")
+        or parsed.query
+        or parsed.fragment
+        or port == 0
+        or len(value.encode("utf-8")) > 2048
+        or any(
+            not character.isprintable() or character.isspace()
+            for character in value
+        )
+    ):
+        raise ValueError(f"{field_name} must be an HTTPS origin")
+    return value.rstrip("/")
+
+
+def _normalized_https_endpoint(
+    value: str,
+    field_name: str,
+    expected_path: str,
+) -> str:
+    """Return a fixed HTTPS endpoint with no query or fragment."""
+    if not isinstance(value, str) or value != value.strip():
+        raise ValueError(
+            f"{field_name} must be an HTTPS URL ending in {expected_path}"
+        )
+    try:
+        parsed = urlsplit(value)
+    except (UnicodeError, ValueError) as exc:
+        raise ValueError(
+            f"{field_name} must be an HTTPS URL ending in {expected_path}"
+        ) from exc
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path != expected_path
+        or parsed.query
+        or parsed.fragment
+        or len(value.encode("utf-8")) > 2048
+    ):
+        raise ValueError(
+            f"{field_name} must be an HTTPS URL ending in {expected_path}"
+        )
+    return value
+
+
+def _url_origin(value: str) -> str:
+    parsed = urlsplit(value)
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
+def _is_cognito_issuer(value: str, region: str) -> bool:
+    try:
+        parsed = urlsplit(value)
+    except (UnicodeError, ValueError):
+        return False
+    if region.startswith("cn-"):
+        suffix = "amazonaws.com.cn"
+    else:
+        suffix = "amazonaws.com"
+    pool_id = parsed.path.removeprefix("/")
+    return bool(
+        parsed.scheme == "https"
+        and parsed.hostname == f"cognito-idp.{region}.{suffix}"
+        and parsed.path == f"/{pool_id}"
+        and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", pool_id)
+        and not parsed.query
+        and not parsed.fragment
+        and parsed.username is None
+        and parsed.password is None
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -161,6 +254,21 @@ class AppConfig:
     alb_signer_arn: str = ""
     alb_client_id: str = ""
     alb_issuer: str = ""
+    # Existing deployments retain ALB-managed browser authentication. The
+    # CloudFront endpoint uses the public Cognito client and application-held
+    # opaque sessions instead.
+    control_plane_endpoint_mode: str = "custom-domain"
+    control_plane_public_url: str = ""
+    cognito_hosted_ui_url: str = ""
+    browser_auth_mode: str = ""
+    browser_auth_client_id: str = ""
+    browser_auth_authorization_endpoint: str = ""
+    browser_auth_token_endpoint: str = ""
+    browser_auth_logout_endpoint: str = ""
+    browser_auth_redirect_uri: str = ""
+    browser_auth_signed_out_uri: str = ""
+    browser_session_max_seconds: int = MAX_BROWSER_SESSION_SECONDS
+    browser_auth_flow_ttl_seconds: int = 600
     auth_mode: str = "ENFORCE"  # fail-closed by default; set AXON_AUTH_MODE=LOG_ONLY for local dev only
     # Migration gate for server-held tenant memberships. Once enabled, every
     # authenticated credential must resolve through durable canonical identity
@@ -200,6 +308,135 @@ class AppConfig:
     control_plane_only: bool = False
 
     def __post_init__(self) -> None:
+        if (
+            self.control_plane_endpoint_mode
+            not in CONTROL_PLANE_ENDPOINT_MODES
+        ):
+            raise ValueError(
+                "control_plane_endpoint_mode must be 'custom-domain' "
+                "or 'cloudfront'"
+            )
+        for field_name, value, minimum, maximum in (
+            (
+                "browser_session_max_seconds",
+                self.browser_session_max_seconds,
+                300,
+                MAX_BROWSER_SESSION_SECONDS,
+            ),
+            (
+                "browser_auth_flow_ttl_seconds",
+                self.browser_auth_flow_ttl_seconds,
+                60,
+                900,
+            ),
+        ):
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or not minimum <= value <= maximum
+            ):
+                raise ValueError(
+                    f"{field_name} must be between {minimum} and {maximum}"
+                )
+
+        if not self.browser_auth_client_id:
+            self.browser_auth_client_id = self.oidc_audience
+        if self.control_plane_endpoint_mode == "cloudfront":
+            if self.browser_auth_mode not in ("", "oidc-session"):
+                raise RuntimeError(
+                    "CloudFront browser authentication requires "
+                    "AXON_BROWSER_AUTH_MODE=oidc-session"
+                )
+            self.browser_auth_mode = "oidc-session"
+            if not _is_cognito_issuer(
+                self.oidc_issuer,
+                self.aws_region,
+            ):
+                raise RuntimeError(
+                    "CloudFront browser authentication requires a Cognito "
+                    "OIDC issuer in AWS_DEFAULT_REGION"
+                )
+            if (
+                not self.control_plane_public_url
+                and self.browser_auth_redirect_uri
+            ):
+                self.control_plane_public_url = _url_origin(
+                    self.browser_auth_redirect_uri
+                )
+            if (
+                not self.cognito_hosted_ui_url
+                and self.browser_auth_authorization_endpoint
+            ):
+                self.cognito_hosted_ui_url = _url_origin(
+                    self.browser_auth_authorization_endpoint
+                )
+            self.control_plane_public_url = _normalized_https_origin(
+                self.control_plane_public_url,
+                "control_plane_public_url",
+            )
+            self.cognito_hosted_ui_url = _normalized_https_origin(
+                self.cognito_hosted_ui_url,
+                "cognito_hosted_ui_url",
+            )
+            endpoint_defaults = {
+                "browser_auth_authorization_endpoint": (
+                    f"{self.cognito_hosted_ui_url}/oauth2/authorize"
+                ),
+                "browser_auth_token_endpoint": (
+                    f"{self.cognito_hosted_ui_url}/oauth2/token"
+                ),
+                "browser_auth_logout_endpoint": (
+                    f"{self.cognito_hosted_ui_url}/logout"
+                ),
+                "browser_auth_redirect_uri": (
+                    f"{self.control_plane_public_url}/auth/callback"
+                ),
+                "browser_auth_signed_out_uri": (
+                    f"{self.control_plane_public_url}/auth/signed-out"
+                ),
+            }
+            endpoint_paths = {
+                "browser_auth_authorization_endpoint": (
+                    "/oauth2/authorize"
+                ),
+                "browser_auth_token_endpoint": "/oauth2/token",
+                "browser_auth_logout_endpoint": "/logout",
+                "browser_auth_redirect_uri": "/auth/callback",
+                "browser_auth_signed_out_uri": "/auth/signed-out",
+            }
+            for field_name, default in endpoint_defaults.items():
+                configured = getattr(self, field_name) or default
+                normalized = _normalized_https_endpoint(
+                    configured,
+                    field_name,
+                    endpoint_paths[field_name],
+                )
+                if normalized != default:
+                    raise RuntimeError(
+                        f"{field_name} does not match its configured origin"
+                    )
+                setattr(self, field_name, normalized)
+            if (
+                not self.browser_auth_client_id
+                or self.browser_auth_client_id
+                != self.oidc_audience
+            ):
+                raise RuntimeError(
+                    "CloudFront browser authentication requires a public "
+                    "client ID matching AXON_OIDC_AUDIENCE"
+                )
+            if (
+                self.auth_mode != "ENFORCE"
+                or not self.canonical_identity_required
+                or not self.durable_persistence_enabled
+                or not self.control_plane_only
+            ):
+                raise RuntimeError(
+                    "CloudFront browser authentication requires enforced "
+                    "canonical identity, durable DynamoDB persistence, and "
+                    "a control-plane-only process"
+                )
+
         for field_name, claim_name in (
             ("oidc_tenant_claim", self.oidc_tenant_claim),
             ("oidc_project_claim", self.oidc_project_claim),
@@ -377,3 +614,19 @@ class AppConfig:
                 "production profile requires "
                 "LLM_ROUTER_DYNAMODB_ENABLED=true"
             )
+
+    @property
+    def browser_auth_enabled(self) -> bool:
+        return self.control_plane_endpoint_mode == "cloudfront"
+
+    @property
+    def browser_auth_callback_url(self) -> str:
+        if not self.browser_auth_enabled:
+            return ""
+        return self.browser_auth_redirect_uri
+
+    @property
+    def browser_auth_signed_out_url(self) -> str:
+        if not self.browser_auth_enabled:
+            return ""
+        return self.browser_auth_signed_out_uri

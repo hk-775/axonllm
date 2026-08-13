@@ -86,6 +86,18 @@ def _one_resource(template: dict, resource_type: str) -> dict:
     return resources[0]
 
 
+def _condition_branch(
+    value: object,
+    condition: str,
+    *,
+    true_branch: bool,
+) -> object:
+    assert isinstance(value, dict)
+    expression = value["Fn::If"]
+    assert expression[0] == condition
+    return expression[1 if true_branch else 2]
+
+
 def _actions(statement: dict) -> set[str]:
     actions = statement["Action"]
     return {actions} if isinstance(actions, str) else set(actions)
@@ -438,7 +450,7 @@ def test_control_plane_imports_state_and_never_creates_another_table(
         assert login_path_pattern.fullmatch(unsafe_path) is None
     for name, value in _QUERY_ENVIRONMENT.items():
         assert environment[name] == value
-    assert environment["AXON_ALB_CLIENT_ID"] == {
+    alb_client_import = {
         "Fn::ImportValue": {
             "Fn::Join": [
                 ":",
@@ -448,6 +460,19 @@ def test_control_plane_imports_state_and_never_creates_another_table(
                 ],
             ]
         }
+    }
+    assert environment["AXON_ALB_CLIENT_ID"]["Fn::If"] == [
+        "CloudFrontEndpoint",
+        "",
+        alb_client_import,
+    ]
+    assert environment["AXON_BROWSER_AUTH_MODE"]["Fn::If"] == [
+        "CloudFrontEndpoint",
+        "oidc-session",
+        "",
+    ]
+    assert environment["AXON_CONTROL_PLANE_ENDPOINT_MODE"] == {
+        "Ref": "EndpointMode"
     }
     assert container["ReadonlyRootFilesystem"] is True
     assert container["LinuxParameters"]["Capabilities"]["Drop"] == ["ALL"]
@@ -928,16 +953,33 @@ def test_control_tasks_are_private_and_alb_requires_https_cognito(
     )
     assert len(listeners) == 1
     listener = listeners[0]["Properties"]
-    assert listener["Port"] == 443
-    assert listener["Protocol"] == "HTTPS"
-    assert listener["SslPolicy"] == (
+    assert _condition_branch(
+        listener["Port"],
+        "CustomDomainEndpoint",
+        true_branch=True,
+    ) == 443
+    assert _condition_branch(
+        listener["Protocol"],
+        "CustomDomainEndpoint",
+        true_branch=True,
+    ) == "HTTPS"
+    assert _condition_branch(
+        listener["SslPolicy"],
+        "CustomDomainEndpoint",
+        true_branch=True,
+    ) == (
         "ELBSecurityPolicy-TLS13-1-2-2021-06"
     )
-    assert [action["Type"] for action in listener["DefaultActions"]] == [
+    custom_actions = _condition_branch(
+        listener["DefaultActions"],
+        "CustomDomainEndpoint",
+        true_branch=True,
+    )
+    assert [action["Type"] for action in custom_actions] == [
         "authenticate-cognito",
         "forward",
     ]
-    authentication = listener["DefaultActions"][0][
+    authentication = custom_actions[0][
         "AuthenticateCognitoConfig"
     ]
     assert authentication["OnUnauthenticatedRequest"] == "authenticate"
@@ -947,10 +989,12 @@ def test_control_tasks_are_private_and_alb_requires_https_cognito(
     assert "HostedUiDomainName" in json.dumps(
         authentication["UserPoolDomain"]
     )
-    listener_rule = _one_resource(
+    listener_rule_resource = _one_resource(
         template,
         "AWS::ElasticLoadBalancingV2::ListenerRule",
-    )["Properties"]
+    )
+    assert listener_rule_resource["Condition"] == "CustomDomainEndpoint"
+    listener_rule = listener_rule_resource["Properties"]
     assert listener_rule["Priority"] == 10
     assert [action["Type"] for action in listener_rule["Actions"]] == [
         "forward"
@@ -968,7 +1012,11 @@ def test_control_tasks_are_private_and_alb_requires_https_cognito(
         template,
         "AWS::ElasticLoadBalancingV2::LoadBalancer",
     )["Properties"]
-    assert load_balancer["Scheme"] == "internet-facing"
+    assert _condition_branch(
+        load_balancer["Scheme"],
+        "CustomDomainEndpoint",
+        true_branch=True,
+    ) == "internet-facing"
     attributes = {
         item["Key"]: item["Value"]
         for item in load_balancer["LoadBalancerAttributes"]
@@ -992,15 +1040,17 @@ def test_control_tasks_are_private_and_alb_requires_https_cognito(
 def test_control_hostname_has_a_concrete_route53_alias(query_templates):
     template = query_templates["control-plane"]
     parameters = template["Parameters"]
-    assert "Default" not in parameters["PublicHostedZoneId"]
+    assert parameters["PublicHostedZoneId"]["Default"] == ""
     assert parameters["PublicHostedZoneId"]["AllowedPattern"] == (
-        "^Z[A-Z0-9]+$"
+        "^$|^Z[A-Z0-9]+$"
     )
 
-    record = _one_resource(
+    record_resource = _one_resource(
         template,
         "AWS::Route53::RecordSet",
-    )["Properties"]
+    )
+    assert record_resource["Condition"] == "CustomDomainEndpoint"
+    record = record_resource["Properties"]
     assert record["Type"] == "A"
     assert record["HostedZoneId"] == {"Ref": "PublicHostedZoneId"}
     assert "ControlPlaneDomainName" in json.dumps(record["Name"])
@@ -1011,6 +1061,115 @@ def test_control_hostname_has_a_concrete_route53_alias(query_templates):
         "CanonicalHostedZoneID"
     )
     assert record["AliasTarget"]["EvaluateTargetHealth"] is True
+
+
+def test_cloudfront_endpoint_is_private_allowlisted_and_application_authenticated(
+    query_templates,
+):
+    template = query_templates["control-plane"]
+    parameters = template["Parameters"]
+    assert parameters["EndpointMode"]["Default"] == "custom-domain"
+    assert parameters["EndpointMode"]["AllowedValues"] == [
+        "custom-domain",
+        "cloudfront",
+    ]
+    assert parameters["AllowedViewerCidrs"]["Type"] == (
+        "CommaDelimitedList"
+    )
+
+    listener = _one_resource(
+        template,
+        "AWS::ElasticLoadBalancingV2::Listener",
+    )["Properties"]
+    assert _condition_branch(
+        listener["Port"],
+        "CustomDomainEndpoint",
+        true_branch=False,
+    ) == 80
+    assert _condition_branch(
+        listener["Protocol"],
+        "CustomDomainEndpoint",
+        true_branch=False,
+    ) == "HTTP"
+    assert _condition_branch(
+        listener["DefaultActions"],
+        "CustomDomainEndpoint",
+        true_branch=False,
+    )[0]["Type"] == "forward"
+
+    load_balancer = _one_resource(
+        template,
+        "AWS::ElasticLoadBalancingV2::LoadBalancer",
+    )["Properties"]
+    assert _condition_branch(
+        load_balancer["Scheme"],
+        "CustomDomainEndpoint",
+        true_branch=False,
+    ) == "internal"
+
+    ip_set = _one_resource(template, "AWS::WAFv2::IPSet")
+    assert ip_set["Condition"] == "CloudFrontEndpoint"
+    assert ip_set["Properties"]["Addresses"] == {
+        "Ref": "AllowedViewerCidrs"
+    }
+    assert ip_set["Properties"]["IPAddressVersion"] == "IPV4"
+    web_acl = _one_resource(template, "AWS::WAFv2::WebACL")
+    assert web_acl["Condition"] == "CloudFrontEndpoint"
+    assert web_acl["Properties"]["DefaultAction"] == {"Block": {}}
+    assert [
+        rule["Name"] for rule in web_acl["Properties"]["Rules"]
+    ] == ["PerViewerRateLimit", "ReviewedViewerNetworks"]
+
+    vpc_origin = _one_resource(
+        template,
+        "AWS::CloudFront::VpcOrigin",
+    )
+    assert vpc_origin["Condition"] == "CloudFrontEndpoint"
+    assert vpc_origin["DependsOn"]
+    endpoint = vpc_origin["Properties"]["VpcOriginEndpointConfig"]
+    assert endpoint["HTTPPort"] == 80
+    assert endpoint["OriginProtocolPolicy"] == "http-only"
+
+    distribution = _one_resource(
+        template,
+        "AWS::CloudFront::Distribution",
+    )
+    assert distribution["Condition"] == "CloudFrontEndpoint"
+    distribution_config = distribution["Properties"][
+        "DistributionConfig"
+    ]
+    assert distribution_config["IPV6Enabled"] is False
+    assert distribution_config["DefaultCacheBehavior"][
+        "CachePolicyId"
+    ] == "4135ea2d-6df8-44a3-9df3-4b5a84be39ad"
+    assert distribution_config["DefaultCacheBehavior"][
+        "ViewerProtocolPolicy"
+    ] == "redirect-to-https"
+    assert distribution_config["Origins"][0]["VpcOriginConfig"]
+    assert distribution_config["WebACLId"]["Fn::GetAtt"][0].startswith(
+        "CloudFrontWebAcl"
+    )
+
+    browser_client = next(
+        client
+        for client in _resources(
+            template,
+            "AWS::Cognito::UserPoolClient",
+        )
+        if client.get("Condition") == "CloudFrontEndpoint"
+    )
+    assert browser_client["Properties"]["GenerateSecret"] is False
+    assert browser_client["Properties"]["AllowedOAuthFlows"] == ["code"]
+    assert "Distribution" in json.dumps(
+        browser_client["Properties"]["CallbackURLs"]
+    )
+    assert template["Outputs"]["ControlPlaneAuthMode"]["Value"][
+        "Fn::If"
+    ] == [
+        "CloudFrontEndpoint",
+        "application-oidc",
+        "alb-cognito",
+    ]
 
 
 def test_control_plane_network_has_no_world_open_security_group_rule(

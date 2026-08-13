@@ -42,10 +42,31 @@ IDENTITY_STACK = "AxonLLMIdentityStack"
 CONTROL_PLANE_STACK = "AxonLLMControlPlaneStack"
 STATE_SCHEMA = "axonllm.control-plane-canary-sessions/v1"
 CSRF_COOKIE_NAME = "__Host-axon-csrf"
+APPLICATION_SESSION_COOKIE_NAME = "__Host-axon-session"
 ALB_SESSION_COOKIE_BASES = (
     "AWSELBAuthSessionCookie",
     "AxonLLMControlPlaneSession",
 )
+CUSTOM_DOMAIN = "custom-domain"
+CLOUDFRONT = "cloudfront"
+ALB_COGNITO = "alb-cognito"
+APPLICATION_OIDC = "application-oidc"
+ALB_SESSION_COOKIE = "alb-session-cookie"
+BROWSER_SESSION_COOKIE = "browser-session-cookie"
+ENDPOINT_CONTRACTS = {
+    CUSTOM_DOMAIN: {
+        "auth_mode": ALB_COGNITO,
+        "credential_type": ALB_SESSION_COOKIE,
+        "callback_path": "/oauth2/idpresponse",
+        "logout_path": None,
+    },
+    CLOUDFRONT: {
+        "auth_mode": APPLICATION_OIDC,
+        "credential_type": BROWSER_SESSION_COOKIE,
+        "callback_path": "/auth/callback",
+        "logout_path": "/auth/signed-out",
+    },
+}
 FIXTURE_ID_FIELD = "control_plane_canary_fixture_id"
 PROBE_PATH = "/admin/projects"
 
@@ -113,8 +134,8 @@ class IdentityOutputs:
     user_pool_id: str
     issuer: str
     certification_client_id: str
-    alb_client_id: str
-    control_host: str
+    public_client_id: str
+    alb_client_id: str | None
     hosted_ui_url: str
     hosted_ui_host: str
     tenant_claim: str
@@ -125,6 +146,14 @@ class IdentityOutputs:
 class ControlPlaneOutputs:
     table_name: str
     load_balancer_host: str
+    endpoint_mode: str
+    url: str
+    host: str
+    auth_mode: str
+    credential_type: str
+    callback_url: str
+    logout_url: str | None
+    browser_client_id: str | None
 
 
 @dataclass(frozen=True)
@@ -321,7 +350,8 @@ class PlaywrightBrowserSession:
                         hosted_ui_host
                     ):
                         raise CanarySessionError(
-                            "ALB did not reach the expected Cognito login host"
+                            "control plane did not reach the expected "
+                            "Cognito login host"
                         )
 
                     page.locator(self._USERNAME_SELECTOR).first.fill(
@@ -572,13 +602,35 @@ def _url_host(value: str, location: str) -> str:
     return _dns_name(_https_url(value, location).hostname, f"{location} host")
 
 
+def _https_origin(value: Any, location: str) -> tuple[str, str]:
+    raw = _safe_string(value, location, maximum=4096)
+    parsed = _https_url(raw, location)
+    host = _dns_name(parsed.hostname, f"{location} host")
+    if (
+        parsed.path
+        or parsed.query
+        or parsed.port not in {None, 443}
+        or raw != f"https://{host}"
+    ):
+        raise CanarySessionError(
+            f"{location} must be a canonical HTTPS origin"
+        )
+    return raw, host
+
+
 def _identity_outputs(
     outputs: dict[str, str],
     *,
     region: str,
+    control: ControlPlaneOutputs,
 ) -> IdentityOutputs:
     if _REGION_PATTERN.fullmatch(region) is None:
         raise CanarySessionError("AWS region is invalid")
+    identity_endpoint_mode = outputs.get("EndpointMode", CUSTOM_DOMAIN)
+    if identity_endpoint_mode != control.endpoint_mode:
+        raise CanarySessionError(
+            "identity and control-plane endpoint modes are inconsistent"
+        )
     user_pool_id = _required_output(
         outputs,
         "UserPoolId",
@@ -613,14 +665,6 @@ def _identity_outputs(
             "managed Cognito issuer outputs are inconsistent"
         )
 
-    control_host = _dns_name(
-        _required_output(
-            outputs,
-            "ControlPlaneDomainName",
-            IDENTITY_STACK,
-        ),
-        "control-plane domain",
-    )
     hosted_ui_url = _required_output(
         outputs,
         "HostedUiDomain",
@@ -649,7 +693,7 @@ def _identity_outputs(
         or hosted.path not in {"", "/"}
         or hosted.query
         or hosted_pattern.fullmatch(hosted_ui_host) is None
-        or control_host == hosted_ui_host
+        or control.host == hosted_ui_host
     ):
         raise CanarySessionError(
             "managed Cognito hosted UI outputs are inconsistent"
@@ -677,15 +721,41 @@ def _identity_outputs(
         "CertificationClientId",
         IDENTITY_STACK,
     )
-    alb_client_id = _required_output(
-        outputs,
-        "AlbClientId",
-        IDENTITY_STACK,
-    )
     public_client_id = _required_output(
         outputs,
         "OidcClientId",
         IDENTITY_STACK,
+    )
+    alb_client_id: str | None = None
+    if control.endpoint_mode == CUSTOM_DOMAIN:
+        identity_control_host = _dns_name(
+            _required_output(
+                outputs,
+                "ControlPlaneDomainName",
+                IDENTITY_STACK,
+            ),
+            "identity control-plane domain",
+        )
+        alb_client_id = _required_output(
+            outputs,
+            "AlbClientId",
+            IDENTITY_STACK,
+        )
+        if identity_control_host != control.host:
+            raise CanarySessionError(
+                "identity and control-plane domains are inconsistent"
+            )
+    elif any(
+        outputs.get(name) not in {None, ""}
+        for name in ("AlbClientId", "ControlPlaneDomainName")
+    ):
+        raise CanarySessionError(
+            "CloudFront identity outputs contain custom-domain resources"
+        )
+    selected_client_id = (
+        alb_client_id
+        if alb_client_id is not None
+        else control.browser_client_id
     )
     if (
         _required_output(
@@ -695,7 +765,11 @@ def _identity_outputs(
         )
         != public_client_id
         or len(
-            {certification_client_id, alb_client_id, public_client_id}
+            {
+                certification_client_id,
+                public_client_id,
+                selected_client_id,
+            }
         )
         != 3
     ):
@@ -706,8 +780,8 @@ def _identity_outputs(
         user_pool_id=user_pool_id,
         issuer=issuer,
         certification_client_id=certification_client_id,
+        public_client_id=public_client_id,
         alb_client_id=alb_client_id,
-        control_host=control_host,
         hosted_ui_url=hosted_ui_url.rstrip("/"),
         hosted_ui_host=hosted_ui_host,
         tenant_claim=tenant_claim,
@@ -767,9 +841,72 @@ def _control_plane_outputs(
         raise CanarySessionError(
             "control-plane load balancer output is inconsistent"
         )
+    endpoint_mode = _required_output(
+        outputs,
+        "EndpointMode",
+        CONTROL_PLANE_STACK,
+    )
+    contract = ENDPOINT_CONTRACTS.get(endpoint_mode)
+    if contract is None:
+        raise CanarySessionError(
+            "control-plane endpoint mode is unsupported"
+        )
+    url, url_host = _https_origin(
+        _required_output(
+            outputs,
+            "ControlPlaneUrl",
+            CONTROL_PLANE_STACK,
+        ),
+        "control-plane URL",
+    )
+    output_host = _dns_name(
+        _required_output(
+            outputs,
+            "ControlPlaneDomainName",
+            CONTROL_PLANE_STACK,
+        ),
+        "control-plane domain",
+    )
+    auth_mode = _required_output(
+        outputs,
+        "ControlPlaneAuthMode",
+        CONTROL_PLANE_STACK,
+    )
+    if (
+        output_host != url_host
+        or auth_mode != contract["auth_mode"]
+    ):
+        raise CanarySessionError(
+            "control-plane endpoint outputs are inconsistent"
+        )
+    browser_client_id: str | None = None
+    if endpoint_mode == CLOUDFRONT:
+        browser_client_id = _required_output(
+            outputs,
+            "BrowserClientId",
+            CONTROL_PLANE_STACK,
+        )
+    elif "BrowserClientId" in outputs:
+        raise CanarySessionError(
+            "custom-domain control plane contains an application client"
+        )
+    callback_url = f"{url}{contract['callback_path']}"
+    logout_path = contract["logout_path"]
     return ControlPlaneOutputs(
         table_name=selected,
         load_balancer_host=load_balancer_host,
+        endpoint_mode=endpoint_mode,
+        url=url,
+        host=output_host,
+        auth_mode=auth_mode,
+        credential_type=contract["credential_type"],
+        callback_url=callback_url,
+        logout_url=(
+            f"{url}{logout_path}"
+            if isinstance(logout_path, str)
+            else None
+        ),
+        browser_client_id=browser_client_id,
     )
 
 
@@ -928,15 +1065,25 @@ def _required_session(response: Any, location: str) -> str:
 def _client_configuration(
     cognito: Any,
     identity: IdentityOutputs,
+    control: ControlPlaneOutputs,
 ) -> str:
+    oauth_client_id = (
+        identity.alb_client_id
+        if control.endpoint_mode == CUSTOM_DOMAIN
+        else control.browser_client_id
+    )
+    if oauth_client_id is None:
+        raise CanarySessionError(
+            "managed Cognito browser client output is missing"
+        )
     try:
         certification_response = cognito.describe_user_pool_client(
             UserPoolId=identity.user_pool_id,
             ClientId=identity.certification_client_id,
         )
-        alb_response = cognito.describe_user_pool_client(
+        oauth_response = cognito.describe_user_pool_client(
             UserPoolId=identity.user_pool_id,
-            ClientId=identity.alb_client_id,
+            ClientId=oauth_client_id,
         )
         pool_response = cognito.describe_user_pool(
             UserPoolId=identity.user_pool_id,
@@ -951,9 +1098,9 @@ def _client_configuration(
         if type(certification_response) is dict
         else None
     )
-    alb = (
-        alb_response.get("UserPoolClient")
-        if type(alb_response) is dict
+    oauth = (
+        oauth_response.get("UserPoolClient")
+        if type(oauth_response) is dict
         else None
     )
     pool = (
@@ -965,8 +1112,8 @@ def _client_configuration(
         type(certification) is not dict
         or certification.get("ClientId")
         != identity.certification_client_id
-        or type(alb) is not dict
-        or alb.get("ClientId") != identity.alb_client_id
+        or type(oauth) is not dict
+        or oauth.get("ClientId") != oauth_client_id
         or type(pool) is not dict
         or pool.get("Id") != identity.user_pool_id
     ):
@@ -990,17 +1137,83 @@ def _client_configuration(
         maximum=4096,
     )
 
-    callback = f"https://{identity.control_host}/oauth2/idpresponse"
+    raw_identity_providers = oauth.get("SupportedIdentityProviders")
     if (
-        alb.get("AllowedOAuthFlowsUserPoolClient") is not True
-        or alb.get("AllowedOAuthFlows") != ["code"]
-        or alb.get("CallbackURLs") != [callback]
-        or alb.get("SupportedIdentityProviders") != ["COGNITO"]
-        or not isinstance(alb.get("ClientSecret"), str)
-        or not alb["ClientSecret"]
+        type(raw_identity_providers) is not list
+        or not 1 <= len(raw_identity_providers) <= 64
     ):
         raise CanarySessionError(
-            "ALB Cognito client configuration is not production-safe"
+            "Cognito browser identity providers are not production-safe"
+        )
+    try:
+        identity_providers = tuple(
+            _safe_string(
+                provider,
+                "Cognito browser identity provider",
+                maximum=128,
+            )
+            for provider in raw_identity_providers
+        )
+    except CanarySessionError:
+        raise CanarySessionError(
+            "Cognito browser identity providers are not production-safe"
+        ) from None
+    if (
+        identity_providers.count("COGNITO") != 1
+        or len(identity_providers) != len(set(identity_providers))
+    ):
+        raise CanarySessionError(
+            "Cognito browser identity providers are not production-safe"
+        )
+    for provider_name in identity_providers:
+        if provider_name == "COGNITO":
+            continue
+        try:
+            provider_response = cognito.describe_identity_provider(
+                UserPoolId=identity.user_pool_id,
+                ProviderName=provider_name,
+            )
+        except Exception:
+            raise CanarySessionError(
+                "cannot verify managed Cognito identity providers"
+            ) from None
+        provider = (
+            provider_response.get("IdentityProvider")
+            if type(provider_response) is dict
+            else None
+        )
+        if (
+            type(provider) is not dict
+            or provider.get("ProviderName") != provider_name
+            or provider.get("ProviderType") != "SAML"
+        ):
+            raise CanarySessionError(
+                "Cognito browser identity providers are not production-safe"
+            )
+
+    oauth_secret = oauth.get("ClientSecret")
+    if (
+        oauth.get("AllowedOAuthFlowsUserPoolClient") is not True
+        or oauth.get("AllowedOAuthFlows") != ["code"]
+        or oauth.get("CallbackURLs") != [control.callback_url]
+        or (
+            control.endpoint_mode == CUSTOM_DOMAIN
+            and (
+                not isinstance(oauth_secret, str)
+                or not oauth_secret
+            )
+        )
+        or (
+            control.endpoint_mode == CLOUDFRONT
+            and oauth_secret is not None
+        )
+        or (
+            control.endpoint_mode == CLOUDFRONT
+            and oauth.get("LogoutURLs") != [control.logout_url]
+        )
+    ):
+        raise CanarySessionError(
+            "Cognito browser client configuration is not production-safe"
         )
     software_mfa = pool.get("SoftwareTokenMfaConfiguration")
     if (
@@ -1318,10 +1531,11 @@ def _validate_navigation_result(
     *,
     start_url: str,
     identity: IdentityOutputs,
+    control: ControlPlaneOutputs,
 ) -> None:
     _validate_navigation_prefix(
         result.navigation_urls,
-        control_host=identity.control_host,
+        control_host=control.host,
         hosted_ui_host=identity.hosted_ui_host,
     )
     hosts = tuple(
@@ -1329,35 +1543,61 @@ def _validate_navigation_result(
         for value in result.navigation_urls
     )
     if (
-        hosts[0] != identity.control_host
+        hosts[0] != control.host
         or identity.hosted_ui_host not in hosts
-        or hosts[-1] != identity.control_host
+        or hosts[-1] != control.host
     ):
         raise CanarySessionError(
-            "browser did not complete the ALB/Cognito redirect"
+            "browser did not complete the deployed Cognito redirect"
+        )
+    oauth_client_id = (
+        identity.alb_client_id
+        if control.endpoint_mode == CUSTOM_DOMAIN
+        else control.browser_client_id
+    )
+    if oauth_client_id is None:
+        raise CanarySessionError(
+            "deployed Cognito browser client is missing"
         )
     client_ids: list[str] = []
+    redirect_uris: list[str] = []
+    callback_count = 0
     for value in result.navigation_urls:
         parsed = _https_url(value, "browser navigation URL")
-        if parsed.hostname != identity.hosted_ui_host:
-            continue
         query = parse_qs(
             parsed.query,
             keep_blank_values=True,
             strict_parsing=False,
         )
-        client_ids.extend(query.get("client_id", []))
+        if parsed.hostname == identity.hosted_ui_host:
+            client_ids.extend(query.get("client_id", []))
+            redirect_uris.extend(query.get("redirect_uri", []))
+            continue
+        if (
+            parsed.hostname == control.host
+            and f"https://{control.host}{parsed.path}"
+            == control.callback_url
+            and len(query.get("code", [])) == 1
+            and bool(query["code"][0])
+        ):
+            callback_count += 1
     if (
         not client_ids
-        or any(value != identity.alb_client_id for value in client_ids)
+        or not redirect_uris
+        or any(value != oauth_client_id for value in client_ids)
+        or any(value != control.callback_url for value in redirect_uris)
     ):
         raise CanarySessionError(
-            "Cognito redirect did not use the deployed ALB client"
+            "Cognito redirect did not use the deployed browser client"
+        )
+    if callback_count != 1:
+        raise CanarySessionError(
+            "browser did not navigate through the exact Cognito callback"
         )
     final = _https_url(result.final_url, "final control-plane URL")
     expected = _https_url(start_url, "control-plane start URL")
     if (
-        final.hostname != identity.control_host
+        final.hostname != control.host
         or final.path != expected.path
         or final.query
         or not isinstance(result.final_status, int)
@@ -1390,11 +1630,13 @@ def _credential_values(
     *,
     start_url: str,
     identity: IdentityOutputs,
+    control: ControlPlaneOutputs,
 ) -> tuple[str, str]:
     _validate_navigation_result(
         result,
         start_url=start_url,
         identity=identity,
+        control=control,
     )
     if (
         not isinstance(result.cookies, tuple)
@@ -1416,16 +1658,38 @@ def _credential_values(
     csrf = by_name.get(CSRF_COOKIE_NAME)
     if csrf is None:
         raise CanarySessionError("Axon CSRF cookie is missing")
-    _cookie_domain(csrf, identity.control_host, "CSRF")
+    _cookie_domain(csrf, control.host, "CSRF")
     if (
         csrf.http_only is not False
         or _CSRF_TOKEN_PATTERN.fullmatch(csrf.value) is None
     ):
         raise CanarySessionError("Axon CSRF cookie is invalid")
 
-    candidates: list[
-        tuple[str, int | None, BrowserCookie]
-    ] = []
+    if control.endpoint_mode == CLOUDFRONT:
+        session = by_name.get(APPLICATION_SESSION_COOKIE_NAME)
+        has_alb_cookie = any(
+            re.fullmatch(rf"{re.escape(base)}(?:-[0-9]+)?", name)
+            is not None
+            for base in ALB_SESSION_COOKIE_BASES
+            for name in by_name
+        )
+        if session is None or has_alb_cookie:
+            raise CanarySessionError(
+                "application session cookie is missing or ambiguous"
+            )
+        _cookie_domain(session, control.host, "application session")
+        if session.http_only is not True:
+            raise CanarySessionError(
+                "application session cookie must be HttpOnly"
+            )
+        header = f"{session.name}={session.value}"
+        if len(header.encode("utf-8")) > _MAX_COOKIE_HEADER_BYTES:
+            raise CanarySessionError(
+                "application session cookie header is too large"
+            )
+        return header, csrf.value
+
+    candidates: list[tuple[str, int | None, BrowserCookie]] = []
     for base in ALB_SESSION_COOKIE_BASES:
         pattern = re.compile(rf"{re.escape(base)}(?:-([0-9]+))?")
         for name, cookie in by_name.items():
@@ -1477,7 +1741,7 @@ def _credential_values(
             )
         ]
     for cookie in ordered:
-        _cookie_domain(cookie, identity.control_host, "ALB session")
+        _cookie_domain(cookie, control.host, "ALB session")
         if cookie.http_only is not True:
             raise CanarySessionError(
                 "ALB session cookie must be HttpOnly"
@@ -2009,16 +2273,17 @@ def prepare_sessions(
         cross_tenant_cookie=cross_tenant_cookie_env,
         ungranted_project_cookie=ungranted_project_cookie_env,
     )
-    identity = _identity_outputs(
-        _stack_outputs(Path(identity_outputs), IDENTITY_STACK),
-        region=region,
-    )
     control = _control_plane_outputs(
         _stack_outputs(
             Path(control_plane_outputs),
             CONTROL_PLANE_STACK,
         ),
         region=region,
+    )
+    identity = _identity_outputs(
+        _stack_outputs(Path(identity_outputs), IDENTITY_STACK),
+        region=region,
+        control=control,
     )
     credential_path = _new_private_path(
         credentials_output,
@@ -2045,7 +2310,7 @@ def prepare_sessions(
         raise CanarySessionError(
             "cannot initialize canary-session AWS clients"
         ) from exc
-    client_secret = _client_configuration(cognito, identity)
+    client_secret = _client_configuration(cognito, identity, control)
     fixture_id = _random_material(random_bytes, 32).hex()
     timestamp = clock()
     if (
@@ -2067,7 +2332,7 @@ def prepare_sessions(
     _write_private_json(state_path, state)
 
     credentials: dict[str, str] = {}
-    start_url = f"https://{identity.control_host}{PROBE_PATH}"
+    start_url = f"{control.url}{PROBE_PATH}"
     try:
         for case in _cases(
             fixture_id,
@@ -2126,7 +2391,7 @@ def prepare_sessions(
                     seed,
                     timestamp=clock(),
                 ),
-                control_host=identity.control_host,
+                control_host=control.host,
                 hosted_ui_host=identity.hosted_ui_host,
                 timeout_seconds=browser_timeout_seconds,
             )
@@ -2134,6 +2399,7 @@ def prepare_sessions(
                 result,
                 start_url=start_url,
                 identity=identity,
+                control=control,
             )
             cookie_names = {
                 "member": output_names.member_cookie,
@@ -2214,7 +2480,7 @@ def cleanup_sessions(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Prepare short-lived managed-Cognito ALB sessions for "
+            "Prepare short-lived managed-Cognito browser sessions for "
             "AxonLLM control-plane canaries"
         ),
     )

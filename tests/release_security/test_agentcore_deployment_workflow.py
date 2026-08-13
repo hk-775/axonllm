@@ -191,6 +191,43 @@ def test_workflow_gates_deployment_before_signed_promotion() -> None:
     assert "production-validation-rollback-journal.json" in rollback_reconciliation["run"]
 
 
+def test_control_plane_validation_is_endpoint_mode_bound() -> None:
+    steps = _workflow()["jobs"]["deploy"]["steps"]
+    prepare = next(
+        step
+        for step in steps
+        if step.get("name")
+        == "Prepare fresh control-plane canary sessions"
+    )["run"]
+    validation = next(
+        step
+        for step in steps
+        if step.get("name")
+        == "Run production control-plane RBAC and load validation"
+    )["run"]
+
+    for body in (prepare, validation):
+        for binding in (
+            "EndpointMode",
+            "ControlPlaneUrl",
+            "ControlPlaneDomainName",
+            "ControlPlaneAuthMode",
+            "custom-domain",
+            "cloudfront",
+            "alb-cognito",
+            "application-oidc",
+            "alb-session-cookie",
+            "browser-session-cookie",
+        ):
+            assert binding in body
+    assert "setup_mode = control.get(" in validation
+    assert '"endpoint_mode",' in validation
+    assert 'deployed_control.get("ControlPlaneUrl")' in validation
+    assert '"--base-url",' in validation
+    assert "control_url," in validation
+    assert 'control_url = f"https://' not in validation
+
+
 def test_transition_journal_is_replay_bound_and_crash_recoverable() -> None:
     workflow = _workflow()
     steps = workflow["jobs"]["deploy"]["steps"]

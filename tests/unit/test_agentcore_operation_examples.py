@@ -26,6 +26,9 @@ LAUNCH_GATES_EXAMPLE = OPERATIONS / "agentcore_launch_gates.example.json"
 PRODUCTION_VALIDATION_EXAMPLE = (
     OPERATIONS / "production_validation.example.json"
 )
+CLOUDFRONT_PRODUCTION_VALIDATION_EXAMPLE = (
+    OPERATIONS / "production_validation.cloudfront.example.json"
+)
 MODELS_CONFIG = ROOT / "config" / "models.yaml"
 REVIEWED_AT_PLACEHOLDER = "REPLACE_PER_LAUNCH_WITH_REVIEWED_AT_RFC3339"
 EXPIRES_AT_PLACEHOLDER = "REPLACE_PER_LAUNCH_WITH_EXPIRES_AT_RFC3339"
@@ -225,8 +228,21 @@ def test_launch_gates_example_has_exact_replace_per_launch_bindings() -> None:
     } <= configured_providers
 
 
-def test_production_validation_example_uses_the_launch_project() -> None:
-    raw = _load(PRODUCTION_VALIDATION_EXAMPLE)
+@pytest.mark.parametrize(
+    ("path", "credential_type"),
+    [
+        (PRODUCTION_VALIDATION_EXAMPLE, "alb-session-cookie"),
+        (
+            CLOUDFRONT_PRODUCTION_VALIDATION_EXAMPLE,
+            "browser-session-cookie",
+        ),
+    ],
+)
+def test_production_validation_examples_use_the_launch_project(
+    path: Path,
+    credential_type: str,
+) -> None:
+    raw = _load(path)
 
     validation.parse_config(raw)
 
@@ -239,6 +255,9 @@ def test_production_validation_example_uses_the_launch_project() -> None:
         request["path"] == "/admin/projects/project-launch"
         for request in requests
     )
+    assert {
+        request["credentialType"] for request in requests
+    } == {credential_type}
     assert _load(CERTIFICATION_EXAMPLE)["tenantConfig"]["projectId"] == (
         "project-launch"
     )
@@ -253,6 +272,7 @@ def test_production_validation_example_uses_the_launch_project() -> None:
         CERTIFICATION_EXAMPLE,
         LAUNCH_GATES_EXAMPLE,
         PRODUCTION_VALIDATION_EXAMPLE,
+        CLOUDFRONT_PRODUCTION_VALIDATION_EXAMPLE,
     ],
 )
 def test_agentcore_operation_examples_contain_no_secret_values(path: Path) -> None:

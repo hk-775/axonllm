@@ -29,6 +29,12 @@ ENTRY_ID = re.compile(r"^[0-9a-f]{64}$")
 JOURNAL_ID = re.compile(r"^[0-9a-f]{32}$")
 MAC = re.compile(r"^[0-9a-f]{64}$")
 PROJECT_PATH = re.compile(r"^/admin/projects/[^/?#]{1,256}$")
+COOKIE_CREDENTIAL_TYPES = frozenset(
+    {
+        "alb-session-cookie",
+        "browser-session-cookie",
+    }
+)
 REVERSIBLE_FIELDS = frozenset(
     {
         "cache_enabled",
@@ -169,7 +175,7 @@ def _entry(value: Any) -> dict[str, Any]:
         or PROJECT_PATH.fullmatch(path) is None
         or not isinstance(credential_env, str)
         or ENVIRONMENT_NAME.fullmatch(credential_env) is None
-        or value["credentialType"] != "alb-session-cookie"
+        or value["credentialType"] not in COOKIE_CREDENTIAL_TYPES
         or not isinstance(csrf_env, str)
         or ENVIRONMENT_NAME.fullmatch(csrf_env) is None
         or credential_env == csrf_env
@@ -208,7 +214,7 @@ def _entry(value: Any) -> dict[str, Any]:
         "endpoint": endpoint,
         "path": path,
         "credentialEnv": credential_env,
-        "credentialType": "alb-session-cookie",
+        "credentialType": value["credentialType"],
         "csrfTokenEnv": csrf_env,
         "timeoutSeconds": float(timeout_seconds),
         "priorRevision": prior_revision,

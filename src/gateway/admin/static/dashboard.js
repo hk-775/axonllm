@@ -23,6 +23,7 @@ const getCsrfToken = () => {
   }
   return '';
 };
+let browserSessionMode = Boolean(getCsrfToken());
 const promptForKey = () => {
   const k = window.prompt('This gateway requires an API key (ENFORCE mode).\n' + 'Paste an admin API key (create one with: axon issue-key):');
   if (k) setApiKey(k.trim());
@@ -30,13 +31,14 @@ const promptForKey = () => {
 };
 const authHeaders = extra => {
   const h = Object.assign({}, extra || {});
-  const key = getApiKey();
+  const key = browserSessionMode ? '' : getApiKey();
   if (key) h['Authorization'] = 'Bearer ' + key;
   return h;
 };
 
 // Turn any failed response into a readable Error (status + server message),
-// instead of rejecting with an opaque object. On 401, prompt for a key and retry once.
+// instead of rejecting with an opaque object. Application browser sessions
+// return a login URL; custom-domain/API-key deployments retain the key prompt.
 async function request(method, url, body, _retried) {
   const headers = authHeaders(body != null ? {
     'Content-Type': 'application/json'
@@ -57,14 +59,22 @@ async function request(method, url, body, _retried) {
   } catch (netErr) {
     throw new Error('Network error: ' + (netErr && netErr.message ? netErr.message : 'request failed'));
   }
-  if (r.status === 401 && !_retried) {
-    if (promptForKey()) return request(method, url, body, true);
-    throw new Error('Authentication required (401). Provide an admin API key.');
-  }
   let data = null;
   try {
     data = await r.json();
   } catch (e) {/* non-JSON body */}
+  if (r.status === 401 && !_retried) {
+    const loginUrl = data && data.error && data.error.login_url;
+    if (typeof loginUrl === 'string' && loginUrl.startsWith('/auth/login')) {
+      browserSessionMode = true;
+      setApiKey('');
+      window.location.assign(loginUrl);
+      throw new Error('Authentication required (401). Redirecting to sign in.');
+    }
+    browserSessionMode = false;
+    if (promptForKey()) return request(method, url, body, true);
+    throw new Error('Authentication required (401). Provide an admin API key.');
+  }
   if (r.ok) return data;
   const msg = data && data.error && (data.error.message || data.error.type) || data && data.message || 'HTTP ' + r.status;
   const err = new Error(msg);
@@ -5748,6 +5758,38 @@ function App() {
   const [editProjectId, setEditProjectId] = useState(null);
   const [selectedUser, setSelectedUser] = useState(null);
   const [tourActive, setTourActive] = useState(false);
+  const [browserAuth, setBrowserAuth] = useState(null);
+  useEffect(() => {
+    let active = true;
+    fetch('/auth/config', {
+      method: 'GET',
+      credentials: 'same-origin',
+      cache: 'no-store',
+      headers: {
+        'Accept': 'application/json'
+      }
+    }).then(response => response.ok ? response.json() : null).then(payload => {
+      if (active && payload && payload.browser_auth && payload.browser_auth.enabled) {
+        browserSessionMode = true;
+        setApiKey('');
+        setBrowserAuth(payload.browser_auth);
+      }
+    }).catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, []);
+  const handleSignOut = useCallback(async () => {
+    if (!browserAuth) return;
+    try {
+      const payload = await request('POST', browserAuth.logout_url);
+      if (payload && typeof payload.logout_url === 'string') {
+        window.location.assign(payload.logout_url);
+      }
+    } catch (error) {
+      window.alert(error && error.message ? error.message : 'Sign out failed.');
+    }
+  }, [browserAuth]);
   const navigate = (v, opts = {}) => {
     setView(v);
     setSelectedProject(opts.projectId || null);
@@ -6094,7 +6136,11 @@ function App() {
     className: "dot"
   }), "AxonLLM \u2014 The neural control plane for enterprise LLMs")), /*#__PURE__*/React.createElement("div", {
     className: "topbar-right"
-  }, !tourActive && /*#__PURE__*/React.createElement("button", {
+  }, browserAuth && /*#__PURE__*/React.createElement("button", {
+    className: "topbar-pill",
+    onClick: handleSignOut,
+    title: "Sign out"
+  }, "Sign out"), !tourActive && /*#__PURE__*/React.createElement("button", {
     className: "topbar-pill",
     onClick: () => setTourActive(true),
     title: "A narrated walkthrough of the dashboard \u2014 ten scenes, about six minutes"

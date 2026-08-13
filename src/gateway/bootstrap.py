@@ -36,6 +36,13 @@ from src.gateway.admin.routes import (
 from src.gateway.admin.webhook_routes import WebhookAPI, create_webhook_routes
 from src.gateway.agent import GatewayAgent
 from src.gateway.auth.api_key_service import APIKeyService
+from src.gateway.auth.browser_session import (
+    BrowserAuthAPI,
+    BrowserSessionConfig,
+    BrowserSessionService,
+    DynamoBrowserSessionStore,
+    create_browser_auth_routes,
+)
 from src.gateway.auth.cedar_policy import CedarPolicyService
 from src.gateway.auth.dynamo_principal_repository import DynamoPrincipalRepository
 from src.gateway.auth.oidc_service import OIDCConfig, OIDCService
@@ -158,6 +165,7 @@ class GatewayComponents:
     catalog: dict
     api_key_service: APIKeyService | None = None
     oidc_service: OIDCService | None = None
+    browser_session_service: BrowserSessionService | None = None
     principal_resolver: PrincipalResolver | None = None
     project_resolver: ProjectResolver | None = None
     scim_store: ScimStore | None = None
@@ -257,6 +265,34 @@ def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComp
         claim_mappings=oidc_claim_mappings,
     )
     oidc_service = OIDCService(config=oidc_config)
+    browser_session_service = None
+    if app_config.browser_auth_enabled:
+        if not persistence.enabled:
+            raise RuntimeError(
+                "CloudFront browser authentication requires enabled "
+                "DynamoDB persistence"
+            )
+        browser_session_service = BrowserSessionService(
+            config=BrowserSessionConfig(
+                hosted_ui_url=app_config.cognito_hosted_ui_url,
+                client_id=app_config.browser_auth_client_id,
+                callback_url=app_config.browser_auth_callback_url,
+                signed_out_url=app_config.browser_auth_signed_out_url,
+                authorization_endpoint=(
+                    app_config.browser_auth_authorization_endpoint
+                ),
+                token_endpoint=app_config.browser_auth_token_endpoint,
+                logout_endpoint=app_config.browser_auth_logout_endpoint,
+                session_max_seconds=(
+                    app_config.browser_session_max_seconds
+                ),
+                flow_ttl_seconds=(
+                    app_config.browser_auth_flow_ttl_seconds
+                ),
+            ),
+            store=DynamoBrowserSessionStore(persistence),
+            oidc_service=oidc_service,
+        )
     principal_resolver = None
     project_resolver = None
     if app_config.canonical_identity_required:
@@ -296,6 +332,8 @@ def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComp
             alb_signer_arn=app_config.alb_signer_arn,
             alb_client_id=app_config.alb_client_id,
             alb_issuer=app_config.alb_issuer,
+            endpoint_mode=app_config.control_plane_endpoint_mode,
+            browser_auth_client_id=app_config.browser_auth_client_id,
         )
     )
 
@@ -694,6 +732,7 @@ def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComp
         catalog=catalog,
         api_key_service=api_key_service,
         oidc_service=oidc_service,
+        browser_session_service=browser_session_service,
         principal_resolver=principal_resolver,
         project_resolver=project_resolver,
         scim_store=scim_store,
@@ -845,6 +884,13 @@ def build_starlette_app(app_config: AppConfig | None = None) -> Starlette:
         ),
     )
     saml_api = SamlAPI(service=comp.saml_service)
+    browser_auth_routes = (
+        create_browser_auth_routes(
+            BrowserAuthAPI(comp.browser_session_service)
+        )
+        if comp.browser_session_service is not None
+        else []
+    )
     datasource_routes: list[Route] = []
     query_routes: list[Route] = []
     if app_config.athena_query_enabled:
@@ -926,6 +972,7 @@ def build_starlette_app(app_config: AppConfig | None = None) -> Starlette:
         + create_quota_routes(quota_api)
         + create_scim_routes(scim_api)
         + create_saml_routes(saml_api)
+        + browser_auth_routes
         + datasource_routes
     )
     data_routes = (
@@ -1017,10 +1064,12 @@ def build_starlette_app(app_config: AppConfig | None = None) -> Starlette:
         config_sync=config_sync,
         principal_resolver=comp.principal_resolver,
         require_canonical_principal=app_config.canonical_identity_required,
+        browser_session_service=comp.browser_session_service,
     )
 
-    # Outermost: bounds admin bodies before authentication does work, protects
-    # ALB cookie sessions from CSRF, and decorates even auth-generated errors.
+    # Outermost: bounds request bodies before authentication does work,
+    # protects browser-cookie sessions from CSRF, and decorates even
+    # auth-generated errors.
     app.add_middleware(
         ControlPlaneHTTPMiddleware,
         production=app_config.deployment_profile == "production",

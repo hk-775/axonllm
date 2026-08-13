@@ -75,12 +75,14 @@ stacks are absent, so there is no deployed AxonLLM AgentCore target on which to
 run release canaries, identity validation, datasource/query validation,
 recovery validation, or rollback checks.
 
-The account also lacks the production DNS zone, regional control-plane ACM
-certificate, approved control-plane ingress and HTTPS egress prefix lists,
-AgentCore HTTPS prefix list, dedicated OIDC configuration, and confirmed
-alarm/event subscribers. The protected GitHub `production` environment lacks
-both target data-key variables because the hardened stacks have not produced
-those keys.
+The account also lacks the selected control-plane endpoint prerequisites,
+control-plane HTTPS egress prefix list, AgentCore HTTPS prefix list, dedicated
+OIDC configuration, and confirmed alarm/event subscribers. A custom-domain
+control plane requires the production DNS zone, regional ACM certificate, and
+approved ingress prefix list. The CloudFront alternative removes those three
+requirements but requires reviewed public IPv4 viewer CIDRs. The protected
+GitHub `production` environment lacks both target data-key variables because
+the hardened stacks have not produced those keys.
 Until those prerequisites are supplied and a reviewed deployment is complete,
 restore/cutover, authenticated RBAC, load, security-event, and multi-replica
 canaries remain blocked.
@@ -271,9 +273,12 @@ exact account/region ARN before deployment, then verify it against the
 `RuntimeExecutionRoleArn` stack output printed by the first-adopter deployer.
 
 Managed Cognito also deploys `AxonLLMControlPlaneStack`, a verified AMD64 image
-on private Fargate tasks behind a Cognito-authenticated HTTPS ALB and stable
-Route 53 alias. It uses AgentCore's verified `StateTableName` output and imports
-the data key, outbox, SNS topic, and CloudWatch event log.
+on private Fargate tasks. The default custom-domain mode uses a
+Cognito-authenticated public TLS ALB and stable Route 53 alias. CloudFront mode
+uses an AWS-generated hostname and certificate, IPv4 WAF allowlist, VPC origin,
+internal ALB, and application-managed Cognito PKCE sessions. Both use
+AgentCore's verified `StateTableName` output and import the data key, outbox,
+SNS topic, and CloudWatch event log.
 `AXON_CONTROL_PLANE_ONLY=true` suppresses chat, model, OpenAI-compatible, and
 query execution routes. The task receives binding metadata for datasource
 validation but has no Athena or STS authority.
@@ -559,7 +564,7 @@ AgentCore has two production identity choices and no unauthenticated mode:
 
 | Identity mode | Operator responsibility | Automated work |
 |---|---|---|
-| `managed-cognito` | Choose a hosted-UI prefix and callback, stable control-plane domain, regional ACM certificate, Route 53 public zone, verified ARM64 AgentCore and AMD64 control-plane digests, AgentCore/control-plane egress prefix lists, control-plane ingress prefix list, tenant/project/admin, Bedrock ARNs, at least one exact Athena role and certification datasource/workgroup, optional complete SCIM secret ARN, protected SAML landing path, and any tenant-specific Cognito SAML IdP configuration | Deploy retained/deletion-protected Cognito, invite the user, deploy AgentCore, bootstrap canonical authority, and deploy the shared-state web control plane |
+| `managed-cognito` | Choose a hosted-UI prefix and AgentCore callback, verified ARM64 AgentCore and AMD64 control-plane digests, AgentCore/control-plane egress prefix lists, tenant/project/admin, Bedrock ARNs, at least one exact Athena role and certification datasource/workgroup, optional complete SCIM secret ARN, protected SAML landing path, tenant-specific Cognito SAML configuration, and one control-plane endpoint contract: custom domain/ACM/Route 53/ingress prefix list or generated CloudFront plus reviewed viewer CIDRs | Deploy retained/deletion-protected Cognito, invite the user, deploy AgentCore, bootstrap canonical authority, and deploy the shared-state web control plane |
 | `external-oidc` | Provision the IdP user/client and supply exact issuer, discovery URL, client, audience, immutable subject, tenant/project claim names, runtime egress, Bedrock ARNs, and at least one exact Athena role plus certification datasource/workgroup | Deploy AgentCore and bootstrap canonical authority; expose read-only viewer and CAS administrator project-config actions, but no Cognito-authenticated web control plane |
 
 Generate the strict schema-v2 setup file with `uv run axon setup agentcore`,
@@ -582,6 +587,12 @@ verifies every canonical policy document and rejects missing, extra, or inline
 policies on the CDK execution role. Do not bootstrap AgentCore with
 `AdministratorAccess`, and do not give the one-time bootstrap principal to the
 routine deployment workflow.
+
+The repository policy includes bounded CloudFront distribution/function/VPC
+origin and WAFv2 lifecycle actions plus condition-scoped CloudFront
+service-linked-role creation. Accounts bootstrapped with an older policy must
+run the reviewed bootstrap update before selecting `cloudfront`; the normal
+deployer rejects the stale policy rather than broadening itself.
 
 Before changing AWS resources, the wrapper resolves every supplied managed
 prefix list and requires a stable, nonempty, customer-owned IPv4 list in the
@@ -610,10 +621,22 @@ secret. The adopting application must use S256 PKCE and submit the Cognito
 `custom:project_id`. The custom attributes select resources but grant no role;
 canonical DynamoDB principals remain authoritative.
 
-The public AgentCore client is secretless; the separate ALB client used by the
-web control plane is confidential. The control-plane DNS name must remain
-stable, the ACM certificate must be in the deployment region, and the supplied
-public hosted zone must contain the name.
+The public AgentCore client is secretless. The endpoint contract is:
+
+| `control_plane.endpoint_mode` | Ingress and identity contract |
+|---|---|
+| `custom-domain` (default) | Stable lowercase DNS name, regional ACM certificate, containing public Route 53 zone, ingress prefix list, confidential ALB Cognito client, and internet-facing TLS ALB |
+| `cloudfront` | `us-east-1`, one or more public canonical IPv4 viewer networks no broader than `/24`, generated CloudFront hostname/certificate, WAF default deny and rate limit, IPv6 disabled, VPC origin, internal ALB, and a secretless Cognito browser client |
+
+Both modes require the control-plane HTTPS egress prefix list. CloudFront mode
+forbids the four custom-domain fields. An existing retained stack cannot change
+endpoint mode in place; legacy stacks without the parameter are
+`custom-domain`. Use a new reviewed namespace/stack for an architecture
+migration.
+
+The AWS-managed `cloudfront.net` certificate does not permit a custom minimum
+viewer TLS policy. Select `custom-domain` when compliance requires enforcing
+TLS 1.2 or newer at the viewer boundary.
 
 When configured, `control_plane.scim_tenants_secret_arn` injects the complete
 `AXON_SCIM_TENANTS` value. Only the execution role and scoped private Secrets
@@ -622,22 +645,28 @@ The stack sets `AXON_SAML_FEDERATION_MODE=managed-cognito` and maps the validate
 `control_plane.saml_login_path` to `AXON_SAML_LOGIN_PATH`, defaulting to
 `/admin/dashboard`.
 
-Only `/scim/*` bypasses ALB Cognito. Every `/saml/*` path is protected by the
-default Cognito action. Cognito is the SAML service provider and owns assertion
-signature, issuer, audience, destination, recipient, time, request-correlation,
-replay, and RelayState validation. The ALB owns the browser session. AxonLLM
-validates only the resulting ALB-signed OIDC identity, then resolves the exact
-Cognito issuer and `sub` through canonical DynamoDB authority. `/saml/acs` and
+In custom-domain mode only `/scim/*` bypasses ALB Cognito and the ALB owns the
+browser session. In CloudFront mode every request traverses CloudFront/WAF;
+AxonLLM performs authorization code with S256 PKCE, binds one-time state to the
+initiating browser with a short-lived host-only cookie, validates the Cognito
+ID token and nonce, and stores only an opaque host-only browser session cookie
+backed by a revisioned, expiring DynamoDB row. Unsafe cookie requests require
+the double-submit CSRF token. Cognito remains the SAML service provider and owns
+assertion signature, issuer, audience, destination, recipient, time,
+request-correlation, replay, and RelayState validation. `/saml/acs` and
 `/saml/metadata` return `410` and never accept direct-SP traffic.
 
 The first-adopter deployer does not ingest tenant-specific IdP metadata. Before
-launch, configure the SAML IdP on the retained Cognito pool, enable it on the
-confidential ALB client and any public client used by federated AgentCore users,
-and configure the enterprise IdP with Cognito's SP entity ID and SAML response
-endpoint. Provision every canonical user with the exact Cognito issuer and
-Cognito `sub`; if SCIM creates the user, those values must be its tenant issuer
-and `externalId`. SAML claims, groups, roles, tenant values, and project values
-never grant authority.
+launch, configure the SAML IdP on the retained Cognito pool and enable it on the
+confidential ALB client for custom-domain or the generated browser client for
+CloudFront. Enable it on the public AgentCore client when federated users invoke
+AgentCore. Configure the enterprise IdP with Cognito's SP entity ID and SAML
+response endpoint. Provision every canonical user with the exact Cognito issuer
+and Cognito `sub`; if SCIM creates the user, those values must be its tenant
+issuer and `externalId`. SAML claims, groups, roles, tenant values, and project
+values never grant authority. The production canary gate requires the
+Cognito-native provider and accepts additional browser-client providers only
+when Cognito reports each one as configured SAML.
 
 The complete commands, external-IdP example, manual CDK fallback, and invitation
 behavior are in the
@@ -884,14 +913,18 @@ Before shifting traffic:
    certification is mandatory, not an optional launch gate.
 8. For managed Cognito, verify S256 PKCE, required TOTP enrollment, the exact
    ID-token issuer/audience/tenant/project claims, and access-token rejection.
-9. Verify the shared control-plane hostname, Cognito ALB login, datasource RBAC,
-   shared state, suppressed execution routes, and lack of Athena/STS task
-   authority. For SAML, exercise signed and invalid assertions at Cognito,
+9. Verify the shared control-plane canonical URL, datasource RBAC, shared state,
+   suppressed execution routes, and lack of Athena/STS task authority. For
+   custom-domain, verify DNS/TLS, ALB Cognito, and ingress restrictions. For
+   CloudFront, verify WAF allow/deny and rate-limit behavior, IPv6 disabled,
+   cache disabled, VPC-origin/internal-ALB isolation, stripped viewer identity
+   headers, cross-replica opaque-session refresh, CSRF denial, and POST logout.
+   For SAML, exercise signed and invalid assertions at Cognito,
    issuer/audience/destination/recipient/time failures, request correlation,
-   replay rejection, RelayState handling, certificate rollover, exact Cognito
-   issuer/`sub` canonical lookup, the configured local landing path, direct ACS
-   and metadata `410` responses, and the absence of `/saml/*` from the ALB bypass
-   rule. Skip this only for external OIDC, which does not deploy it.
+   replay rejection, safe return handling, certificate rollover, exact Cognito
+   issuer/`sub` canonical lookup, the configured local landing path, and direct
+   ACS and metadata `410` responses. Skip this only for external OIDC, which
+   does not deploy the control plane.
 10. Verify alarms, a confirmed SNS subscription, logs, tenant audit-chain
     verification, and rollback.
 11. Verify the independent transition watchdog can assume its protected role
@@ -993,8 +1026,17 @@ python scripts/operations/run_production_validation.py \
   --output production-validation.json
 ```
 
-   Customize the example with real signed tenant/project claim variants and
-   credential environment names. It requires an authenticated read,
+   `production_validation.example.json` is the custom-domain/ALB-cookie
+   contract. For `EndpointMode=cloudfront`, use the checked
+   `scripts/operations/production_validation.cloudfront.example.json`; every
+   request in that file requires `browser-session-cookie`. The session
+   preparation command resolves `EndpointMode`, drives the appropriate Cognito
+   browser flow with Playwright, and exports only owner-readable cookie and CSRF
+   environment files. The workflow rejects a validation config whose cookie
+   type does not match the deployed endpoint.
+
+   Customize the selected example with real tenant/project fixture identities
+   and credential environment names. It requires an authenticated read,
    viewer-write denial, cross-tenant-claim denial, and ungranted-project-claim
    denial before running a bodyless GET/HEAD load. Those ingress-boundary claim
    mismatches return 403; the report's separate source-policy contract proves

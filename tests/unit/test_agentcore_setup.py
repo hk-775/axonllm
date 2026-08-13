@@ -110,6 +110,20 @@ def _external() -> dict:
     return value
 
 
+def _cloudfront() -> dict:
+    value = _base()
+    value["control_plane"] = {
+        "endpoint_mode": "cloudfront",
+        "verified_image_uri": _CONTROL_IMAGE,
+        "approved_https_prefix_list_id": "pl-456def",
+        "allowed_viewer_cidrs": [
+            "1.1.1.0/24",
+            "8.8.8.8/32",
+        ],
+    }
+    return value
+
+
 def _athena_roles_for_bindings_length(target_length: int) -> list[str]:
     roles = [f"arn:aws:iam::{123456789012 + index}:role/r{index}" for index in range(4)]
 
@@ -152,6 +166,81 @@ def test_managed_setup_round_trips_without_a_secret_or_subject(tmp_path):
     assert "subject" not in payload["admin"]
     assert "secret" not in output.read_text(encoding="utf-8").casefold()
     assert output.stat().st_mode & 0o777 == 0o600
+
+
+def test_cloudfront_setup_round_trips_without_dns_or_certificate(tmp_path):
+    config = AgentCoreSetupConfig.from_mapping(_cloudfront())
+    output = write_agentcore_setup(config, tmp_path / "agentcore.json")
+    payload = json.loads(output.read_text(encoding="utf-8"))
+
+    assert load_agentcore_setup(output) == config
+    assert config.control_plane is not None
+    assert config.control_plane.endpoint_mode == "cloudfront"
+    assert config.control_plane.allowed_viewer_cidrs == (
+        "1.1.1.0/24",
+        "8.8.8.8/32",
+    )
+    assert payload["control_plane"]["endpoint_mode"] == "cloudfront"
+    assert "domain_name" not in payload["control_plane"]
+    assert "certificate_arn" not in payload["control_plane"]
+    assert "public_hosted_zone_id" not in payload["control_plane"]
+    assert "approved_ingress_prefix_list_id" not in (
+        payload["control_plane"]
+    )
+
+
+@pytest.mark.parametrize(
+    ("cidrs", "message"),
+    [
+        ([], "must be a non-empty array"),
+        (["10.0.0.0/24"], "must be a public IPv4 network"),
+        (["224.0.0.0/24"], "must be a public IPv4 network"),
+        (["1.1.0.0/16"], "no broader than /24"),
+        (["1.1.1.1/24"], "must be a canonical IP network"),
+        (["2606:4700:4700::1111/128"], "must be an IPv4 network"),
+        (
+            ["1.1.1.0/24", "1.1.1.1/32"],
+            "must not contain overlapping CIDRs",
+        ),
+    ],
+)
+def test_cloudfront_setup_rejects_unsafe_viewer_cidrs(
+    cidrs,
+    message,
+):
+    value = _cloudfront()
+    value["control_plane"]["allowed_viewer_cidrs"] = cidrs
+
+    with pytest.raises(AgentCoreSetupError, match=message):
+        AgentCoreSetupConfig.from_mapping(value)
+
+
+def test_cloudfront_setup_rejects_custom_domain_inputs_and_other_regions():
+    value = _cloudfront()
+    value["control_plane"]["domain_name"] = "axon.example.com"
+    with pytest.raises(
+        AgentCoreSetupError,
+        match="forbids custom-domain fields: domain_name",
+    ):
+        AgentCoreSetupConfig.from_mapping(value)
+
+    value = _cloudfront()
+    value["aws_region"] = "us-west-2"
+    value["runtime"]["verified_image_uri"] = _IMAGE.replace(
+        "us-east-1",
+        "us-west-2",
+    )
+    value["control_plane"]["verified_image_uri"] = (
+        _CONTROL_IMAGE.replace("us-east-1", "us-west-2")
+    )
+    value["runtime"]["bedrock_invoke_resource_arns"] = [
+        _BEDROCK_ARN.replace("us-east-1", "us-west-2")
+    ]
+    with pytest.raises(
+        AgentCoreSetupError,
+        match="currently requires aws_region 'us-east-1'",
+    ):
+        AgentCoreSetupConfig.from_mapping(value)
 
 
 def test_managed_setup_validates_optional_ses_sender_domain():
@@ -730,6 +819,10 @@ def test_control_plane_deploy_command_is_bound_to_managed_identity(
     assert ("AxonLLMControlPlaneStack:PrimaryStateTableName=axonllm-agentcore-state") in command
     assert (f"AxonLLMControlPlaneStack:ControlPlaneVerifiedImageUri={_CONTROL_IMAGE}") in command
     assert (f"AxonLLMControlPlaneStack:CertificateArn={_CERTIFICATE_ARN}") in command
+    assert (
+        "AxonLLMControlPlaneStack:ControlPlaneDomainName="
+        "axon.example.com"
+    ) in command
     assert "client_secret" not in joined.casefold()
 
     with pytest.raises(
@@ -742,6 +835,39 @@ def test_control_plane_deploy_command_is_bound_to_managed_identity(
             outputs_file=tmp_path / "external-control.json",
             assume_yes=True,
         )
+
+
+def test_cloudfront_deploy_commands_select_generated_endpoint(tmp_path):
+    config = AgentCoreSetupConfig.from_mapping(_cloudfront())
+    identity_command = identity_deploy_command(
+        config,
+        outputs_file=tmp_path / "identity.json",
+        assume_yes=True,
+    )
+    control_command = control_plane_deploy_command(
+        config,
+        primary_state_table_name="axonllm-agentcore-state",
+        outputs_file=tmp_path / "control.json",
+        assume_yes=True,
+    )
+    identity_arguments = "\n".join(identity_command)
+    control_arguments = "\n".join(control_command)
+
+    assert (
+        "AxonLLMIdentityStack:EndpointMode=cloudfront"
+    ) in identity_command
+    assert "ControlPlaneDomainName=" not in identity_arguments
+    assert (
+        "AxonLLMControlPlaneStack:EndpointMode=cloudfront"
+    ) in control_command
+    assert (
+        "AxonLLMControlPlaneStack:AllowedViewerCidrs="
+        "1.1.1.0/24,8.8.8.8/32"
+    ) in control_command
+    assert "CertificateArn=" not in control_arguments
+    assert "PublicHostedZoneId=" not in control_arguments
+    assert "ApprovedIngressPrefixListId=" not in control_arguments
+    assert "ControlPlaneDomainName=" not in control_arguments
 
 
 def test_control_plane_deploy_command_passes_recovery_and_identity_inputs(
@@ -1108,6 +1234,19 @@ def test_bootstrap_policy_uses_valid_bounded_lifecycle_and_pass_role_actions():
     assert "s3:PutEncryptionConfiguration" in global_actions
     assert "s3:PutBucketEncryption" not in global_actions
     assert {
+        "cloudfront:CreateDistribution",
+        "cloudfront:CreateFunction",
+        "cloudfront:CreateVpcOrigin",
+        "cloudfront:DeleteDistribution",
+        "cloudfront:DeleteFunction",
+        "cloudfront:DeleteVpcOrigin",
+        "cloudfront:GetDistribution",
+        "cloudfront:GetDistributionConfig",
+        "cloudfront:GetVpcOrigin",
+        "cloudfront:PublishFunction",
+        "cloudfront:UpdateDistribution",
+        "cloudfront:UpdateFunction",
+        "cloudfront:UpdateVpcOrigin",
         "s3:GetBucketOwnershipControls",
         "s3:GetBucketPolicyStatus",
         "s3:GetBucketPublicAccessBlock",
@@ -1115,6 +1254,19 @@ def test_bootstrap_policy_uses_valid_bounded_lifecycle_and_pass_role_actions():
         "s3:GetLifecycleConfiguration",
     } <= global_actions
     assert not any(action in global_actions for action in {"s3:GetObject", "s3:GetObjectVersion"})
+    regional_actions = set(
+        statements["RegionalAxonLLMInfrastructure"]["Action"]
+    )
+    assert {
+        "wafv2:CreateIPSet",
+        "wafv2:CreateWebACL",
+        "wafv2:DeleteIPSet",
+        "wafv2:DeleteWebACL",
+        "wafv2:GetIPSet",
+        "wafv2:GetWebACL",
+        "wafv2:UpdateIPSet",
+        "wafv2:UpdateWebACL",
+    } <= regional_actions
     assert statements["CreateBoundedAxonLLMServiceRoles"]["Action"] == ("iam:CreateRole")
     create_conditions = statements["CreateBoundedAxonLLMServiceRoles"]["Condition"]["StringEquals"]
     assert create_conditions == {
@@ -1165,6 +1317,7 @@ def test_bootstrap_policy_uses_valid_bounded_lifecycle_and_pass_role_actions():
     }
     assert statements["CreateRequiredServiceLinkedRoles"]["Condition"]["StringEquals"]["iam:AWSServiceName"] == [
         "bedrock-agentcore.amazonaws.com",
+        "cloudfront.amazonaws.com",
         "ecs.amazonaws.com",
         "ecs.application-autoscaling.amazonaws.com",
         "email.cognito-idp.amazonaws.com",
@@ -1199,6 +1352,17 @@ def test_bootstrap_execution_policy_parts_fit_iam_limit_and_preserve_actions(
             )
         )
         <= bootstrap_policy.IAM_MANAGED_POLICY_SIZE_LIMIT
+        for part in parts
+    )
+    assert all(
+        len(
+            json.dumps(
+                part,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+        )
+        <= bootstrap_policy._EXECUTION_POLICY_TARGET_SIZE
         for part in parts
     )
     original_actions = {
@@ -2027,8 +2191,13 @@ def _control_outputs(
     return {
         "AgentCoreStackName": deployment.AGENTCORE_STACK,
         "ClusterName": "axonllm-control",
+        "ControlPlaneAuthMode": "alb-cognito",
+        "ControlPlaneDomainName": "axon.example.com",
         "ControlPlaneImageUri": image,
+        "ControlPlaneUrl": "https://axon.example.com",
         "DeploymentTransitionId": _DEPLOYMENT_TRANSITION_ID,
+        "EndpointMode": "custom-domain",
+        "LoadBalancerScheme": "internet-facing",
         "PrimaryStateTableName": runtime_outputs["StateTableName"],
         "QueryPlaneEnabled": "true",
         "RecoveryApprovalId": runtime_outputs.get(
@@ -2043,6 +2212,100 @@ def _control_outputs(
             "arn:aws:elasticloadbalancing:us-east-1:123456789012:targetgroup/axonllm-control/0123456789abcdef"
         ),
     }
+
+
+def _cloudfront_control_outputs(
+    runtime_outputs: dict[str, str],
+) -> dict[str, str]:
+    domain_name = "d111111abcdef8.cloudfront.net"
+    return {
+        **_control_outputs(runtime_outputs),
+        "BrowserClientId": "browser-client-id",
+        "ControlPlaneAuthMode": "application-oidc",
+        "ControlPlaneDomainName": domain_name,
+        "ControlPlaneUrl": f"https://{domain_name}",
+        "DistributionDomainName": domain_name,
+        "DistributionId": "E1234567890ABC",
+        "EndpointMode": "cloudfront",
+        "LoadBalancerScheme": "internal",
+        "VpcOriginId": "vo_1234567890",
+        "WebAclArn": (
+            "arn:aws:wafv2:us-east-1:123456789012:"
+            "global/webacl/axonllm/11111111-2222-3333-4444-555555555555"
+        ),
+    }
+
+
+def test_control_plane_output_validation_locks_endpoint_architecture():
+    config = _managed_transition_config()
+    runtime_outputs = _promoted_runtime_outputs(config)
+    custom_outputs = _control_outputs(runtime_outputs)
+    legacy_outputs = {
+        name: value
+        for name, value in custom_outputs.items()
+        if name
+        not in {
+            "ControlPlaneAuthMode",
+            "ControlPlaneDomainName",
+            "ControlPlaneUrl",
+            "EndpointMode",
+            "LoadBalancerScheme",
+        }
+    }
+
+    deployment._validate_control_plane_outputs(
+        legacy_outputs,
+        runtime_outputs=runtime_outputs,
+        expected_image=_CONTROL_IMAGE,
+        expected_endpoint_mode="custom-domain",
+    )
+    with pytest.raises(
+        AgentCoreDeploymentError,
+        match="predate the requested endpoint architecture",
+    ):
+        deployment._validate_control_plane_outputs(
+            legacy_outputs,
+            runtime_outputs=runtime_outputs,
+            expected_image=_CONTROL_IMAGE,
+            expected_endpoint_mode="cloudfront",
+        )
+
+    cloudfront_outputs = _cloudfront_control_outputs(runtime_outputs)
+    deployment._validate_control_plane_outputs(
+        cloudfront_outputs,
+        runtime_outputs=runtime_outputs,
+        expected_image=_CONTROL_IMAGE,
+        expected_endpoint_mode="cloudfront",
+    )
+    cloudfront_outputs.pop("WebAclArn")
+    with pytest.raises(
+        AgentCoreDeploymentError,
+        match="WebAclArn is missing or invalid",
+    ):
+        deployment._validate_control_plane_outputs(
+            cloudfront_outputs,
+            runtime_outputs=runtime_outputs,
+            expected_image=_CONTROL_IMAGE,
+            expected_endpoint_mode="cloudfront",
+        )
+
+
+def test_retained_stack_endpoint_mode_defaults_legacy_to_custom_domain():
+    legacy_stack = {"Parameters": []}
+    deployment._validate_stack_endpoint_mode(
+        legacy_stack,
+        expected_endpoint_mode="custom-domain",
+        stack_name=deployment.CONTROL_PLANE_STACK,
+    )
+    with pytest.raises(
+        AgentCoreDeploymentError,
+        match="cannot be changed in place",
+    ):
+        deployment._validate_stack_endpoint_mode(
+            legacy_stack,
+            expected_endpoint_mode="cloudfront",
+            stack_name=deployment.CONTROL_PLANE_STACK,
+        )
 
 
 def _control_stack(

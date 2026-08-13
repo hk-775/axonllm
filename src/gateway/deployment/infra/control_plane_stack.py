@@ -16,12 +16,12 @@ from aws_cdk import (
     Tags,
     Token,
     custom_resources as cr,
-    aws_certificatemanager as acm,
+    aws_cloudfront as cloudfront,
+    aws_cloudfront_origins as origins,
     aws_cognito as cognito,
     aws_ec2 as ec2,
     aws_ecs as ecs,
     aws_elasticloadbalancingv2 as elbv2,
-    aws_elasticloadbalancingv2_actions as elbv2_actions,
     aws_iam as iam,
     aws_kms as kms,
     aws_lambda as lambda_,
@@ -31,6 +31,7 @@ from aws_cdk import (
     aws_secretsmanager as secretsmanager,
     aws_sns as sns,
     aws_sqs as sqs,
+    aws_wafv2 as wafv2,
 )
 from constructs import Construct
 
@@ -433,6 +434,33 @@ class AxonLLMControlPlaneStack(Stack):
 
         scim_tenants_secret_arn = secret_context("scim_tenants_secret_arn")
 
+        endpoint_mode = CfnParameter(
+            self,
+            "EndpointMode",
+            type="String",
+            default="custom-domain",
+            allowed_values=["custom-domain", "cloudfront"],
+            description=(
+                "Control-plane endpoint architecture. Existing deployments "
+                "default to custom-domain."
+            ),
+        )
+        custom_domain_mode = CfnCondition(
+            self,
+            "CustomDomainEndpoint",
+            expression=Fn.condition_equals(
+                endpoint_mode.value_as_string,
+                "custom-domain",
+            ),
+        )
+        cloudfront_mode = CfnCondition(
+            self,
+            "CloudFrontEndpoint",
+            expression=Fn.condition_equals(
+                endpoint_mode.value_as_string,
+                "cloudfront",
+            ),
+        )
         agentcore_stack_name = CfnParameter(
             self,
             "AgentCoreStackName",
@@ -457,17 +485,37 @@ class AxonLLMControlPlaneStack(Stack):
             self,
             "CertificateArn",
             type="String",
+            default="",
             allowed_pattern=(
-                r"^arn:(?:aws|aws-us-gov|aws-cn):acm:[a-z0-9-]+:"
+                r"^$|^arn:(?:aws|aws-us-gov|aws-cn):acm:[a-z0-9-]+:"
                 r"[0-9]{12}:certificate/[0-9a-fA-F-]+$"
             ),
             description=("Regional ACM certificate ARN for the control-plane HTTPS listener"),
+        )
+        control_plane_domain_input = CfnParameter(
+            self,
+            "ControlPlaneDomainInput",
+            type="String",
+            default="",
+            max_length=253,
+            allowed_pattern=(
+                r"^(?:|(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}"
+                r"[a-z0-9])?\.)+[a-z]{2,63})$"
+            ),
+            constraint_description=(
+                "must be empty or a lowercase fully qualified DNS hostname"
+            ),
+            description="Stable custom-domain control-plane hostname",
+        )
+        control_plane_domain_input.override_logical_id(
+            "ControlPlaneDomainName"
         )
         approved_ingress_prefix_list_id = CfnParameter(
             self,
             "ApprovedIngressPrefixListId",
             type="String",
-            allowed_pattern=r"^pl-[0-9a-fA-F]+$",
+            default="",
+            allowed_pattern=r"^$|^pl-[0-9a-fA-F]+$",
             constraint_description="must be an EC2 managed prefix list ID",
             description=("Managed prefix list containing approved control-plane clients"),
         )
@@ -483,9 +531,20 @@ class AxonLLMControlPlaneStack(Stack):
             self,
             "PublicHostedZoneId",
             type="String",
-            allowed_pattern=r"^Z[A-Z0-9]+$",
+            default="",
+            allowed_pattern=r"^$|^Z[A-Z0-9]+$",
             constraint_description=("must be a Route 53 public hosted-zone ID"),
             description=("Public hosted-zone ID containing the identity stack's control-plane hostname"),
+        )
+        allowed_viewer_cidrs = CfnParameter(
+            self,
+            "AllowedViewerCidrs",
+            type="CommaDelimitedList",
+            default="192.0.2.0/32",
+            description=(
+                "Reviewed public viewer CIDRs allowed by the CloudFront WAF. "
+                "The documentation-only default permits no production viewer."
+            ),
         )
         saml_login_path = CfnParameter(
             self,
@@ -706,18 +765,14 @@ class AxonLLMControlPlaneStack(Stack):
             "IdentityAlbClient",
             imported(identity_stack_name, "AlbClientId"),
         )
-        user_pool_domain = cognito.UserPoolDomain.from_domain_name(
-            self,
-            "IdentityHostedUiDomain",
-            imported(identity_stack_name, "HostedUiDomainName"),
+        hosted_ui_domain_name = imported(
+            identity_stack_name,
+            "HostedUiDomainName",
         )
         oidc_issuer = imported(identity_stack_name, "OidcIssuer")
         tenant_claim = imported(identity_stack_name, "TenantClaimName")
         project_claim = imported(identity_stack_name, "ProjectClaimName")
-        control_plane_domain_name = imported(
-            identity_stack_name,
-            "ControlPlaneDomainName",
-        )
+        control_plane_domain_name = control_plane_domain_input.value_as_string
 
         image_account_id = Fn.select(
             0,
@@ -802,11 +857,32 @@ class AxonLLMControlPlaneStack(Stack):
             ec2.Port.tcp(8000),
             "Application traffic from the control-plane ALB",
         )
-        alb_security_group.add_ingress_rule(
-            ec2.Peer.prefix_list(approved_ingress_prefix_list_id.value_as_string),
-            ec2.Port.tcp(443),
-            "HTTPS from approved control-plane clients",
+        custom_domain_ingress = ec2.CfnSecurityGroupIngress(
+            self,
+            "CustomDomainIngress",
+            group_id=alb_security_group.security_group_id,
+            ip_protocol="tcp",
+            from_port=443,
+            to_port=443,
+            source_prefix_list_id=(
+                approved_ingress_prefix_list_id.value_as_string
+            ),
+            description="HTTPS from approved control-plane clients",
         )
+        custom_domain_ingress.cfn_options.condition = custom_domain_mode
+        cloudfront_origin_ingress = ec2.CfnSecurityGroupIngress(
+            self,
+            "CloudFrontVpcOriginIngress",
+            group_id=alb_security_group.security_group_id,
+            ip_protocol="tcp",
+            from_port=80,
+            to_port=80,
+            cidr_ip=vpc.vpc_cidr_block,
+            description=(
+                "HTTP from CloudFront VPC-origin interfaces in the dedicated VPC"
+            ),
+        )
+        cloudfront_origin_ingress.cfn_options.condition = cloudfront_mode
         alb_security_group.add_egress_rule(
             task_security_group,
             ec2.Port.tcp(8000),
@@ -1287,11 +1363,11 @@ class AxonLLMControlPlaneStack(Stack):
                 "AXON_DEPLOYMENT_PROFILE": "production",
                 "AXON_LOAD_DEMO_DATA": "false",
                 "AXON_OIDC_ISSUER": oidc_issuer,
-                "AXON_OIDC_AUDIENCE": alb_client.user_pool_client_id,
                 "AXON_OIDC_TENANT_CLAIM": tenant_claim,
                 "AXON_OIDC_PROJECT_CLAIM": project_claim,
-                "AXON_ALB_CLIENT_ID": alb_client.user_pool_client_id,
-                "AXON_ALB_ISSUER": (f"https://public-keys.auth.elb.{self.region}.amazonaws.com"),
+                "AXON_CONTROL_PLANE_ENDPOINT_MODE": (
+                    endpoint_mode.value_as_string
+                ),
                 "AXON_REQUIRE_CANONICAL_IDENTITY": "true",
                 "AXON_CONTROL_PLANE_ONLY": "true",
                 "AXON_SAML_FEDERATION_MODE": "managed-cognito",
@@ -1367,12 +1443,23 @@ class AxonLLMControlPlaneStack(Stack):
             self,
             "LoadBalancer",
             vpc=vpc,
-            internet_facing=True,
+            internet_facing=False,
             vpc_subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PUBLIC),
             security_group=alb_security_group,
             deletion_protection=deletion_protection,
             desync_mitigation_mode=elbv2.DesyncMitigationMode.STRICTEST,
             drop_invalid_header_fields=True,
+        )
+        cfn_load_balancer = load_balancer.node.default_child
+        if not isinstance(cfn_load_balancer, elbv2.CfnLoadBalancer):
+            raise RuntimeError("control-plane ALB did not synthesize")
+        cfn_load_balancer.add_property_override(
+            "Scheme",
+            Fn.condition_if(
+                custom_domain_mode.logical_id,
+                "internet-facing",
+                "internal",
+            ),
         )
         access_logs_bucket = s3.Bucket(
             self,
@@ -1412,41 +1499,110 @@ class AxonLLMControlPlaneStack(Stack):
             ),
         )
         service.attach_to_application_target_group(target_group)
-        certificate = acm.Certificate.from_certificate_arn(
-            self,
-            "Certificate",
-            certificate_arn.value_as_string,
-        )
-        https_listener = load_balancer.add_listener(
+        endpoint_listener = load_balancer.add_listener(
             "HttpsListener",
-            port=443,
-            protocol=elbv2.ApplicationProtocol.HTTPS,
-            certificates=[certificate],
-            ssl_policy=elbv2.SslPolicy.RECOMMENDED_TLS,
+            port=80,
+            protocol=elbv2.ApplicationProtocol.HTTP,
             open=False,
-            default_action=elbv2_actions.AuthenticateCognitoAction(
-                user_pool=user_pool,
-                user_pool_client=alb_client,
-                user_pool_domain=user_pool_domain,
-                allow_https_outbound=False,
-                on_unauthenticated_request=(elbv2.UnauthenticatedAction.AUTHENTICATE),
-                scope="openid email profile",
-                session_cookie_name=(f"AxonLLMControlPlaneSession{physical_suffix}"),
-                session_timeout=Duration.hours(1),
-                next=elbv2.ListenerAction.forward([target_group]),
+            default_action=elbv2.ListenerAction.forward([target_group]),
+        )
+        cfn_endpoint_listener = endpoint_listener.node.default_child
+        if not isinstance(cfn_endpoint_listener, elbv2.CfnListener):
+            raise RuntimeError("control-plane endpoint listener did not synthesize")
+        forward_action = {
+            "Type": "forward",
+            "Order": 1,
+            "TargetGroupArn": target_group.target_group_arn,
+        }
+        authenticated_forward_action = {
+            "Type": "forward",
+            "Order": 2,
+            "TargetGroupArn": target_group.target_group_arn,
+        }
+        authenticate_action = {
+            "Type": "authenticate-cognito",
+            "Order": 1,
+            "AuthenticateCognitoConfig": {
+                "UserPoolArn": user_pool.user_pool_arn,
+                "UserPoolClientId": alb_client.user_pool_client_id,
+                "UserPoolDomain": hosted_ui_domain_name,
+                "OnUnauthenticatedRequest": "authenticate",
+                "Scope": "openid email profile",
+                "SessionCookieName": (
+                    f"AxonLLMControlPlaneSession{physical_suffix}"
+                ),
+                "SessionTimeout": "3600",
+            },
+        }
+        cfn_endpoint_listener.add_property_override(
+            "Port",
+            Fn.condition_if(
+                custom_domain_mode.logical_id,
+                443,
+                80,
             ),
         )
-        https_listener.add_action(
+        cfn_endpoint_listener.add_property_override(
+            "Protocol",
+            Fn.condition_if(
+                custom_domain_mode.logical_id,
+                "HTTPS",
+                "HTTP",
+            ),
+        )
+        cfn_endpoint_listener.add_property_override(
+            "Certificates",
+            Fn.condition_if(
+                custom_domain_mode.logical_id,
+                [
+                    {
+                        "CertificateArn": certificate_arn.value_as_string,
+                    }
+                ],
+                {"Ref": "AWS::NoValue"},
+            ),
+        )
+        cfn_endpoint_listener.add_property_override(
+            "SslPolicy",
+            Fn.condition_if(
+                custom_domain_mode.logical_id,
+                "ELBSecurityPolicy-TLS13-1-2-2021-06",
+                {"Ref": "AWS::NoValue"},
+            ),
+        )
+        cfn_endpoint_listener.add_property_override(
+            "DefaultActions",
+            Fn.condition_if(
+                custom_domain_mode.logical_id,
+                [authenticate_action, authenticated_forward_action],
+                [forward_action],
+            ),
+        )
+        self_authenticated_rule = elbv2.CfnListenerRule(
+            self,
             "SelfAuthenticatedProtocols",
+            listener_arn=endpoint_listener.listener_arn,
             priority=10,
-            conditions=[elbv2.ListenerCondition.path_patterns(["/scim/*"])],
-            action=elbv2.ListenerAction.forward([target_group]),
+            conditions=[
+                elbv2.CfnListenerRule.RuleConditionProperty(
+                    field="path-pattern",
+                    path_pattern_config=(
+                        elbv2.CfnListenerRule.PathPatternConfigProperty(
+                            values=["/scim/*"],
+                        )
+                    ),
+                )
+            ],
+            actions=[
+                elbv2.CfnListenerRule.ActionProperty(
+                    type="forward",
+                    order=1,
+                    target_group_arn=target_group.target_group_arn,
+                )
+            ],
         )
-        container.add_environment(
-            "AXON_ALB_SIGNER_ARN",
-            load_balancer.load_balancer_arn,
-        )
-        route53.CfnRecordSet(
+        self_authenticated_rule.cfn_options.condition = custom_domain_mode
+        control_plane_alias = route53.CfnRecordSet(
             self,
             "ControlPlaneAlias",
             hosted_zone_id=public_hosted_zone_id.value_as_string,
@@ -1463,6 +1619,322 @@ class AxonLLMControlPlaneStack(Stack):
                 hosted_zone_id=(load_balancer.load_balancer_canonical_hosted_zone_id),
                 evaluate_target_health=True,
             ),
+        )
+        control_plane_alias.cfn_options.condition = custom_domain_mode
+
+        viewer_ip_set = wafv2.CfnIPSet(
+            self,
+            "CloudFrontViewerIpSet",
+            addresses=allowed_viewer_cidrs.value_as_list,
+            ip_address_version="IPV4",
+            scope="CLOUDFRONT",
+            description=(
+                "Reviewed viewer networks for the generated AxonLLM endpoint"
+            ),
+        )
+        viewer_ip_set.cfn_options.condition = cloudfront_mode
+        web_acl = wafv2.CfnWebACL(
+            self,
+            "CloudFrontWebAcl",
+            default_action=wafv2.CfnWebACL.DefaultActionProperty(
+                block={},
+            ),
+            scope="CLOUDFRONT",
+            visibility_config=wafv2.CfnWebACL.VisibilityConfigProperty(
+                cloud_watch_metrics_enabled=True,
+                metric_name=(
+                    f"AxonLLMControlPlane{physical_suffix.replace('-', '')}"
+                ),
+                sampled_requests_enabled=False,
+            ),
+            rules=[
+                wafv2.CfnWebACL.RuleProperty(
+                    name="PerViewerRateLimit",
+                    priority=0,
+                    action=wafv2.CfnWebACL.RuleActionProperty(
+                        block={},
+                    ),
+                    statement=wafv2.CfnWebACL.StatementProperty(
+                        rate_based_statement=(
+                            wafv2.CfnWebACL.RateBasedStatementProperty(
+                                aggregate_key_type="IP",
+                                limit=2_000,
+                            )
+                        ),
+                    ),
+                    visibility_config=(
+                        wafv2.CfnWebACL.VisibilityConfigProperty(
+                            cloud_watch_metrics_enabled=True,
+                            metric_name=(
+                                "AxonLLMControlPlaneRateLimit"
+                                f"{physical_suffix.replace('-', '')}"
+                            ),
+                            sampled_requests_enabled=False,
+                        )
+                    ),
+                ),
+                wafv2.CfnWebACL.RuleProperty(
+                    name="ReviewedViewerNetworks",
+                    priority=1,
+                    action=wafv2.CfnWebACL.RuleActionProperty(
+                        allow={},
+                    ),
+                    statement=wafv2.CfnWebACL.StatementProperty(
+                        ip_set_reference_statement=(
+                            wafv2.CfnWebACL.IPSetReferenceStatementProperty(
+                                arn=viewer_ip_set.attr_arn,
+                            )
+                        ),
+                    ),
+                    visibility_config=(
+                        wafv2.CfnWebACL.VisibilityConfigProperty(
+                            cloud_watch_metrics_enabled=True,
+                            metric_name=(
+                                "AxonLLMControlPlaneAllowedViewers"
+                                f"{physical_suffix.replace('-', '')}"
+                            ),
+                            sampled_requests_enabled=False,
+                        )
+                    ),
+                ),
+            ],
+        )
+        web_acl.cfn_options.condition = cloudfront_mode
+        strip_untrusted_identity = cloudfront.Function(
+            self,
+            "StripUntrustedIdentityHeaders",
+            code=cloudfront.FunctionCode.from_inline(
+                """function handler(event) {
+    var request = event.request;
+    delete request.headers['x-amzn-oidc-data'];
+    delete request.headers['x-amzn-oidc-identity'];
+    delete request.headers['x-amzn-oidc-accesstoken'];
+    return request;
+}
+"""
+            ),
+            runtime=cloudfront.FunctionRuntime.JS_2_0,
+            comment=(
+                "Remove viewer-supplied ALB identity headers before the "
+                "private origin"
+            ),
+        )
+        cfn_strip_untrusted_identity = (
+            strip_untrusted_identity.node.default_child
+        )
+        if not isinstance(
+            cfn_strip_untrusted_identity,
+            cloudfront.CfnFunction,
+        ):
+            raise RuntimeError("CloudFront request function did not synthesize")
+        cfn_strip_untrusted_identity.cfn_options.condition = cloudfront_mode
+        cloudfront_origin = origins.VpcOrigin.with_application_load_balancer(
+            load_balancer,
+            http_port=80,
+            protocol_policy=cloudfront.OriginProtocolPolicy.HTTP_ONLY,
+            read_timeout=Duration.seconds(60),
+            connection_timeout=Duration.seconds(10),
+        )
+        distribution = cloudfront.Distribution(
+            self,
+            "Distribution",
+            default_behavior=cloudfront.BehaviorOptions(
+                origin=cloudfront_origin,
+                allowed_methods=cloudfront.AllowedMethods.ALLOW_ALL,
+                cached_methods=(
+                    cloudfront.CachedMethods.CACHE_GET_HEAD_OPTIONS
+                ),
+                cache_policy=cloudfront.CachePolicy.CACHING_DISABLED,
+                origin_request_policy=(
+                    cloudfront.OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER
+                ),
+                viewer_protocol_policy=(
+                    cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS
+                ),
+                function_associations=[
+                    cloudfront.FunctionAssociation(
+                        event_type=(
+                            cloudfront.FunctionEventType.VIEWER_REQUEST
+                        ),
+                        function=strip_untrusted_identity,
+                    )
+                ],
+            ),
+            comment=(
+                "Generated AxonLLM control-plane endpoint"
+                f"{physical_suffix}"
+            ),
+            enable_ipv6=False,
+            http_version=cloudfront.HttpVersion.HTTP2_AND_3,
+            price_class=cloudfront.PriceClass.PRICE_CLASS_100,
+            web_acl_id=web_acl.attr_arn,
+        )
+        cfn_distribution = distribution.node.default_child
+        if not isinstance(cfn_distribution, cloudfront.CfnDistribution):
+            raise RuntimeError("CloudFront distribution did not synthesize")
+        cfn_distribution.cfn_options.condition = cloudfront_mode
+        cfn_vpc_origins = [
+            construct
+            for construct in self.node.find_all()
+            if isinstance(construct, cloudfront.CfnVpcOrigin)
+        ]
+        if len(cfn_vpc_origins) != 1:
+            raise RuntimeError("CloudFront VPC origin did not synthesize once")
+        cfn_vpc_origin = cfn_vpc_origins[0]
+        cfn_vpc_origin.cfn_options.condition = cloudfront_mode
+        cfn_vpc_origin.add_dependency(cfn_endpoint_listener)
+
+        control_plane_url = Fn.join(
+            "",
+            [
+                "https://",
+                Token.as_string(
+                    Fn.condition_if(
+                        cloudfront_mode.logical_id,
+                        distribution.distribution_domain_name,
+                        control_plane_domain_name,
+                    )
+                ),
+            ],
+        )
+        browser_callback_url = Fn.join(
+            "",
+            [
+                "https://",
+                distribution.distribution_domain_name,
+                "/auth/callback",
+            ],
+        )
+        browser_signed_out_url = Fn.join(
+            "",
+            [
+                "https://",
+                distribution.distribution_domain_name,
+                "/auth/signed-out",
+            ],
+        )
+        browser_client = user_pool.add_client(
+            "CloudFrontBrowserClient",
+            user_pool_client_name=(
+                f"axonllm-control-plane-cloudfront{physical_suffix}"
+            ),
+            generate_secret=False,
+            prevent_user_existence_errors=True,
+            enable_token_revocation=True,
+            auth_flows=cognito.AuthFlow(),
+            access_token_validity=Duration.minutes(15),
+            id_token_validity=Duration.minutes(15),
+            refresh_token_validity=Duration.hours(8),
+            refresh_token_rotation_grace_period=Duration.seconds(0),
+            read_attributes=(
+                cognito.ClientAttributes()
+                .with_standard_attributes(
+                    email=True,
+                    email_verified=True,
+                )
+                .with_custom_attributes("tenant_id", "project_id")
+            ),
+            supported_identity_providers=[
+                cognito.UserPoolClientIdentityProvider.COGNITO
+            ],
+            o_auth=cognito.OAuthSettings(
+                callback_urls=[browser_callback_url],
+                logout_urls=[browser_signed_out_url],
+                flows=cognito.OAuthFlows(
+                    authorization_code_grant=True,
+                    implicit_code_grant=False,
+                    client_credentials=False,
+                ),
+                scopes=[
+                    cognito.OAuthScope.OPENID,
+                    cognito.OAuthScope.EMAIL,
+                    cognito.OAuthScope.PROFILE,
+                ],
+            ),
+        )
+        browser_client.apply_removal_policy(removal_policy)
+        cfn_browser_client = browser_client.node.default_child
+        if not isinstance(cfn_browser_client, cognito.CfnUserPoolClient):
+            raise RuntimeError("CloudFront Cognito client did not synthesize")
+        cfn_browser_client.cfn_options.condition = cloudfront_mode
+
+        def endpoint_value(
+            cloudfront_value: str,
+            custom_domain_value: str = "",
+        ) -> str:
+            return Token.as_string(
+                Fn.condition_if(
+                    cloudfront_mode.logical_id,
+                    cloudfront_value,
+                    custom_domain_value,
+                )
+            )
+
+        hosted_ui_base = Fn.join("", ["https://", hosted_ui_domain_name])
+        container.add_environment(
+            "AXON_OIDC_AUDIENCE",
+            endpoint_value(
+                browser_client.user_pool_client_id,
+                alb_client.user_pool_client_id,
+            ),
+        )
+        container.add_environment(
+            "AXON_ALB_CLIENT_ID",
+            endpoint_value("", alb_client.user_pool_client_id),
+        )
+        container.add_environment(
+            "AXON_ALB_ISSUER",
+            endpoint_value(
+                "",
+                (
+                    "https://public-keys.auth.elb."
+                    f"{self.region}.amazonaws.com"
+                ),
+            ),
+        )
+        container.add_environment(
+            "AXON_ALB_SIGNER_ARN",
+            endpoint_value("", load_balancer.load_balancer_arn),
+        )
+        container.add_environment(
+            "AXON_BROWSER_AUTH_MODE",
+            endpoint_value("oidc-session"),
+        )
+        container.add_environment(
+            "AXON_BROWSER_AUTH_CLIENT_ID",
+            endpoint_value(browser_client.user_pool_client_id),
+        )
+        container.add_environment(
+            "AXON_BROWSER_AUTH_AUTHORIZATION_ENDPOINT",
+            endpoint_value(
+                Fn.join("", [hosted_ui_base, "/oauth2/authorize"])
+            ),
+        )
+        container.add_environment(
+            "AXON_BROWSER_AUTH_OAUTH_EXCHANGE_URL",
+            endpoint_value(
+                Fn.join("", [hosted_ui_base, "/oauth2/token"])
+            ),
+        )
+        container.add_environment(
+            "AXON_BROWSER_AUTH_LOGOUT_ENDPOINT",
+            endpoint_value(Fn.join("", [hosted_ui_base, "/logout"])),
+        )
+        container.add_environment(
+            "AXON_BROWSER_AUTH_REDIRECT_URI",
+            endpoint_value(browser_callback_url),
+        )
+        container.add_environment(
+            "AXON_BROWSER_AUTH_SIGNED_OUT_URI",
+            endpoint_value(browser_signed_out_url),
+        )
+        container.add_environment(
+            "AXON_BROWSER_AUTH_SESSION_TTL_SECONDS",
+            endpoint_value("28800", "900"),
+        )
+        container.add_environment(
+            "AXON_CONTROL_PLANE_URL",
+            control_plane_url,
         )
 
         scaling = service.auto_scale_task_count(
@@ -1964,6 +2436,89 @@ class AxonLLMControlPlaneStack(Stack):
                     resources=[(f"arn:{self.partition}:s3:::prod-{self.region}-starport-layer-bucket/*")],
                 )
             )
+        endpoint_mode_output = CfnOutput(
+            self,
+            "EndpointModeOutput",
+            value=endpoint_mode.value_as_string,
+            description="Selected control-plane endpoint architecture",
+        )
+        endpoint_mode_output.override_logical_id("EndpointMode")
+        CfnOutput(
+            self,
+            "ControlPlaneUrl",
+            value=control_plane_url,
+            description="Canonical HTTPS URL for the web control plane",
+        )
+        CfnOutput(
+            self,
+            "ControlPlaneDomainName",
+            value=Token.as_string(
+                Fn.condition_if(
+                    cloudfront_mode.logical_id,
+                    distribution.distribution_domain_name,
+                    control_plane_domain_name,
+                )
+            ),
+            description="Canonical control-plane hostname",
+        )
+        CfnOutput(
+            self,
+            "ControlPlaneAuthMode",
+            value=Token.as_string(
+                Fn.condition_if(
+                    cloudfront_mode.logical_id,
+                    "application-oidc",
+                    "alb-cognito",
+                )
+            ),
+            description="Browser authentication boundary",
+        )
+        browser_client_output = CfnOutput(
+            self,
+            "BrowserClientId",
+            value=browser_client.user_pool_client_id,
+            description="CloudFront-mode Cognito PKCE client",
+        )
+        browser_client_output.condition = cloudfront_mode
+        distribution_id_output = CfnOutput(
+            self,
+            "DistributionId",
+            value=distribution.distribution_id,
+            description="Generated-endpoint CloudFront distribution",
+        )
+        distribution_id_output.condition = cloudfront_mode
+        distribution_domain_output = CfnOutput(
+            self,
+            "DistributionDomainName",
+            value=distribution.distribution_domain_name,
+            description="AWS-generated CloudFront hostname",
+        )
+        distribution_domain_output.condition = cloudfront_mode
+        web_acl_output = CfnOutput(
+            self,
+            "WebAclArn",
+            value=web_acl.attr_arn,
+            description="CloudFront viewer allowlist and rate-limit WebACL",
+        )
+        web_acl_output.condition = cloudfront_mode
+        vpc_origin_output = CfnOutput(
+            self,
+            "VpcOriginId",
+            value=cfn_vpc_origin.attr_id,
+            description="Private CloudFront origin attachment",
+        )
+        vpc_origin_output.condition = cloudfront_mode
+        CfnOutput(
+            self,
+            "LoadBalancerScheme",
+            value=Token.as_string(
+                Fn.condition_if(
+                    custom_domain_mode.logical_id,
+                    "internet-facing",
+                    "internal",
+                )
+            ),
+        )
         CfnOutput(
             self,
             "AgentCoreStackNameOutput",

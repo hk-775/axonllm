@@ -1,5 +1,30 @@
 const { useState, useEffect } = React;
 
+const CSRF_COOKIE = '__Host-axon-csrf';
+
+function getCsrfToken() {
+  for (const part of document.cookie.split(';')) {
+    const cookie = part.trim();
+    if (cookie.startsWith(CSRF_COOKIE + '=')) {
+      return cookie.slice(CSRF_COOKIE.length + 1);
+    }
+  }
+  return '';
+}
+
+function appFetch(url, options) {
+  const requestOptions = Object.assign({}, options || {});
+  const method = (requestOptions.method || 'GET').toUpperCase();
+  const headers = Object.assign({}, requestOptions.headers || {});
+  if (!['GET', 'HEAD', 'OPTIONS'].includes(method)) {
+    const csrfToken = getCsrfToken();
+    if (csrfToken) headers['X-Axon-CSRF-Token'] = csrfToken;
+  }
+  requestOptions.headers = headers;
+  requestOptions.credentials = 'same-origin';
+  return fetch(url, requestOptions);
+}
+
 function RoutingExplorer() {
   const [models, setModels] = useState([]);
   const [prompt, setPrompt] = useState('');
@@ -7,7 +32,7 @@ function RoutingExplorer() {
   const [result, setResult] = useState(null);
   const [mode, setMode] = useState('smart');
 
-  useEffect(() => { fetch('/api/models').then(r => r.json()).then(setModels).catch(() => {}); }, []);
+  useEffect(() => { appFetch('/api/models').then(r => r.json()).then(setModels).catch(() => {}); }, []);
 
   const handleSend = async () => {
     if (!prompt.trim() || loading || models.length === 0) return;
@@ -17,7 +42,7 @@ function RoutingExplorer() {
 
     try {
       // Send with smart_routing context flag — let the router pick the model
-      const resp = await fetch('/api/chat', {
+      const resp = await appFetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(

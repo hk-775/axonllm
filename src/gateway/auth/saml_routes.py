@@ -16,7 +16,7 @@ _NO_STORE_HEADERS = {
     "Pragma": "no-cache",
 }
 _MANAGED_MESSAGE = (
-    "SAML authentication is managed by Cognito and the control-plane ALB. "
+    "SAML authentication is managed by Cognito and the control-plane login. "
     "AxonLLM does not accept SAML assertions directly."
 )
 
@@ -42,7 +42,7 @@ def _error(
 
 
 class SamlAPI:
-    """HTTP contract for ALB/Cognito-managed enterprise SAML login."""
+    """HTTP contract for managed Cognito enterprise SAML login."""
 
     def __init__(self, service: SamlService) -> None:
         self.service = service
@@ -58,7 +58,7 @@ class SamlAPI:
         )
 
     async def login(self, request: Request) -> Response:
-        """Redirect to a protected local path so the ALB starts Cognito auth."""
+        """Redirect to the configured ALB or application Cognito handoff."""
         if (disabled := self._disabled()) is not None:
             return disabled
 

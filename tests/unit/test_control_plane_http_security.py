@@ -15,8 +15,9 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
-from src.gateway.config import AppConfig
+from src.gateway.auth.browser_session import SESSION_COOKIE_NAME
 from src.gateway.bootstrap import build_starlette_app
+from src.gateway.config import AppConfig
 from src.gateway.middleware.security import (
     CSRF_COOKIE_NAME,
     CSRF_HEADER_NAME,
@@ -63,6 +64,7 @@ def _app(
             ),
             Route("/admin/json", _read_json, methods=["POST"]),
             Route("/v1/chat/completions", _read_body, methods=["POST"]),
+            Route("/chat", _status, methods=["GET"]),
             Route("/health", _status, methods=["GET"]),
         ]
     )
@@ -232,6 +234,35 @@ def test_non_admin_bearer_api_keeps_its_existing_body_contract() -> None:
 
     assert response.status_code == 200
     assert response.json() == {"size": len(payload)}
+
+
+def test_app_browser_session_requires_csrf_for_non_admin_mutation() -> None:
+    session_cookie = f"{SESSION_COOKIE_NAME}={'A' * 43}"
+    with _secure_client(_app()) as client:
+        page = client.get(
+            "/chat",
+            headers={"Cookie": session_cookie},
+        )
+        token = page.cookies.get(CSRF_COOKIE_NAME)
+        rejected = client.post(
+            "/v1/chat/completions",
+            content=b"{}",
+            headers={"Cookie": session_cookie},
+        )
+        accepted = client.post(
+            "/v1/chat/completions",
+            content=b"{}",
+            headers={
+                "Cookie": (
+                    f"{session_cookie}; {CSRF_COOKIE_NAME}={token}"
+                ),
+                CSRF_HEADER_NAME: token,
+            },
+        )
+
+    assert token is not None
+    assert rejected.status_code == 403
+    assert accepted.status_code == 200
 
 
 def test_non_admin_request_is_rejected_at_global_ceiling() -> None:

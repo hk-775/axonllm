@@ -146,6 +146,8 @@ def _fixtures(
             "OidcClientId": "client-id",
             "OidcAudience": "client-id",
             "UserPoolId": "us-east-1_pool",
+            "EndpointMode": "custom-domain",
+            "AlbClientId": "alb-client-id",
             "AlbClientSecretArn": (f"arn:aws:secretsmanager:{REGION}:{ACCOUNT}:secret:alb-client"),
             "ControlPlaneDomainName": "axon.example.com",
         }
@@ -183,6 +185,10 @@ def _fixtures(
             f"arn:aws:elasticloadbalancing:{REGION}:{ACCOUNT}:targetgroup/axonllm-control-plane/0123456789abcdef"
         ),
         "QueryPlaneEnabled": "true",
+        "EndpointMode": "custom-domain",
+        "ControlPlaneUrl": "https://axon.example.com",
+        "ControlPlaneDomainName": "axon.example.com",
+        "ControlPlaneAuthMode": "alb-cognito",
     }
     control = {deployment_evidence.CONTROL_PLANE_STACK: control_outputs}
     provider = {
@@ -349,6 +355,7 @@ def _fixtures(
                 {
                     "category": category,
                     "baseUrl": "https://axon.example.com",
+                    "credentialType": "alb-session-cookie",
                     "passed": True,
                 }
                 for category in required_control_categories
@@ -356,6 +363,7 @@ def _fixtures(
         },
         "load": {
             "status": "PASS",
+            "credentialType": "alb-session-cookie",
             "requestCountConfigured": 4,
             "requestCountCompleted": 4,
             "concurrency": 2,
@@ -1042,6 +1050,62 @@ def _fixtures(
     )
 
 
+def _use_cloudfront_endpoint(args: argparse.Namespace) -> None:
+    domain = "d111111abcdef8.cloudfront.net"
+    setup = json.loads(args.setup_config.read_text(encoding="utf-8"))
+    setup["control_plane"]["endpoint_mode"] = "cloudfront"
+    setup["control_plane"].pop("domain_name")
+    _write(args.setup_config, setup)
+
+    identity = json.loads(
+        args.identity_outputs.read_text(encoding="utf-8")
+    )
+    identity_outputs = identity[deployment_evidence.IDENTITY_STACK]
+    identity_outputs["EndpointMode"] = "cloudfront"
+    identity_outputs["AlbClientId"] = ""
+    identity_outputs.pop("AlbClientSecretArn")
+    identity_outputs["ControlPlaneDomainName"] = ""
+    _write(args.identity_outputs, identity)
+
+    control = json.loads(
+        args.control_outputs.read_text(encoding="utf-8")
+    )
+    control_outputs = control[deployment_evidence.CONTROL_PLANE_STACK]
+    control_outputs.update(
+        {
+            "EndpointMode": "cloudfront",
+            "ControlPlaneUrl": f"https://{domain}",
+            "ControlPlaneDomainName": domain,
+            "ControlPlaneAuthMode": "application-oidc",
+            "BrowserClientId": "browser-client-id",
+        }
+    )
+    _write(args.control_outputs, control)
+
+    report = json.loads(
+        args.production_validation_report.read_text(encoding="utf-8")
+    )
+    report["httpEndpoints"] = [f"https://{domain}"]
+    for result in report["canaries"]["results"]:
+        result["baseUrl"] = f"https://{domain}"
+        result["credentialType"] = "browser-session-cookie"
+    report["load"]["credentialType"] = "browser-session-cookie"
+    _write(args.production_validation_report, report)
+
+
+def _verify_args(args: argparse.Namespace) -> argparse.Namespace:
+    return argparse.Namespace(
+        evidence=args.output,
+        repository=args.repository,
+        deployment_commit=args.deployment_commit,
+        release_commit=args.release_commit,
+        run_id=args.run_id,
+        run_attempt=args.run_attempt,
+        agentcore_image=args.agentcore_image,
+        fargate_image=args.fargate_image,
+    )
+
+
 def test_create_evidence_binds_release_runtime_secret_and_canaries(
     tmp_path: Path,
 ) -> None:
@@ -1062,6 +1126,12 @@ def test_create_evidence_binds_release_runtime_secret_and_canaries(
     assert evidence["productionCertification"]["overallStatus"] == "PASS"
     assert evidence["productionCertification"]["endpoint"]["endpointName"] == "production"
     assert evidence["productionValidation"]["overallStatus"] == "PASS"
+    assert evidence["stacks"]["controlPlane"]["EndpointMode"] == (
+        "custom-domain"
+    )
+    assert evidence["productionValidation"]["httpEndpoints"] == [
+        "https://axon.example.com"
+    ]
     assert evidence["launchRehearsal"]["gates"]["securityEventDeliveryAndDlq"]["environment"] == "production"
     assert set(evidence["launchRehearsal"]["gates"]) == (deployment_evidence.REQUIRED_REHEARSAL_GATES)
     assert evidence["launchRehearsalSource"]["artifact"] == {
@@ -1092,6 +1162,77 @@ def test_create_evidence_binds_release_runtime_secret_and_canaries(
     serialized = args.output.read_text(encoding="utf-8")
     assert "actual-provider-secret" not in serialized
     assert stat_mode(args.output) == 0o600
+
+
+def test_create_and_verify_bind_cloudfront_endpoint_mode(
+    tmp_path: Path,
+) -> None:
+    args = _fixtures(tmp_path)
+    _use_cloudfront_endpoint(args)
+
+    evidence = deployment_evidence.create_evidence(args)
+    deployment_evidence._atomic_write(args.output, evidence)
+    verified = deployment_evidence.verify_evidence(_verify_args(args))
+
+    assert verified["stacks"]["controlPlane"][
+        "ControlPlaneAuthMode"
+    ] == "application-oidc"
+    assert verified["productionValidation"]["httpEndpoints"] == [
+        "https://d111111abcdef8.cloudfront.net"
+    ]
+    assert {
+        result["credentialType"]
+        for result in verified["productionValidation"]["canaries"][
+            "results"
+        ]
+    } == {"browser-session-cookie"}
+
+
+def test_create_defaults_omitted_setup_endpoint_mode_to_custom_domain(
+    tmp_path: Path,
+) -> None:
+    args = _fixtures(tmp_path)
+    setup = json.loads(args.setup_config.read_text(encoding="utf-8"))
+    assert "endpoint_mode" not in setup["control_plane"]
+
+    evidence = deployment_evidence.create_evidence(args)
+
+    assert evidence["stacks"]["controlPlane"]["EndpointMode"] == (
+        "custom-domain"
+    )
+
+
+def test_create_rejects_setup_and_control_endpoint_mode_mismatch(
+    tmp_path: Path,
+) -> None:
+    args = _fixtures(tmp_path)
+    setup = json.loads(args.setup_config.read_text(encoding="utf-8"))
+    setup["control_plane"]["endpoint_mode"] = "cloudfront"
+    setup["control_plane"].pop("domain_name")
+    _write(args.setup_config, setup)
+
+    with pytest.raises(
+        deployment_evidence.DeploymentEvidenceError,
+        match="control-plane endpoint",
+    ):
+        deployment_evidence.create_evidence(args)
+
+
+def test_verify_rejects_tampered_endpoint_auth_binding(
+    tmp_path: Path,
+) -> None:
+    args = _fixtures(tmp_path)
+    evidence = deployment_evidence.create_evidence(args)
+    evidence["stacks"]["controlPlane"][
+        "ControlPlaneAuthMode"
+    ] = "application-oidc"
+    deployment_evidence._atomic_write(args.output, evidence)
+
+    with pytest.raises(
+        deployment_evidence.DeploymentEvidenceError,
+        match="endpoint outputs are inconsistent",
+    ):
+        deployment_evidence.verify_evidence(_verify_args(args))
 
 
 @pytest.mark.parametrize("include_ai21", [False, True])

@@ -1,6 +1,7 @@
 """Retained Cognito identity for first-time AxonLLM AgentCore adopters."""
 
 from aws_cdk import (
+    CfnCondition,
     CfnOutput,
     CfnParameter,
     Duration,
@@ -38,6 +39,25 @@ class AxonLLMIdentityStack(Stack):
         )
         deletion_protection = not bool(deployment_namespace)
 
+        endpoint_mode = CfnParameter(
+            self,
+            "EndpointMode",
+            type="String",
+            default="custom-domain",
+            allowed_values=["custom-domain", "cloudfront"],
+            description=(
+                "Control-plane endpoint architecture. Existing deployments "
+                "default to custom-domain."
+            ),
+        )
+        custom_domain_mode = CfnCondition(
+            self,
+            "CustomDomainEndpoint",
+            expression=Fn.condition_equals(
+                endpoint_mode.value_as_string,
+                "custom-domain",
+            ),
+        )
         hosted_ui_domain_prefix = CfnParameter(
             self,
             "HostedUiDomainPrefix",
@@ -70,14 +90,14 @@ class AxonLLMIdentityStack(Stack):
             self,
             "ControlPlaneDomainInput",
             type="String",
-            min_length=1,
+            default="",
             max_length=253,
             allowed_pattern=(
-                r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}"
-                r"[a-z0-9])?\.)+[a-z]{2,63}$"
+                r"^(?:|(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}"
+                r"[a-z0-9])?\.)+[a-z]{2,63})$"
             ),
             constraint_description=(
-                "must be a lowercase fully qualified DNS hostname"
+                "must be empty or a lowercase fully qualified DNS hostname"
             ),
             description=(
                 "Stable control-plane hostname used for the ALB OAuth callback"
@@ -304,6 +324,10 @@ class AxonLLMIdentityStack(Stack):
             ),
         )
         alb_client.apply_removal_policy(removal_policy)
+        cfn_alb_client = alb_client.node.default_child
+        if not isinstance(cfn_alb_client, cognito.CfnUserPoolClient):
+            raise RuntimeError("ALB Cognito client did not synthesize")
+        cfn_alb_client.cfn_options.condition = custom_domain_mode
 
         hosted_ui_domain = user_pool.add_domain(
             "HostedUiDomain",
@@ -379,7 +403,11 @@ class AxonLLMIdentityStack(Stack):
         CfnOutput(
             self,
             "AlbClientId",
-            value=alb_client.user_pool_client_id,
+            value=Fn.condition_if(
+                custom_domain_mode.logical_id,
+                alb_client.user_pool_client_id,
+                "",
+            ).to_string(),
             description=(
                 "Confidential authorization-code client used by the "
                 "control-plane ALB"
@@ -401,7 +429,11 @@ class AxonLLMIdentityStack(Stack):
         CfnOutput(
             self,
             "ControlPlaneDomainName",
-            value=control_plane_domain_name.value_as_string,
+            value=Fn.condition_if(
+                custom_domain_mode.logical_id,
+                control_plane_domain_name.value_as_string,
+                "",
+            ).to_string(),
             description=(
                 "Stable hostname configured on the confidential ALB client"
             ),
@@ -410,6 +442,13 @@ class AxonLLMIdentityStack(Stack):
                 [self.stack_name, "ControlPlaneDomainName"],
             ),
         )
+        endpoint_mode_output = CfnOutput(
+            self,
+            "EndpointModeOutput",
+            value=endpoint_mode.value_as_string,
+            description="Selected control-plane endpoint architecture",
+        )
+        endpoint_mode_output.override_logical_id("EndpointMode")
         CfnOutput(
             self,
             "HostedUiDomain",

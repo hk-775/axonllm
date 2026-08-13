@@ -57,6 +57,7 @@ def _rollback_journal(
 def _configuration(
     *,
     target: str = "agentcore-http",
+    fargate_credential_type: str = "alb-session-cookie",
     include_query: bool = True,
     request_count: int = 4,
     concurrency: int = 2,
@@ -161,7 +162,7 @@ def _configuration(
                 "method": "PUT",
                 "path": viewer["path"],
                 "credentialEnv": "AXON_CANARY_TENANT_ADMIN_TOKEN",
-                "credentialType": "alb-session-cookie",
+                "credentialType": fargate_credential_type,
                 "csrfTokenEnv": "AXON_CANARY_TENANT_ADMIN_CSRF_TOKEN",
                 "expectedStatuses": [200],
                 "jsonBody": dict(viewer["jsonBody"]),
@@ -171,7 +172,7 @@ def _configuration(
             *configuration["canaries"],
             configuration["load"]["request"],
         ]:
-            request["credentialType"] = "alb-session-cookie"
+            request["credentialType"] = fargate_credential_type
     return configuration
 
 
@@ -822,11 +823,22 @@ def test_missing_credential_fails_without_calling_transport() -> None:
     assert len(transport.requests) == 8
 
 
-def test_example_configuration_is_valid_and_load_is_read_only() -> None:
-    example = json.loads(
+@pytest.mark.parametrize(
+    ("filename", "credential_type"),
+    [
+        ("production_validation.example.json", "alb-session-cookie"),
         (
-            OPERATIONS_DIR / "production_validation.example.json"
-        ).read_text(encoding="utf-8")
+            "production_validation.cloudfront.example.json",
+            "browser-session-cookie",
+        ),
+    ],
+)
+def test_example_configuration_is_valid_and_load_is_read_only(
+    filename: str,
+    credential_type: str,
+) -> None:
+    example = json.loads(
+        (OPERATIONS_DIR / filename).read_text(encoding="utf-8")
     )
 
     parsed = validation.parse_config(example)
@@ -842,7 +854,7 @@ def test_example_configuration_is_valid_and_load_is_read_only() -> None:
         for canary in example["canaries"]
     )
     assert all(
-        canary["credentialType"] == "alb-session-cookie"
+        canary["credentialType"] == credential_type
         for canary in example["canaries"]
     )
     viewer = next(
@@ -859,16 +871,46 @@ def test_example_configuration_is_valid_and_load_is_read_only() -> None:
     assert viewer["expectedErrorCode"] == "admin_access_denied"
     assert viewer["path"] == admin["path"]
     assert viewer["jsonBody"] == admin["jsonBody"]
-    assert parsed.load.request.credential_type == "alb-session-cookie"
+    assert parsed.load.request.credential_type == credential_type
 
 
-def test_fargate_validation_rejects_credentials_the_alb_cannot_use() -> None:
+def test_fargate_validation_accepts_application_browser_sessions() -> None:
+    parsed = validation.parse_config(
+        _configuration(
+            target="fargate",
+            fargate_credential_type="browser-session-cookie",
+        )
+    )
+
+    assert {
+        request.credential_type
+        for request in (
+            *(canary.request for canary in parsed.canaries),
+            parsed.load.request,
+        )
+    } == {"browser-session-cookie"}
+
+
+def test_fargate_validation_rejects_non_browser_credentials() -> None:
     raw = _configuration(target="fargate")
     raw["canaries"][0]["credentialType"] = "bearer"
 
     with pytest.raises(
         validation.ConfigurationError,
-        match="ALB session cookies",
+        match="browser session cookies",
+    ):
+        validation.parse_config(raw)
+
+
+def test_fargate_validation_rejects_mixed_cookie_modes() -> None:
+    raw = _configuration(target="fargate")
+    raw["load"]["request"]["credentialType"] = (
+        "browser-session-cookie"
+    )
+
+    with pytest.raises(
+        validation.ConfigurationError,
+        match="one credential type",
     ):
         validation.parse_config(raw)
 
@@ -894,9 +936,15 @@ def test_config_rejects_inline_credentials_and_mutating_load() -> None:
         validation.parse_config(mutating_load)
 
 
-def test_alb_session_cookie_is_loaded_only_from_environment() -> None:
+@pytest.mark.parametrize(
+    "credential_type",
+    ["alb-session-cookie", "browser-session-cookie"],
+)
+def test_browser_session_cookie_is_loaded_only_from_environment(
+    credential_type: str,
+) -> None:
     raw = _configuration()
-    raw["canaries"][1]["credentialType"] = "alb-session-cookie"
+    raw["canaries"][1]["credentialType"] = credential_type
     raw["canaries"][1]["csrfTokenEnv"] = "AXON_CANARY_VIEWER_CSRF_TOKEN"
     config = validation.parse_config(raw)
     cookie = "AWSELBAuthSessionCookie-0=opaque; AWSELBAuthSessionCookie-1=opaque"
