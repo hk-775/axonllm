@@ -261,6 +261,15 @@ jobs:
           set -euo pipefail
           change_set="AxonLLMReleaseFoundation-${GITHUB_SHA}"
           review="${RUNNER_TEMP}/foundation-change-set.json"
+          expected_role="arn:aws:iam::${{ vars.AXON_AWS_ACCOUNT_ID }}:role/cdk-axrel-cfn-exec-role-${{ vars.AXON_AWS_ACCOUNT_ID }}-us-east-1"
+          live_role=$(
+            aws cloudformation describe-stacks \
+              --stack-name AxonLLMReleaseFoundationStack \
+              --query 'Stacks[0].RoleARN' \
+              --output text \
+              --no-cli-pager
+          )
+          [[ "${live_role}" == "${expected_role}" ]]
           aws cloudformation describe-change-set \
             --stack-name AxonLLMReleaseFoundationStack \
             --change-set-name "${change_set}" \
@@ -270,12 +279,12 @@ jobs:
             >"${review}"
           jq -e \
             --arg name "${change_set}" \
-            --arg role "arn:aws:iam::${{ vars.AXON_AWS_ACCOUNT_ID }}:role/cdk-axrel-cfn-exec-role-${{ vars.AXON_AWS_ACCOUNT_ID }}-us-east-1" '
+            --arg role "${expected_role}" '
             .ChangeSetName == $name
             and .StackName == "AxonLLMReleaseFoundationStack"
             and .Status == "CREATE_COMPLETE"
             and .ExecutionStatus == "AVAILABLE"
-            and .RoleARN == $role
+            and (.RoleARN == null or .RoleARN == $role)
           ' "${review}" >/dev/null
           jq '{
             ChangeSetName,
@@ -293,6 +302,15 @@ jobs:
           set -euo pipefail
           change_set="AxonLLMReleaseFoundation-${GITHUB_SHA}"
           review="${RUNNER_TEMP}/foundation-change-set.json"
+          expected_role="arn:aws:iam::${{ vars.AXON_AWS_ACCOUNT_ID }}:role/cdk-axrel-cfn-exec-role-${{ vars.AXON_AWS_ACCOUNT_ID }}-us-east-1"
+          live_role=$(
+            aws cloudformation describe-stacks \
+              --stack-name AxonLLMReleaseFoundationStack \
+              --query 'Stacks[0].RoleARN' \
+              --output text \
+              --no-cli-pager
+          )
+          [[ "${live_role}" == "${expected_role}" ]]
           aws cloudformation describe-change-set \
             --stack-name AxonLLMReleaseFoundationStack \
             --change-set-name "${change_set}" \
@@ -303,12 +321,12 @@ jobs:
           jq -e \
             --slurpfile live "${RUNNER_TEMP}/foundation-parameters.json" \
             --arg name "${change_set}" \
-            --arg role "arn:aws:iam::${{ vars.AXON_AWS_ACCOUNT_ID }}:role/cdk-axrel-cfn-exec-role-${{ vars.AXON_AWS_ACCOUNT_ID }}-us-east-1" '
+            --arg role "${expected_role}" '
             .ChangeSetName == $name
             and .StackName == "AxonLLMReleaseFoundationStack"
             and .Status == "CREATE_COMPLETE"
             and .ExecutionStatus == "AVAILABLE"
-            and .RoleARN == $role
+            and (.RoleARN == null or .RoleARN == $role)
             and (
               [
                 .Parameters[]

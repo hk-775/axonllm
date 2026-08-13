@@ -101,3 +101,24 @@ def test_foundation_deployment_preserves_every_live_parameter():
     assert "--method execute-change-set" in serialized
     assert "ExecutionStatus == \"AVAILABLE\"" in serialized
     assert "sort_by(.ParameterKey)" in serialized
+
+
+def test_null_change_set_role_requires_exact_live_stack_role():
+    workflow = _workflow()
+    steps = workflow["jobs"]["deploy"]["steps"]
+    names = {
+        "Publish reviewable foundation change set",
+        "Validate reviewed foundation change set",
+    }
+    validation_steps = {
+        step["name"]: step["run"]
+        for step in steps
+        if step.get("name") in names
+    }
+    assert set(validation_steps) == names
+    for script in validation_steps.values():
+        assert "aws cloudformation describe-stacks" in script
+        assert "--query 'Stacks[0].RoleARN'" in script
+        assert '[[ "${live_role}" == "${expected_role}" ]]' in script
+        assert "cdk-axrel-cfn-exec-role-" in script
+        assert "(.RoleARN == null or .RoleARN == $role)" in script
