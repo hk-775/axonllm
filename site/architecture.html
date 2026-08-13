@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>AxonLLM — Architecture</title>
-    <meta name="description" content="How AxonLLM is built: the AWS infrastructure it deploys onto, the 16-step request pipeline every prompt passes through, and the component graph behind it.">
+    <meta name="description" content="How AxonLLM is built: its AgentCore data plane, shared control plane, governed request pipeline, and reusable component graph.">
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%237c3aed'/%3E%3Cpath d='M8 22L16 10L24 22' stroke='white' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round' fill='none'/%3E%3Ccircle cx='16' cy='10' r='2.5' fill='white'/%3E%3C/svg%3E">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -832,7 +832,7 @@
         <div class="stage">
             <div class="stage-bar">
                 <p class="stage-caption" id="stage-caption">
-                    <strong>Infrastructure</strong> — CloudFront &rarr; ALB &rarr; ECS Fargate &rarr; DynamoDB, from <code>infra/stack.py</code>
+                    <strong>Production Topology</strong> — AgentCore data plane + private Fargate control plane + canonical DynamoDB authority
                 </p>
                 <div class="zoom-controls">
                     <button class="zoom-btn" id="zoom-out" title="Zoom out" aria-label="Zoom out">
@@ -871,7 +871,7 @@
                     </div>
                 </div>
                 <div class="narr-aside">
-                    <span class="narr-voice">Amazon Polly &middot; Matthew</span>
+                    <span class="narr-voice">On-device narration &middot; Daniel</span>
                     <button class="narr-transcript-btn" id="narr-transcript-btn"
                             aria-expanded="false" aria-controls="narr-transcript">Transcript</button>
                 </div>
@@ -904,11 +904,11 @@
         <p class="section-label">Request Pipeline</p>
         <h2>What happens to a request</h2>
         <p class="lede">
-            Every call to <code>/v1/chat/completions</code> runs the same ordered pipeline in
-            <code>GatewayAgent.handle_chat_completion</code>. The numbering below is the
-            numbering in the source — fractional steps are the ones added after the
-            original sixteen, kept in place rather than renumbered so the code and the
-            diagram stay readable together.
+            The normal non-streaming path through
+            <code>GatewayAgent.handle_chat_completion</code> is ordered so authority and
+            admission run before provider spend, accounting runs immediately after the
+            provider result, and output policy runs before release. Streaming uses the
+            same controls with the lifecycle differences called out below.
         </p>
         <ol class="flow-list">
             <li data-step="1–2"><strong>Parse the request and extract context</strong> — project, user, and model resolved from the token or API key</li>
@@ -923,13 +923,13 @@
             <li data-step="9"><strong>Look up the cache</strong> — exact key first, then a semantic match on the reworded question; a hit returns here and never reaches a provider</li>
             <li data-step="9.5"><strong>Route by region</strong> — hub to spoke, honouring data-residency zones; skipped in single-region deploys</li>
             <li data-step="10"><strong>Route and execute</strong> — direct with a fallback chain, smart (classify &rarr; leaderboard &rarr; cost/quality), or ensemble (panel &rarr; quorum &rarr; synthesis)</li>
-            <li data-step="11"><strong>Apply response guardrails</strong></li>
+            <li data-step="12"><strong>Finalize usage, cost, and reserved spend</strong> — provider usage is durable before output policy can withhold a response</li>
+            <li data-step="11"><strong>Apply response guardrails</strong> — only <code>block</code> changes execution today; warn/redact rules record matches</li>
             <li data-step="11.5"><strong>Re-inject PII</strong> — the original values restored into the response, per chunk when streaming</li>
-            <li data-step="11.6"><strong>Append to the audit trail</strong> — SHA-256 hash chain, head reloaded on restart</li>
-            <li data-step="12"><strong>Track cost and spend</strong> — priced from the pricing table and charged against the project and user quota</li>
+            <li data-step="11.6"><strong>Append audit metadata</strong> — tenant SHA-256 hash chain without prompt or response bodies</li>
             <li data-step="13–14"><strong>Budget status and session storage</strong> — recorded after the response is complete</li>
-            <li data-step="15"><strong>Stream, if asked</strong> — SSE opened straight from the provider</li>
-            <li data-step="15.5"><strong>Write the cache</strong> — after guardrails and PII re-injection, so a later hit cannot bypass either, and after the streaming return so only complete responses are stored</li>
+            <li data-step="15"><strong>Stream, if asked</strong> — eligible routes relay native chunks; output inspection buffers, and other routes can emit simulated chunks</li>
+            <li data-step="15.5"><strong>Write the cache</strong> — only eligible non-streaming, post-policy responses are stored</li>
             <li data-step="16"><strong>Return</strong> — JSON, with routing and cache metadata attached</li>
         </ol>
     </div>
@@ -940,42 +940,42 @@
         <p class="section-label">Infrastructure</p>
         <h2>AWS services it deploys onto</h2>
         <p>
-            One CDK stack in <code>infra/stack.py</code>. Nothing in the request path is
-            serverless-cold: the gateway runs as a long-lived Fargate service because
-            provider connections and the pricing table are worth keeping warm.
+            The production topology separates the AgentCore data plane from a private
+            Fargate web control plane. They share canonical DynamoDB authority but have
+            different routes and IAM permissions.
         </p>
         <div class="component-grid">
             <div class="component-card">
                 <h3>Amazon CloudFront</h3>
-                <p>Fronts both the landing page and the gateway with an <code>ALL_VIEWER</code> origin request policy, so <code>Authorization</code> headers survive to the origin.</p>
+                <p>Provides the generated-domain browser option with WAF, a VPC origin, Cognito authorization-code PKCE, and opaque DynamoDB-backed sessions.</p>
             </div>
             <div class="component-card">
                 <h3>Application Load Balancer</h3>
-                <p>Terminates in front of the ECS service on port 8000 and health-checks <code>/health</code>. Also validates the ALB-issued JWT when OIDC is enabled.</p>
+                <p>Provides the custom-domain option. ALB Cognito authentication produces signed OIDC headers that AxonLLM verifies before canonical authorization.</p>
             </div>
             <div class="component-card">
-                <h3>ECS Fargate</h3>
-                <p>Two tasks at 1024 CPU / 2048 MiB, auto-scaling to ten on CPU and request-count targets. Container Insights v2 enabled.</p>
+                <h3>Amazon Bedrock AgentCore</h3>
+                <p>Runs the OIDC-authenticated data plane for chat, model listing, governed query, bounded project configuration, health, and readiness.</p>
             </div>
             <div class="component-card">
                 <h3>Amazon DynamoDB</h3>
-                <p>One on-demand table, single-table PK/SK design: usage records, projects, API keys, the audit chain, policy nodes, and SCIM users share it.</p>
+                <p>One tenant-qualified authority table for principals, projects, key hashes, sessions, SCIM, policy, budgets, usage, audit, events, and query lifecycle.</p>
             </div>
             <div class="component-card">
                 <h3>AWS Secrets Manager</h3>
-                <p>Holds provider API keys, granted read-only to the task role. Keys are never in the image, the task definition, or an environment variable.</p>
+                <p>Production provider settings load from one exact secret ARN and version, with only allowlisted fields accepted by the runtime.</p>
             </div>
             <div class="component-card">
                 <h3>Amazon Bedrock</h3>
-                <p>Reached with SigV4 from the task role — no key to store. Both the Converse API and Mantle's OpenAI-compatible surface.</p>
+                <p>Bedrock and Bedrock Mantle use scoped runtime IAM instead of a stored provider API key.</p>
             </div>
             <div class="component-card">
                 <h3>CloudWatch Logs</h3>
-                <p>Log group prefixed <code>axonllm</code> with 30-day retention. Spans go to an OTLP collector instead when <code>OTEL_EXPORTER_OTLP_ENDPOINT</code> is set.</p>
+                <p>Collects logs, metrics, alarms, and readiness signals. Optional OTLP export carries completed usage telemetry.</p>
             </div>
             <div class="component-card">
                 <h3>Amazon ECR</h3>
-                <p>Image built and pushed by CDK as a <code>DockerImageAsset</code>, so a deploy is one command with no separate build step.</p>
+                <p>Stores separately built, immutable ARM64 AgentCore and AMD64 control-plane images identified by digest.</p>
             </div>
         </div>
     </div>
@@ -994,7 +994,7 @@
         <div class="component-grid">
             <div class="component-card">
                 <h3>GatewayAgent</h3>
-                <p>The orchestrator. Owns the 16-step pipeline, model listing, health checks, and the true-streaming generators.</p>
+                <p>The orchestrator for validation, governance, safety, routing, accounting, output policy, and native or policy-buffered streaming.</p>
             </div>
             <div class="component-card">
                 <h3>Router</h3>
@@ -1014,7 +1014,7 @@
             </div>
             <div class="component-card">
                 <h3>MultiProviderFactory</h3>
-                <p>Thirteen adapters behind one interface — boto3 for Bedrock and Mantle, an HTTP client for the rest — with a per-region client cache.</p>
+                <p>Thirteen adapters behind AWS SDK and HTTP transports, with provider route pools for credentials, endpoints, health, and capacity.</p>
             </div>
             <div class="component-card">
                 <h3>PolicyHierarchyResolver</h3>
@@ -1026,11 +1026,11 @@
             </div>
             <div class="component-card">
                 <h3>PIIRedactor</h3>
-                <p>Redact &rarr; tokenize &rarr; re-inject, with a split-token buffer so a redaction spanning two stream chunks still matches.</p>
+                <p>Redacts shaped and optional named-entity PII, restores eligible caller values, and fails closed when configured output inspection cannot complete.</p>
             </div>
             <div class="component-card">
                 <h3>AuditTrail</h3>
-                <p>SHA-256 hash chain over every recorded event, verifiable end to end, with the chain head reloaded on restart so a redeploy doesn't fork it.</p>
+                <p>Tenant-qualified SHA-256 hash chains over operation metadata and security events; prompt and response bodies are not stored.</p>
             </div>
             <div class="component-card">
                 <h3>EventDispatcher</h3>
@@ -1038,7 +1038,7 @@
             </div>
             <div class="component-card">
                 <h3>DynamoPersistence</h3>
-                <p>Optional by design. Disabled, the gateway runs fully in memory — which is what makes local development and the demo dashboard work with no AWS account.</p>
+                <p>Optional for local development, but required for canonical production authority, shared admission, sessions, durable audit, and AgentCore readiness.</p>
             </div>
         </div>
     </div>
@@ -1064,7 +1064,7 @@
     var caption = document.getElementById('stage-caption');
 
     var CAPTIONS = {
-        'panel-infrastructure': '<strong>Infrastructure</strong> — CloudFront &rarr; ALB &rarr; ECS Fargate &rarr; DynamoDB, from <code>infra/stack.py</code>',
+        'panel-infrastructure': '<strong>Production Topology</strong> — AgentCore data plane + private Fargate control plane + canonical DynamoDB authority',
         'panel-pipeline': '<strong>Request Pipeline</strong> — step numbering follows <code>src/gateway/agent.py</code>',
         'panel-components': '<strong>Components</strong> — the graph as wired by <code>build_gateway_components()</code>'
     };

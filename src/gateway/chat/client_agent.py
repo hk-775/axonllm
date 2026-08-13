@@ -159,10 +159,9 @@ class ClientAgent:
     ) -> AsyncIterator[dict]:
         """Streaming chat completion. Yields chunk dicts.
 
-        Tools are forwarded on the request, but only providers whose stream
-        translation preserves the raw ``choices`` (OpenAI-style) surface
-        ``tool_calls`` deltas back — the hand-built translators emit text-only
-        deltas, so a tool call there arrives only in the buffered fallback.
+        Tools are forwarded on the request. Native SSE routes can relay text
+        incrementally; buffered policy/fallback paths emit a normalized,
+        complete ``tool_calls`` delta rather than partial argument fragments.
         """
         request_data = self._build_request_data(
             model, messages, stream=True,

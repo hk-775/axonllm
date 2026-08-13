@@ -8,6 +8,7 @@ control-plane canary.
 
 See also:
 
+- [AxonLLM In Simple English](AXONLLM_SIMPLE_GUIDE.md)
 - [README](../README.md)
 - [Product requirements](PRD.md)
 - [AgentCore runbook](AGENTCORE_RUNBOOK.md)
@@ -341,10 +342,19 @@ API-key, policy, webhook, provider-secret, or event-destination administration.
 5. Check exact cache, then optional semantic cache.
 6. Select region and provider using the configured routing strategy.
 7. Retry transient failures and traverse the fallback chain.
-8. Translate provider requests, streaming chunks, tool calls, and responses.
-9. Apply output guardrails and restore redacted values.
-10. Persist usage/cost and audit state, dispatch threshold/security events, and
-    return the normalized response.
+8. Translate provider requests, supported streaming chunks, tool calls, and
+   responses.
+9. Finalize provider usage, cost, reserved budget, spend, and usage telemetry.
+10. Apply output guardrails and output PII policy. Configured output-inspection
+    failure withholds the response.
+11. Append audit metadata, dispatch threshold/security events, store eligible
+    session/cache state, and return normalized JSON or SSE.
+
+Streaming is route- and policy-dependent. Supported policy-free provider routes
+can relay chunks; output inspection uses bounded buffering, and providers
+without a native path can produce simulated chunks from a complete response.
+Accounting and audit finalize after success, failure, cancellation, or client
+abandonment.
 
 Tool calling and the built-in query plane are separate. AxonLLM transports a
 caller-defined `db_query` tool and its model-generated arguments, but does not

@@ -1951,12 +1951,9 @@ class GatewayAgent:
                 continue
 
         if chosen is None:
-            # No provider could open a REAL SSE stream. This is expected for
-            # providers that don't stream over HttpClient — notably boto3-based
-            # Bedrock and google_ai (distinct SSE shape). Rather than fail the
-            # request, fall back to the pre-#18 behavior: run the normal
-            # blocking call and simulate-stream the complete response. Only treat
-            # it as an error if the fallback itself can't run.
+            # No candidate opened a native SSE stream. Run the normal provider
+            # call and emit normalized simulated chunks from the complete
+            # response. Only fail if that fallback cannot run either.
             logger.debug("true-streaming unavailable (%s); falling back to buffered "
                          "simulate-stream for model=%s", open_errors, request.model)
             try:

@@ -8,6 +8,9 @@
 
 One API, any provider. Smart routing picks the best model for each prompt. Ensemble mode dispatches to multiple models and synthesizes a better answer. Policy-driven security, PII redaction, quota enforcement, and multi-region failover — all in one place.
 
+For a plain-English feature tour with code flows and diagrams, see
+[AxonLLM In Simple English](docs/AXONLLM_SIMPLE_GUIDE.md).
+
 ```bash
 git clone https://github.com/AxonLLM/axonllm.git
 cd axonllm
@@ -52,7 +55,7 @@ install paths — local or AWS, seeded or clean — and which flag decides.
 ### Routing & Providers
 - **Multi-provider routing** — 13 provider adapters: Bedrock, Bedrock Mantle, Anthropic, OpenAI, Azure, Vertex AI, Google AI Studio, Cohere, AI21, Fireworks, Groq, Together, xAI. The shipped registry configures 51 logical models across 55 provider mappings; 46 models are production-price-ready with the shipped pricing. AgentCore defaults to a nine-provider launch profile with Google AI Studio; direct `ai21`, Azure OpenAI, Cohere, and Vertex AI are explicit opt-ins, while AI21 Jamba 1.5 remains available through the default `bedrock` provider.
 - **Adaptive provider route pools** — balance multiple credentials and endpoints per provider using route-level health, token-adjusted latency, capacity, priority, and recovery probes; reuse TCP/TLS pools by transport identity
-- **Tool calling (function calling)** — send OpenAI-shaped `tools`/`tool_choice`; each adapter translates into its provider's own dialect (Anthropic `input_schema`, Bedrock `toolSpec`, Gemini `functionDeclarations`, Cohere `parameter_definitions`) and translates the call back. One tool definition works across every provider.
+- **Tool calling (function calling)** — send OpenAI-shaped `tools`/`tool_choice`; supported adapters translate into their provider dialect (Anthropic `input_schema`, Bedrock `toolSpec`, Gemini `functionDeclarations`, Cohere `parameter_definitions`) and normalize calls on return. Support is model- and provider-specific, and AxonLLM transports tool calls rather than executing them.
 - **5 routing strategies** — round-robin, weighted, least-latency, cost-optimized, smart (intent-aware)
 - **Ensemble routing** — scatter-gather-synthesize across a panel of models with configurable quorum
 - **Multi-region hub-and-spoke** — single-region, active-passive failover, or active-active with weighted distribution
@@ -60,7 +63,7 @@ install paths — local or AWS, seeded or clean — and which flag decides.
 
 ### Security & Compliance
 - **PII redaction** — per-policy-node, regex-based detection across 10 types (email, SSN, credit card, phone, IPv4, IPv6, AWS account id, medical record, IBAN, passport). Redacts before the LLM sees the prompt, re-injects in the response. The type list is a policy choice per node, not a fixed default — `aws_account_id` matches any bare 12-digit number and `passport` any letter followed by 6–9 digits, so both fire on ordinary identifiers and are usually left off.
-- **Named-entity redaction (opt-in)** — adds AWS Comprehend detection for the shapeless types regex cannot match: names, addresses, ages. Per-node via `pii_ner_enabled`, and billed per request (~$0.0001/100 chars, often more than the model's own input tokens), so it is off by default. Fails open: a Comprehend error leaves the regex types redacted and reports the failure rather than blocking the request.
+- **Named-entity redaction (opt-in)** — adds AWS Comprehend detection for the shapeless types regex cannot match: names, addresses, ages. Per-node via `pii_ner_enabled`, and billed per request (~$0.0001/100 chars, often more than the model's own input tokens), so it is off by default. Input detector failure degrades to regex-only redaction and is reported; configured output inspection fails closed and withholds uninspected provider output.
 - **Prompt injection detection** — pattern-scored heuristics (role override, system-prompt extraction, delimiter escape, base64-encoded payloads). Blocking threshold configurable, defaults to 0.7.
 - **Immutable audit trail** — SHA-256 hash chain, DynamoDB persistence, tamper detection
 - **Durable event dispatcher** — tenant-scoped webhook, AWS SNS, and CloudWatch
@@ -174,7 +177,7 @@ unconditional denial.
   demo data, provider credentials, pricing, model ids, persistence, and API-key
   expiry/scope posture. On `/admin/production-checklist`, production only.
 - **Catalogue drift detection** — `models.yaml` decides what the router can dispatch to; `catalog.yaml` describes what those models are. They are edited independently and nothing cross-checks them, so drift is invisible because neither file is wrong on its own terms. Reports catalogue entries no mapping can reach, routed models with no capability description (which return `[]` — a silent "no" to "does this do vision", worse than a gap), and traffic naming models the registry does not list. On `/admin/catalog-drift`.
-- **Streaming** — SSE streaming for all providers with PII re-injection
+- **Streaming** — normalized SSE output; supported policy-free routes relay provider chunks, while output inspection and providers without a native path use bounded buffering or simulated chunks
 - **Trace forwarding** — each completed request can be forwarded as a trace event to an external control plane over HTTP or an in-process sink. Best-effort: a slow or absent collector never slows or fails a request.
 
 ## Supported Providers
@@ -1030,11 +1033,12 @@ supply legacy authority.
  ┌─────────────────────────────────────────────────────────────┐
  │ AuthMiddleware — first match wins                           │
  │                                                             │
- │   1. X-Amzn-Oidc-Data     →  ALB OIDC JWT (ES256)           │
- │   2. Authorization: Bearer →  axon_… prefix ? API key       │
+ │   1. Browser session       →  CloudFront PKCE session        │
+ │   2. X-Amzn-Oidc-Data     →  ALB OIDC JWT (ES256)           │
+ │   3. Authorization: Bearer →  axon_… prefix ? API key       │
  │                                           : OIDC JWT (JWKS) │
- │   3. X-Api-Key            →  API key                        │
- │   4. nothing              →  401 under ENFORCE              │
+ │   4. X-Api-Key            →  API key                        │
+ │   5. nothing              →  401 under ENFORCE              │
  └──────────────────────────────┬──────────────────────────────┘
                                 │ verified identity
                                 ▼
@@ -1073,19 +1077,21 @@ requests need no key. **Anything reachable from a network should run `ENFORCE`**
 an unrecognized value falls back to `ENFORCE` rather than guessing, and `LOG_ONLY`
 logs a warning at startup.
 
-Verified against a clean `ENFORCE` instance:
+Verified against a clean direct Starlette `ENFORCE` instance without an
+application-authenticated browser UI:
 
 ```
 GET  /health            → 200   (public)
-GET  /admin/dashboard   → 200   (public — the page; its data calls still 401)
+GET  /admin/dashboard   → 200   (public shell in this direct mode)
 GET  /admin/overview    → 401   {"type":"authentication_error"}
 POST /api/chat          → 401
 GET  /admin/overview    → 401   with X-Api-Key: axon_bogus
 ```
 
-The dashboard *page* is public by design — it is a static shell that fetches its
-data over the same authenticated endpoints, so it renders and then shows errors
-rather than serving anyone else's numbers.
+That direct-mode dashboard page is a static shell whose data calls remain
+authenticated. Managed browser deployments protect the UI itself: custom-domain
+mode uses ALB Cognito authentication, and CloudFront mode requires an
+application-managed Cognito PKCE session.
 
 #### Tenant and legacy HTTP admin RBAC
 
@@ -1134,7 +1140,10 @@ matching `admin:` scopes remain supported only in noncanonical migration mode:
 Scope granularity is one segment: `admin:<resource>` matches
 `/admin/<resource>/...`. In legacy mode, roles can come from IdP claims and
 scopes from the API key. Canonical mode replaces both with the principal record.
-`/admin/static/*` and `/admin/dashboard` are always public.
+`/admin/static/*` and `/admin/dashboard` bypass the inner admin-RBAC middleware.
+They are public only when no outer managed browser-authentication layer is
+configured; the custom-domain and CloudFront control-plane modes protect them
+with Cognito.
 
 ##### Read-only vs read-write
 
@@ -1469,12 +1478,13 @@ curl -X POST http://localhost:8000/admin/quotas/simulate \
 > `/admin/quotas/my-project` answers 200 with the real numbers. Check that a
 > limit you set is actually in the response before concluding there is none.
 
-### OpenAI-compatible endpoint — drop-in `base_url` swap
+### OpenAI-compatible chat endpoint
 
 AxonLLM exposes an OpenAI-compatible surface at `/v1`, so existing code that uses
-the OpenAI SDK can point at the gateway by changing only the `base_url` and the
-API key — no request/response reshaping. Routing, quotas, guardrails, and cost
-attribution all still apply.
+the supported chat-completions and model-listing subset of the OpenAI SDK can
+usually point at the gateway by changing the `base_url` and API key. AxonLLM is
+not a complete OpenAI API replacement; provider/model capability differences
+still apply. Routing, quotas, guardrails, and cost attribution remain active.
 
 ```python
 from openai import OpenAI
@@ -1690,12 +1700,13 @@ curl -X POST localhost:8000/admin/pii/preview \
 
 Nothing is persisted by this endpoint.
 
-### Tool calling — one definition, every provider
+### Tool calling — one definition, supported provider routes
 
 Define tools once in OpenAI's shape. Each adapter translates them into its
 provider's dialect on the way out and translates the model's call back into
-`tool_calls` on the way in, so the same loop works whether the request lands on
-Bedrock, Bedrock Mantle, Anthropic, Gemini, or Cohere.
+`tool_calls` on the way in. The loop is portable across supported
+provider/model routes, subject to the capability and `tool_choice` limitations
+listed below.
 
 The `db_query` function below belongs to the calling application. AxonLLM
 transports its schema and the model's arguments, but does not automatically
@@ -1779,8 +1790,9 @@ Request → Auth (OIDC/API Key) → Tenant Project Resolution → Tenant RBAC
   → Quota Enforcement (policy hierarchy)
   → Injection Detection → PII Redaction → Rate Limit → Access Check
   → Budget Check → Guardrails → Cache Check → Region Route
-  → Provider Route (strategy) → Response Guardrails → PII Re-injection
-  → Audit Trail → Cost Track → Event Dispatch → Response
+  → Provider Route (strategy) → Usage/Cost/Budget Finalize
+  → Response Guardrails → Output PII Policy → Audit Trail
+  → Event Dispatch → Session/Eligible Cache Write → Response
 ```
 
 ### Request Pipeline Steps
@@ -1796,10 +1808,14 @@ Request → Auth (OIDC/API Key) → Tenant Project Resolution → Tenant RBAC
 9. **Cache** — tenant/project-qualified exact-match response cache (SHA-256 of model + messages + params), then an optional semantic match in the same tenant/project namespace. Written back after guardrails and PII re-injection, so a hit cannot bypass either. A hit is labelled on the way out: `x_cached: true` plus `x_cache_type` of `exact` or `semantic` (absent on a provider call)
 10. **Region routing** — select spoke based on health, data residency, model availability
 11. **Provider routing** — strategy-based model selection + fallback
-12. **Response guardrails** — output filtering
-13. **PII re-injection** — restore original values in response
-14. **Audit trail** — immutable record with hash chain
-15. **Cost tracking** — record usage, check budget thresholds, fire alerts
+12. **Usage and cost finalization** — record tokens and provider cost, finalize
+    reserved spend, and emit usage telemetry before output policy
+13. **Response guardrails and output PII policy** — withhold blocked or
+    uninspected output and restore only eligible caller-supplied values
+14. **Audit and events** — append metadata/security evidence to the tenant hash
+    chain and dispatch configured events
+15. **Session/cache/return** — store session state, write only eligible
+    post-policy non-streaming cache entries, and return JSON or normalized SSE
 
 ## Admin API Reference
 

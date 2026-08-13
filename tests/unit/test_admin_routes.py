@@ -1671,10 +1671,9 @@ class TestArchitecturePage:
     def test_the_step_numbers_match_the_source(self, site_client):
         """The prose claims these are the source's own numbers.
 
-        agent.py numbers its pipeline with fractional inserts (2.5, 9.5, 11.6)
-        added after the original sixteen. The page states it keeps that
-        numbering, so a step renumbered or dropped here makes the page lie about
-        the code — which is the one thing an architecture page cannot do.
+        agent.py numbers its pipeline with fractional inserts (2.5, 9.5, 11.6).
+        The page uses those source labels, so a step renumbered or dropped here
+        would make the architecture walkthrough disagree with the code.
         """
         import pathlib
         import re
@@ -1715,7 +1714,7 @@ class TestArchitecturePage:
         r = site_client.get("/narration/architecture-narration.json")
         assert r.status_code == 200
         assert r.headers["content-type"] == "application/json"
-        assert r.json()["voice"] == "Matthew"
+        assert r.json()["voice"] == "Daniel"
 
     def test_every_narration_track_has_its_audio(self, site_client):
         """Track ids name the MP3s by convention, so a rename fails at runtime.
@@ -1772,7 +1771,7 @@ class TestArchitecturePage:
             )
 
     def test_the_narration_text_matches_the_ssml(self, site_client):
-        """Two fields, one script: the transcript must be what Polly read.
+        """Two fields, one script: the transcript must match synthesized speech.
 
         The SSML is what got synthesized; the plain text is what the transcript
         panel shows. They are maintained by hand as a pair, so a claim corrected

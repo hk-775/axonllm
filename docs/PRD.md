@@ -102,7 +102,7 @@ A single gateway endpoint that applications target instead of individual provide
 | G2 | **Intelligent routing** | Requests are routed to the optimal provider based on configurable strategies (round-robin, weighted, least-latency, cost-optimized, smart, and ensemble) with automatic failover. |
 | G3 | **Cost management** | Every request is tracked with full token-level cost attribution (including cached, reasoning, image, and per-request fees) at the project and user level, with configurable budget limits and alerts. |
 | G4 | **Access control** | Per-project and per-user model access restrictions are enforced at the gateway level before requests reach any provider. |
-| G5 | **Content safety** | Configurable guardrail rules (keyword blocking, regex matching, content category filtering) inspect requests and responses, with block/warn/redact actions. |
+| G5 | **Content safety** | Configurable guardrail rules (keyword blocking, regex matching, content category filtering) inspect requests and responses. `block` changes execution; `warn` and `redact` currently record matches only and do not yet emit a warning or rewrite content. |
 | G6 | **High availability** | Automatic retry with exponential backoff on transient failures, multi-provider fallback chains, and health-aware routing ensure application continuity during provider outages. |
 | G7 | **Operational visibility** | A web-based admin console provides real-time dashboards for usage monitoring, cost analytics, project management, and provider health status. |
 | G8 | **Managed AgentCore deployment** | Provide target-specific release evidence and deployment verification for the checked-in private-networked stack and its JWT, readiness, backup, monitoring, rotation-safe KMS signing controls, and managed control plane with either custom-domain or generated-CloudFront ingress. |
@@ -264,7 +264,7 @@ Stakeholders who need visibility into LLM spend and assurance that usage complie
 
 | ID | Requirement | Details |
 |----|-------------|---------|
-| FR-G1 | **Per-project guardrail rules** | Each project can define guardrail rules with: name, rule_type (keyword_block, regex_match, content_category), pattern, action (block, warn, redact), applies_to (request, response, both). Rules are a field on the project, so they are edited through `PUT /admin/projects/{id}` rather than a guardrail endpoint of their own, and take effect on the next request without a restart (FR-AD2). `GuardrailEngine` is stateless — the rule list is a call argument, not constructor state. |
+| FR-G1 | **Per-project guardrail rules** | Each project can define guardrail rules with: name, rule_type (keyword_block, regex_match, content_category), pattern, action (block, warn, redact), applies_to (request, response, both). Only `block` changes execution today; `warn` and `redact` add the rule name to `violated_rules` but do not emit a caller warning or modify text. Rules are edited through `PUT /admin/projects/{id}` and take effect on the next request. `GuardrailEngine` is stateless. |
 | FR-G2 | **Request guardrails** | Rules with `applies_to` = "request" or "both" are evaluated against all message content before the request reaches a provider. Blocking violations return HTTP 400. |
 | FR-G3 | **Response guardrails** | Rules with `applies_to` = "response" or "both" are evaluated against response content. Blocking violations replace the response content with a policy violation message. |
 
@@ -317,7 +317,7 @@ Stakeholders who need visibility into LLM spend and assurance that usage complie
 
 | ID | Requirement | Details |
 |----|-------------|---------|
-| FR-T1 | **Unified tool definition** | Callers send OpenAI-shaped `tools` and `tool_choice`. One definition works across every provider; no per-provider tool schema is required of the caller. |
+| FR-T1 | **Unified tool definition** | Callers send OpenAI-shaped `tools` and `tool_choice`. One schema works across supported provider/model routes without caller-side dialect conversion; capability and `tool_choice` limitations still apply. |
 | FR-T2 | **Bidirectional dialect translation** | Each adapter translates the tool spec on the way out and the model's tool call back into OpenAI `tool_calls` on the way in. Five dialects: OpenAI-style (`tools[].function.parameters` / `tool_calls[]` / `role:"tool"`), Anthropic-style (`input_schema` / `tool_use` / `tool_result`), Bedrock Converse (`toolConfig..toolSpec` / `toolUse` / `toolResult`), Gemini (`functionDeclarations` / `functionCall` / `functionResponse`), Cohere (`parameter_definitions` / top-level `tool_results`). |
 | FR-T3 | **Normalized completion signal** | A tool call always surfaces as `finish_reason: "tool_calls"` regardless of the provider's own signal (Anthropic/Bedrock `stop_reason: "tool_use"`; Gemini leaves `finishReason` at `STOP` and signals only via the part itself). |
 | FR-T4 | **Arguments encoding** | OpenAI carries tool arguments as a JSON string, every other dialect as an object; the value is re-encoded at each boundary. Malformed model output yields `{}` rather than failing the request, so the tool reports the bad call. |
@@ -375,7 +375,7 @@ stored and no request is slowed.
 | NFR-P1 | Gateway overhead latency (excluding provider call) | < 50ms p99 |
 | NFR-P2 | Cache hit response time | < 10ms p99 |
 | NFR-P3 | Concurrent request handling | Async event loop supports thousands of concurrent connections per instance |
-| NFR-P4 | Streaming first-byte latency | Pass-through from provider (no buffering) |
+| NFR-P4 | Streaming first-byte latency | Provider pass-through only on supported routes without output inspection; bounded policy buffering and simulated-stream fallbacks intentionally delay the first emitted chunk |
 
 ### 7.2 Availability
 
@@ -433,13 +433,13 @@ stored and no request is slowed.
                             |   9.   Cache (exact, semantic)  |           +----------+
                             |   9.5  Region / Residency       |
                             |  10.   Route & Execute          |           +----------+
-                            |  11.   Response Guardrails      |---------->| Azure    |
-                            |  11.5  PII Re-injection         |           | (HTTP)   |
-                            |  11.6  Audit Trail              |           +----------+
-                            |  12.   Cost Tracking            |
+                            |  12.   Usage / Cost / Budget    |---------->| Azure    |
+                            |  11.   Response Guardrails      |           | (HTTP)   |
+                            |  11.5  Output PII Policy        |           +----------+
+                            |  11.6  Audit Metadata           |
                             |  13-14 Budget / Session         |           +----------+
-                            |  15.   Streaming Return         |---------->| 9 more   |
-                            |  15.5  Cache Write              |           |providers |
+                            |  15.   Native/buffered SSE      |---------->| 9 more   |
+                            |  15.5  Eligible Cache Write     |           |providers |
                             |  16.   Non-streaming Return     |           +----------+
                             |                                 |
                             |  +----------+  +-----------+    |
@@ -1062,12 +1062,12 @@ must therefore be evaluated separately.
 
 | Layer | Mechanism |
 |-------|-----------|
-| **Request Guardrails** | Content inspection before provider call. Keyword blocking, regex matching, content category filtering. Block/warn/redact actions. |
+| **Request Guardrails** | Content inspection before provider call. Keyword blocking, regex matching, and content-category matching are implemented. `block` rejects; `warn` and `redact` currently record matches without changing the response or text. |
 | **Response Guardrails** | Content inspection after provider response. Blocking violations replace response content with policy message. |
 | **PII redaction** | `security/pii_redactor.py` replaces detected PII with indexed tokens (`[EMAIL_1]`, `[SSN_2]`) before the prompt leaves the gateway, and keeps a reversible mapping so originals are re-injected into the response for the caller. Ten regex types: email, ssn, credit_card, phone, ip_address, ipv6, aws_account_id, medical_record, iban, passport. Configured per org/BU/project through the resolved policy; `AXON_PII_REDACTION_DEFAULT` flips an entire deployment to redact-by-default for policies that say nothing. |
 | **Named-entity PII** | `security/pii_ner.py` adds a second detector for PII that has no *shape* — names, addresses, ages — which no regex can match. Backed by Amazon Comprehend, chosen over spaCy/Presidio because `boto3` is already in the image while `en_core_web_sm` adds ~148MB and 1.35s of start-up, and because it tags `Jenkins`, `Django` and `UserService` as PERSON/ORG. The two detectors are a **union**, not a replacement: Comprehend missed `10.0.0.7`, which the `ip_address` pattern catches trivially. |
 | **Prompt injection detection** | `security/injection_detector.py` scores prompts across role-override attempts, system-prompt extraction, delimiter escape, and base64-encoded payloads, returning a five-level `ThreatLevel` (none → critical) after Unicode normalization. |
-| **Audit trail** | `security/audit_trail.py` records every request/response pair append-only: who asked, the redacted prompt and the response, security events, and the policy state at the time. Each record carries a SHA-256 hash of its predecessor, so any retroactive edit breaks the chain and is detectable. |
+| **Audit trail** | `security/audit_trail.py` stores append-only, tenant-qualified metadata and security events: identity, project, request id, model/provider, message count, redaction count, injection findings, and operation-specific fields. It does not store prompt or response bodies. Each record carries a SHA-256 hash of its predecessor, so retroactive edits are detectable. |
 | **Security event fan-out** | `security/event_dispatcher.py` snapshots each matching tenant destination into a strict FIFO SQS envelope. A worker delivers to HTTPS webhooks, CloudWatch Logs, or SNS with deterministic idempotency identities, bounded visibility retries, native DLQ redrive, same-account/region checks, and managed AWS destination allowlists. Without an outbox URL, local/development deployments retain direct best-effort delivery. |
 
 ### 11.4 Data Protection
@@ -1077,7 +1077,7 @@ must therefore be evaluated separately.
 | **Credentials at rest** | Environment variables preferred; YAML config files should be excluded from version control. API keys are persisted as SHA-256 hashes only — the plaintext exists once, in the issue response. |
 | **Data in transit** | All provider calls use HTTPS. Bedrock and Bedrock Mantle use AWS SDK / SigV4 signing. |
 | **Logging** | Structured JSON logs include request metadata (IDs, tokens, cost) but not message content. |
-| **Prompt content leaving the tenant** | PII redaction runs before dispatch, so the provider sees tokens rather than the original values; the audit trail stores the redacted form as well. |
+| **Prompt content leaving the tenant** | When enabled, PII redaction runs before dispatch so the provider sees tokens rather than the original values. The audit trail stores metadata and counts, not prompt bodies. |
 | **Data residency** | `multi_region/` can filter candidate regions by residency requirement, so a request tagged for one jurisdiction is not routed to a spoke outside it. |
 
 ---
