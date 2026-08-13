@@ -19,6 +19,7 @@ from starlette.responses import JSONResponse, RedirectResponse, Response
 
 from src.gateway.auth.browser_session import (
     BROWSER_AUTH_PATHS,
+    CONFIG_PATH as BROWSER_AUTH_CONFIG_PATH,
     SESSION_COOKIE_NAME,
     BrowserSessionUnavailable,
     browser_session_cookie_values,
@@ -166,6 +167,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
             or path.startswith("/chat/static")
             or path.startswith("/scim/")
             or path in SAML_HANDOFF_PATHS
+            or path == BROWSER_AUTH_CONFIG_PATH
             or (
                 self.browser_session_service is not None
                 and path in BROWSER_AUTH_PATHS

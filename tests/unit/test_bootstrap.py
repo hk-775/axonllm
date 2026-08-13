@@ -122,6 +122,42 @@ class TestBuildStaletteApp:
         assert app is not None
         assert hasattr(app, "routes")
 
+    def test_disabled_browser_auth_has_an_explicit_config(
+        self,
+        demo_app_config: AppConfig,
+    ):
+        from starlette.testclient import TestClient
+
+        response = TestClient(build_starlette_app(demo_app_config)).get(
+            "/auth/config"
+        )
+
+        assert response.status_code == 200
+        assert response.json() == {"browser_auth": {"enabled": False}}
+        assert response.headers["cache-control"] == "no-store"
+        assert response.headers["pragma"] == "no-cache"
+
+    def test_lifespan_closes_provider_connections(
+        self,
+        demo_app_config: AppConfig,
+        monkeypatch,
+    ):
+        from starlette.testclient import TestClient
+
+        closed = []
+
+        async def close(factory):
+            closed.append(factory)
+
+        monkeypatch.setattr(
+            "src.gateway.multi_provider_factory.MultiProviderFactory.close",
+            close,
+        )
+        with TestClient(build_starlette_app(demo_app_config)) as client:
+            assert client.get("/health").status_code == 200
+
+        assert len(closed) == 1
+
     def test_readiness_route_is_separate_from_liveness(
         self,
         minimal_app_config: AppConfig,

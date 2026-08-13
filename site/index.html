@@ -9,6 +9,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="architecture-flow.css">
     <style>
         :root {
             /* Exact palette of the Ostiari Control Plane (the light UI on :9000),
@@ -287,7 +288,7 @@
         .demo-modal[data-playing] .demo-modal-play { display: none; }
 
         .hero {
-            padding: 160px 0 100px;
+            padding: 136px 0 72px;
             text-align: center;
             position: relative;
         }
@@ -298,7 +299,7 @@
             top: 80px;
             left: 50%;
             transform: translateX(-50%);
-            width: 600px;
+            width: min(600px, 100%);
             height: 600px;
             background: radial-gradient(circle, var(--accent-glow) 0%, transparent 70%);
             pointer-events: none;
@@ -466,7 +467,7 @@
             font-size: 1.25rem;
             color: var(--text-mid);
             max-width: 660px;
-            margin: 0 auto 48px;
+            margin: 0 auto 32px;
             line-height: 1.7;
         }
 
@@ -517,6 +518,83 @@
             background: var(--border-soft);
         }
 
+        button.btn-secondary {
+            font-family: inherit;
+            cursor: pointer;
+        }
+
+        .demo-context {
+            align-items: center;
+            color: var(--text-dim);
+            display: flex;
+            font-size: 0.78rem;
+            gap: 8px;
+            justify-content: center;
+            margin-top: 16px;
+        }
+
+        .demo-context::before {
+            background: var(--green);
+            border-radius: 50%;
+            box-shadow: 0 0 0 4px var(--green-soft);
+            content: '';
+            height: 7px;
+            width: 7px;
+        }
+
+        .hero-preview {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            box-shadow: 0 24px 54px rgba(28, 25, 23, 0.14);
+            margin: 50px auto 0;
+            max-width: 960px;
+            overflow: hidden;
+            position: relative;
+        }
+
+        .hero-preview-bar {
+            align-items: center;
+            background: var(--border-soft);
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            justify-content: space-between;
+            min-height: 38px;
+            padding: 8px 12px;
+        }
+
+        .hero-preview-title,
+        .hero-preview-state {
+            color: var(--text-dim);
+            font-size: 0.7rem;
+            font-weight: 600;
+            letter-spacing: 0;
+            text-transform: uppercase;
+        }
+
+        .hero-preview-state {
+            align-items: center;
+            display: inline-flex;
+            gap: 6px;
+        }
+
+        .hero-preview-state::before {
+            background: var(--green);
+            border-radius: 50%;
+            content: '';
+            height: 6px;
+            width: 6px;
+        }
+
+        .hero-preview img {
+            aspect-ratio: 16 / 5;
+            display: block;
+            height: auto;
+            object-fit: cover;
+            object-position: top left;
+            width: 100%;
+        }
+
         .install-bar {
             margin-top: 48px;
             display: flex;
@@ -546,6 +624,33 @@
 
         .stats {
             padding: 0 0 40px;
+        }
+
+        .architecture-demo {
+            background: var(--surface);
+            border-bottom: 1px solid var(--border);
+            border-top: 1px solid var(--border);
+            padding: 96px 0;
+        }
+
+        .architecture-demo-head {
+            align-items: end;
+            display: flex;
+            gap: 24px;
+            justify-content: space-between;
+            margin-bottom: 28px;
+        }
+
+        .architecture-demo-head .section-desc {
+            margin-bottom: 0;
+        }
+
+        .architecture-demo-link {
+            flex: 0 0 auto;
+        }
+
+        .architecture-demo .axon-flow {
+            text-align: left;
         }
 
         .stat-row {
@@ -828,6 +933,12 @@
             padding: 80px 0;
         }
 
+        .silent-table-wrap {
+            max-width: 100%;
+            overflow-x: auto;
+            border-radius: var(--radius);
+        }
+
         .silent-table {
             width: 100%;
             border-collapse: collapse;
@@ -955,6 +1066,15 @@
             .nav-links { display: none; }
         }
 
+        @media (max-width: 700px) {
+            .nav-actions .nav-cta:last-child { display: none; }
+            .nav-actions .nav-cta { padding: 8px 10px; }
+        }
+
+        @media (max-width: 500px) {
+            .nav-actions .nav-cta-demo { display: none; }
+        }
+
         @media (max-width: 768px) {
             /* .nav-links is already hidden by the 950px rule above. */
             /* Scaled as a set, so the tagline keeps matching the top line's
@@ -971,6 +1091,20 @@
                1.8rem keeps the 0.73x step under a 2.5rem wordmark. */
             h1 { font-size: 1.8rem; letter-spacing: -0.8px; }
             .hero-sub { font-size: 1.05rem; }
+            .hero { padding: 120px 0 56px; }
+            .hero-actions { gap: 10px; }
+            .btn-primary, .btn-secondary {
+                justify-content: center;
+                padding: 12px 16px;
+                width: 100%;
+            }
+            .demo-context { align-items: flex-start; text-align: left; }
+            .hero-preview { margin-top: 34px; }
+            .hero-preview-bar { align-items: flex-start; gap: 8px; }
+            .hero-preview-title, .hero-preview-state { font-size: 0.62rem; }
+            .architecture-demo { padding: 72px 0; }
+            .architecture-demo-head { align-items: stretch; flex-direction: column; }
+            .architecture-demo-link { width: fit-content; }
             .tier-cards { grid-template-columns: 1fr; }
             .feature-grid { grid-template-columns: 1fr; }
             .stat-row { grid-template-columns: repeat(2, 1fr); gap: 32px 16px; }
@@ -1008,24 +1142,11 @@
             <li><a href="#silent">Silent Failures</a></li>
             <li><a href="architecture.html">Architecture</a></li>
         </ul>
-        <div style="display:flex;gap:8px;align-items:center;flex-shrink:0;">
-            <!-- Ahead of Docs and Dashboard: it is the shortest path to
-                 understanding the product, and the only ribbon item that
-                 explains itself. Tinted rather than a bordered outline like
-                 Docs and GitHub so it reads as the one thing to try, without
-                 competing with the solid Dashboard button beside it.
-
-                 "Demo" and not "Watch demo · 2:13": the ribbon is a fixed
-                 budget and the long label measured 178px, the widest item in
-                 the row, which pushed the six nav links into wrapping. The
-                 runtime moved to the tooltip, where it costs no width. -->
-            <button type="button" class="nav-cta nav-cta-demo" data-demo-open
-                    title="Watch the 2-minute product demo">
+        <div class="nav-actions" style="display:flex;gap:8px;align-items:center;flex-shrink:0;">
+            <a href="/admin/dashboard?tour=1" class="nav-cta nav-cta-demo"
+               title="Start the narrated dashboard showcase">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5.14v13.72a1 1 0 0 0 1.52.86l11.14-6.86a1 1 0 0 0 0-1.72L9.52 4.28A1 1 0 0 0 8 5.14z"/></svg>
-                Demo
-            </button>
-            <a href="https://github.com/AxonLLM/axonllm#readme" class="nav-cta" style="background:var(--surface);color:var(--text);border:1px solid var(--border);">
-                Docs
+                Showcase
             </a>
             <a href="/admin/dashboard" class="nav-cta">
                 <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/></svg>
@@ -1069,19 +1190,28 @@
             AxonLLM is the neural control plane for enterprise LLMs. Point your existing OpenAI SDK at it and get intent-aware routing across 13 providers, hierarchy-driven budgets that block before you overspend, and one audit trail for all of it.
         </p>
         <div class="hero-actions">
-            <a href="/admin/dashboard" class="btn-primary">
-                Open the Dashboard
-                <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+            <a href="/admin/dashboard?tour=1" class="btn-primary">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>
+                Start Guided Showcase
             </a>
-            <a href="https://github.com/AxonLLM/axonllm#quick-start" class="btn-secondary">
-                Get Started
+            <a href="/admin/dashboard" class="btn-secondary">
+                <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/></svg>
+                Open Seeded Dashboard
             </a>
+            <button type="button" class="btn-secondary" data-demo-open>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>
+                Watch Product Film
+            </button>
         </div>
-        <div class="install-bar">
-            <div class="install-cmd" onclick="navigator.clipboard.writeText('docker compose up')">
-                $ <code>git clone … &amp;&amp; docker compose up</code>
-                <svg class="copy-icon" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
+        <p class="demo-context">Local non-production demo seeded with Acme Corp, projects, users, policies, usage, and audit history.</p>
+        <div class="hero-preview">
+            <div class="hero-preview-bar">
+                <span class="hero-preview-title">AxonLLM control plane · Acme Corp</span>
+                <span class="hero-preview-state">Seeded demo</span>
             </div>
+            <img src="dashboard-showcase.png"
+                 alt="AxonLLM seeded dashboard showing populated gateway metrics, spend, projects, users, and provider activity"
+                 width="1440" height="900">
         </div>
     </div>
 </section>
@@ -1106,6 +1236,23 @@
                 <div class="stat-label">Tests passing</div>
             </div>
         </div>
+    </div>
+</section>
+
+<section class="architecture-demo" id="interactive-architecture">
+    <div class="container">
+        <div class="architecture-demo-head">
+            <div>
+                <p class="section-label">Interactive Architecture</p>
+                <h2 class="section-title">Follow the decision, not just the arrow</h2>
+                <p class="section-desc">Play four real request paths: smart multi-provider routing, provider fallback, governed Athena SELECT, and tenant-admin RBAC.</p>
+            </div>
+            <a href="architecture.html#interactive-flow" class="btn-secondary architecture-demo-link">
+                Full Architecture
+                <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+            </a>
+        </div>
+        <div class="axon-flow axon-flow--compact" data-axon-flow aria-label="Interactive AxonLLM request architecture"></div>
     </div>
 </section>
 
@@ -1316,15 +1463,16 @@ resp = client.chat.completions.create(
         <h2 class="section-title">The failures that don't raise</h2>
         <p class="section-desc">The dangerous misconfigurations aren't the ones that 500. They're the ones that serve traffic happily while being wrong. AxonLLM ships a checklist for the class of bug that leaves no error in any log.</p>
 
-        <table class="silent-table">
-            <thead>
-                <tr>
-                    <th>What's wrong</th>
-                    <th>What you see</th>
-                    <th>Why nobody notices</th>
-                </tr>
-            </thead>
-            <tbody>
+        <div class="silent-table-wrap" role="region" aria-label="Silent failure comparison" tabindex="0">
+            <table class="silent-table">
+                <thead>
+                    <tr>
+                        <th>What's wrong</th>
+                        <th>What you see</th>
+                        <th>Why nobody notices</th>
+                    </tr>
+                </thead>
+                <tbody>
                 <tr>
                     <td>Model has no price</td>
                     <td><span class="signal signal-ok">$0.00 spend</span> Requests succeed.</td>
@@ -1355,8 +1503,9 @@ resp = client.chat.completions.create(
                     <td><span class="signal signal-ok">200 OK</span> Requests succeed normally.</td>
                     <td>DynamoDB writes are swallowed by design — a provider call shouldn't 500 over a Dynamo hiccup — so billing records vanish silently.</td>
                 </tr>
-            </tbody>
-        </table>
+                </tbody>
+            </table>
+        </div>
         <p class="section-desc" style="margin-top: 32px; margin-bottom: 0;">A check that <em>couldn't run</em> reports <span class="signal signal-warn">UNKNOWN</span>, never <span class="signal signal-ok">PASS</span> — collapsing those is exactly how an expired credential renders as a green checklist. And nothing here is enforced: no check can refuse a boot or reject a request, because a readiness page that can take down a deployment is one nobody enables.</p>
     </div>
 </section>
@@ -1374,6 +1523,12 @@ resp = client.chat.completions.create(
                 <a href="https://github.com/AxonLLM/axonllm#quick-start" class="btn-secondary">
                     Get Started
                 </a>
+            </div>
+            <div class="install-bar">
+                <div class="install-cmd" onclick="navigator.clipboard.writeText('docker compose up')">
+                    $ <code>git clone … &amp;&amp; docker compose up</code>
+                    <svg class="copy-icon" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
+                </div>
             </div>
         </div>
     </div>
@@ -1484,6 +1639,7 @@ document.querySelectorAll('.install-cmd').forEach(el => {
     modal.addEventListener('close', () => video.pause());
 })();
 </script>
+<script src="architecture-flow.js"></script>
 
 </body>
 </html>

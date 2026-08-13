@@ -37,6 +37,12 @@ _PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent.parent.parent
 # 401 on the SVG it needs.
 SITE_ASSET_TYPES = {
     ".html": "text/html",
+    # The request-flow player is shared by the landing and architecture pages.
+    # Keeping it as a static pair avoids copying scenario data between two flat
+    # HTML files while preserving the no-build-step site deployment.
+    ".css": "text/css",
+    ".js": "text/javascript",
+    ".png": "image/png",
     ".svg": "image/svg+xml",
     ".drawio": "application/xml",
     # The product demo the landing page's ribbon opens. Served out of site/

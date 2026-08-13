@@ -2,12 +2,13 @@
 #
 # Synthesize a narration track set with Amazon Polly.
 #
-#   ./scripts/build_narration_audio.sh [architecture|tour]
+#   ./scripts/build_narration_audio.sh [architecture|interactive|tour]
 #
-# Two narrations share this script, because they differ only in which JSON is
+# Three narrations share this script, because they differ only in which JSON is
 # the source and where the MP3s land:
 #
 #   architecture  site/narration/            — the three diagrams on the site
+#   interactive   site/narration/            — landing-page request journeys
 #   tour          src/gateway/admin/static/tour/ — the dashboard's guided demo
 #
 # The chosen JSON is the single source of its script. This writes one MP3 per
@@ -28,12 +29,16 @@ case "${1:-architecture}" in
         SRC="site/narration/architecture-narration.json"
         OUT_DIR="site/narration"
         ;;
+    interactive)
+        SRC="site/narration/interactive-flow-narration.json"
+        OUT_DIR="site/narration"
+        ;;
     tour)
         SRC="src/gateway/admin/static/tour/tour-narration.json"
         OUT_DIR="src/gateway/admin/static/tour"
         ;;
     *)
-        echo "usage: $0 [architecture|tour]" >&2
+        echo "usage: $0 [architecture|interactive|tour]" >&2
         exit 2
         ;;
 esac
@@ -42,6 +47,7 @@ if [[ ! -f "$SRC" ]]; then
     echo "error: $SRC not found" >&2
     exit 1
 fi
+mkdir -p "$OUT_DIR"
 
 for tool in aws python3; do
     command -v "$tool" >/dev/null 2>&1 || { echo "error: $tool not found" >&2; exit 1; }

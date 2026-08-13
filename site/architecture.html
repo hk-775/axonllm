@@ -9,6 +9,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="architecture-flow.css">
     <style>
         :root {
             /* Same tokens as index.html — see the comment there for why stone
@@ -177,6 +178,42 @@
         .ghost-link:hover {
             border-color: var(--accent);
             box-shadow: 0 2px 8px var(--accent-glow);
+        }
+
+        .journeys {
+            background: var(--surface);
+            border-bottom: 1px solid var(--border);
+            border-top: 1px solid var(--border);
+            padding: 64px 0 72px;
+        }
+
+        .journeys-head {
+            align-items: end;
+            display: flex;
+            gap: 24px;
+            justify-content: space-between;
+            margin: 0 auto 26px;
+            max-width: 1200px;
+            padding: 0 24px;
+        }
+
+        .journeys h2 {
+            font-size: 2rem;
+            font-weight: 800;
+            letter-spacing: -1px;
+            line-height: 1.2;
+            margin-bottom: 8px;
+        }
+
+        .journeys .lede {
+            color: var(--text-mid);
+            font-size: 0.98rem;
+            margin: 0;
+            max-width: 760px;
+        }
+
+        .journeys .axon-flow {
+            text-align: left;
         }
 
         /* --- Diagram viewer ------------------------------------------------ */
@@ -691,6 +728,12 @@
             .component-card { transition: none; }
             .component-card:hover { transform: none; }
         }
+
+        @media (max-width: 760px) {
+            .journeys { padding: 48px 0 56px; }
+            .journeys-head { align-items: stretch; flex-direction: column; }
+            .journeys h2 { font-size: 1.6rem; }
+        }
     </style>
 </head>
 <body>
@@ -734,13 +777,16 @@
         <p class="section-label">Architecture</p>
         <h1>How AxonLLM is built</h1>
         <p class="subtitle">
-            Three views of the same system: the AWS infrastructure it deploys onto, the
-            16-step pipeline every request passes through, and the component graph behind
-            it. All three are generated from the source, so they describe what the code
-            does rather than what it was meant to do. Each one comes with a narrated
-            walkthrough — press play above the diagram.
+            Start with four executable request stories, then inspect the AWS
+            infrastructure, ordered gateway pipeline, and component graph behind them.
+            The engineering diagrams are generated from the source and include narrated
+            walkthroughs.
         </p>
         <div class="page-actions">
+            <a href="/admin/dashboard?tour=1" class="ghost-link">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>
+                Start dashboard showcase
+            </a>
             <a href="architecture.drawio" download class="ghost-link">
                 <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
                 Download .drawio (all three pages)
@@ -750,6 +796,19 @@
                 Same diagram inside the dashboard
             </a>
         </div>
+    </div>
+</section>
+
+<section class="journeys" id="interactive-flow">
+    <div class="journeys-head">
+        <div>
+            <p class="section-label">Interactive Request Journeys</p>
+            <h2>See where every decision is made</h2>
+            <p class="lede">Play each scenario step by step. The highlighted path separates caller identity, governance, routing, provider or data execution, and durable evidence.</p>
+        </div>
+    </div>
+    <div class="container-wide">
+        <div class="axon-flow" data-axon-flow aria-label="Interactive AxonLLM request architecture"></div>
     </div>
 </section>
 
@@ -1624,6 +1683,7 @@
     load(panels[0]);
 })();
 </script>
+<script src="architecture-flow.js"></script>
 
 </body>
 </html>
