@@ -403,13 +403,14 @@ def _regional_infrastructure_statements(
         "logs": [
             (
                 f"arn:{partition}:logs:{region}:{account_id}:log-group:"
-                f"{name}:*"
+                f"{name}{suffix}"
             )
             for name in (
                 "/aws/lambda/axonllm-production-transition-mutation-broker",
                 "/aws/lambda/axonllm-qualification-selector-mutation-broker",
                 "/aws/vendedlogs/states/AxonLLMLaunchCoordinator",
             )
+            for suffix in ("", ":*")
         ],
         "scheduler": [
             (

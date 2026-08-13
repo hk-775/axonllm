@@ -107,6 +107,40 @@ def test_execution_policy_is_fixed_size_and_excludes_data_access():
         "arn:aws:ssm:us-east-1:123456789012:"
         "parameter/cdk-bootstrap/axrel/version"
     )
+    log_access = [
+        statement
+        for document in documents
+        for statement in document["Statement"]
+        if statement.get("Sid") == "ManageReleaseFoundationLogs"
+    ]
+    assert len(log_access) == 1
+    assert "logs:ListTagsForResource" in log_access[0]["Action"]
+    assert {
+        (
+            "arn:aws:logs:us-east-1:123456789012:log-group:"
+            "/aws/lambda/axonllm-production-transition-mutation-broker"
+        ),
+        (
+            "arn:aws:logs:us-east-1:123456789012:log-group:"
+            "/aws/lambda/axonllm-production-transition-mutation-broker:*"
+        ),
+        (
+            "arn:aws:logs:us-east-1:123456789012:log-group:"
+            "/aws/lambda/axonllm-qualification-selector-mutation-broker"
+        ),
+        (
+            "arn:aws:logs:us-east-1:123456789012:log-group:"
+            "/aws/lambda/axonllm-qualification-selector-mutation-broker:*"
+        ),
+        (
+            "arn:aws:logs:us-east-1:123456789012:log-group:"
+            "/aws/vendedlogs/states/AxonLLMLaunchCoordinator"
+        ),
+        (
+            "arn:aws:logs:us-east-1:123456789012:log-group:"
+            "/aws/vendedlogs/states/AxonLLMLaunchCoordinator:*"
+        ),
+    } == set(log_access[0]["Resource"])
 
 
 def test_execution_policy_binds_roles_boundaries_and_oidc_provider():
