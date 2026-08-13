@@ -1911,7 +1911,7 @@ class AxonLLMControlPlaneStack(Stack):
             ),
         )
         container.add_environment(
-            "AXON_BROWSER_AUTH_TOKEN_ENDPOINT",
+            "AXON_BROWSER_AUTH_OAUTH_EXCHANGE_URL",
             endpoint_value(
                 Fn.join("", [hosted_ui_base, "/oauth2/token"])
             ),

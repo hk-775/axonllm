@@ -303,6 +303,10 @@ per-viewer rate limit. CloudFront caching is disabled, viewer-supplied ALB OIDC
 headers are removed before origin forwarding, and the internal ALB accepts
 origin traffic only inside the dedicated VPC.
 
+The AWS-managed `cloudfront.net` certificate does not permit selecting a custom
+minimum viewer TLS policy. Use `custom-domain` when policy requires enforcing
+TLS 1.2 or newer at the CloudFront viewer boundary.
+
 CloudFront mode creates a secretless Cognito browser client whose callback is
 the generated `/auth/callback` URL. AxonLLM stores one-time OAuth state, nonce,
 and PKCE verifier records in the encrypted state table, binds state to the

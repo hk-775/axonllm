@@ -1235,7 +1235,7 @@ so invoke it as `uv run axon <subcommand>` (or activate the venv first):
 | `AXON_BROWSER_AUTH_MODE` | — | Must be `oidc-session` for CloudFront browser authentication |
 | `AXON_BROWSER_AUTH_CLIENT_ID` | `AXON_OIDC_AUDIENCE` | Secretless Cognito browser client; must equal the verified OIDC audience in CloudFront mode |
 | `AXON_BROWSER_AUTH_AUTHORIZATION_ENDPOINT` | — | Exact Cognito `/oauth2/authorize` endpoint |
-| `AXON_BROWSER_AUTH_TOKEN_ENDPOINT` | — | Exact Cognito `/oauth2/token` endpoint |
+| `AXON_BROWSER_AUTH_OAUTH_EXCHANGE_URL` | — | Exact public Cognito `/oauth2/token` endpoint |
 | `AXON_BROWSER_AUTH_LOGOUT_ENDPOINT` | — | Exact Cognito `/logout` endpoint |
 | `AXON_BROWSER_AUTH_REDIRECT_URI` | — | Exact generated-origin `/auth/callback` URI |
 | `AXON_BROWSER_AUTH_SIGNED_OUT_URI` | — | Exact generated-origin `/auth/signed-out` URI |

@@ -634,6 +634,10 @@ endpoint mode in place; legacy stacks without the parameter are
 `custom-domain`. Use a new reviewed namespace/stack for an architecture
 migration.
 
+The AWS-managed `cloudfront.net` certificate does not permit a custom minimum
+viewer TLS policy. Select `custom-domain` when compliance requires enforcing
+TLS 1.2 or newer at the viewer boundary.
+
 When configured, `control_plane.scim_tenants_secret_arn` injects the complete
 `AXON_SCIM_TENANTS` value. Only the execution role and scoped private Secrets
 Manager endpoint can read that complete ARN. There is no SAML secret injection.

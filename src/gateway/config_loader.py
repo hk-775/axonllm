@@ -104,7 +104,7 @@ def load_app_config() -> AppConfig:
             "",
         ),
         browser_auth_token_endpoint=os.environ.get(
-            "AXON_BROWSER_AUTH_TOKEN_ENDPOINT",
+            "AXON_BROWSER_AUTH_OAUTH_EXCHANGE_URL",
             "",
         ),
         browser_auth_logout_endpoint=os.environ.get(

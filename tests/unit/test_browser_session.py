@@ -690,7 +690,7 @@ def test_cloudfront_config_loader_requires_public_cognito_contract(
         "AXON_BROWSER_AUTH_AUTHORIZATION_ENDPOINT": (
             f"{HOSTED_UI_URL}/oauth2/authorize"
         ),
-        "AXON_BROWSER_AUTH_TOKEN_ENDPOINT": (
+        "AXON_BROWSER_AUTH_OAUTH_EXCHANGE_URL": (
             f"{HOSTED_UI_URL}/oauth2/token"
         ),
         "AXON_BROWSER_AUTH_LOGOUT_ENDPOINT": (
