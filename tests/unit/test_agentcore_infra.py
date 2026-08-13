@@ -45,21 +45,26 @@ _MANTLE_ACTIONS = {
     "bedrock-mantle:CreateInference",
     "bedrock-mantle:ListModels",
 }
-_ENABLED_PROVIDERS = {
-    "ai21",
+_DEFAULT_ENABLED_PROVIDERS = {
     "anthropic",
-    "azure_openai",
     "bedrock",
     "bedrock-mantle",
-    "cohere",
     "fireworks",
     "google_ai",
     "groq",
     "openai",
     "together",
-    "vertex_ai",
     "xai",
 }
+_OPTIONAL_ENABLED_PROVIDERS = {
+    "ai21",
+    "azure_openai",
+    "cohere",
+    "vertex_ai",
+}
+_ENABLED_PROVIDERS = (
+    _DEFAULT_ENABLED_PROVIDERS | _OPTIONAL_ENABLED_PROVIDERS
+)
 _SQS_ACTIONS = {
     "sqs:ChangeMessageVisibility",
     "sqs:DeleteMessage",
@@ -520,14 +525,17 @@ def test_runtime_enforces_jwt_identity_and_bounded_lifecycle(
     assert environment["AXON_ENABLED_PROVIDERS"] == {
         "Ref": "EnabledProviders"
     }
-    assert set(
-        synthesized_template["Parameters"]["EnabledProviders"][
-            "Default"
-        ].split(",")
-    ) == _ENABLED_PROVIDERS - {"ai21"}
-    assert "ai21" in synthesized_template["Parameters"][
+    default_providers = synthesized_template["Parameters"][
+        "EnabledProviders"
+    ]["Default"].split(",")
+    assert default_providers == sorted(_DEFAULT_ENABLED_PROVIDERS)
+    allowed_pattern = synthesized_template["Parameters"][
         "EnabledProviders"
     ]["AllowedPattern"]
+    assert all(
+        provider in allowed_pattern
+        for provider in _OPTIONAL_ENABLED_PROVIDERS
+    )
     assert environment["AXON_PROVIDER_SECRET_ARN"]["Ref"].startswith(
         "ProviderCredentials"
     )

@@ -69,13 +69,14 @@ def _configuration() -> dict:
 
 def _production_configuration(
     *,
-    include_ai21: bool = False,
+    optional_providers: frozenset[str] = frozenset(),
 ) -> dict:
     raw = _configuration()
     raw["profile"] = certification.PRODUCTION_LAUNCH_PROFILE
-    providers = set(certification.PRODUCTION_LAUNCH_PROVIDERS)
-    if include_ai21:
-        providers.add("ai21")
+    providers = (
+        set(certification.PRODUCTION_LAUNCH_PROVIDERS)
+        | set(optional_providers)
+    )
     raw["providers"] = [
         {
             "provider": provider,
@@ -634,13 +635,22 @@ def test_production_launch_profile_requires_the_mandatory_provider_baseline() ->
     )
 
 
-def test_production_launch_profile_accepts_optional_direct_ai21() -> None:
+@pytest.mark.parametrize(
+    "optional_provider",
+    sorted(certification.PRODUCTION_OPTIONAL_PROVIDERS),
+)
+def test_production_launch_profile_accepts_optional_provider(
+    optional_provider: str,
+) -> None:
     parsed = certification.parse_config(
-        _production_configuration(include_ai21=True)
+        _production_configuration(
+            optional_providers=frozenset({optional_provider})
+        )
     )
 
     assert {case.provider for case in parsed.providers} == (
-        certification.PRODUCTION_ALLOWED_PROVIDERS
+        certification.PRODUCTION_LAUNCH_PROVIDERS
+        | {optional_provider}
     )
 
 

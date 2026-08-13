@@ -89,18 +89,15 @@ _RUNTIME_SQS_ACTIONS = [
 ]
 _AGENTCORE_ENABLED_PROVIDERS = ",".join(
     (
+        "anthropic",
         "bedrock",
         "bedrock-mantle",
-        "anthropic",
-        "openai",
-        "azure_openai",
-        "vertex_ai",
-        "google_ai",
-        "cohere",
-        "xai",
-        "groq",
-        "together",
         "fireworks",
+        "google_ai",
+        "groq",
+        "openai",
+        "together",
+        "xai",
     )
 )
 _PROVIDER_SECRET_FIELDS = (

@@ -34,17 +34,20 @@ REVIEWED_AT_PLACEHOLDER = "REPLACE_PER_LAUNCH_WITH_REVIEWED_AT_RFC3339"
 EXPIRES_AT_PLACEHOLDER = "REPLACE_PER_LAUNCH_WITH_EXPIRES_AT_RFC3339"
 EXPECTED_CERTIFICATION_MODELS = {
     "anthropic": "claude-opus",
-    "azure_openai": "gpt-4o",
     "bedrock": "claude-opus",
     "bedrock-mantle": "gpt-oss-120b-mantle",
-    "cohere": "cohere-command-r",
     "fireworks": "fireworks-deepseek-v4",
     "google_ai": "gemini-3.5-flash",
     "groq": "groq-llama-3.3-70b",
     "openai": "gpt-4.1",
     "together": "together-llama-3.3-70b",
-    "vertex_ai": "gemini-2.5-pro",
     "xai": "grok-4.3",
+}
+OPTIONAL_CERTIFICATION_MODELS = {
+    "ai21": "jamba-large",
+    "azure_openai": "gpt-4o",
+    "cohere": "cohere-command-r",
+    "vertex_ai": "gemini-2.5-pro",
 }
 EXPECTED_CREDENTIAL_ENVIRONMENTS = {
     "AXON_ACTIVE_CREDENTIAL",
@@ -137,12 +140,30 @@ def test_production_certification_example_uses_the_complete_launch_contract() ->
     assert all(re.fullmatch(r"[A-Z_][A-Z0-9_]*", name) for name in identity_values)
 
 
-def test_production_certification_accepts_valid_optional_direct_ai21() -> None:
+def test_production_launch_provider_policy_is_explicit() -> None:
+    assert certification.PRODUCTION_LAUNCH_PROVIDERS == frozenset(
+        EXPECTED_CERTIFICATION_MODELS
+    )
+    assert certification.PRODUCTION_OPTIONAL_PROVIDERS == frozenset(
+        OPTIONAL_CERTIFICATION_MODELS
+    )
+    assert "google_ai" in certification.PRODUCTION_LAUNCH_PROVIDERS
+    assert "vertex_ai" not in certification.PRODUCTION_LAUNCH_PROVIDERS
+
+
+@pytest.mark.parametrize(
+    ("provider", "model_name"),
+    sorted(OPTIONAL_CERTIFICATION_MODELS.items()),
+)
+def test_production_certification_accepts_valid_optional_provider(
+    provider: str,
+    model_name: str,
+) -> None:
     raw = _load(CERTIFICATION_EXAMPLE)
     raw["providers"].append(
         {
-            "provider": "ai21",
-            "model": "jamba-large",
+            "provider": provider,
+            "model": model_name,
             "features": [
                 "completion",
                 "stream",
@@ -152,14 +173,17 @@ def test_production_certification_accepts_valid_optional_direct_ai21() -> None:
     )
 
     config = certification.parse_config(raw)
-    ai21 = next(
-        case for case in config.providers if case.provider == "ai21"
+    optional_case = next(
+        case for case in config.providers if case.provider == provider
     )
-    model = _configured_models()[ai21.model]
+    model = _configured_models()[optional_case.model]
 
-    assert ai21.model == "jamba-large"
-    assert ai21.features == certification.SUPPORTED_PROVIDER_FEATURES
-    assert "ai21" in {
+    assert optional_case.model == model_name
+    assert (
+        optional_case.features
+        == certification.PRODUCTION_PROVIDER_FEATURES_BY_PROVIDER[provider]
+    )
+    assert provider in {
         mapping["provider"] for mapping in model["providers"]
     }
     assert "tools" in model["capabilities"]

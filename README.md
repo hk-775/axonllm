@@ -50,7 +50,7 @@ install paths — local or AWS, seeded or clean — and which flag decides.
 ## Features
 
 ### Routing & Providers
-- **Multi-provider routing** — 13 provider adapters: Bedrock, Bedrock Mantle, Anthropic, OpenAI, Azure, Vertex AI, Google AI, Cohere, AI21, Fireworks, Groq, Together, xAI. The shipped registry configures 51 logical models across 55 provider mappings; 46 models are production-price-ready with the shipped pricing. AgentCore enables 12 providers by default; direct `ai21` is opt-in, while AI21 Jamba 1.5 remains available through the default `bedrock` provider.
+- **Multi-provider routing** — 13 provider adapters: Bedrock, Bedrock Mantle, Anthropic, OpenAI, Azure, Vertex AI, Google AI Studio, Cohere, AI21, Fireworks, Groq, Together, xAI. The shipped registry configures 51 logical models across 55 provider mappings; 46 models are production-price-ready with the shipped pricing. AgentCore defaults to a nine-provider launch profile with Google AI Studio; direct `ai21`, Azure OpenAI, Cohere, and Vertex AI are explicit opt-ins, while AI21 Jamba 1.5 remains available through the default `bedrock` provider.
 - **Adaptive provider route pools** — balance multiple credentials and endpoints per provider using route-level health, token-adjusted latency, capacity, priority, and recovery probes; reuse TCP/TLS pools by transport identity
 - **Tool calling (function calling)** — send OpenAI-shaped `tools`/`tool_choice`; each adapter translates into its provider's own dialect (Anthropic `input_schema`, Bedrock `toolSpec`, Gemini `functionDeclarations`, Cohere `parameter_definitions`) and translates the call back. One tool definition works across every provider.
 - **5 routing strategies** — round-robin, weighted, least-latency, cost-optimized, smart (intent-aware)
@@ -193,7 +193,7 @@ evidence of a defect and not evidence against one.
 | xAI | API key | Verified |
 | Together | API key | Verified |
 | Fireworks | API key | Verified |
-| Google AI (Gemini) | API key | Adapter ready — request timed out |
+| Google AI Studio (Gemini) | API key | Verified |
 | AI21 | Direct API key, or AWS credentials through Bedrock | Jamba 1.5 Bedrock mappings available; direct Jamba 1.6 adapter untested |
 | Groq | API key | Adapter ready — untested (no credential) |
 | Azure OpenAI | API key | Adapter ready — untested (no credential) |
@@ -840,7 +840,7 @@ The environment variable name per provider (from `src/gateway/provider_loader.py
 | OpenAI | `OPENAI_API_KEY` |
 | Azure OpenAI | `AZURE_OPENAI_API_KEY` |
 | Cohere | `COHERE_API_KEY` |
-| Google AI (Gemini) | `GOOGLE_AI_API_KEY` |
+| Google AI Studio (Gemini) | `GOOGLE_AI_API_KEY` |
 | Vertex AI | ADC or `GCP_CREDENTIALS_JSON` plus `GCP_PROJECT_ID` / `GCP_LOCATION` |
 | xAI | `XAI_API_KEY` |
 | Groq | `GROQ_API_KEY` |
@@ -2456,12 +2456,14 @@ allows only the approved roles and bounded Athena API set. The datasource role
 trust policy must name the exact AgentCore runtime execution role and permit
 all three STS actions.
 
-The stack supports 13 provider adapters but enables 12 by default. Direct
-`ai21` is opt-in through `enabled_providers` and requires `AI21_API_KEY`; AI21
-Jamba 1.5 is available through the default `bedrock` provider and runtime IAM.
-Bedrock and Mantle use the runtime role; direct HTTP providers become available
-only when their credential is present in the retained KMS-encrypted secret
-exported as `ProviderSecretArn`.
+The stack supports 13 provider adapters but enables the nine-provider launch
+baseline by default. Google uses the AI Studio `google_ai` route and
+`GOOGLE_AI_API_KEY`; it does not use Vertex. Direct `ai21`, Azure OpenAI,
+Cohere, and Vertex AI are opt-ins through `enabled_providers`. Direct AI21
+requires `AI21_API_KEY`; AI21 Jamba 1.5 is available through the default
+`bedrock` provider and runtime IAM. Bedrock and Mantle use the runtime role;
+direct HTTP providers become available only when their credential is present
+in the retained KMS-encrypted secret exported as `ProviderSecretArn`.
 The runtime reads that secret through a resource-scoped private Secrets Manager
 endpoint. The approved HTTPS prefix list must include the current addresses for
 `bedrock-mantle.<region>.api.aws` and every configured direct-provider
