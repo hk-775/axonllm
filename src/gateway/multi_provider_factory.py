@@ -1,8 +1,4 @@
-"""Unified multi-provider factory that routes to the correct backend per provider.
-
-- Bedrock providers use boto3 (invoke_model / converse API)
-- All other providers use the generic HttpClient with ProviderConfig
-"""
+"""Build provider callables from configured AWS SDK and HTTP transport routes."""
 
 from __future__ import annotations
 
