@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.8] - 2026-08-12
+
+### Added
+
+- **Managed AgentCore adopters can launch without owning a domain.** The
+  shared-state control plane now supports an AWS-generated CloudFront endpoint
+  with WAF admission, a VPC origin, an internal ALB, and private Fargate tasks.
+  Schema-v2 setup, protected launch workflows, deployment evidence, runbooks,
+  and production validation all support the generated endpoint contract.
+- **CloudFront browser authentication is application-held and replica-safe.**
+  Cognito authorization code with S256 PKCE now establishes an opaque,
+  encrypted DynamoDB-backed session with bounded refresh rotation, absolute
+  expiry, cross-replica reads, CSRF protection, and explicit logout.
+
+### Security
+
+- Viewer identity headers are stripped at the CloudFront boundary, caching is
+  disabled, IPv6 is disabled for the allowlisted endpoint, and WAF defaults to
+  deny with per-viewer rate limiting. Session and token storage failures fail
+  closed, and direct SAML service-provider endpoints remain disabled.
+
+### Fixed
+
+- **The production transition watchdog can assume its bounded role.** Removed
+  a duplicate inline session policy that exceeded STS's packed-policy limit;
+  the workflow now relies on its dedicated least-privilege watchdog role and
+  has a regression assertion for that assumption path.
+
 ## [0.2.7] - 2026-08-12
 
 ### Fixed
