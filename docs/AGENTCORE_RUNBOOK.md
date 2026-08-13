@@ -174,12 +174,14 @@ test tenant event destinations before traffic.
 
 The stack supports thirteen provider adapters and applies the configured
 allowlist when the runtime constructs its provider factory. The AgentCore
-default contains twelve: direct `ai21` is opt-in, while AI21 Jamba 1.5 remains
-available through the default `bedrock` provider. Bedrock and Mantle are always
-credentialled through the runtime role; an HTTP provider is advertised only
-when its credential loads from the retained secret referenced by
-`AXON_PROVIDER_SECRET_ARN`. Mantle uses AWS SigV4 and needs no stored provider
-key.
+default is the nine-provider production baseline: Bedrock, Bedrock Mantle,
+Anthropic, OpenAI, Google AI Studio, xAI, Groq, Together, and Fireworks.
+Direct `ai21`, Azure OpenAI, Cohere, and Vertex AI are explicit opt-ins, while
+AI21 Jamba 1.5 remains available through the default `bedrock` provider.
+Bedrock and Mantle are always credentialled through the runtime role; an HTTP
+provider is advertised only when its credential loads from the retained secret
+referenced by `AXON_PROVIDER_SECRET_ARN`. Mantle uses AWS SigV4 and needs no
+stored provider key.
 
 The provider secret accepts these fields:
 
@@ -197,14 +199,15 @@ assignments, which are ignored rather than copied into the provider secret.
 Direct AI21 Jamba 1.6 uses `AI21_API_KEY`; Jamba 1.5 uses standard Bedrock IAM
 and no AI21 key.
 
-Google AI sends `GOOGLE_AI_API_KEY` only in the `x-goog-api-key` header; the
-key never enters completion, streaming, or model-list URLs. Vertex accepts only
-refreshable credentials: supply Google ADC or set `GCP_CREDENTIALS_JSON` to a
-JSON-encoded `external_account` AWS workload-identity configuration or
-`service_account` document. In the AgentCore provider secret, that field is a
-string containing the credential JSON, while `GCP_PROJECT_ID` and
-`GCP_LOCATION` select the Vertex resource. AWS workload identity avoids a
-long-lived Google private key and is preferred.
+The default launch uses Google AI Studio. It sends `GOOGLE_AI_API_KEY` only in
+the `x-goog-api-key` header; the key never enters completion, streaming, or
+model-list URLs. It does not use or fall back to Vertex. Optional Vertex access
+accepts only refreshable credentials: supply Google ADC or set
+`GCP_CREDENTIALS_JSON` to a JSON-encoded `external_account` AWS
+workload-identity configuration or `service_account` document. In the
+AgentCore provider secret, that field is a string containing the credential
+JSON, while `GCP_PROJECT_ID` and `GCP_LOCATION` select the Vertex resource. AWS
+workload identity avoids a long-lived Google private key and is preferred.
 
 Vertex performs one bounded credential exchange during synchronous bootstrap,
 then refreshes five minutes ahead of expiry on a daemon thread. Request and

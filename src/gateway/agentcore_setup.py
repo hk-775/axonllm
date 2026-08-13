@@ -27,21 +27,24 @@ DEFAULT_TENANT_CLAIM = "custom:tenant_id"
 DEFAULT_PROJECT_CLAIM = "custom:project_id"
 DEFAULT_SAML_LOGIN_PATH = "/admin/dashboard"
 DEFAULT_AGENTCORE_PROVIDERS = (
+    "anthropic",
     "bedrock",
     "bedrock-mantle",
-    "anthropic",
-    "openai",
-    "azure_openai",
-    "vertex_ai",
-    "google_ai",
-    "cohere",
-    "xai",
-    "groq",
-    "together",
     "fireworks",
+    "google_ai",
+    "groq",
+    "openai",
+    "together",
+    "xai",
 )
 SUPPORTED_AGENTCORE_PROVIDERS = frozenset(
-    (*DEFAULT_AGENTCORE_PROVIDERS, "ai21")
+    (
+        *DEFAULT_AGENTCORE_PROVIDERS,
+        "ai21",
+        "azure_openai",
+        "cohere",
+        "vertex_ai",
+    )
 )
 _IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _DOMAIN_PREFIX_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9-]{1,61}[a-z0-9])$")

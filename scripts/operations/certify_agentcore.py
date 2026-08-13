@@ -31,20 +31,24 @@ PRODUCTION_LAUNCH_PROFILE = "production-launch"
 PRODUCTION_LAUNCH_PROVIDERS = frozenset(
     {
         "anthropic",
-        "azure_openai",
         "bedrock",
         "bedrock-mantle",
-        "cohere",
         "fireworks",
         "google_ai",
         "groq",
         "openai",
         "together",
-        "vertex_ai",
         "xai",
     }
 )
-PRODUCTION_OPTIONAL_PROVIDERS = frozenset({"ai21"})
+PRODUCTION_OPTIONAL_PROVIDERS = frozenset(
+    {
+        "ai21",
+        "azure_openai",
+        "cohere",
+        "vertex_ai",
+    }
+)
 PRODUCTION_ALLOWED_PROVIDERS = (
     PRODUCTION_LAUNCH_PROVIDERS | PRODUCTION_OPTIONAL_PROVIDERS
 )

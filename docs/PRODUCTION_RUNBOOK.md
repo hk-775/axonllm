@@ -543,20 +543,23 @@ creates a different generated secret and output.
 Providers outside it are neither advertised nor invoked. Leaving it unset adds
 no allowlist beyond provider configuration and credentials; setting it empty or
 including an unknown provider fails startup. AgentCore supports thirteen
-provider adapters but defaults to twelve: direct `ai21` must be explicitly
-enabled and supplied `AI21_API_KEY`, while AI21 Jamba 1.5 remains available
-through the default `bedrock` provider. Direct HTTP providers are advertised
-only when their credentials load from the retained KMS-encrypted
-`ProviderSecretArn`. Its runtime egress prefix list must cover
+provider adapters but defaults to nine: Bedrock, Bedrock Mantle, Anthropic,
+OpenAI, Google AI Studio, xAI, Groq, Together, and Fireworks. Direct `ai21`,
+Azure OpenAI, Cohere, and Vertex AI must be explicitly enabled; AI21 Jamba 1.5
+remains available through the default `bedrock` provider. Direct HTTP providers
+are advertised only when their credentials load from the retained
+KMS-encrypted `ProviderSecretArn`. Its runtime egress prefix list must cover
 `bedrock-mantle.<region>.api.aws` and every credentialled provider hostname.
 Mantle authenticates with SigV4 and does not use a provider secret.
 
-Google AI uses `x-goog-api-key`, never a URL key. Vertex ignores static
-`GCP_ACCESS_TOKEN`; use ADC or a `GCP_CREDENTIALS_JSON` service-account/AWS
-external-account document with `GCP_PROJECT_ID` and `GCP_LOCATION`. Prefer AWS
-workload identity to a long-lived service-account key. Google access tokens are
-initialized during bounded startup and refreshed off the event loop; an
-unavailable token fails requests closed.
+The default Google path is Google AI Studio using `GOOGLE_AI_API_KEY` in the
+`x-goog-api-key` header, never a URL key. It does not use Vertex. Optional
+Vertex ignores static `GCP_ACCESS_TOKEN`; use ADC or a
+`GCP_CREDENTIALS_JSON` service-account/AWS external-account document with
+`GCP_PROJECT_ID` and `GCP_LOCATION`. Prefer AWS workload identity to a
+long-lived service-account key. Google access tokens are initialized during
+bounded startup and refreshed off the event loop; an unavailable token fails
+requests closed.
 
 ## AgentCore First-Adopter Deployment
 

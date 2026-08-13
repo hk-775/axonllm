@@ -65,6 +65,20 @@ QUALIFICATION_TEARDOWN_SIGNATURE_URI = (
 )
 
 
+def test_deployment_evidence_uses_the_certification_provider_contract() -> None:
+    assert deployment_evidence.PRODUCTION_LAUNCH_PROVIDERS == (
+        external_oidc.PRODUCTION_LAUNCH_PROVIDERS
+    )
+    assert deployment_evidence.PRODUCTION_OPTIONAL_PROVIDERS == frozenset(
+        {
+            "ai21",
+            "azure_openai",
+            "cohere",
+            "vertex_ai",
+        }
+    )
+
+
 def _write(path: Path, value: object) -> Path:
     path.write_text(
         json.dumps(value, indent=2, sort_keys=True) + "\n",

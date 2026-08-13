@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.9] - 2026-08-12
+
+### Changed
+
+- **AgentCore launches use Google AI Studio instead of Vertex by default.**
+  The mandatory nine-provider launch profile uses `GOOGLE_AI_API_KEY`; Vertex
+  AI, Azure OpenAI, Cohere, and direct AI21 remain supported as explicit
+  opt-ins and no longer block production certification.
+
 ## [0.2.8] - 2026-08-12
 
 ### Added

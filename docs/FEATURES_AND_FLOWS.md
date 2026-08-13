@@ -36,7 +36,7 @@ executor through that task.
 | Identity | OIDC/JWKS, ALB OIDC, API keys, Cognito-managed SAML federation, SCIM 2.0, managed Cognito first-adopter identity, and CloudFront application PKCE sessions |
 | Tenant RBAC | Canonical DynamoDB principals, project grants, service scopes, viewer/admin roles, audited platform break glass |
 | Query | Bounded Athena `SELECT`, HTTP and AgentCore entry points, deployment-bound IAM roles, datasource metadata administration |
-| Routing | Thirteen provider adapters; AgentCore defaults to twelve, with direct `ai21` opt-in and AI21 Jamba 1.5 available through Bedrock; retry/fallback, round-robin, weighted, least-latency, cost-optimized, smart, and ensemble paths |
+| Routing | Thirteen provider adapters; AgentCore defaults to nine with Google AI Studio, while direct `ai21`, Azure OpenAI, Cohere, and Vertex AI are opt-in and AI21 Jamba 1.5 remains available through Bedrock; retry/fallback, round-robin, weighted, least-latency, cost-optimized, smart, and ensemble paths |
 | Chat | Native and OpenAI-compatible APIs, streaming, tool translation, model/project access checks |
 | Governance | Policy hierarchy, Cedar restrictions, project/user budgets, quotas, shared rate and budget admission |
 | Safety | PII redaction and re-injection, optional Comprehend entities, prompt-injection detection, request/response guardrails |

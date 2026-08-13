@@ -24,6 +24,7 @@ from src.gateway.deployment.agentcore_deploy import (
 )
 from src.gateway.agentcore_setup import (
     DEFAULT_AGENTCORE_PROVIDERS,
+    SUPPORTED_AGENTCORE_PROVIDERS,
     AgentCoreSetupConfig,
     AgentCoreSetupError,
     cmd_setup_agentcore,
@@ -166,6 +167,34 @@ def test_managed_setup_round_trips_without_a_secret_or_subject(tmp_path):
     assert "subject" not in payload["admin"]
     assert "secret" not in output.read_text(encoding="utf-8").casefold()
     assert output.stat().st_mode & 0o777 == 0o600
+
+
+def test_agentcore_defaults_to_the_required_google_ai_launch_profile():
+    config = AgentCoreSetupConfig.from_mapping(_base())
+
+    assert set(config.runtime.enabled_providers) == {
+        "anthropic",
+        "bedrock",
+        "bedrock-mantle",
+        "fireworks",
+        "google_ai",
+        "groq",
+        "openai",
+        "together",
+        "xai",
+    }
+    assert config.runtime.enabled_providers == DEFAULT_AGENTCORE_PROVIDERS
+    assert config.runtime.enabled_providers == tuple(
+        sorted(config.runtime.enabled_providers)
+    )
+    assert SUPPORTED_AGENTCORE_PROVIDERS - set(
+        DEFAULT_AGENTCORE_PROVIDERS
+    ) == {
+        "ai21",
+        "azure_openai",
+        "cohere",
+        "vertex_ai",
+    }
 
 
 def test_cloudfront_setup_round_trips_without_dns_or_certificate(tmp_path):
