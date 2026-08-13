@@ -29,6 +29,7 @@ _CDK_QUALIFIERS = {
     "production": "axprod",
     "qualification": "axqual",
     "external": "axext",
+    "release-foundation": "axrel",
 }
 
 
@@ -47,9 +48,15 @@ def stack_name(base: str, namespace: str) -> str:
     return f"{base}-{namespace}" if namespace else base
 
 
-def cdk_qualifier(app: cdk.App, namespace: str) -> str:
+def cdk_qualifier(
+    app: cdk.App,
+    namespace: str,
+    deployment_target: str,
+) -> str:
     domain = (
-        "production"
+        "release-foundation"
+        if deployment_target == "release-foundation"
+        else "production"
         if not namespace
         else "external"
         if namespace in {"external", "external-oidc"}
@@ -93,14 +100,14 @@ def apply_service_boundary(
 
 app = cdk.App()
 namespace = deployment_namespace(app)
-qualifier = cdk_qualifier(app, namespace)
+deployment_target = (app.node.try_get_context("deployment_target") or "fargate").lower()
+qualifier = cdk_qualifier(app, namespace, deployment_target)
 
 environment = cdk.Environment(
     account=app.node.try_get_context("account") or None,
     region=app.node.try_get_context("region") or "us-east-1",
 )
 region = app.node.try_get_context("region") or "us-east-1"
-deployment_target = (app.node.try_get_context("deployment_target") or "fargate").lower()
 deployment_stack: cdk.Stack | None = None
 
 if deployment_target == "fargate":
@@ -148,6 +155,7 @@ elif deployment_target == "release-foundation":
         app,
         "AxonLLMReleaseFoundationStack",
         env=environment,
+        synthesizer=cdk.DefaultStackSynthesizer(qualifier=qualifier),
         termination_protection=True,
     )
 elif deployment_target == "launch-workers":

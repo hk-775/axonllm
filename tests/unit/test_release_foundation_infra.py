@@ -349,6 +349,8 @@ def test_deployment_evidence_store_is_immutable_encrypted_and_retained(
         synthesized_template,
         "AWS::S3::BucketPolicy",
     )[0]
+    assert bucket_policy["DeletionPolicy"] == "Retain"
+    assert bucket_policy["UpdateReplacePolicy"] == "Retain"
     deny = next(
         statement
         for statement in bucket_policy["Properties"]["PolicyDocument"]["Statement"]
@@ -400,7 +402,7 @@ def test_github_oidc_trust_is_exact_and_retained(synthesized_template):
 
     roles = _resources(synthesized_template, "AWS::IAM::Role")
     assert "repo:AxonLLM/axonllm:" not in json.dumps(roles)
-    assert len(roles) == 17
+    assert len(roles) == 18
     roles_by_name = {role["Properties"]["RoleName"] for role in roles}
     assert roles_by_name == {
         "AxonLLMLaunchActionWorkerRole",
@@ -417,6 +419,7 @@ def test_github_oidc_trust_is_exact_and_retained(synthesized_template):
         "AxonLLMOperationsRecovery",
         "AxonLLMProductionTransitionMutationBrokerRole",
         "AxonLLMQualificationMutationBrokerRole",
+        "AxonLLMReleaseFoundationDeployRole",
         "AxonLLMReleasePublisher",
         "AxonLLMReleaseSigner",
         "AxonLLMReleaseVerifier",
@@ -426,7 +429,7 @@ def test_github_oidc_trust_is_exact_and_retained(synthesized_template):
         for role in roles
         if role["Properties"]["AssumeRolePolicyDocument"]["Statement"][0]["Action"] == "sts:AssumeRoleWithWebIdentity"
     ]
-    assert len(github_roles) == 11
+    assert len(github_roles) == 12
     expected_durations = {
         "AxonLLMAgentCoreDeployRole": 10800,
         "AxonLLMAgentCoreQualificationRole": 10800,
@@ -436,6 +439,7 @@ def test_github_oidc_trust_is_exact_and_retained(synthesized_template):
         "AxonLLMLaunchGatesRole": 10800,
         "AxonLLMOperationsAudit": 3600,
         "AxonLLMOperationsRecovery": 7200,
+        "AxonLLMReleaseFoundationDeployRole": 3600,
         "AxonLLMReleasePublisher": 3600,
         "AxonLLMReleaseSigner": 3600,
         "AxonLLMReleaseVerifier": 3600,
@@ -449,6 +453,9 @@ def test_github_oidc_trust_is_exact_and_retained(synthesized_template):
         "AxonLLMLaunchGatesRole": (":environment:agentcore-production-launch-gates"),
         "AxonLLMOperationsAudit": ":environment:production",
         "AxonLLMOperationsRecovery": ":environment:production",
+        "AxonLLMReleaseFoundationDeployRole": (
+            ":environment:release-foundation"
+        ),
         "AxonLLMReleasePublisher": ":environment:release",
         "AxonLLMReleaseVerifier": ":environment:production",
     }
@@ -512,7 +519,7 @@ def test_signer_publisher_and_verifier_permissions_are_separate(
     synthesized_template,
 ):
     policies = _resources(synthesized_template, "AWS::IAM::Policy")
-    assert len(policies) == 17
+    assert len(policies) == 18
     by_role: dict[str, list[dict]] = {}
     for policy in policies:
         role = policy["Properties"]["Roles"][0]["Ref"]
@@ -1440,6 +1447,7 @@ def test_launch_coordinator_is_versioned_standard_and_dispatches_29_actions(
     assert properties["TracingConfiguration"] == {"Enabled": True}
     assert {tag["Key"]: tag["Value"] for tag in properties["Tags"]} == {
         "Application": "AxonLLM",
+        "AxonLLMTrustDomain": "axrel",
         "Environment": "production",
         "Purpose": "agentcore-launch-rehearsal",
     }
@@ -2178,6 +2186,72 @@ def test_repository_policy_denies_insecure_transport(
         assert deny["Condition"] == {"Bool": {"aws:SecureTransport": "false"}}
 
 
+def test_foundation_uses_dedicated_bounded_cdk_domain(
+    synthesized_template,
+):
+    serialized = json.dumps(synthesized_template, sort_keys=True)
+    assert "hnb659fds" not in serialized
+    assert (
+        synthesized_template["Parameters"]["BootstrapVersion"]["Default"]
+        == "/cdk-bootstrap/axrel/version"
+    )
+
+    for role in _resources(synthesized_template, "AWS::IAM::Role"):
+        assert _literal_parts(
+            role["Properties"]["PermissionsBoundary"]
+        ).endswith(
+            ":policy/"
+            "AxonLLMReleaseFoundationRoleBoundary-axrel-us-east-1"
+        )
+        tags = {
+            item["Key"]: item["Value"]
+            for item in role["Properties"]["Tags"]
+        }
+        assert tags["Application"] == "AxonLLM"
+        assert tags["AxonLLMTrustDomain"] == "axrel"
+
+    deployer = _role_statements(
+        synthesized_template,
+        "AxonLLMReleaseFoundationDeployRole",
+    )
+    actions = {
+        action
+        for statement in deployer
+        for action in _actions(statement)
+    }
+    assert "sts:AssumeRole" in actions
+    assert "iam:PassRole" not in actions
+    assert "iam:ListRoleTags" in actions
+    assume = next(
+        statement
+        for statement in deployer
+        if statement.get("Sid") == "UseBoundedReleaseFoundationCdkRoles"
+    )
+    resources = (
+        assume["Resource"]
+        if isinstance(assume["Resource"], list)
+        else [assume["Resource"]]
+    )
+    assert len(resources) == 2
+    assert all("cdk-axrel-" in _literal_parts(resource) for resource in resources)
+    assert all("hnb659fds" not in _literal_parts(resource) for resource in resources)
+    assert all(
+        purpose not in json.dumps(resources)
+        for purpose in ("image-publishing", "lookup")
+    )
+    inspect = next(
+        statement
+        for statement in deployer
+        if statement.get("Sid") == "InspectBoundedReleaseFoundationCdkRoles"
+    )
+    inspect_resources = (
+        inspect["Resource"]
+        if isinstance(inspect["Resource"], list)
+        else [inspect["Resource"]]
+    )
+    assert len(inspect_resources) == 5
+
+
 def test_foundation_outputs_all_operator_inputs(synthesized_template):
     assert set(synthesized_template["Outputs"]) == {
         "AgentCoreDeployRoleArn",
@@ -2224,6 +2298,7 @@ def test_foundation_outputs_all_operator_inputs(synthesized_template):
         "RehearsalControlLedgerTableArn",
         "RehearsalControlLedgerTableName",
         "ReleasePublisherRoleArn",
+        "ReleaseFoundationDeployRoleArn",
         "ReleaseRegistryKeyArn",
         "ReleaseSigningKeyArn",
         "ReleaseSignerRoleArn",

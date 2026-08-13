@@ -728,6 +728,14 @@ release is published, CI is green, and the `agentcore` target has passed
 deployment verification, choose one identity path. There is no unauthenticated
 AgentCore mode.
 
+For an existing account, complete the one-time `axrel` migration before any
+AgentCore production launch. The foundation stack must report
+`cdk-axrel-cfn-exec-role-<account>-us-east-1` as its `RoleARN`, the bounded
+bootstrap verifier must pass, and the protected `release-foundation`
+environment must contain the exact `ReleaseFoundationDeployRoleArn` output.
+Do not use the shared `hnb659fds` execution role for foundation changes and do
+not detach its current policy while another application still depends on it.
+
 The generated first-adopter file uses schema version 2. In managed-Cognito
 mode, its `control_plane` object is required and may select `custom-domain` or
 `cloudfront`; schema-v1 files must be regenerated or migrated before

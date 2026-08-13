@@ -297,6 +297,9 @@ See [Features And Flows](FEATURES_AND_FLOWS.md) for request sequences.
   with separate prerequisite, transition-intent, transition-terminal, and
   storage keys;
 - an account-global GitHub Actions OIDC provider;
+- an `AxonLLMReleaseFoundationDeployRole` trusted only by the protected
+  `release-foundation` environment and permitted to enter only the dedicated
+  `axrel` CDK trust domain;
 - an `AxonLLMReleaseSigner` role trusted only by `v*` tag refs and permitted
   only to sign and verify with the release-signing key;
 - an `AxonLLMReleasePublisher` role trusted only by the protected GitHub
@@ -323,7 +326,14 @@ The signer cannot access ECR. The publisher can verify evidence and upload and
 read image layers, but cannot sign or delete images or repositories. The
 verifier can verify signatures and read images but cannot sign or write. Both
 operations roles trust only the exact protected `production` environment
-subject. Deploy this stack once per target account:
+subject.
+
+The foundation does not use the account's shared `hnb659fds` CDK execution
+role. It uses the `axrel` qualifier, five repository-generated execution
+policies, a boundary on the CloudFormation execution and CDK deploy roles, and
+a separate boundary on all foundation service roles. Do not remove or modify
+the shared `hnb659fds` roles while other applications, including AgentLasso,
+still use them.
 
 The IAM trust subjects use GitHub's immutable organization and repository IDs,
 not rename-sensitive names. Before deploying after a repository transfer,
@@ -335,11 +345,44 @@ gh api repos/AxonLLM/axonllm/actions/oidc/customization/sub
 
 The returned `sub_claim_prefix` must match exactly.
 
+### One-Time `axrel` Migration
+
+The steady-state workflow cannot perform the first migration because its OIDC
+role is created by the foundation stack. From a reviewed `main` commit, use a
+time-limited privileged operator and Node 22 for this one migration only:
+
+```bash
+npm ci \
+  --prefix src/gateway/deployment/infra \
+  --ignore-scripts \
+  --no-audit \
+  --no-fund
+uv run --frozen --no-sync python \
+  -m src.gateway.deployment.release_foundation_bootstrap \
+  install --apply --region us-east-1
+```
+
+The installer creates or updates the seven repository-owned managed policies,
+bootstraps `AxonLLMToolkit-axrel`, applies the deploy-role boundary omitted by
+the stock CDK template, and verifies exact trust, attached policy, inline
+policy, boundary, tag, toolkit, and bootstrap-version contracts. It retains
+the previous managed-policy version for rollback. It never changes the shared
+`hnb659fds` toolkit.
+
+Create a non-executing change set with the repository-pinned CLI. Include all
+ten business parameters and explicitly migrate `BootstrapVersion`:
+
 ```bash
 cd infra
-npx cdk deploy AxonLLMReleaseFoundationStack \
+../src/gateway/deployment/infra/node_modules/.bin/cdk deploy \
+  AxonLLMReleaseFoundationStack \
+  --app ".venv/bin/python app.py" \
   -c deployment_target=release-foundation \
   -c region=us-east-1 \
+  --lookups false \
+  --method prepare-change-set \
+  --change-set-name AxonLLMReleaseFoundation-initial-axrel \
+  --require-approval never \
   --parameters AxonLLMReleaseFoundationStack:FargateStateTableName=axonllm-state \
   --parameters AxonLLMReleaseFoundationStack:AgentCoreStateTableName=axonllm-agentcore-state \
   --parameters AxonLLMReleaseFoundationStack:ProductionProviderSourceSecretArn="$PRODUCTION_PROVIDER_SOURCE_SECRET_ARN" \
@@ -348,15 +391,42 @@ npx cdk deploy AxonLLMReleaseFoundationStack \
   --parameters AxonLLMReleaseFoundationStack:QualificationProviderSourceKmsKeyArn="$QUALIFICATION_PROVIDER_SOURCE_KMS_KEY_ARN" \
   --parameters AxonLLMReleaseFoundationStack:ExternalOidcProviderSourceSecretArn="$EXTERNAL_PROVIDER_SOURCE_SECRET_ARN" \
   --parameters AxonLLMReleaseFoundationStack:ExternalOidcProviderSourceKmsKeyArn="$EXTERNAL_PROVIDER_SOURCE_KMS_KEY_ARN" \
-  --parameters AxonLLMReleaseFoundationStack:LaunchAlarmEmail="$LAUNCH_ALARM_EMAIL"
+  --parameters AxonLLMReleaseFoundationStack:GitHubOidcSubjectPrefix="$GITHUB_OIDC_SUBJECT_PREFIX" \
+  --parameters AxonLLMReleaseFoundationStack:LaunchAlarmEmail="$LAUNCH_ALARM_EMAIL" \
+  --parameters AxonLLMReleaseFoundationStack:BootstrapVersion=/cdk-bootstrap/axrel/version
 ```
+
+Review the complete change set, especially replacements, IAM trust, KMS key
+policies, retained resources, tags, and permissions boundaries. Execute only
+the reviewed change set, wait for `UPDATE_COMPLETE`, then require:
+
+```bash
+aws cloudformation execute-change-set \
+  --stack-name AxonLLMReleaseFoundationStack \
+  --change-set-name AxonLLMReleaseFoundation-initial-axrel
+aws cloudformation wait stack-update-complete \
+  --stack-name AxonLLMReleaseFoundationStack
+cd ..
+uv run --frozen --no-sync python \
+  -m src.gateway.deployment.release_foundation_bootstrap \
+  verify --region us-east-1
+```
+
+Confirm that the foundation stack's `RoleARN` is
+`cdk-axrel-cfn-exec-role-<account>-us-east-1`, all 18 service roles carry the
+`axrel` boundary and trust-domain tag, and no `axrel` role has
+`AdministratorAccess`. If migration fails, inspect stack events before using
+`continue-update-rollback`; do not delete retained keys, evidence, or policy
+versions.
 
 If either runtime uses a nondefault physical table name, pass the same name to
 the foundation parameter. The operations IAM policies are generated from these
 parameters and will not reach a different table.
 
-Create eight protected GitHub environments:
+Create nine protected GitHub environments:
 
+- `release-foundation`: require approval and restrict deployment refs to
+  protected `main`;
 - `release`: require approval and restrict deployment refs to version tags;
 - `production`: require approval and restrict deployment refs to protected
   production branches and tags;
@@ -388,6 +458,19 @@ Configure these repository variables for the tag-triggered signing workflow:
 | `AXON_RELEASE_SIGN_ROLE_ARN` | `ReleaseSignerRoleArn` output |
 | `AXON_RELEASE_SIGNING_KEY_ARN` | Current exact `ReleaseSigningKeyArn` output; never an alias |
 | `AXON_AWS_ACCOUNT_ID` | Twelve-digit deployment account |
+
+After the one-time migration, configure `release-foundation` with the
+`AXON_RELEASE_FOUNDATION_DEPLOY_ROLE_ARN` secret from
+`ReleaseFoundationDeployRoleArn` and the `AXON_AWS_ACCOUNT_ID` variable. Only
+then enable `.github/workflows/deploy-release-foundation.yml`. Every dispatch
+must name an approved change and use a successful `main` push CI run. Dispatch
+`prepare` first, record and review the complete
+`AxonLLMReleaseFoundation-<commit>` change set, then dispatch `execute` from
+the same commit and change approval. The execute dispatch rejects absent,
+stale, already-run, differently scoped, or non-`axrel` change sets. It
+preserves the ten live business parameters, forces the `axrel` bootstrap
+parameter, and finishes by verifying the stack execution role and bootstrap
+contract.
 
 Configure `release` with:
 
