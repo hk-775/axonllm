@@ -13,6 +13,7 @@ from typing import Any, Sequence
 from src.gateway.deployment.release_foundation_policy import (
     EXECUTION_POLICY_PART_COUNT,
     FOUNDATION_QUALIFIER,
+    IAM_MANAGED_POLICY_SIZE_LIMIT,
     TOOLKIT_STACK_NAME,
     bootstrap_boundary_arn,
     bootstrap_boundary_document,
@@ -353,6 +354,34 @@ def ensure_policy_set(
     apply: bool,
 ) -> tuple[str, ...]:
     """Create or verify the exact repository-owned IAM policy set."""
+    service_document = service_boundary_document(
+        partition=identity.partition,
+        account_id=identity.account_id,
+        region=region,
+    )
+    bootstrap_document = bootstrap_boundary_document(
+        partition=identity.partition,
+        account_id=identity.account_id,
+        region=region,
+    )
+    documents = execution_policy_documents(
+        partition=identity.partition,
+        account_id=identity.account_id,
+        region=region,
+    )
+    for purpose, document in (
+        ("service-role boundary", service_document),
+        ("bootstrap-role boundary", bootstrap_document),
+        *(
+            (f"execution policy part {part}", document)
+            for part, document in enumerate(documents, start=1)
+        ),
+    ):
+        if len(_canonical(document)) > IAM_MANAGED_POLICY_SIZE_LIMIT:
+            raise ReleaseFoundationBootstrapError(
+                f"{purpose} exceeds IAM's managed-policy size quota"
+            )
+
     iam_client = session.client("iam", region_name=region)
     service_arn = service_boundary_arn(
         partition=identity.partition,
@@ -367,11 +396,7 @@ def ensure_policy_set(
             "Mandatory anti-escalation boundary for AxonLLM "
             "release-foundation roles"
         ),
-        document=service_boundary_document(
-            partition=identity.partition,
-            account_id=identity.account_id,
-            region=region,
-        ),
+        document=service_document,
         purpose="ServiceRoleBoundary",
         apply=apply,
     )
@@ -388,18 +413,9 @@ def ensure_policy_set(
             "Mandatory anti-escalation boundary for AxonLLM "
             "release-foundation CDK roles"
         ),
-        document=bootstrap_boundary_document(
-            partition=identity.partition,
-            account_id=identity.account_id,
-            region=region,
-        ),
+        document=bootstrap_document,
         purpose="BootstrapRoleBoundary",
         apply=apply,
-    )
-    documents = execution_policy_documents(
-        partition=identity.partition,
-        account_id=identity.account_id,
-        region=region,
     )
     arns: list[str] = []
     for part, document in enumerate(documents, start=1):

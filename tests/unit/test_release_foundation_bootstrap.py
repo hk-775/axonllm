@@ -170,6 +170,10 @@ def test_boundaries_prevent_identity_and_credential_escalation():
         account_id=ACCOUNT_ID,
         region=REGION,
     )
+    assert (
+        len(json.dumps(boundary, separators=(",", ":"), sort_keys=True))
+        <= policy.IAM_MANAGED_POLICY_SIZE_LIMIT
+    )
     serialized = json.dumps(boundary, sort_keys=True)
     assert "iam:CreateAccessKey" in serialized
     assert "iam:UpdateAssumeRolePolicy" in serialized
@@ -195,6 +199,37 @@ def test_boundaries_prevent_identity_and_credential_escalation():
         "AxonLLMReleaseFoundation" in resource
         for resource in stack_deny["NotResource"]
     )
+    baseline = next(
+        statement
+        for statement in boundary["Statement"]
+        if statement["Sid"] == "AllowReviewedNonIdentityPermissions"
+    )
+    assert {"iam:*", "sts:*"} <= set(baseline["NotAction"])
+    identity_allows = {
+        statement["Sid"]: statement
+        for statement in boundary["Statement"]
+        if statement["Effect"] == "Allow"
+        and any(
+            action.startswith(("iam:", "sts:"))
+            for action in _actions({"Statement": [statement]})
+        )
+    }
+    assert set(identity_allows) == {
+        "AllowCallerIdentityInspection",
+        "AllowExactOidcManagement",
+        "AllowExpectedManagedPolicyManagement",
+        "AllowExpectedRoleManagement",
+        "AllowExpectedRolePassing",
+        "AllowIdentityMetadataInspection",
+    }
+    for sid, statement in identity_allows.items():
+        if sid in {
+            "AllowCallerIdentityInspection",
+            "AllowIdentityMetadataInspection",
+        }:
+            continue
+        assert statement["Resource"] != "*"
+        assert "NotResource" not in statement
 
 
 def test_execution_policy_scopes_regional_mutations_to_foundation_resources():
@@ -309,6 +344,40 @@ def test_install_requires_explicit_apply(capsys):
 def test_verify_rejects_apply(capsys):
     assert bootstrap.main(["verify", "--apply"]) == 2
     assert "valid only with install" in capsys.readouterr().err
+
+
+def test_policy_set_rejects_oversized_document_before_aws_calls(monkeypatch):
+    class NoAwsCalls:
+        def client(self, *_args, **_kwargs):
+            raise AssertionError("policy validation must precede AWS calls")
+
+    monkeypatch.setattr(
+        bootstrap,
+        "bootstrap_boundary_document",
+        lambda **_kwargs: {
+            "Version": "2012-10-17",
+            "Statement": [
+                {
+                    "Effect": "Allow",
+                    "Action": "s3:ListAllMyBuckets",
+                    "Resource": "x" * policy.IAM_MANAGED_POLICY_SIZE_LIMIT,
+                }
+            ],
+        },
+    )
+    with pytest.raises(
+        bootstrap.ReleaseFoundationBootstrapError,
+        match="bootstrap-role boundary exceeds IAM's managed-policy size quota",
+    ):
+        bootstrap.ensure_policy_set(
+            NoAwsCalls(),
+            identity=bootstrap.AwsIdentity(
+                account_id=ACCOUNT_ID,
+                partition=PARTITION,
+            ),
+            region=REGION,
+            apply=True,
+        )
 
 
 def test_compatibility_launcher_runs_outside_the_scripts_directory(

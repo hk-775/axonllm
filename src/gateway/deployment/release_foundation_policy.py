@@ -889,60 +889,10 @@ def bootstrap_boundary_document(
                 ],
                 "Resource": "*",
             },
-            {
-                "Sid": "DenyUnexpectedRoleMutation",
-                "Effect": "Deny",
-                "Action": [
-                    "iam:AttachRolePolicy",
-                    "iam:CreateRole",
-                    "iam:DeleteRole",
-                    "iam:DeleteRolePermissionsBoundary",
-                    "iam:DeleteRolePolicy",
-                    "iam:DetachRolePolicy",
-                    "iam:PutRolePermissionsBoundary",
-                    "iam:PutRolePolicy",
-                    "iam:TagRole",
-                    "iam:UntagRole",
-                    "iam:UpdateAssumeRolePolicy",
-                    "iam:UpdateRole",
-                    "iam:UpdateRoleDescription",
-                ],
-                "NotResource": role_arns,
-            },
-            {
-                "Sid": "DenyUnexpectedManagedPolicyMutation",
-                "Effect": "Deny",
-                "Action": [
-                    "iam:CreatePolicy",
-                    "iam:CreatePolicyVersion",
-                    "iam:DeletePolicy",
-                    "iam:DeletePolicyVersion",
-                    "iam:SetDefaultPolicyVersion",
-                    "iam:TagPolicy",
-                    "iam:UntagPolicy",
-                ],
-                "NotResource": managed_policy_arns,
-            },
-            {
-                "Sid": "DenyUnexpectedOidcMutation",
-                "Effect": "Deny",
-                "Action": [
-                    "iam:AddClientIDToOpenIDConnectProvider",
-                    "iam:CreateOpenIDConnectProvider",
-                    "iam:DeleteOpenIDConnectProvider",
-                    "iam:RemoveClientIDFromOpenIDConnectProvider",
-                    "iam:TagOpenIDConnectProvider",
-                    "iam:UntagOpenIDConnectProvider",
-                    "iam:UpdateOpenIDConnectProviderThumbprint",
-                ],
-                "NotResource": oidc_provider,
-            },
-            {
-                "Sid": "DenyUnexpectedRolePassing",
-                "Effect": "Deny",
-                "Action": "iam:PassRole",
-                "NotResource": [*role_arns, cloudformation_role],
-            },
+            # IAM and STS are excluded from the baseline allow. Identity
+            # operations not explicitly scoped above remain implicitly denied;
+            # duplicating every ARN in deny statements exceeds IAM's boundary
+            # size quota without changing effective access.
             {
                 "Sid": "DenyUnexpectedCloudFormationMutation",
                 "Effect": "Deny",
