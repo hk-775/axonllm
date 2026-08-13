@@ -92,6 +92,21 @@ def test_execution_policy_is_fixed_size_and_excludes_data_access():
         in resource
         for resource in asset_reads[0]["Resource"]
     )
+    bootstrap_reads = [
+        statement
+        for document in documents
+        for statement in document["Statement"]
+        if statement.get("Sid") == "ReadDedicatedCdkBootstrapVersion"
+    ]
+    assert len(bootstrap_reads) == 1
+    assert set(bootstrap_reads[0]["Action"]) == {
+        "ssm:GetParameter",
+        "ssm:GetParameters",
+    }
+    assert bootstrap_reads[0]["Resource"] == (
+        "arn:aws:ssm:us-east-1:123456789012:"
+        "parameter/cdk-bootstrap/axrel/version"
+    )
 
 
 def test_execution_policy_binds_roles_boundaries_and_oidc_provider():
