@@ -264,7 +264,7 @@ def test_shipped_example_defines_every_direct_provider(monkeypatch) -> None:
         lambda _values: refreshable,
     )
 
-    configs = load_provider_configs("config/providers.yaml")
+    configs = load_provider_configs("config/providers.yaml.example")
 
     assert set(configs) == {
         *provider_loader._ENV_KEY_MAP,

@@ -4,12 +4,48 @@
 [![License: MIT-0](https://img.shields.io/badge/License-MIT--0-blue.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
 
-**The neural control plane for enterprise LLMs.**
+**An open-source multi-provider LLM gateway with a mandatory control plane.**
 
-One API, any provider. Smart routing picks the best model for each prompt. Ensemble mode dispatches to multiple models and synthesizes a better answer. Policy-driven security, PII redaction, quota enforcement, and multi-region failover — all in one place.
+AxonLLM uses one routing core for an embedded Python API, a standalone
+OpenAI-compatible gateway, and an AgentCore Runtime adapter. The router owns
+provider translation, selection, retry, fallback, streaming, and usage
+telemetry. The control plane owns configuration, virtual keys, policies,
+budgets, analytics, and audit.
+
+The accepted v0.3 boundary is recorded in
+[ADR 0001](docs/adr/0001-v0.3-product-boundary.md). Fleet-wide adaptive load
+balancing, Athena query execution, agent behavior, and Ostiari integration are
+explicitly outside the public-beta release gate.
 
 For a plain-English feature tour with code flows and diagrams, see
 [AxonLLM In Simple English](docs/AXONLLM_SIMPLE_GUIDE.md).
+
+The public embedded API now starts at `axonllm.AsyncRouter`:
+
+```python
+import asyncio
+
+from axonllm import AsyncRouter
+
+
+async def main() -> None:
+    async with AsyncRouter.from_files(
+        models="config/models.yaml",
+        providers="config/providers.yaml",
+        pricing="config/pricing.yaml",
+    ) as router:
+        response = await router.chat.completions.create(
+            model="claude-sonnet",
+            messages=[{"role": "user", "content": "Hello"}],
+        )
+        print(response.choices[0]["message"]["content"])
+
+
+asyncio.run(main())
+```
+
+`from_files` is the local/bootstrap path. Production deployments will consume
+the same configuration through versioned control-plane snapshots.
 
 ```bash
 git clone https://github.com/AxonLLM/axonllm.git
@@ -84,7 +120,12 @@ install paths — local or AWS, seeded or clean — and which flag decides.
 - **Budget threshold alerting** — fires events at 80%, 90%, 100% spend via the event dispatcher
 - **Per-user and per-project budgets** with automatic blocking
 
-### Read-Only Query And Shared Control Plane
+### Control Plane And Legacy Query Integration
+
+The control plane remains mandatory in v0.3. The Athena bullets below describe
+existing v0.2 integration code, but Athena execution is deferred from the v0.3
+public-beta boundary.
+
 - **Governed Athena query** — a normal Starlette data-plane process exposes
   `POST /v1/query`, and AgentCore exposes a `query` action. Both call the same
   canonical `QueryService`.
@@ -869,8 +910,9 @@ provider in `config/providers.yaml`, give each route a stable `route_id`, and
 select its secret with `api_key_env` (or the corresponding cloud credential
 environment fields). Legacy single-key provider documents continue to become
 one `<provider>:default` route. See
-[Provider Route Pools](docs/PROVIDER_ROUTES.md) for adaptive scoring, endpoint
-balancing, shared-account capacity, connection pooling, and failure behavior.
+[Provider Route Pools](docs/PROVIDER_ROUTES.md) for process-local adaptive
+endpoint selection, route capacity, connection pooling, failure behavior, and
+the explicitly deferred fleet-wide milestone.
 
 **Locally:**
 
@@ -2194,11 +2236,6 @@ Two more caveats worth knowing before you rely on this layer:
 | `AXON_PII_REDACT_TYPES` | all patterns | Comma-separated subset of regex PII types to redact when the default above is on |
 | `AXON_PII_NER_DEFAULT` | `false` | Turn entity detection on for policies that don't configure it. **Bills per request** — see [Names, addresses, and the limits of regex](#names-addresses-and-the-limits-of-regex) |
 | `AXON_PII_NER_TYPES` | `name,address,age` | Comma-separated subset of entity types to detect |
-| `OSTIARI_TRACES_URL` | — | When set, forward request traces to this Ostiari ingest URL (e.g. `http://control-plane:8000/api/traces/ingest`) |
-| `OSTIARI_GATEWAY_ID` | `axonllm` | Gateway identifier reported in Ostiari's Live Traces |
-| `OSTIARI_INGEST_KEY` | — | Shared secret sent as `X-Ingest-Key` when Ostiari's ingest endpoint requires auth |
-| `OSTIARI_TRACES_TIMEOUT` | `3.0` | Per-request timeout (seconds) for trace forwarding |
-
 ### Models
 
 Define models in `config/models.yaml`:
@@ -2604,38 +2641,6 @@ Require green CI and schema-v3 target-aware release evidence for the exact
 deployed digest. `v0.2.4` has retained private-ECR/KMS evidence, but no hardened
 runtime deployment, AWS restore exercise, or application recovery rehearsal has
 been verified.
-
-## Embedding in Ostiari (trace forwarding)
-
-When AxonLLM runs embedded inside Ostiari, each completed
-request is forwarded as a trace event into Ostiari's Live Traces view. Forwarding
-activates automatically when Ostiari is *detected* — no code change to standalone
-deployments (with neither of the following, it's a no-op).
-
-**Two delivery paths (either or both):**
-
-1. **HTTP** — set `OSTIARI_TRACES_URL` to Ostiari's control-plane ingest endpoint:
-
-   ```bash
-   OSTIARI_TRACES_URL=http://control-plane:8000/api/traces/ingest \
-   OSTIARI_GATEWAY_ID=axon-prod-1 \
-   uv run python serve_dashboard.py
-   ```
-
-2. **In-process** — when co-located in the same process, the embedding host registers
-   a sink; AxonLLM calls it directly (no network hop, no dependency on the `ostiari`
-   package):
-
-   ```python
-   from src.gateway.observability.trace_forwarder import register_sink
-   register_sink(lambda event: ostiari_storage.save_trace_event(event))
-   ```
-
-Each forwarded event carries the model, provider, token counts, cost, latency, and
-user/project in Ostiari's trace shape. AxonLLM is a routing/cost layer, not a risk
-scorer, so it sends neutral risk fields (`tier="allow"`, `score=0`) and leaves risk
-scoring to Ostiari. Forwarding is best-effort: a slow or unavailable Ostiari never
-slows or fails a request.
 
 ## Contributing
 
