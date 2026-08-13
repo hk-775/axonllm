@@ -1,8 +1,9 @@
 """OpenAI-compatible ingress for AxonLLM.
 
-Exposes ``POST /v1/chat/completions`` and ``GET /v1/models`` in the shape the
-OpenAI SDK (and the many tools built on it) expect, so a client can point at
-AxonLLM with nothing more than a ``base_url`` swap:
+Exposes ``POST /v1/chat/completions``, ``POST /v1/responses``,
+``POST /v1/embeddings``, and ``GET /v1/models`` in the shape the OpenAI SDK
+(and the many tools built on it) expect, so a client can point at AxonLLM with
+nothing more than a ``base_url`` swap:
 
     from openai import OpenAI
     client = OpenAI(base_url="https://<gateway>/v1", api_key="axon_...")
@@ -36,6 +37,10 @@ if TYPE_CHECKING:
     from src.gateway.chat.client_agent import ClientAgent
 
 logger = logging.getLogger("gateway.openai")
+
+
+class ResponsesRequestError(ValueError):
+    """A client-correctable Responses API translation error."""
 
 
 def _identity(
@@ -87,6 +92,404 @@ def _resolve_request_validator(client_agent: ClientAgent) -> RequestValidator:
     if isinstance(validator, RequestValidator):
         return validator
     return RequestValidator()
+
+
+def _responses_content(content: Any, *, field: str) -> str | list[dict[str, Any]]:
+    """Translate Responses message content into Chat Completions content."""
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list) or not content:
+        raise ResponsesRequestError(
+            f"Field '{field}' must be a string or a non-empty list of content parts."
+        )
+
+    translated: list[dict[str, Any]] = []
+    text_parts: list[str] = []
+    only_text = True
+    for index, part in enumerate(content):
+        part_field = f"{field}[{index}]"
+        if not isinstance(part, dict):
+            raise ResponsesRequestError(f"Field '{part_field}' must be an object.")
+        part_type = part.get("type")
+        if part_type in {"input_text", "output_text", "text"}:
+            text = part.get("text")
+            if not isinstance(text, str):
+                raise ResponsesRequestError(
+                    f"Field '{part_field}.text' must be a string."
+                )
+            text_parts.append(text)
+            translated.append({"type": "text", "text": text})
+            continue
+        if part_type == "input_image":
+            only_text = False
+            if part.get("file_id") is not None:
+                raise ResponsesRequestError(
+                    "Responses input images referenced by file_id are not supported."
+                )
+            image_url = part.get("image_url")
+            if not isinstance(image_url, str) or not image_url:
+                raise ResponsesRequestError(
+                    f"Field '{part_field}.image_url' must be a non-empty string."
+                )
+            image: dict[str, Any] = {"url": image_url}
+            detail = part.get("detail")
+            if detail is not None:
+                if detail not in {"auto", "low", "high"}:
+                    raise ResponsesRequestError(
+                        f"Field '{part_field}.detail' must be auto, low, or high."
+                    )
+                image["detail"] = detail
+            translated.append({"type": "image_url", "image_url": image})
+            continue
+        raise ResponsesRequestError(
+            f"Responses content type '{part_type}' is not supported."
+        )
+
+    if only_text:
+        return "".join(text_parts)
+    return translated
+
+
+def _responses_text_content(content: Any, *, field: str) -> str:
+    """Return text-only content for system and developer instructions."""
+    translated = _responses_content(content, field=field)
+    if isinstance(translated, str):
+        return translated
+    raise ResponsesRequestError(
+        "System and developer Responses input must contain text only."
+    )
+
+
+def _responses_input(input_value: Any) -> tuple[list[dict[str, Any]], list[str]]:
+    """Translate Responses input items into chat messages and instructions."""
+    if isinstance(input_value, str):
+        return [{"role": "user", "content": input_value}], []
+    if not isinstance(input_value, list) or not input_value:
+        raise ResponsesRequestError(
+            "Field 'input' is required and must be a string or a non-empty list."
+        )
+
+    messages: list[dict[str, Any]] = []
+    instructions: list[str] = []
+    for index, item in enumerate(input_value):
+        field = f"input[{index}]"
+        if not isinstance(item, dict):
+            raise ResponsesRequestError(f"Field '{field}' must be an object.")
+
+        item_type = item.get("type")
+        if item_type in {None, "message"}:
+            role = item.get("role")
+            if role not in {"user", "assistant", "system", "developer"}:
+                raise ResponsesRequestError(
+                    f"Field '{field}.role' must be user, assistant, system, or developer."
+                )
+            content = item.get("content")
+            if role in {"system", "developer"}:
+                instructions.append(
+                    _responses_text_content(content, field=f"{field}.content")
+                )
+            else:
+                messages.append(
+                    {
+                        "role": role,
+                        "content": _responses_content(
+                            content,
+                            field=f"{field}.content",
+                        ),
+                    }
+                )
+            continue
+
+        if item_type == "function_call":
+            call_id = item.get("call_id") or item.get("id")
+            name = item.get("name")
+            arguments = item.get("arguments", "{}")
+            if not isinstance(call_id, str) or not call_id:
+                raise ResponsesRequestError(
+                    f"Field '{field}.call_id' must be a non-empty string."
+                )
+            if not isinstance(name, str) or not name:
+                raise ResponsesRequestError(
+                    f"Field '{field}.name' must be a non-empty string."
+                )
+            if not isinstance(arguments, str):
+                arguments = json.dumps(
+                    arguments,
+                    ensure_ascii=False,
+                    allow_nan=False,
+                    separators=(",", ":"),
+                )
+            tool_call = {
+                "id": call_id,
+                "type": "function",
+                "function": {"name": name, "arguments": arguments},
+            }
+            if (
+                messages
+                and messages[-1].get("role") == "assistant"
+                and messages[-1].get("content") is None
+                and isinstance(messages[-1].get("tool_calls"), list)
+            ):
+                messages[-1]["tool_calls"].append(tool_call)
+            else:
+                messages.append(
+                    {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [tool_call],
+                    }
+                )
+            continue
+
+        if item_type == "function_call_output":
+            call_id = item.get("call_id")
+            output = item.get("output")
+            if not isinstance(call_id, str) or not call_id:
+                raise ResponsesRequestError(
+                    f"Field '{field}.call_id' must be a non-empty string."
+                )
+            if not isinstance(output, str):
+                output = json.dumps(
+                    output,
+                    ensure_ascii=False,
+                    allow_nan=False,
+                    separators=(",", ":"),
+                )
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": call_id,
+                    "content": output,
+                }
+            )
+            continue
+
+        raise ResponsesRequestError(
+            f"Responses input item type '{item_type}' is not supported."
+        )
+
+    if not messages:
+        raise ResponsesRequestError(
+            "Field 'input' must include at least one user, assistant, or tool item."
+        )
+    return messages, instructions
+
+
+def _responses_tools(tools: Any) -> list[dict[str, Any]] | None:
+    """Translate flat Responses function tools into Chat Completions tools."""
+    if tools is None:
+        return None
+    if not isinstance(tools, list):
+        raise ResponsesRequestError("Field 'tools' must be a list.")
+
+    translated: list[dict[str, Any]] = []
+    for index, tool in enumerate(tools):
+        field = f"tools[{index}]"
+        if not isinstance(tool, dict):
+            raise ResponsesRequestError(f"Field '{field}' must be an object.")
+        if tool.get("type") != "function":
+            raise ResponsesRequestError(
+                "Only function tools are supported by the AxonLLM router."
+            )
+        name = tool.get("name")
+        if not isinstance(name, str) or not name:
+            raise ResponsesRequestError(
+                f"Field '{field}.name' must be a non-empty string."
+            )
+        function: dict[str, Any] = {
+            "name": name,
+            "parameters": tool.get("parameters")
+            or {"type": "object", "properties": {}},
+        }
+        for key in ("description", "strict"):
+            if key in tool:
+                function[key] = tool[key]
+        translated.append({"type": "function", "function": function})
+    return translated
+
+
+def _responses_tool_choice(choice: Any) -> str | dict[str, Any] | None:
+    """Translate the Responses API's flat function choice into chat shape."""
+    if choice is None or isinstance(choice, str):
+        return choice
+    if not isinstance(choice, dict):
+        raise ResponsesRequestError(
+            "Field 'tool_choice' must be a string or an object."
+        )
+    if choice.get("type") != "function":
+        raise ResponsesRequestError(
+            "Only function tool choices are supported by the AxonLLM router."
+        )
+    name = choice.get("name")
+    if not isinstance(name, str) or not name:
+        raise ResponsesRequestError(
+            "A function tool choice must include a non-empty name."
+        )
+    return {"type": "function", "function": {"name": name}}
+
+
+def _translate_responses_request(body: dict[str, Any]) -> dict[str, Any]:
+    """Return the governed chat request represented by a Responses payload."""
+    for field in ("previous_response_id", "conversation", "prompt"):
+        if body.get(field) is not None:
+            raise ResponsesRequestError(
+                f"Field '{field}' is stateful and is not supported by AxonLLM."
+            )
+    if body.get("store") is True:
+        raise ResponsesRequestError(
+            "AxonLLM is stateless; field 'store' must be false or omitted."
+        )
+    if body.get("background") is True:
+        raise ResponsesRequestError("Background Responses are not supported.")
+    if body.get("reasoning") not in (None, {}):
+        raise ResponsesRequestError(
+            "Responses reasoning configuration is not supported yet."
+        )
+    if body.get("text") not in (None, {}):
+        raise ResponsesRequestError(
+            "Responses structured text configuration is not supported yet."
+        )
+    for field in ("include", "max_tool_calls", "service_tier"):
+        if body.get(field) is not None:
+            raise ResponsesRequestError(
+                f"Field '{field}' is not supported by AxonLLM."
+            )
+    if body.get("parallel_tool_calls") is False:
+        raise ResponsesRequestError(
+            "Disabling parallel tool calls is not supported yet."
+        )
+    truncation = body.get("truncation")
+    if truncation not in (None, "disabled"):
+        raise ResponsesRequestError(
+            "Only truncation='disabled' is supported."
+        )
+
+    if "input" not in body:
+        raise ResponsesRequestError("Field 'input' is required.")
+    messages, input_instructions = _responses_input(body["input"])
+
+    instructions = body.get("instructions")
+    if instructions is not None and not isinstance(instructions, str):
+        raise ResponsesRequestError("Field 'instructions' must be a string.")
+    system_parts = ([instructions] if instructions else []) + input_instructions
+
+    metadata = body.get("metadata")
+    if metadata is not None and not isinstance(metadata, dict):
+        raise ResponsesRequestError("Field 'metadata' must be an object.")
+
+    return {
+        "model": body.get("model", ""),
+        "messages": messages,
+        "temperature": body.get("temperature"),
+        "max_tokens": body.get("max_output_tokens"),
+        "top_p": body.get("top_p"),
+        "system": "\n\n".join(system_parts) if system_parts else None,
+        "stream": body.get("stream", False),
+        "tools": _responses_tools(body.get("tools")),
+        "tool_choice": _responses_tool_choice(body.get("tool_choice")),
+        "metadata": metadata or {},
+    }
+
+
+def _responses_usage(usage: dict[str, Any]) -> dict[str, Any]:
+    input_tokens = usage.get("prompt_tokens", 0)
+    output_tokens = usage.get("completion_tokens", 0)
+    return {
+        "input_tokens": input_tokens,
+        "input_tokens_details": {"cached_tokens": 0},
+        "output_tokens": output_tokens,
+        "output_tokens_details": {"reasoning_tokens": 0},
+        "total_tokens": usage.get("total_tokens", input_tokens + output_tokens),
+    }
+
+
+def _responses_output(
+    content: str | None,
+    tool_calls: Any,
+) -> list[dict[str, Any]]:
+    output: list[dict[str, Any]] = []
+    if content is not None and (content or not tool_calls):
+        output.append(
+            {
+                "id": f"msg_{uuid.uuid4().hex}",
+                "type": "message",
+                "status": "completed",
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": content,
+                        "annotations": [],
+                        "logprobs": [],
+                    }
+                ],
+            }
+        )
+    if isinstance(tool_calls, list):
+        for index, tool_call in enumerate(tool_calls):
+            if not isinstance(tool_call, dict):
+                continue
+            function = tool_call.get("function") or {}
+            output.append(
+                {
+                    "id": f"fc_{uuid.uuid4().hex}",
+                    "call_id": tool_call.get("id") or f"call_{index}",
+                    "type": "function_call",
+                    "name": function.get("name", ""),
+                    "arguments": function.get("arguments", "{}") or "{}",
+                    "status": "completed",
+                }
+            )
+    return output
+
+
+def _responses_envelope(
+    *,
+    response_id: str,
+    created_at: int,
+    body: dict[str, Any],
+    model: str,
+    output: list[dict[str, Any]],
+    usage: dict[str, Any] | None,
+    finish_reason: str | None,
+    status: str,
+) -> dict[str, Any]:
+    incomplete_details = None
+    if finish_reason == "length":
+        incomplete_details = {"reason": "max_output_tokens"}
+    elif finish_reason == "content_filter":
+        incomplete_details = {"reason": "content_filter"}
+    return {
+        "id": response_id,
+        "object": "response",
+        "created_at": created_at,
+        "completed_at": int(time.time()) if status != "in_progress" else None,
+        "status": status,
+        "error": None,
+        "incomplete_details": incomplete_details,
+        "instructions": body.get("instructions"),
+        "max_output_tokens": body.get("max_output_tokens"),
+        "model": model,
+        "output": output,
+        "parallel_tool_calls": body.get("parallel_tool_calls", True),
+        "previous_response_id": None,
+        "prompt": None,
+        "reasoning": None,
+        "service_tier": "default",
+        "store": False,
+        "temperature": body.get("temperature"),
+        "text": {"format": {"type": "text"}},
+        "tool_choice": body.get(
+            "tool_choice",
+            "auto" if body.get("tools") else "none",
+        ),
+        "tools": body.get("tools") or [],
+        "top_p": body.get("top_p"),
+        "truncation": "disabled",
+        "usage": usage,
+        "user": body.get("user"),
+        "metadata": body.get("metadata") or {},
+    }
 
 
 # OpenAI defines exactly four finish_reason values, and typed SDK clients
@@ -410,6 +813,539 @@ class OpenAICompatAPI:
         return StreamingResponse(event_generator(), media_type="text/event-stream")
 
     # ------------------------------------------------------------------
+    # POST /v1/responses
+    # ------------------------------------------------------------------
+
+    async def responses(self, request: Request):
+        try:
+            body = await read_json_object(
+                request,
+                max_bytes=self.max_request_bytes,
+            )
+        except JSONBodyError as exc:
+            return _error(exc.status_code, exc.message)
+
+        try:
+            translated = _translate_responses_request(body)
+        except (ResponsesRequestError, TypeError, ValueError) as exc:
+            return _error(400, str(exc))
+
+        raw_model = translated["model"]
+        smart_routing = (
+            not isinstance(raw_model, str)
+            or raw_model.strip().lower() in ("", "auto")
+        )
+        errors = self.request_validator.validate_payload(
+            translated,
+            allow_empty_model=smart_routing,
+            check_model=False,
+        )
+        if errors:
+            return _error(400, errors[0].message)
+
+        model = raw_model
+        assert isinstance(model, str)
+        if smart_routing:
+            model = ""
+
+        user_id, project_id, tenant_id = _identity(request)
+        authorized_project = _authorized_project(request)
+        allow_legacy_project_lookup = _allow_legacy_project_lookup(request)
+        if translated["stream"]:
+            return await self._responses_stream(
+                body=body,
+                translated=translated,
+                model=model,
+                smart_routing=smart_routing,
+                user_id=user_id,
+                project_id=project_id,
+                tenant_id=tenant_id,
+                authorized_project=authorized_project,
+                allow_legacy_project_lookup=allow_legacy_project_lookup,
+            )
+        return await self._responses_complete(
+            body=body,
+            translated=translated,
+            model=model,
+            smart_routing=smart_routing,
+            user_id=user_id,
+            project_id=project_id,
+            tenant_id=tenant_id,
+            authorized_project=authorized_project,
+            allow_legacy_project_lookup=allow_legacy_project_lookup,
+        )
+
+    @staticmethod
+    def _responses_chat_kwargs(
+        *,
+        translated: dict[str, Any],
+        smart_routing: bool,
+        user_id: str | None,
+        project_id: str | None,
+        tenant_id: str | None,
+        authorized_project: Any,
+        allow_legacy_project_lookup: bool,
+    ) -> dict[str, Any]:
+        kwargs: dict[str, Any] = {
+            "temperature": translated["temperature"],
+            "max_tokens": translated["max_tokens"],
+            "top_p": translated["top_p"],
+            "system": translated["system"],
+            "user_id": user_id,
+            "project_id": project_id,
+            "smart_routing": smart_routing,
+            "tools": translated["tools"],
+            "tool_choice": translated["tool_choice"],
+        }
+        if tenant_id is not None:
+            kwargs["tenant_id"] = tenant_id
+        if authorized_project is not None:
+            kwargs["authorized_project"] = authorized_project
+        if allow_legacy_project_lookup:
+            kwargs["allow_legacy_project_lookup"] = True
+        return kwargs
+
+    async def _responses_complete(
+        self,
+        *,
+        body: dict[str, Any],
+        translated: dict[str, Any],
+        model: str,
+        smart_routing: bool,
+        user_id: str | None,
+        project_id: str | None,
+        tenant_id: str | None,
+        authorized_project: Any,
+        allow_legacy_project_lookup: bool,
+    ) -> JSONResponse:
+        try:
+            response = await self.client_agent.chat(
+                model,
+                translated["messages"],
+                **self._responses_chat_kwargs(
+                    translated=translated,
+                    smart_routing=smart_routing,
+                    user_id=user_id,
+                    project_id=project_id,
+                    tenant_id=tenant_id,
+                    authorized_project=authorized_project,
+                    allow_legacy_project_lookup=allow_legacy_project_lookup,
+                ),
+            )
+        except Exception:
+            logger.exception("Responses request failed")
+            return _error(500, "Internal server error", err_type="server_error")
+
+        response.pop("_rate_limit_headers", None)
+        if "error" in response:
+            error = response["error"]
+            message = (
+                error.get("message", "request failed")
+                if isinstance(error, dict)
+                else str(error)
+            )
+            status_code = response.get("status_code", 500)
+            error_type = (
+                "invalid_request_error"
+                if isinstance(status_code, int) and status_code < 500
+                else "server_error"
+            )
+            return _error(status_code, message, err_type=error_type)
+
+        tool_calls = response.get("tool_calls")
+        finish_reason = _finish_reason(
+            response.get("finish_reason"),
+            bool(tool_calls),
+        )
+        status = (
+            "incomplete"
+            if finish_reason in {"length", "content_filter"}
+            else "completed"
+        )
+        created_at = int(time.time())
+        payload = _responses_envelope(
+            response_id=f"resp_{uuid.uuid4().hex}",
+            created_at=created_at,
+            body=body,
+            model=response.get("model", model),
+            output=_responses_output(response.get("content"), tool_calls),
+            usage=_responses_usage(response.get("usage", {}) or {}),
+            finish_reason=finish_reason,
+            status=status,
+        )
+        if "smart_routing" in response:
+            payload["x_smart_routing"] = response["smart_routing"]
+        if response.get("is_cached"):
+            payload["x_cached"] = True
+            payload["x_cache_type"] = response.get("cache_type", "exact")
+        return JSONResponse(payload)
+
+    async def _responses_stream(
+        self,
+        *,
+        body: dict[str, Any],
+        translated: dict[str, Any],
+        model: str,
+        smart_routing: bool,
+        user_id: str | None,
+        project_id: str | None,
+        tenant_id: str | None,
+        authorized_project: Any,
+        allow_legacy_project_lookup: bool,
+    ) -> StreamingResponse:
+        response_id = f"resp_{uuid.uuid4().hex}"
+        created_at = int(time.time())
+        try:
+            chunks = self.client_agent.chat_stream(
+                model,
+                translated["messages"],
+                **self._responses_chat_kwargs(
+                    translated=translated,
+                    smart_routing=smart_routing,
+                    user_id=user_id,
+                    project_id=project_id,
+                    tenant_id=tenant_id,
+                    authorized_project=authorized_project,
+                    allow_legacy_project_lookup=allow_legacy_project_lookup,
+                ),
+            )
+        except Exception:
+            logger.exception("Responses stream setup failed")
+            return StreamingResponse(
+                iter(
+                    [
+                        "event: error\n"
+                        f"data: {json.dumps({'type': 'error', 'code': 'server_error', 'message': 'Internal server error', 'param': None, 'sequence_number': 0})}\n\n"
+                    ]
+                ),
+                media_type="text/event-stream",
+            )
+
+        async def event_generator():
+            sequence_number = 0
+
+            def event(event_type: str, **fields: Any) -> str:
+                nonlocal sequence_number
+                payload = {
+                    "type": event_type,
+                    "sequence_number": sequence_number,
+                    **fields,
+                }
+                sequence_number += 1
+                return (
+                    f"event: {event_type}\n"
+                    f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                )
+
+            resolved_model = model
+            initial = _responses_envelope(
+                response_id=response_id,
+                created_at=created_at,
+                body=body,
+                model=resolved_model,
+                output=[],
+                usage=None,
+                finish_reason=None,
+                status="in_progress",
+            )
+            yield event("response.created", response=initial)
+            yield event("response.in_progress", response=initial)
+
+            message_id = f"msg_{uuid.uuid4().hex}"
+            message_started = False
+            text = ""
+            observed_finish: str | None = None
+            tool_calls: dict[str, dict[str, Any]] = {}
+            try:
+                async for chunk in chunks:
+                    if "_rate_limit_headers" in chunk:
+                        continue
+                    if "error" in chunk:
+                        error = chunk["error"]
+                        message = (
+                            error.get("message", "stream error")
+                            if isinstance(error, dict)
+                            else str(error)
+                        )
+                        yield event(
+                            "error",
+                            code="server_error",
+                            message=message,
+                            param=None,
+                        )
+                        return
+                    if chunk.get("done"):
+                        break
+
+                    resolved_model = chunk.get("model") or resolved_model
+                    delta = chunk.get("content")
+                    if isinstance(delta, str) and delta:
+                        if not message_started:
+                            message_started = True
+                            yield event(
+                                "response.output_item.added",
+                                output_index=0,
+                                item={
+                                    "id": message_id,
+                                    "type": "message",
+                                    "status": "in_progress",
+                                    "role": "assistant",
+                                    "content": [],
+                                },
+                            )
+                            yield event(
+                                "response.content_part.added",
+                                item_id=message_id,
+                                output_index=0,
+                                content_index=0,
+                                part={
+                                    "type": "output_text",
+                                    "text": "",
+                                    "annotations": [],
+                                    "logprobs": [],
+                                },
+                            )
+                        text += delta
+                        yield event(
+                            "response.output_text.delta",
+                            item_id=message_id,
+                            output_index=0,
+                            content_index=0,
+                            delta=delta,
+                            logprobs=[],
+                        )
+
+                    streamed_calls = chunk.get("tool_calls")
+                    if isinstance(streamed_calls, list):
+                        for index, tool_call in enumerate(streamed_calls):
+                            if not isinstance(tool_call, dict):
+                                continue
+                            call_id = (
+                                tool_call.get("id")
+                                or f"call_{len(tool_calls) + index}"
+                            )
+                            function = tool_call.get("function") or {}
+                            tool_calls[call_id] = {
+                                "id": call_id,
+                                "type": "function",
+                                "function": {
+                                    "name": function.get("name", ""),
+                                    "arguments": function.get("arguments", "{}")
+                                    or "{}",
+                                },
+                            }
+                    if chunk.get("finish_reason"):
+                        observed_finish = chunk["finish_reason"]
+            except Exception:
+                logger.exception("error during Responses stream")
+                yield event(
+                    "error",
+                    code="server_error",
+                    message="stream failed",
+                    param=None,
+                )
+                return
+
+            output: list[dict[str, Any]] = []
+            output_index = 0
+            if message_started or not tool_calls:
+                message_item = {
+                    "id": message_id,
+                    "type": "message",
+                    "status": "completed",
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": text,
+                            "annotations": [],
+                            "logprobs": [],
+                        }
+                    ],
+                }
+                if not message_started:
+                    yield event(
+                        "response.output_item.added",
+                        output_index=output_index,
+                        item={
+                            **message_item,
+                            "status": "in_progress",
+                            "content": [],
+                        },
+                    )
+                    yield event(
+                        "response.content_part.added",
+                        item_id=message_id,
+                        output_index=output_index,
+                        content_index=0,
+                        part={
+                            "type": "output_text",
+                            "text": "",
+                            "annotations": [],
+                            "logprobs": [],
+                        },
+                    )
+                yield event(
+                    "response.output_text.done",
+                    item_id=message_id,
+                    output_index=output_index,
+                    content_index=0,
+                    text=text,
+                    logprobs=[],
+                )
+                yield event(
+                    "response.content_part.done",
+                    item_id=message_id,
+                    output_index=output_index,
+                    content_index=0,
+                    part=message_item["content"][0],
+                )
+                yield event(
+                    "response.output_item.done",
+                    output_index=output_index,
+                    item=message_item,
+                )
+                output.append(message_item)
+                output_index += 1
+
+            for tool_call in tool_calls.values():
+                function = tool_call["function"]
+                item_id = f"fc_{uuid.uuid4().hex}"
+                item = {
+                    "id": item_id,
+                    "call_id": tool_call["id"],
+                    "type": "function_call",
+                    "name": function["name"],
+                    "arguments": function["arguments"],
+                    "status": "completed",
+                }
+                yield event(
+                    "response.output_item.added",
+                    output_index=output_index,
+                    item={**item, "arguments": "", "status": "in_progress"},
+                )
+                if function["arguments"]:
+                    yield event(
+                        "response.function_call_arguments.delta",
+                        item_id=item_id,
+                        output_index=output_index,
+                        delta=function["arguments"],
+                    )
+                yield event(
+                    "response.function_call_arguments.done",
+                    item_id=item_id,
+                    output_index=output_index,
+                    arguments=function["arguments"],
+                )
+                yield event(
+                    "response.output_item.done",
+                    output_index=output_index,
+                    item=item,
+                )
+                output.append(item)
+                output_index += 1
+
+            finish_reason = _finish_reason(
+                observed_finish,
+                bool(tool_calls),
+            )
+            status = (
+                "incomplete"
+                if finish_reason in {"length", "content_filter"}
+                else "completed"
+            )
+            completed = _responses_envelope(
+                response_id=response_id,
+                created_at=created_at,
+                body=body,
+                model=resolved_model,
+                output=output,
+                usage=None,
+                finish_reason=finish_reason,
+                status=status,
+            )
+            event_type = (
+                "response.incomplete"
+                if status == "incomplete"
+                else "response.completed"
+            )
+            yield event(event_type, response=completed)
+
+        return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+    # ------------------------------------------------------------------
+    # POST /v1/embeddings
+    # ------------------------------------------------------------------
+
+    async def embeddings(self, request: Request) -> JSONResponse:
+        try:
+            body = await read_json_object(
+                request,
+                max_bytes=self.max_request_bytes,
+            )
+        except JSONBodyError as exc:
+            return _error(exc.status_code, exc.message)
+
+        model = body.get("model")
+        input_value = body.get("input")
+        encoding_format = body.get("encoding_format", "float")
+        dimensions = body.get("dimensions")
+        user = body.get("user")
+        if not isinstance(model, str) or not model.strip():
+            return _error(400, "Field 'model' is required.")
+        if not isinstance(input_value, (str, list)):
+            return _error(
+                400,
+                "Field 'input' must be a string or a list of strings.",
+            )
+        if encoding_format not in {"float", "base64"}:
+            return _error(
+                400,
+                "Field 'encoding_format' must be 'float' or 'base64'.",
+            )
+
+        user_id, project_id, tenant_id = _identity(request)
+        try:
+            response = await self.client_agent.embeddings(
+                model,
+                input_value,
+                encoding_format=encoding_format,
+                dimensions=dimensions,
+                user=user,
+                user_id=user_id,
+                project_id=project_id,
+                tenant_id=tenant_id,
+                authorized_project=_authorized_project(request),
+                allow_legacy_project_lookup=(
+                    _allow_legacy_project_lookup(request)
+                ),
+            )
+        except Exception:
+            logger.exception("embeddings request failed")
+            return _error(
+                500,
+                "Internal server error",
+                err_type="server_error",
+            )
+
+        response.pop("_rate_limit_headers", None)
+        if "error" in response:
+            error = response["error"]
+            message = (
+                error.get("message", "request failed")
+                if isinstance(error, dict)
+                else str(error)
+            )
+            status_code = response.get("status_code", 500)
+            error_type = (
+                "invalid_request_error"
+                if isinstance(status_code, int) and status_code < 500
+                else "server_error"
+            )
+            return _error(status_code, message, err_type=error_type)
+        return JSONResponse(response)
+
+    # ------------------------------------------------------------------
     # GET /v1/models
     # ------------------------------------------------------------------
 
@@ -446,5 +1382,7 @@ def create_openai_routes(api: OpenAICompatAPI) -> list[Route]:
     """Return Starlette routes for the OpenAI-compatible surface."""
     return [
         Route("/v1/chat/completions", api.chat_completions, methods=["POST"]),
+        Route("/v1/responses", api.responses, methods=["POST"]),
+        Route("/v1/embeddings", api.embeddings, methods=["POST"]),
         Route("/v1/models", api.list_models, methods=["GET"]),
     ]

@@ -9,6 +9,7 @@ import pytest
 
 import src.gateway.http_client as http_transport
 from src.gateway.adapters.anthropic_adapter import AnthropicAdapter
+from src.gateway.adapters.azure_adapter import AzureOpenAIAdapter
 from src.gateway.adapters.cohere_adapter import CohereAdapter
 from src.gateway.adapters.google_ai_adapter import GoogleAIAdapter
 from src.gateway.adapters.openai_adapter import OpenAIAdapter
@@ -17,6 +18,7 @@ from src.gateway.http_client import HttpClient
 from src.gateway.models import (
     ChatCompletionRequest,
     ChatCompletionResponse,
+    EmbeddingRequest,
     ProviderModelMapping,
     TokenUsage,
 )
@@ -239,6 +241,113 @@ async def test_resolved_openai_model_drives_reasoning_parameters() -> None:
     assert "max_tokens" not in payload
     assert "temperature" not in payload
     assert "top_p" not in payload
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("provider", "adapter", "auth_type", "expected_url"),
+    [
+        (
+            "openai",
+            OpenAIAdapter(),
+            "api_key",
+            "https://api.example/v1/embeddings",
+        ),
+        (
+            "azure_openai",
+            AzureOpenAIAdapter(),
+            "azure_key",
+            (
+                "https://api.example/openai/deployments/embed-deployment"
+                "/embeddings?api-version=2024-02-01"
+            ),
+        ),
+    ],
+)
+async def test_embeddings_transport_uses_provider_model_and_url(
+    provider,
+    adapter,
+    auth_type,
+    expected_url,
+) -> None:
+    client, session = _client_with_response(
+        provider,
+        _Response(
+            [],
+            body={
+                "object": "list",
+                "data": [
+                    {
+                        "object": "embedding",
+                        "index": 0,
+                        "embedding": [0.25, 0.75],
+                    }
+                ],
+                "model": "embed-deployment",
+                "usage": {"prompt_tokens": 3, "total_tokens": 3},
+            },
+        ),
+    )
+    config = ProviderConfig(
+        provider_name=provider,
+        base_url="https://api.example",
+        auth_type=auth_type,
+        credentials={"api_key": "secret"},
+    )
+    mapping = ProviderModelMapping(
+        provider=provider,
+        model_id="embed-deployment",
+    )
+    request = EmbeddingRequest(
+        input=["hello"],
+        model="logical-embedding",
+        encoding_format="float",
+        dimensions=256,
+    )
+
+    response = await client.execute_embeddings(
+        request,
+        mapping,
+        adapter,
+        config,
+    )
+
+    assert session.post.call_args.args[0] == expected_url
+    assert session.post.call_args.kwargs["json"] == {
+        "model": "embed-deployment",
+        "input": ["hello"],
+        "encoding_format": "float",
+        "dimensions": 256,
+    }
+    assert response.data[0].embedding == [0.25, 0.75]
+    assert response.usage.prompt_tokens == 3
+    assert response.usage.completion_tokens == 0
+
+
+@pytest.mark.asyncio
+async def test_embeddings_reject_adapter_without_capability() -> None:
+    client = HttpClient()
+    config = ProviderConfig(
+        provider_name="anthropic",
+        base_url="https://api.example",
+        auth_type="api_key",
+        credentials={"api_key": "secret"},
+    )
+    mapping = ProviderModelMapping(
+        provider="anthropic",
+        model_id="not-an-embedding-model",
+    )
+
+    with pytest.raises(ProviderError) as exc_info:
+        await client.execute_embeddings(
+            EmbeddingRequest(input=["hello"], model="logical-embedding"),
+            mapping,
+            AnthropicAdapter(),
+            config,
+        )
+
+    assert exc_info.value.status_code == 501
+    assert exc_info.value.provider_unavailable is False
 
 
 @pytest.mark.asyncio

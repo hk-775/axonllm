@@ -16,9 +16,12 @@ from src.gateway.models import (
     BudgetStatus,
     ChatCompletionRequest,
     ChatCompletionResponse,
+    EmbeddingData,
+    EmbeddingResponse,
     EnsembleDecision,
     GuardrailResult,
     GuardrailRule,
+    ModelConfig,
     Project,
     ProviderModelMapping,
     RateLimitConfig,
@@ -182,6 +185,130 @@ async def test_provider_model_prices_logical_public_response(
     assert result["model"] == "gpt-4"
     assert tracker._records[0].model == "gpt-4"
     assert tracker._records[0].cost == pytest.approx(0.00025)
+
+
+@pytest.mark.asyncio
+async def test_governed_embeddings_route_and_record_usage(
+    mock_rate_limiter,
+    guardrail_engine,
+    cache_manager,
+):
+    mapping = ProviderModelMapping(
+        provider="openai",
+        model_id="text-embedding-3-small",
+    )
+    router = MagicMock(spec=Router)
+    model_registry = MagicMock()
+    model_registry.models = {
+        "text-embedding": ModelConfig(
+            name="text-embedding",
+            description="Embedding model",
+            providers=[mapping],
+            capabilities=["embeddings"],
+        )
+    }
+    router.model_registry = model_registry
+    router.is_model_available.return_value = True
+    router.get_fallback_chain.return_value = [mapping]
+    runtime = MagicMock()
+    runtime.embed = AsyncMock(
+        return_value=EmbeddingResponse(
+            id="embedding-1",
+            data=[
+                EmbeddingData(index=0, embedding=[0.25, 0.75]),
+                EmbeddingData(index=1, embedding=[0.5, 0.5]),
+            ],
+            usage=TokenUsage(6, 0, 6),
+            model="text-embedding",
+            provider="openai",
+            provider_model="text-embedding-3-small",
+        )
+    )
+    tracker = CostTracker(
+        pricing_config={
+            "openai": {
+                "text-embedding-3-small": TokenPricing(
+                    prompt_token_cost=0.00002,
+                    completion_token_cost=0.0,
+                )
+            }
+        }
+    )
+    agent = GatewayAgent(
+        router=router,
+        rate_limiter=mock_rate_limiter,
+        guardrail_engine=guardrail_engine,
+        cache_manager=cache_manager,
+        cost_tracker=tracker,
+        routing_runtime=runtime,
+    )
+
+    result = await agent.handle_embeddings(
+        {
+            "model": "text-embedding",
+            "input": ["first", "second"],
+            "dimensions": 2,
+        },
+        _base_context(),
+    )
+
+    assert result["object"] == "list"
+    assert result["model"] == "text-embedding"
+    assert [item["index"] for item in result["data"]] == [0, 1]
+    assert result["usage"] == {"prompt_tokens": 6, "total_tokens": 6}
+    runtime.embed.assert_awaited_once()
+    routed_request = runtime.embed.await_args.args[0]
+    assert routed_request.input == ["first", "second"]
+    assert routed_request.dimensions == 2
+    assert len(tracker._records) == 1
+    assert tracker._records[0].model == "text-embedding"
+    assert tracker._records[0].provider == "openai"
+    assert tracker._records[0].completion_tokens == 0
+
+
+@pytest.mark.asyncio
+async def test_embeddings_require_model_capability_before_provider_call(
+    mock_rate_limiter,
+    guardrail_engine,
+    cache_manager,
+    cost_tracker,
+):
+    router = MagicMock(spec=Router)
+    model_registry = MagicMock()
+    model_registry.models = {
+        "chat-only": ModelConfig(
+            name="chat-only",
+            description="Chat model",
+            providers=[
+                ProviderModelMapping(
+                    provider="openai",
+                    model_id="gpt-chat",
+                )
+            ],
+            capabilities=["chat"],
+        )
+    }
+    router.model_registry = model_registry
+    router.is_model_available.return_value = True
+    runtime = MagicMock()
+    runtime.embed = AsyncMock()
+    agent = GatewayAgent(
+        router=router,
+        rate_limiter=mock_rate_limiter,
+        guardrail_engine=guardrail_engine,
+        cache_manager=cache_manager,
+        cost_tracker=cost_tracker,
+        routing_runtime=runtime,
+    )
+
+    result = await agent.handle_embeddings(
+        {"model": "chat-only", "input": "hello"},
+        _base_context(),
+    )
+
+    assert result["status_code"] == 400
+    assert result["error"]["code"] == "model_capability_mismatch"
+    runtime.embed.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -449,7 +576,7 @@ async def test_create_gateway_agent_factory():
 # Task 14.2 — list_models and health_check
 # ---------------------------------------------------------------------------
 
-from src.gateway.models import ModelConfig, RoutingStrategy
+from src.gateway.models import RoutingStrategy
 from src.gateway.health_tracker import ProviderHealthTracker
 from src.gateway.model_registry import ModelRegistry
 

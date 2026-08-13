@@ -133,6 +133,7 @@ from src.gateway.query.routes import QueryAPI, create_query_routes
 from src.gateway.query.service import QueryService
 from src.gateway.request_validator import RequestValidator
 from src.gateway.router import Router
+from src.gateway.routing_runtime import RoutingRuntime
 from src.gateway.semantic_efficiency import SemanticEfficiencyEngine
 from src.gateway.smart_routing import SmartRoutingStrategy
 from src.gateway.task_classifier import TaskClassifier
@@ -157,6 +158,7 @@ class GatewayComponents:
     guardrail_engine: GuardrailEngine
     cache_manager: CacheManager
     multi_factory: MultiProviderFactory
+    routing_runtime: RoutingRuntime
     request_validator: RequestValidator
     gateway_agent: GatewayAgent
     projects: dict[str, Project]
@@ -675,6 +677,12 @@ def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComp
 
     # --- Request validator ---
     request_validator = RequestValidator(model_registry=registry)
+    routing_runtime = RoutingRuntime(
+        router=router,
+        provider_factory=multi_factory,
+        model_registry=registry,
+        validator=request_validator,
+    )
 
     # --- Gateway agent ---
     gateway_agent = GatewayAgent(
@@ -699,6 +707,7 @@ def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComp
         otlp_exporter=otlp_exporter,
         semantic_cache=semantic_cache,
         persistence=persistence,
+        routing_runtime=routing_runtime,
     )
 
     # --- Efficiency analysis ---
@@ -724,6 +733,7 @@ def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComp
         guardrail_engine=guardrail_engine,
         cache_manager=cache_manager,
         multi_factory=multi_factory,
+        routing_runtime=routing_runtime,
         request_validator=request_validator,
         gateway_agent=gateway_agent,
         projects=projects,

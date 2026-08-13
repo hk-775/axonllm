@@ -114,6 +114,21 @@ class TestAdapterRegistry:
         registry.register("p", new)
         assert registry.get("p") is new
 
+    def test_lazy_registration_constructs_once_on_first_use(self):
+        registry = AdapterRegistry()
+        built: list[FakeAdapter] = []
+
+        def factory() -> FakeAdapter:
+            adapter = FakeAdapter()
+            built.append(adapter)
+            return adapter
+
+        registry.register_lazy("lazy", factory)
+
+        assert built == []
+        assert registry.get("lazy") is registry.get("lazy")
+        assert len(built) == 1
+
     def test_error_message_lists_available_providers(self):
         registry = AdapterRegistry()
         registry.register("openai", FakeAdapter())

@@ -35,6 +35,7 @@ import logging
 import time
 
 from src.gateway.multi_region.region_config import apply_persisted_topology
+from src.gateway.routing_config import RoutingConfigSnapshot
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +94,11 @@ class ConfigSyncService:
             if model_registry is not None
             else None
         )
+        self._last_good_routing_snapshot = (
+            RoutingConfigSnapshot.from_registry(model_registry)
+            if model_registry is not None
+            else None
+        )
         self._model_refresh_task: asyncio.Task | None = None
         self._model_generation = 0
         self._last_region_check = float("-inf")
@@ -107,6 +113,13 @@ class ConfigSyncService:
     def region_lock(self) -> asyncio.Lock:
         """Lock shared with the local topology writer."""
         return self._region_lock
+
+    @property
+    def active_routing_snapshot(
+        self,
+    ) -> RoutingConfigSnapshot | None:
+        """The last fully validated routing configuration adopted here."""
+        return self._last_good_routing_snapshot
 
     async def refresh_if_stale(self) -> bool:
         """Adopt fleet config if another instance changed it. Returns whether it did.
@@ -203,19 +216,20 @@ class ConfigSyncService:
             self._last_model_check = now
             return False
 
-        # replace_config validates and parses into a detached dict before one
-        # assignment publishes it. Every routing consumer retains this registry
-        # object, so no request can observe a half-rebuilt route table.
-        self._model_registry.replace_config(
+        candidate = RoutingConfigSnapshot.from_config(
             config,
             revision=revision,
         )
+        # Applying assigns the complete parsed model map in one operation. A
+        # malformed or unavailable refresh leaves the previous snapshot active.
+        candidate.apply(self._model_registry)
         logger.info(
             "Adopting model registry revision %s -> %s (%d models)",
             live_revision,
             revision,
             len(self._model_registry.models),
         )
+        self._last_good_routing_snapshot = candidate
         self._known_model_revision = revision
         self._last_model_check = now
         return True
@@ -449,6 +463,12 @@ class ConfigSyncService:
         # local CAS committed, preventing it from publishing an older revision.
         self._model_generation += 1
         self._known_model_revision = revision
+        if self._model_registry is not None:
+            self._last_good_routing_snapshot = (
+                RoutingConfigSnapshot.from_registry(
+                    self._model_registry
+                )
+            )
         self._last_model_check = time.monotonic()
 
     def note_local_region_revision(self, revision: int) -> None:

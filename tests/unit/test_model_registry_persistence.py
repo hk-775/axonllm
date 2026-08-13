@@ -284,8 +284,10 @@ async def test_invalid_new_snapshot_is_never_partially_adopted() -> None:
     # suite and this fake intentionally implements no scan API.
     sync._known_version = 0
     sync._last_version_check = time.monotonic()
+    active = sync.active_routing_snapshot
 
     assert await sync.refresh_if_stale() is False
     assert registry.revision == 0
     assert set(registry.models) == {"default-model"}
+    assert sync.active_routing_snapshot == active
     assert sync._last_model_check == float("-inf")

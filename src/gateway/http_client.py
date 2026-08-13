@@ -13,11 +13,14 @@ from src.gateway.adapters.base import ProviderAdapter
 from src.gateway.models import (
     ChatCompletionRequest,
     ChatCompletionResponse,
+    EmbeddingRequest,
+    EmbeddingResponse,
     ProviderModelMapping,
     StreamChunk,
 )
 from src.gateway.provider_config import (
     ProviderConfig,
+    build_provider_embedding_url,
     build_provider_url,
     build_provider_stream_url,
     get_auth_headers,
@@ -366,6 +369,115 @@ class HttpClient:
                 status_code=502,
                 provider=mapping.provider,
                 message="Provider network request failed",
+            ) from exc
+
+    # ------------------------------------------------------------------
+    # Embeddings
+    # ------------------------------------------------------------------
+
+    async def execute_embeddings(
+        self,
+        request: EmbeddingRequest,
+        mapping: ProviderModelMapping,
+        adapter: ProviderAdapter,
+        config: ProviderConfig,
+    ) -> EmbeddingResponse:
+        """Send a routed embeddings request through a supported HTTP adapter."""
+        if not adapter.supports_embeddings:
+            raise ProviderError(
+                status_code=501,
+                provider=mapping.provider,
+                message=(
+                    f"Embeddings are not supported for provider "
+                    f"'{mapping.provider}'"
+                ),
+                retryable=False,
+                provider_unavailable=False,
+            )
+
+        provider_request = replace(request, model=mapping.model_id)
+        try:
+            payload = await adapter.translate_embedding_request(
+                provider_request
+            )
+        except NotImplementedError as exc:
+            raise ProviderError(
+                status_code=501,
+                provider=mapping.provider,
+                message=(
+                    f"Embeddings are not supported for provider "
+                    f"'{mapping.provider}'"
+                ),
+                retryable=False,
+                provider_unavailable=False,
+            ) from exc
+        if "model" in payload:
+            payload["model"] = mapping.model_id
+
+        url = build_provider_embedding_url(config, mapping)
+        headers: dict[str, str] = {"Content-Type": "application/json"}
+        headers.update(get_auth_headers(config))
+        headers.update(config.extra_headers)
+
+        session = self._get_or_create_session(config)
+        try:
+            async with session.post(
+                url,
+                json=payload,
+                headers=headers,
+                proxy=config.extra_params.get("proxy_url") or None,
+            ) as resp:
+                raw_body = await _read_bounded_body(
+                    resp.content,
+                    provider=mapping.provider,
+                )
+                if 200 <= resp.status < 300:
+                    try:
+                        body = json.loads(raw_body)
+                    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                        raise ProviderError(
+                            status_code=502,
+                            provider=mapping.provider,
+                            message="Provider returned malformed JSON",
+                        ) from exc
+                    if not isinstance(body, dict):
+                        raise ProviderError(
+                            status_code=502,
+                            provider=mapping.provider,
+                            message="Provider returned a non-object response",
+                        )
+                    try:
+                        return adapter.translate_embedding_response(body)
+                    except (TypeError, ValueError) as exc:
+                        raise ProviderError(
+                            status_code=502,
+                            provider=mapping.provider,
+                            message=(
+                                "Provider returned a malformed embeddings "
+                                "response"
+                            ),
+                        ) from exc
+                raise ProviderError(
+                    status_code=resp.status,
+                    provider=mapping.provider,
+                    message=(
+                        "Provider embeddings request failed with status "
+                        f"{resp.status}"
+                    ),
+                )
+        except ProviderError:
+            raise
+        except TimeoutError as exc:
+            raise ProviderError(
+                status_code=504,
+                provider=mapping.provider,
+                message="Provider embeddings request timed out",
+            ) from exc
+        except aiohttp.ClientError as exc:
+            raise ProviderError(
+                status_code=502,
+                provider=mapping.provider,
+                message="Provider embeddings network request failed",
             ) from exc
 
     # ------------------------------------------------------------------

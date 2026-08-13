@@ -10,6 +10,8 @@ import pytest
 from axonllm import (
     AsyncRouter,
     ChatCompletionResponse,
+    EmbeddingData,
+    EmbeddingResponse,
     InvalidRequestError,
     ProviderError,
     RouterClosedError,
@@ -315,3 +317,87 @@ async def test_public_router_cleanup_is_idempotent(
     assert close_calls == 1
     with pytest.raises(RouterClosedError):
         await router.models.list()
+
+
+@pytest.mark.asyncio
+async def test_public_router_exposes_routed_embeddings(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    models = tmp_path / "embedding-models.yaml"
+    models.write_text(
+        """
+models:
+  - name: text-embedding
+    description: Multi-provider embedding model
+    capabilities: [embeddings]
+    routing_strategy: round-robin
+    providers:
+      - provider: openai
+        model_id: text-embedding-openai
+        fallback_order: 0
+      - provider: azure_openai
+        model_id: text-embedding-azure
+        fallback_order: 1
+""",
+        encoding="utf-8",
+    )
+    providers = tmp_path / "embedding-providers.yaml"
+    providers.write_text(
+        """
+providers:
+  openai:
+    base_url: https://openai.example
+    auth_type: api_key
+    api_key: test-openai
+  azure_openai:
+    base_url: https://azure.example
+    auth_type: azure_key
+    api_key: test-azure
+""",
+        encoding="utf-8",
+    )
+    router = AsyncRouter.from_files(
+        models=models,
+        providers=providers,
+        max_retries=0,
+    )
+    calls: list[str] = []
+
+    def create_embeddings(request):
+        async def provider_fn(mapping):
+            calls.append(mapping.provider)
+            if mapping.provider == "openai":
+                raise ProviderError(503, "openai", "unavailable")
+            return EmbeddingResponse(
+                id="embedding-1",
+                data=[EmbeddingData(index=0, embedding=[0.25, 0.75])],
+                usage=TokenUsage(3, 0, 3),
+                model=mapping.model_id,
+                provider=mapping.provider,
+            )
+
+        return provider_fn
+
+    monkeypatch.setattr(
+        router._provider_factory,
+        "create_embeddings",
+        create_embeddings,
+    )
+
+    try:
+        response = await router.embeddings.create(
+            model="text-embedding",
+            input="hello",
+            preferred_provider="openai",
+        )
+    finally:
+        await router.close()
+
+    assert calls == ["openai", "azure_openai"]
+    assert response.model == "text-embedding"
+    assert response.provider == "azure_openai"
+    assert response.provider_model == "text-embedding-azure"
+    assert response.data == [
+        EmbeddingData(index=0, embedding=[0.25, 0.75])
+    ]

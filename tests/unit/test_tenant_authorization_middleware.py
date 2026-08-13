@@ -117,6 +117,8 @@ def _client(
         Route("/api/users", _ok, methods=["GET"]),
         Route("/api/chat", _ok, methods=["POST"]),
         Route("/v1/chat/completions", _ok, methods=["POST"]),
+        Route("/v1/responses", _ok, methods=["POST"]),
+        Route("/v1/embeddings", _ok, methods=["POST"]),
         Route("/unmapped", _ok, methods=["POST"]),
     ])
     app.add_middleware(
@@ -141,6 +143,8 @@ def test_tenant_member_may_list_models_and_invoke() -> None:
     assert response.json()["tenant_id"] == "tenant-a"
     assert client.post("/api/chat").status_code == 200
     assert client.post("/v1/chat/completions").status_code == 200
+    assert client.post("/v1/responses").status_code == 200
+    assert client.post("/v1/embeddings").status_code == 200
 
 
 def test_service_requires_explicit_inference_scope() -> None:

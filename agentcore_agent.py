@@ -9,11 +9,14 @@ from starlette.responses import JSONResponse
 
 from src.gateway.agentcore.adapter import AgentCoreAdapter
 from src.gateway.agentcore.errors import AgentCoreAdapterError
+from src.gateway.agentcore.router_adapter import AgentCoreRouterAdapter
 from src.gateway.agentcore.runtime import RuntimeProvider
 from src.gateway.agentcore.sdk_compat import BedrockAgentCoreApp
 
 logger = logging.getLogger(__name__)
-_adapter = AgentCoreAdapter(RuntimeProvider())
+_adapter = AgentCoreRouterAdapter(
+    AgentCoreAdapter(RuntimeProvider())
+)
 
 
 @contextlib.asynccontextmanager
@@ -53,7 +56,7 @@ app.add_route("/ready", readiness, methods=["GET"])
 
 @app.entrypoint
 async def invoke(payload: Any, context: Any) -> Any:
-    """Validate, authorize, and dispatch one AgentCore invocation."""
+    """Dispatch one inference-only OpenAI-compatible path invocation."""
     try:
         return await _adapter.invoke(payload, context)
     except AgentCoreAdapterError as exc:
