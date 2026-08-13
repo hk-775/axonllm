@@ -17,6 +17,7 @@ from datetime import datetime, timedelta, timezone
 from time import monotonic
 from typing import TYPE_CHECKING
 
+from src.gateway.config import DEFAULT_CONFIG
 from src.gateway.rate_limiter import consume_shared_rate_limit
 from src.gateway.striped_lock import StripedLock
 
@@ -1104,9 +1105,12 @@ class QuotaEnforcer:
                 self._adopt_shared_spend(scope_id, total, epoch)
 
     def cap_max_tokens(self, requested: int | None, policy: ResolvedPolicy) -> int | None:
-        """Return the effective max_tokens — capped by policy if needed."""
+        """Return a bounded output size without turning a ceiling into a default."""
         if policy.max_tokens_per_request is None:
             return requested
         if requested is None:
-            return policy.max_tokens_per_request
+            return min(
+                DEFAULT_CONFIG.adapter.default_max_tokens,
+                policy.max_tokens_per_request,
+            )
         return min(requested, policy.max_tokens_per_request)

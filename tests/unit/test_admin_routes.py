@@ -1073,6 +1073,25 @@ class TestLandingPage:
         assert 'href="/admin/dashboard"' in r.text
         assert "localhost:8000/admin/dashboard" not in r.text
 
+    def test_the_guided_showcase_deep_links_into_the_dashboard_tour(self, client):
+        """The landing page and dashboard player are one flow, not two demos.
+
+        A plain dashboard link would make the prominent Showcase button look
+        successful while landing on the normal Overview page.
+        """
+        html = client.get("/").text
+        assert 'href="/admin/dashboard?tour=1"' in html
+        assert "Start Guided Showcase" in html
+        assert "Open Seeded Dashboard" in html
+
+    def test_the_landing_page_hosts_the_interactive_request_flow(self, client):
+        html = client.get("/").text
+        assert 'id="interactive-architecture"' in html
+        assert "data-axon-flow" in html
+        assert 'href="architecture-flow.css"' in html
+        assert 'src="architecture-flow.js"' in html
+        assert 'href="architecture.html#interactive-flow"' in html
+
     def test_the_link_target_actually_resolves(self, client):
         """The pair of routes, not just the href.
 
@@ -1432,6 +1451,20 @@ class TestGuidedTour:
         assert "Guided Demo" in dashboard_source
         assert "function GuidedTour" in dashboard_source
 
+    def test_the_landing_page_query_starts_the_tour(self, dashboard_source):
+        assert "new URLSearchParams(window.location.search)" in dashboard_source
+        assert ".get('tour')" in dashboard_source
+        assert "value === '1' || value === 'true'" in dashboard_source
+
+    def test_blocked_autoplay_turns_the_control_into_play(self, dashboard_source):
+        """A navigation does not carry browser audio activation with it.
+
+        The showcase can therefore open with its audio blocked. The control
+        must say Play in that state rather than offering to pause silence.
+        """
+        assert "setAudioBlocked(true);" in dashboard_source
+        assert "setPaused(true);" in dashboard_source
+
     def test_the_player_fetches_the_script_at_the_served_path(
         self,
         client,
@@ -1533,6 +1566,57 @@ class TestArchitecturePage:
         assert r.status_code == 200
         assert "text/html" in r.headers["content-type"]
         assert "Architecture" in r.text
+
+    def test_the_scenario_player_is_shared_with_the_landing_page(self, site_client):
+        architecture = site_client.get("/architecture.html").text
+        landing = site_client.get("/").text
+        for html in (landing, architecture):
+            assert "data-axon-flow" in html
+            assert 'href="architecture-flow.css"' in html
+            assert 'src="architecture-flow.js"' in html
+        assert 'id="interactive-flow"' in architecture
+
+    @pytest.mark.parametrize(
+        ("path", "content_type", "marker"),
+        [
+            ("/architecture-flow.css", "text/css", ".axon-flow__canvas"),
+            ("/architecture-flow.js", "text/javascript", "Smart chat routing"),
+            ("/dashboard-showcase.png", "image/png", None),
+        ],
+    )
+    def test_the_demo_assets_are_served(
+        self,
+        site_client,
+        path,
+        content_type,
+        marker,
+    ):
+        response = site_client.get(path)
+        assert response.status_code == 200, f"{path} is referenced but not served"
+        assert response.headers["content-type"].startswith(content_type)
+        if marker is not None:
+            assert marker in response.text
+        else:
+            assert response.content.startswith(b"\x89PNG\r\n\x1a\n")
+
+    def test_the_scenario_player_covers_the_launch_paths(self, site_client):
+        script = site_client.get("/architecture-flow.js").text
+        for scenario in (
+            "Smart chat routing",
+            "Provider fallback",
+            "Governed SQL SELECT",
+            "Tenant admin RBAC",
+        ):
+            assert scenario in script
+        for control in (
+            "query.select",
+            "SELECT only",
+            "admin write",
+            "member view",
+            "Semantic Cache",
+            "Audit Chain",
+        ):
+            assert control in script
 
     def test_the_landing_page_links_to_it(self, client):
         """An unlinked page is one nobody finds.

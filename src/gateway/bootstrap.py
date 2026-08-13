@@ -40,6 +40,7 @@ from src.gateway.auth.browser_session import (
     BrowserAuthAPI,
     BrowserSessionConfig,
     BrowserSessionService,
+    CONFIG_PATH as BROWSER_AUTH_CONFIG_PATH,
     DynamoBrowserSessionStore,
     create_browser_auth_routes,
 )
@@ -884,13 +885,29 @@ def build_starlette_app(app_config: AppConfig | None = None) -> Starlette:
         ),
     )
     saml_api = SamlAPI(service=comp.saml_service)
-    browser_auth_routes = (
-        create_browser_auth_routes(
+    if comp.browser_session_service is not None:
+        browser_auth_routes = create_browser_auth_routes(
             BrowserAuthAPI(comp.browser_session_service)
         )
-        if comp.browser_session_service is not None
-        else []
-    )
+    else:
+        async def disabled_browser_auth_config(
+            _request: Request,
+        ) -> JSONResponse:
+            return JSONResponse(
+                {"browser_auth": {"enabled": False}},
+                headers={
+                    "Cache-Control": "no-store",
+                    "Pragma": "no-cache",
+                },
+            )
+
+        browser_auth_routes = [
+            Route(
+                BROWSER_AUTH_CONFIG_PATH,
+                disabled_browser_auth_config,
+                methods=["GET"],
+            )
+        ]
     datasource_routes: list[Route] = []
     query_routes: list[Route] = []
     if app_config.athena_query_enabled:
@@ -1024,12 +1041,15 @@ def build_starlette_app(app_config: AppConfig | None = None) -> Starlette:
                 await query_reconciliation_worker.start()
             yield
         finally:
-            if query_reconciliation_worker is not None:
-                await query_reconciliation_worker.stop()
-            if dispatcher is not None:
-                await dispatcher.stop()
-            if monitor is not None:
-                await monitor.stop()
+            try:
+                if query_reconciliation_worker is not None:
+                    await query_reconciliation_worker.stop()
+                if dispatcher is not None:
+                    await dispatcher.stop()
+                if monitor is not None:
+                    await monitor.stop()
+            finally:
+                await comp.multi_factory.close()
 
     app = Starlette(routes=routes, lifespan=_lifespan)
 

@@ -106,6 +106,14 @@ class TestMaxTokens:
         assert enforcer.cap_max_tokens(2000, policy) == 2000
         assert enforcer.cap_max_tokens(None, policy) == 4096
 
+    def test_loose_policy_does_not_become_an_oversized_provider_request(
+        self,
+        enforcer,
+    ):
+        policy = ResolvedPolicy(max_tokens_per_request=32768)
+
+        assert enforcer.cap_max_tokens(None, policy) == 4096
+
     def test_cap_no_policy_limit(self, enforcer):
         policy = ResolvedPolicy(max_tokens_per_request=None)
         assert enforcer.cap_max_tokens(8000, policy) == 8000

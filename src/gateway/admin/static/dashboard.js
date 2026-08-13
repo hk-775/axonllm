@@ -3872,6 +3872,18 @@ function ApiKeysPage({
     scopes: 'chat:invoke',
     project_id: ''
   });
+
+  /* A direct sidebar visit has no project in its navigation state. Select the
+     first visible project so the seeded demo shows its keys immediately; the
+     input remains editable for operators who want a different project. */
+  useEffect(() => {
+    if (initialProjectId) return;
+    api.get('/admin/projects').then(projects => {
+      if (projects && projects.length) {
+        setProjectId(current => current || projects[0].project_id);
+      }
+    }).catch(e => setError('Failed to load projects: ' + (e && e.message ? e.message : 'unknown error')));
+  }, [initialProjectId]);
   const loadKeys = useCallback(() => {
     if (!projectId) return;
     api.get(`/admin/projects/${encodeURIComponent(projectId)}/keys`).then(setKeys).catch(e => setError('Failed to load keys: ' + (e && e.message ? e.message : 'unknown error')));
@@ -5379,6 +5391,8 @@ function SandboxPage() {
     borderRadius: '10px'
   });
   return /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    className: "page-header"
+  }, /*#__PURE__*/React.createElement("h1", null, "Sandbox"), /*#__PURE__*/React.createElement("p", null, "Run live chat, direct model prompts, and intent-aware routing through this gateway")), /*#__PURE__*/React.createElement("div", {
     style: {
       display: 'flex',
       gap: '0.35rem',
@@ -5399,9 +5413,11 @@ function SandboxPage() {
     onClick: () => setTab('routing')
   }, "Routing")), /*#__PURE__*/React.createElement("iframe", {
     src: tab === 'chat' ? '/chat' : tab === 'playground' ? '/playground' : '/routing',
+    title: 'Sandbox ' + tab,
     style: {
       width: '100%',
-      height: 'calc(100vh - 140px)',
+      height: 'calc(100vh - 215px)',
+      minHeight: '520px',
       border: '1.5px solid #e7e5e4',
       borderRadius: '16px',
       background: '#fff'
@@ -5522,7 +5538,13 @@ function GuidedTour({
     };
     audio.addEventListener('timeupdate', onTime);
     audio.addEventListener('ended', onEnded);
-    audio.play().then(() => setAudioBlocked(false)).catch(() => setAudioBlocked(true));
+    audio.play().then(() => {
+      setAudioBlocked(false);
+      setPaused(false);
+    }).catch(() => {
+      setAudioBlocked(true);
+      setPaused(true);
+    });
     return () => {
       audio.removeEventListener('timeupdate', onTime);
       audio.removeEventListener('ended', onEnded);
@@ -5757,7 +5779,16 @@ function App() {
   const [selectedProject, setSelectedProject] = useState(null);
   const [editProjectId, setEditProjectId] = useState(null);
   const [selectedUser, setSelectedUser] = useState(null);
-  const [tourActive, setTourActive] = useState(false);
+  /* The landing-page showcase deep-links here with ?tour=1. Starting the
+     player from initial state makes the overlay available on the first render
+     rather than flashing the Overview page and waiting for a later effect.
+     Browsers may still block narration after a navigation; GuidedTour surfaces
+     that state and turns its control into Play instead of claiming to pause
+     audio that never started. */
+  const [tourActive, setTourActive] = useState(() => {
+    const value = new URLSearchParams(window.location.search).get('tour');
+    return value === '1' || value === 'true';
+  });
   const [browserAuth, setBrowserAuth] = useState(null);
   useEffect(() => {
     let active = true;

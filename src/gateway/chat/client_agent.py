@@ -227,6 +227,7 @@ class ClientAgent:
             out: dict[str, Any] = {
                 "id": data.get("id", ""),
                 "model": data.get("model", ""),
+                "provider": data.get("provider", ""),
                 "content": content,
                 "is_final": data.get("is_final", False),
             }

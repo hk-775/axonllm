@@ -162,6 +162,26 @@ class TestResponseSide:
 
 
 class TestStreamResponseSide:
+    def test_provider_survives_stream_flattening(self):
+        gw = _CapturingGateway(stream_chunks=[
+            {"data": {
+                "id": "i",
+                "model": "m",
+                "provider": "groq",
+                "choices": [{
+                    "delta": {"content": "ready"},
+                    "finish_reason": "stop",
+                }],
+            }},
+        ])
+        ca = ClientAgent(gw)
+
+        chunks = _collect(
+            ca.chat_stream("m", [{"role": "user", "content": "hi"}])
+        )
+
+        assert chunks[0]["provider"] == "groq"
+
     def test_delta_tool_calls_surface(self):
         gw = _CapturingGateway(stream_chunks=[
             {"data": {"id": "i", "model": "m", "choices": [
