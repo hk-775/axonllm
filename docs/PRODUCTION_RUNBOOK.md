@@ -538,6 +538,8 @@ Rotate the asymmetric signing key through a reviewed migration:
 - canonical identity and enforced authentication in production mode;
 - a private ECR image parameter that accepts only `@sha256` URIs;
 - KMS-encrypted DynamoDB with deletion protection and PITR;
+- KMS-signed routing snapshots with a private KMS endpoint and exact-key
+  sign/verify task authority;
 - daily AWS Backup at 05:00 UTC, 30-day cold transition, 365-day deletion, and
   governance-mode Vault Lock enforcing 30-365 day retention;
 - a KMS-encrypted FIFO security-event outbox and DLQ retained for 14 days;

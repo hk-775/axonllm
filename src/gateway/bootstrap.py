@@ -111,7 +111,10 @@ from src.gateway.model_leaderboard import ModelLeaderboard
 from src.gateway.model_registry import ModelRegistry
 from src.gateway.models import PolicyNode, Project, RateLimitConfig, UsageRecord
 from src.gateway.multi_provider_factory import MultiProviderFactory
-from src.gateway.persistence import DynamoPersistence
+from src.gateway.persistence import (
+    DynamoPersistence,
+    PersistenceConflictError,
+)
 from src.gateway.provider_config import ProviderConfig
 from src.gateway.provider_loader import load_provider_routes
 from src.gateway.rate_limiter import SlidingWindowRateLimiter
@@ -222,12 +225,35 @@ def _load_runtime_model_registry(
     snapshot = asyncio.run(
         persistence.load_model_registry_snapshot()
     )
-    if snapshot is not None:
-        model_config, model_revision = snapshot
-        registry.replace_config(
-            model_config,
-            revision=model_revision,
+    if snapshot is None:
+        signing_mode = getattr(
+            persistence,
+            "routing_config_signing_mode",
+            "disabled",
         )
+        if signing_mode == "verify":
+            raise RuntimeError(
+                "signed routing configuration is not initialized"
+            )
+        if signing_mode == "sign-verify":
+            try:
+                snapshot = asyncio.run(
+                    persistence.save_model_registry(
+                        registry.to_config(),
+                        expected_revision=0,
+                    )
+                )
+            except PersistenceConflictError:
+                snapshot = asyncio.run(
+                    persistence.load_model_registry_snapshot()
+                )
+                if snapshot is None:
+                    raise RuntimeError(
+                        "signed routing configuration initialization "
+                        "lost its concurrent write"
+                    ) from None
+    if snapshot is not None:
+        snapshot.apply(registry)
     return registry
 
 
@@ -243,7 +269,15 @@ def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComp
     pricing = load_pricing_config(app_config.pricing_config_path)
 
     # --- Persistence ---
-    persistence = DynamoPersistence(region=app_config.aws_region)
+    persistence = DynamoPersistence(
+        region=app_config.aws_region,
+        routing_config_signing_mode=(
+            app_config.routing_config_signing_mode
+        ),
+        routing_config_signing_key_arn=(
+            app_config.routing_config_signing_key_arn
+        ),
+    )
     if persistence.enabled:
         asyncio.run(
             persistence.create_table_if_not_exists()
@@ -980,9 +1014,21 @@ def build_starlette_app(app_config: AppConfig | None = None) -> Starlette:
                     "ready" if outbox_ready else "unavailable"
                 )
             ready = ready and outbox_ready
+        await config_sync.refresh_routing_if_stale()
+        routing_status = config_sync.routing_config_status
+        routing_dependency = (
+            "degraded"
+            if routing_status["status"] == "degraded"
+            else "ready"
+        )
+        dependencies["routing_configuration"] = routing_dependency
         return JSONResponse(
             {
-                "status": "ready" if ready else "not_ready",
+                "status": (
+                    "degraded"
+                    if ready and routing_dependency == "degraded"
+                    else ("ready" if ready else "not_ready")
+                ),
                 "ready": ready,
                 "dependencies": dependencies,
             },

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 from collections.abc import Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -24,6 +25,7 @@ import sys
 import tempfile
 from typing import Any, Callable
 from urllib.parse import unquote, urlsplit, urlunsplit
+import zlib
 
 try:
     import fcntl
@@ -1334,6 +1336,27 @@ def _validate_candidate_endpoint_name(value: str) -> str:
     return value
 
 
+def initial_routing_config_zlib_base64() -> str:
+    """Return the validated packaged routing defaults for one-time seeding."""
+    from src.gateway.model_registry import ModelRegistry
+    from src.gateway.routing_config import RoutingConfigSnapshot
+
+    resource = files("src.gateway").joinpath(
+        "resources/runtime/config/models.yaml"
+    )
+    registry = ModelRegistry.from_yaml(resource.read_text(encoding="utf-8"))
+    snapshot = RoutingConfigSnapshot.from_registry(registry)
+    compressed = base64.b64encode(
+        zlib.compress(snapshot.document.encode("utf-8"), level=9)
+    ).decode("ascii")
+    if len(compressed) > 4096:
+        raise AgentCoreDeploymentError(
+            "packaged routing configuration is too large for AgentCore "
+            "bootstrap"
+        )
+    return compressed
+
+
 def agentcore_deploy_command(
     config: AgentCoreSetupConfig,
     identity: IdentityValues,
@@ -1379,6 +1402,9 @@ def agentcore_deploy_command(
         "CandidateEndpointName": candidate_endpoint_name,
         "EnabledProviders": ",".join(config.runtime.enabled_providers),
         "ProviderSecretVersion": provider_secret_version,
+        "InitialRoutingConfigZlibBase64": (
+            initial_routing_config_zlib_base64()
+        ),
         "PublishCandidateEndpoint": ("true" if publish_candidate_endpoint else "false"),
         "PublishProductionEndpoint": ("true" if publish_production_endpoint else "false"),
         "ProductionRuntimeVersion": production_runtime_version,

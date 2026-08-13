@@ -92,6 +92,14 @@ class TestTheTaskDefinitionEnvironment:
             "selected_state_table_name"
         )
 
+    def test_routing_configuration_is_kms_signed(self, env):
+        mode = env["AXON_ROUTING_CONFIG_SIGNING_MODE"]
+        assert isinstance(mode, ast.Constant)
+        assert mode.value == "sign-verify"
+        key = env["AXON_ROUTING_CONFIG_SIGNING_KEY_ARN"]
+        assert isinstance(key, ast.Attribute)
+        assert key.attr == "key_arn"
+
     def test_the_port_matches_the_container_port(self, env):
         """`AXON_SERVER_PORT` is what uvicorn binds; `container_port` is what the
         target group health-checks. A mismatch fails the health check with a

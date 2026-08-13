@@ -101,6 +101,17 @@ def test_production_profile_accepts_the_canonical_durable_contract(
     monkeypatch.setenv("AXON_AUTH_MODE", "ENFORCE")
     monkeypatch.setenv("AXON_REQUIRE_CANONICAL_IDENTITY", "true")
     monkeypatch.setenv("LLM_ROUTER_DYNAMODB_ENABLED", "true")
+    monkeypatch.setenv(
+        "AXON_ROUTING_CONFIG_SIGNING_MODE",
+        "verify",
+    )
+    monkeypatch.setenv(
+        "AXON_ROUTING_CONFIG_SIGNING_KEY_ARN",
+        (
+            "arn:aws:kms:us-east-1:123456789012:"
+            "key/11111111-2222-3333-4444-555555555555"
+        ),
+    )
 
     config = load_app_config()
 

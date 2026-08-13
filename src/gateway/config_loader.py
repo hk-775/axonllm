@@ -137,6 +137,14 @@ def load_app_config() -> AppConfig:
         durable_persistence_enabled=os.environ.get(
             "LLM_ROUTER_DYNAMODB_ENABLED", "false"
         ).lower() == "true",
+        routing_config_signing_mode=os.environ.get(
+            "AXON_ROUTING_CONFIG_SIGNING_MODE",
+            "disabled",
+        ).strip().lower(),
+        routing_config_signing_key_arn=os.environ.get(
+            "AXON_ROUTING_CONFIG_SIGNING_KEY_ARN",
+            "",
+        ).strip(),
         semantic_cache_enabled=os.environ.get(
             "AXON_SEMANTIC_CACHE", "false"
         ).lower() == "true",

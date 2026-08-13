@@ -104,6 +104,12 @@ class _CasDynamoClient:
             if token in values and f"{field} = {token}" in expression:
                 if current.get(field) != values[token]:
                     return False
+        if (
+            ":expected_schema" in values
+            and current.get("schema_version")
+            != values[":expected_schema"]
+        ):
+            return False
 
         if expression == "authorization_version = :expected":
             return (

@@ -177,8 +177,8 @@ class RuntimeDependency:
     """One bounded dependency check required for runtime readiness."""
 
     name: str
-    check: Callable[[], Awaitable[bool]]
-    startup_check: Callable[[], Awaitable[bool]]
+    check: Callable[[], Awaitable[bool | str]]
+    startup_check: Callable[[], Awaitable[bool | str]]
 
 
 @dataclass(frozen=True)
@@ -198,8 +198,15 @@ class RuntimeReadiness:
     dependencies: dict[str, str]
 
     def as_dict(self) -> dict[str, Any]:
+        status = "not_ready"
+        if self.ready:
+            status = (
+                "degraded"
+                if "degraded" in self.dependencies.values()
+                else "ready"
+            )
         return {
-            "status": "ready" if self.ready else "not_ready",
+            "status": status,
             "ready": self.ready,
             "state": self.state,
             "dependencies": dict(self.dependencies),
@@ -250,7 +257,12 @@ class RuntimeServices:
         async def _run(check: RuntimeDependency) -> str:
             try:
                 callback = check.startup_check if startup else check.check
-                return "ready" if await callback() else "unavailable"
+                result = await callback()
+                if isinstance(result, bool):
+                    return "ready" if result else "unavailable"
+                if result in {"ready", "degraded", "unavailable"}:
+                    return result
+                return "unavailable"
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -277,7 +289,10 @@ class RuntimeServices:
                 dependencies[name] = "timeout"
                 _cancel_detached_tasks([task])
 
-        ready = all(status == "ready" for status in dependencies.values())
+        ready = all(
+            status in {"ready", "degraded"}
+            for status in dependencies.values()
+        )
         return RuntimeReadiness(ready, RuntimeState.READY.value, dependencies)
 
     async def check_startup_readiness(
@@ -444,6 +459,17 @@ def build_runtime_services() -> RuntimeServices:
         status = await components.persistence.health_status()
         return status.get("enabled") is True and status.get("reachable") is True
 
+    async def _routing_configuration_ready() -> str:
+        await config_sync.refresh_routing_if_stale()
+        if config_sync.active_routing_snapshot is None:
+            return "unavailable"
+        status = config_sync.routing_config_status
+        return (
+            "degraded"
+            if status.get("status") == "degraded"
+            else "ready"
+        )
+
     async def _event_outbox_startup_ready() -> bool:
         return await components.event_dispatcher.check_readiness()
 
@@ -534,6 +560,11 @@ def build_runtime_services() -> RuntimeServices:
                 "principal_store",
                 _principal_store_ready,
                 _principal_store_ready,
+            ),
+            RuntimeDependency(
+                "routing_configuration",
+                _routing_configuration_ready,
+                _routing_configuration_ready,
             ),
             RuntimeDependency(
                 "security_event_outbox",

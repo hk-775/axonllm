@@ -649,6 +649,16 @@ class AxonLLMStack(Stack):
             removal_policy=RemovalPolicy.RETAIN,
             pending_window=Duration.days(30),
         )
+        routing_config_signing_key = kms.Key(
+            self,
+            "RoutingConfigSigningKey",
+            alias="alias/axonllm/routing-config",
+            description="Signs AxonLLM routing configuration snapshots",
+            key_spec=kms.KeySpec.ECC_NIST_P256,
+            key_usage=kms.KeyUsage.SIGN_VERIFY,
+            removal_policy=RemovalPolicy.RETAIN,
+            pending_window=Duration.days(30),
+        )
         data_key.add_to_resource_policy(
             iam.PolicyStatement(
                 sid="AllowCloudWatchLogsEncryption",
@@ -809,6 +819,16 @@ class AxonLLMStack(Stack):
         sqs_endpoint = vpc.add_interface_endpoint(
             "SqsEndpoint",
             service=ec2.InterfaceVpcEndpointAwsService.SQS,
+            open=False,
+            private_dns_enabled=True,
+            security_groups=[aws_endpoint_security_group],
+            subnets=ec2.SubnetSelection(
+                subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS
+            ),
+        )
+        kms_endpoint = vpc.add_interface_endpoint(
+            "KmsEndpoint",
+            service=ec2.InterfaceVpcEndpointAwsService.KMS,
             open=False,
             private_dns_enabled=True,
             security_groups=[aws_endpoint_security_group],
@@ -1020,6 +1040,10 @@ class AxonLLMStack(Stack):
                     "AXON_AWS_ACCOUNT_ID": self.account,
                     "LLM_ROUTER_DYNAMODB_ENABLED": "true",
                     "AXON_DYNAMODB_TABLE": selected_state_table_name,
+                    "AXON_ROUTING_CONFIG_SIGNING_MODE": "sign-verify",
+                    "AXON_ROUTING_CONFIG_SIGNING_KEY_ARN": (
+                        routing_config_signing_key.key_arn
+                    ),
                     "AXON_EVENT_OUTBOX_QUEUE_URL": (
                         event_outbox_queue.queue_url
                     ),
@@ -1366,6 +1390,20 @@ class AxonLLMStack(Stack):
                     selected_state_table_arn,
                     f"{selected_state_table_arn}/index/*",
                 ],
+            )
+        )
+        task_role.add_to_policy(
+            iam.PolicyStatement(
+                sid="SignAndVerifyRoutingConfiguration",
+                actions=["kms:Sign", "kms:Verify"],
+                resources=[routing_config_signing_key.key_arn],
+            )
+        )
+        kms_endpoint.add_to_policy(
+            iam.PolicyStatement(
+                principals=[task_role],
+                actions=["kms:Sign", "kms:Verify"],
+                resources=[routing_config_signing_key.key_arn],
             )
         )
 
@@ -1873,6 +1911,11 @@ class AxonLLMStack(Stack):
             self,
             "DataKeyArn",
             value=data_key.key_arn,
+        )
+        CfnOutput(
+            self,
+            "RoutingConfigSigningKeyArn",
+            value=routing_config_signing_key.key_arn,
         )
         CfnOutput(
             self,

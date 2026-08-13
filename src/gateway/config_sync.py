@@ -36,6 +36,10 @@ import time
 
 from src.gateway.multi_region.region_config import apply_persisted_topology
 from src.gateway.routing_config import RoutingConfigSnapshot
+from src.gateway.routing_config_signing import (
+    RoutingConfigRollbackError,
+    RoutingConfigSignatureError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -94,11 +98,17 @@ class ConfigSyncService:
             if model_registry is not None
             else None
         )
-        self._last_good_routing_snapshot = (
+        persisted_snapshot = getattr(
+            persistence,
+            "authenticated_routing_snapshot",
+            None,
+        )
+        self._last_good_routing_snapshot = persisted_snapshot or (
             RoutingConfigSnapshot.from_registry(model_registry)
             if model_registry is not None
             else None
         )
+        self._routing_sync_error: str | None = None
         self._model_refresh_task: asyncio.Task | None = None
         self._model_generation = 0
         self._last_region_check = float("-inf")
@@ -121,6 +131,32 @@ class ConfigSyncService:
         """The last fully validated routing configuration adopted here."""
         return self._last_good_routing_snapshot
 
+    @property
+    def routing_config_status(self) -> dict[str, object]:
+        """Return sanitized last-known-good and synchronization state."""
+        snapshot = self._last_good_routing_snapshot
+        return {
+            "status": (
+                "degraded"
+                if self._routing_sync_error is not None
+                else "synchronized"
+            ),
+            "revision": (
+                snapshot.revision if snapshot is not None else None
+            ),
+            "sha256": snapshot.sha256 if snapshot is not None else None,
+            "signed": snapshot.is_signed if snapshot is not None else False,
+            "error": self._routing_sync_error,
+        }
+
+    @staticmethod
+    def _routing_error_category(exc: Exception) -> str:
+        if isinstance(exc, RoutingConfigRollbackError):
+            return "rollback_rejected"
+        if isinstance(exc, RoutingConfigSignatureError):
+            return "signature_verification_failed"
+        return "snapshot_unavailable"
+
     async def refresh_if_stale(self) -> bool:
         """Adopt fleet config if another instance changed it. Returns whether it did.
 
@@ -131,7 +167,7 @@ class ConfigSyncService:
         if self._persistence is None or not self._persistence.enabled:
             return False
 
-        model_refreshed = await self._refresh_model_registry_if_stale()
+        model_refreshed = await self.refresh_routing_if_stale()
         region_refreshed = await self._refresh_region_if_stale()
         now = time.monotonic()
         if now - self._last_version_check < self.CONFIG_SYNC_TTL_SECONDS:
@@ -149,6 +185,12 @@ class ConfigSyncService:
         except Exception:
             logger.warning("Config refresh failed", exc_info=True)
             return model_refreshed or region_refreshed
+
+    async def refresh_routing_if_stale(self) -> bool:
+        """Poll only the signed routing document for readiness and requests."""
+        if self._persistence is None or not self._persistence.enabled:
+            return False
+        return await self._refresh_model_registry_if_stale()
 
     async def _refresh_model_registry_if_stale(self) -> bool:
         """Adopt a newer complete registry document, at most once per TTL."""
@@ -177,17 +219,24 @@ class ConfigSyncService:
             )
         try:
             return await asyncio.shield(self._model_refresh_task)
-        except Exception:
+        except Exception as exc:
             # Keep routing with the last fully validated snapshot. Do not move
             # the check clock: the next request retries instead of treating an
             # outage or malformed document as a successful refresh.
+            self._routing_sync_error = self._routing_error_category(exc)
             logger.warning("Model registry refresh failed", exc_info=True)
             return False
 
     async def _refresh_model_registry(self, now: float) -> bool:
         generation = self._model_generation
         snapshot = (
-            await self._persistence.load_model_registry_snapshot()
+            await self._persistence.load_model_registry_snapshot(
+                after_revision=getattr(
+                    self._model_registry,
+                    "revision",
+                    0,
+                )
+            )
         )
         if generation != self._model_generation:
             return False
@@ -198,10 +247,13 @@ class ConfigSyncService:
                     "revision %s",
                     getattr(self._model_registry, "revision", 0),
                 )
+                self._routing_sync_error = "snapshot_missing"
+            else:
+                self._routing_sync_error = None
             self._last_model_check = now
             return False
 
-        config, revision = snapshot
+        revision = snapshot.revision
         if (
             not isinstance(revision, int)
             or isinstance(revision, bool)
@@ -213,24 +265,22 @@ class ConfigSyncService:
         live_revision = getattr(self._model_registry, "revision", 0)
         if revision <= live_revision:
             self._known_model_revision = live_revision
+            self._routing_sync_error = None
             self._last_model_check = now
             return False
 
-        candidate = RoutingConfigSnapshot.from_config(
-            config,
-            revision=revision,
-        )
         # Applying assigns the complete parsed model map in one operation. A
         # malformed or unavailable refresh leaves the previous snapshot active.
-        candidate.apply(self._model_registry)
+        snapshot.apply(self._model_registry)
         logger.info(
             "Adopting model registry revision %s -> %s (%d models)",
             live_revision,
             revision,
             len(self._model_registry.models),
         )
-        self._last_good_routing_snapshot = candidate
+        self._last_good_routing_snapshot = snapshot
         self._known_model_revision = revision
+        self._routing_sync_error = None
         self._last_model_check = now
         return True
 
@@ -449,8 +499,12 @@ class ConfigSyncService:
         self._local_generation += 1
         self._last_version_check = float("-inf")
 
-    def note_local_model_revision(self, revision: int) -> None:
-        """Record a registry revision this instance has already published."""
+    def note_local_model_snapshot(
+        self,
+        snapshot: RoutingConfigSnapshot,
+    ) -> None:
+        """Record an authenticated registry snapshot published locally."""
+        revision = snapshot.revision
         if (
             not isinstance(revision, int)
             or isinstance(revision, bool)
@@ -463,13 +517,22 @@ class ConfigSyncService:
         # local CAS committed, preventing it from publishing an older revision.
         self._model_generation += 1
         self._known_model_revision = revision
-        if self._model_registry is not None:
-            self._last_good_routing_snapshot = (
-                RoutingConfigSnapshot.from_registry(
-                    self._model_registry
-                )
-            )
+        self._last_good_routing_snapshot = snapshot
+        self._routing_sync_error = None
         self._last_model_check = time.monotonic()
+
+    def note_local_model_revision(self, revision: int) -> None:
+        """Compatibility wrapper for unsigned local-development publication."""
+        if self._model_registry is None:
+            raise RuntimeError("model registry is not configured")
+        snapshot = RoutingConfigSnapshot.from_registry(
+            self._model_registry
+        )
+        if snapshot.revision != revision:
+            raise ValueError(
+                "model registry revision does not match the live snapshot"
+            )
+        self.note_local_model_snapshot(snapshot)
 
     def note_local_region_revision(self, revision: int) -> None:
         """Record a topology revision this instance already published."""
