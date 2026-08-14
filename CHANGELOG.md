@@ -19,6 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   checksum-only model-registry rows, monotonic live adoption, and
   last-known-good routing during control-plane or signature-verification
   outages.
+- Added one v0.3 routing conformance gate across embedded Python, standalone
+  HTTP, and AgentCore Runtime delivery modes, covering models, chat,
+  Responses, embeddings, streaming, tools, errors, usage, signed snapshots,
+  last-known-good routing, and provider fallback.
 
 ### Security
 

@@ -78,6 +78,9 @@ axon-agentcore-deploy = "src.gateway.deployment.agentcore_deploy:main"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+markers = [
+    "routing_conformance: shared v0.3 contract across every delivery mode",
+]
 # Put the repo root on sys.path so `import src.gateway...` resolves without
 # relying on the CWD happening to be the repo root.
 pythonpath = ["."]
