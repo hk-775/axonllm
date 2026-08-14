@@ -32,6 +32,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   endpoints. A CloudFormation-owned one-shot signer initializes or migrates
   AgentCore routing state before the verify-only runtime updates.
 
+### Changed
+
+- Added public issue and pull-request templates, complete package-page metadata,
+  and distributable third-party and generated-media notices ahead of the v0.3
+  open-source release.
+
 ### Fixed
 
 - Made shipped-configuration tests independent of the gitignored local

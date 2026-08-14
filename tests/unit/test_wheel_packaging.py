@@ -18,7 +18,12 @@ _REPO = Path(__file__).resolve().parents[2]
 def _build_wheel(tmp_path: Path) -> Path:
     project = tmp_path / "project"
     project.mkdir()
-    for name in ("pyproject.toml", "LICENSE"):
+    for name in (
+        "pyproject.toml",
+        "LICENSE",
+        "README.md",
+        "THIRD_PARTY_NOTICES.md",
+    ):
         shutil.copy2(_REPO / name, project / name)
     shutil.copytree(
         _REPO / "src",
@@ -108,12 +113,25 @@ def test_clean_wheel_launchers_and_assets_work_outside_repository(tmp_path):
             if name.endswith(".dist-info/entry_points.txt")
         )
         entry_points = archive.read(entry_points_name).decode("utf-8")
+        metadata_name = next(
+            name for name in names if name.endswith(".dist-info/METADATA")
+        )
+        metadata = archive.read(metadata_name).decode("utf-8")
     assert "axon = src.gateway.cli:main" in entry_points
     assert "axon-demo = src.gateway.cli:demo" in entry_points
     assert (
         "axon-agentcore-deploy = "
         "src.gateway.deployment.agentcore_deploy:main"
     ) in entry_points
+    assert "Description-Content-Type: text/markdown" in metadata
+    assert "License-File: LICENSE" in metadata
+    assert "License-File: THIRD_PARTY_NOTICES.md" in metadata
+    assert "# AxonLLM" in metadata
+    assert any(name.endswith(".dist-info/licenses/LICENSE") for name in names)
+    assert any(
+        name.endswith(".dist-info/licenses/THIRD_PARTY_NOTICES.md")
+        for name in names
+    )
 
     required = {
         "axonllm/__init__.py",
