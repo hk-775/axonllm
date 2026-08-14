@@ -2,12 +2,17 @@
 name = "axon-llm"
 version = "0.2.9"
 description = "Open-source multi-provider LLM gateway and control plane"
+readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.11"
 license = "MIT-0"
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md"]
+authors = [{ name = "AxonLLM contributors" }]
+maintainers = [{ name = "AxonLLM maintainers" }]
 keywords = ["llm", "gateway", "ai", "routing", "enterprise", "bedrock", "openai", "anthropic"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
@@ -27,7 +32,9 @@ dependencies = [
 Homepage = "https://github.com/AxonLLM/axonllm"
 Repository = "https://github.com/AxonLLM/axonllm"
 Issues = "https://github.com/AxonLLM/axonllm/issues"
-Documentation = "https://github.com/AxonLLM/axonllm#readme"
+Documentation = "https://github.com/AxonLLM/axonllm/tree/main/docs"
+Changelog = "https://github.com/AxonLLM/axonllm/blob/main/CHANGELOG.md"
+Security = "https://github.com/AxonLLM/axonllm/security/policy"
 
 [project.optional-dependencies]
 # Native OTLP span export (standalone observability). Opt-in at deploy time

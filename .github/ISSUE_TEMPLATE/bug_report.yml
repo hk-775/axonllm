@@ -1,0 +1,69 @@
+name: Bug report
+description: Report reproducible incorrect behavior in AxonLLM
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include credentials, tokens, tenant data, prompts, or provider responses. Report security issues through the private vulnerability form instead.
+  - type: input
+    id: version
+    attributes:
+      label: AxonLLM version
+      description: Release tag, package version, image digest, or commit SHA
+      placeholder: v0.2.9
+    validations:
+      required: true
+  - type: dropdown
+    id: delivery_mode
+    attributes:
+      label: Delivery mode
+      options:
+        - Embedded Python
+        - Standalone HTTP
+        - Amazon Bedrock AgentCore
+        - Fargate control plane
+        - Local demo
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What happened, and what did you expect instead?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Provide the smallest configuration and sequence that reproduces the problem.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include OS, Python version, deployment profile, provider, and relevant dependency versions.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Sanitized logs
+      description: Remove credentials, account IDs, tenant data, prompts, responses, and personal information.
+      render: text
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I searched existing issues for this problem.
+          required: true
+        - label: I removed secrets and customer data from this report.
+          required: true
+        - label: This is not a security vulnerability.
+          required: true

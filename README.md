@@ -2664,3 +2664,6 @@ See [CONTRIBUTING.md](CONTRIBUTING.md).
 ## License
 
 MIT-0 — See [LICENSE](LICENSE).
+
+Vendored browser-library notices and generated-media provenance are documented
+in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

@@ -1757,7 +1757,8 @@ class TestArchitecturePage:
         r = site_client.get("/narration/architecture-narration.json")
         assert r.status_code == 200
         assert r.headers["content-type"] == "application/json"
-        assert r.json()["voice"] == "Daniel"
+        assert r.json()["voice"] == "Matthew"
+        assert r.json()["engine"] == "generative"
 
     def test_every_narration_track_has_its_audio(self, site_client):
         """Track ids name the MP3s by convention, so a rename fails at runtime.
