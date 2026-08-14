@@ -61,6 +61,11 @@ jobs:
           uv run --frozen --no-sync ruff check --no-cache
           axonllm src tests agentcore_agent.py serve_dashboard.py
 
+      - name: Run v0.3 routing conformance
+        run: >-
+          uv run --frozen --no-sync pytest
+          tests/conformance -q --tb=short
+
       - name: Run tests
         run: uv run --frozen --no-sync pytest tests -q --tb=short
 
