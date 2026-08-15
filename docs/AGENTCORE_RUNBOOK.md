@@ -748,12 +748,14 @@ their behavior.
 ### Managed Cognito
 
 The managed option creates `AxonLLMIdentityStack` separately from the runtime.
-Its user pool, public AgentCore client, and hosted domain are retained and
-deletion protected. `custom-domain` also creates the confidential ALB client;
-`cloudfront` instead creates its secretless browser client in the control-plane
-stack after the generated distribution hostname is known. Self-signup and
-direct password/SRP client flows are disabled; TOTP MFA is required. Public
-clients have no secret and support authorization code only.
+Its user pool, secretless AgentCore audience client, and hosted domain are
+retained and deletion protected. The audience client has OAuth and direct
+authentication disabled. `custom-domain` also creates the confidential ALB
+client; `cloudfront` instead creates its secretless browser client in the
+control-plane stack after the generated distribution hostname is known.
+Self-signup and direct password/SRP workforce flows are disabled; TOTP MFA is
+required. The CloudFront browser client has no secret and supports
+authorization code only.
 
 Set the common release and network inputs, then generate a reviewable setup
 file:
@@ -783,7 +785,6 @@ uv run axon setup agentcore \
   --admin-email admin@example.com \
   --admin-display-name "Tenant A Admin" \
   --hosted-ui-domain-prefix axonllm-123456789012 \
-  --oauth-callback-url https://app.example.com/oauth/callback \
   --athena-query-role-arn arn:aws:iam::123456789012:role/AxonAthenaReader \
   --output axonllm-agentcore.json
 ```
@@ -804,18 +805,18 @@ The hosted-UI prefix must be globally available. CloudFront mode supplies its
 own hostname and certificate, so it forbids domain, ACM, Route 53, and ingress
 prefix-list fields. Custom-domain mode requires all four. The control-plane
 image is a verified AMD64 digest, distinct from the AgentCore ARM64 digest.
-Every callback is HTTPS. The adopting AgentCore OAuth client must generate a
-verifier and send
-`code_challenge_method=S256`; AxonLLM does not ship an OAuth callback
-application. Invoke AgentCore with the returned **ID token**, which carries
-`custom:tenant_id` and `custom:project_id`. Do not substitute the Cognito access
-token, which does not contain those user attributes by default.
+The CloudFront control-plane client owns its exact HTTPS callback and S256 PKCE
+flow. The retained AgentCore audience client is not an interactive login
+client. The protected certification client is the only managed client used to
+mint tokens for direct runtime certification.
 
-The SES sender and its exact lowercase domain must be verified in the deployment
-region before the identity stack is deployed. If they are omitted, the
-first-adopter command uses the administrator email and its domain as explicit
-SES inputs; that identity must then be verified. Cognito is configured with the
-SES developer account, not the account-limited Cognito default sender.
+The SES sender and either its exact email identity or its exact lowercase
+domain must be verified in the deployment region before the identity stack is
+deployed. Set `AXON_COGNITO_SES_VERIFIED_DOMAIN` to the verified source
+identity. If the SES inputs are omitted, the first-adopter command uses the
+administrator email and its domain; that domain must then be verified. Cognito
+is configured with the SES developer account, not the account-limited Cognito
+default sender.
 
 Omit the optional SCIM secret ARN when SCIM is disabled. Its complete
 `SecretString` is the tenant map accepted by `AXON_SCIM_TENANTS`; the
@@ -830,8 +831,7 @@ the service provider:
 2. Configure the IdP with Cognito's SP entity ID and SAML response endpoint, not
    AxonLLM `/saml/acs` or `/saml/metadata`.
 3. Enable the SAML IdP on the confidential ALB client for `custom-domain`, or
-   on the generated control-plane browser client for `cloudfront`. Also enable
-   it on the public AgentCore client if federated users invoke AgentCore.
+   on the generated control-plane browser client for `cloudfront`.
 4. Verify Cognito attribute mappings, certificate rotation, logout, and
    IdP-initiated and SP-initiated policy according to the enterprise IdP.
 5. Provision canonical principals using the exact Cognito issuer and Cognito

@@ -24,7 +24,7 @@ import subprocess
 import sys
 import tempfile
 from typing import Any, Callable
-from urllib.parse import unquote, urlsplit, urlunsplit
+from urllib.parse import unquote
 import zlib
 
 try:
@@ -513,32 +513,6 @@ def deployment_control_plane_domain(
             "namespaced control-plane domain must be at most 253 characters with valid lowercase DNS labels"
         )
     return value
-
-
-def _deployment_oauth_callback_urls(
-    callback_urls: tuple[str, ...],
-    *,
-    domain_name: str,
-    deployment_namespace: str,
-) -> tuple[str, ...]:
-    if not deployment_namespace:
-        return callback_urls
-    rewritten: list[str] = []
-    for value in callback_urls:
-        parsed = urlsplit(value)
-        candidate = urlunsplit(
-            (
-                parsed.scheme,
-                domain_name,
-                parsed.path,
-                parsed.query,
-                "",
-            )
-        )
-        if candidate in rewritten:
-            raise AgentCoreDeploymentError("namespaced OAuth callback URLs must remain unique")
-        rewritten.append(candidate)
-    return tuple(rewritten)
 
 
 @dataclass(frozen=True)
@@ -1103,13 +1077,15 @@ def _parameter(name: str, value: str, *, stack: str) -> list[str]:
 def managed_ses_sender(
     config: AgentCoreSetupConfig,
 ) -> tuple[str, str]:
-    """Return an explicit SES sender/domain pair for the identity stack."""
+    """Return an explicit SES sender/source-identity pair."""
     managed = config.managed_cognito
     if managed is None:
         raise AgentCoreDeploymentError("managed Cognito settings are missing")
     if managed.ses_from_email is not None:
         if managed.ses_verified_domain is None:
-            raise AgentCoreDeploymentError("managed Cognito SES domain is missing")
+            raise AgentCoreDeploymentError(
+                "managed Cognito SES source identity is missing"
+            )
         return managed.ses_from_email, managed.ses_verified_domain
     local, separator, domain = config.admin.email.rpartition("@")
     if separator != "@" or not local or not domain:
@@ -1158,14 +1134,14 @@ def _identity_parameters(
         if deployment_namespace is None
         else deployment_names(deployment_namespace).namespace
     )
-    ses_from_email, ses_verified_domain = managed_ses_sender(config)
+    ses_from_email, ses_source_identity = managed_ses_sender(config)
     parameters = {
         "HostedUiDomainPrefix": _managed_hosted_ui_domain_prefix(
             config,
             deployment_namespace=namespace,
         ),
         "SesFromEmail": ses_from_email,
-        "SesVerifiedDomain": ses_verified_domain,
+        "SesVerifiedDomain": ses_source_identity,
     }
     if control_plane.endpoint_mode == CLOUDFRONT:
         parameters["EndpointMode"] = CLOUDFRONT
@@ -1180,19 +1156,8 @@ def _identity_parameters(
         )
         parameters.update(
             {
-                "OAuthCallbackUrls": ",".join(
-                    _deployment_oauth_callback_urls(
-                        managed.oauth_callback_urls,
-                        domain_name=domain_name,
-                        deployment_namespace=namespace,
-                    )
-                ),
                 "ControlPlaneDomainName": domain_name,
             }
-        )
-    else:
-        parameters["OAuthCallbackUrls"] = ",".join(
-            managed.oauth_callback_urls
         )
     return parameters
 

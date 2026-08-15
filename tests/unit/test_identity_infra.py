@@ -83,14 +83,12 @@ def test_identity_inputs_are_explicit_https_values(identity_template):
         ),
     }
     assert "Default" not in parameters["HostedUiDomainPrefix"]
-    assert "Default" not in parameters["OAuthCallbackUrls"]
+    assert "OAuthCallbackUrls" not in parameters
     assert parameters["ControlPlaneDomainName"]["Default"] == ""
     assert "Default" not in parameters["SesFromEmail"]
     assert "Default" not in parameters["SesVerifiedDomain"]
     assert parameters["HostedUiDomainPrefix"]["MinLength"] == 3
     assert parameters["HostedUiDomainPrefix"]["MaxLength"] == 63
-    assert parameters["OAuthCallbackUrls"]["Type"] == "CommaDelimitedList"
-    assert parameters["OAuthCallbackUrls"]["AllowedPattern"].startswith("^https://")
     assert parameters["ControlPlaneDomainName"]["AllowedPattern"].startswith(
         r"^(?:|"
     )
@@ -191,7 +189,7 @@ def test_tenant_and_project_are_operator_controlled_claims(identity_template):
     assert "custom:project_id" not in client["WriteAttributes"]
 
 
-def test_public_client_is_code_pkce_shaped_without_implicit_flow(
+def test_runtime_audience_client_has_no_authentication_flow(
     identity_template,
 ):
     client_resource = _client(
@@ -202,10 +200,10 @@ def test_public_client_is_code_pkce_shaped_without_implicit_flow(
     assert client_resource["DeletionPolicy"] == "Retain"
     assert client_resource["UpdateReplacePolicy"] == "Retain"
     assert client["GenerateSecret"] is False
-    assert client["AllowedOAuthFlows"] == ["code"]
+    assert "AllowedOAuthFlows" not in client
+    assert "AllowedOAuthScopes" not in client
+    assert "CallbackURLs" not in client
     assert "ExplicitAuthFlows" not in client
-    assert client["AllowedOAuthScopes"] == ["openid", "email", "profile"]
-    assert client["CallbackURLs"] == {"Ref": "OAuthCallbackUrls"}
     assert client["PreventUserExistenceErrors"] == "ENABLED"
     assert client["EnableTokenRevocation"] is True
     assert client["RefreshTokenRotation"] == {
@@ -214,6 +212,15 @@ def test_public_client_is_code_pkce_shaped_without_implicit_flow(
     }
     assert client["IdTokenValidity"] == 15
     assert client["AccessTokenValidity"] == 15
+
+
+def test_runtime_audience_client_preserves_retained_resource_identity(
+    identity_template,
+):
+    client = identity_template["Resources"][
+        "UserPoolPublicPkceClientA2454A48"
+    ]
+    assert client["Properties"]["ClientName"] == "axonllm-agentcore-pkce"
 
 
 def test_confidential_alb_client_has_its_own_exact_callback(

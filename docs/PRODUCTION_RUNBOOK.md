@@ -703,13 +703,16 @@ output, passes it as the control plane's required `PrimaryStateTableName`
 parameter, and compares the resulting outputs. A manual control-plane
 deployment must pass that exact output; `PrimaryStateTableName` has no default.
 
-The managed AgentCore client is authorization-code only and has no client
-secret. The adopting application must use S256 PKCE and submit the Cognito
-**ID token** to AgentCore because that token carries `custom:tenant_id` and
-`custom:project_id`. The custom attributes select resources but grant no role;
-canonical DynamoDB principals remain authoritative.
+The managed AgentCore client is a secretless audience marker with OAuth and
+direct authentication disabled. Browser authorization belongs to the control
+plane: custom-domain mode uses the confidential ALB client, and CloudFront mode
+uses its generated secretless S256-PKCE client. The protected certification
+workflow uses a separate confidential client. Custom tenant/project attributes
+select resources but grant no role; canonical DynamoDB principals remain
+authoritative.
 
-The public AgentCore client is secretless. The endpoint contract is:
+The AgentCore audience client is secretless and non-interactive. The endpoint
+contract is:
 
 | `control_plane.endpoint_mode` | Ingress and identity contract |
 |---|---|
@@ -747,8 +750,7 @@ request-correlation, replay, and RelayState validation. `/saml/acs` and
 The first-adopter deployer does not ingest tenant-specific IdP metadata. Before
 launch, configure the SAML IdP on the retained Cognito pool and enable it on the
 confidential ALB client for custom-domain or the generated browser client for
-CloudFront. Enable it on the public AgentCore client when federated users invoke
-AgentCore. Configure the enterprise IdP with Cognito's SP entity ID and SAML
+CloudFront. Configure the enterprise IdP with Cognito's SP entity ID and SAML
 response endpoint. Provision every canonical user with the exact Cognito issuer
 and Cognito `sub`; if SCIM creates the user, those values must be its tenant
 issuer and `externalId`. SAML claims, groups, roles, tenant values, and project

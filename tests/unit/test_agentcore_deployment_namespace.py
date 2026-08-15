@@ -350,9 +350,7 @@ def test_namespaced_runtime_commands_receive_exact_rehearsal_parameter(
     )
     assert not any("RehearsalControlTableArn" in argument for argument in identity_command)
     assert ("AxonLLMIdentityStack-managed:ControlPlaneDomainName=managed.axon.example.com") in identity_command
-    assert (
-        "AxonLLMIdentityStack-managed:OAuthCallbackUrls=https://managed.axon.example.com/oauth/callback"
-    ) in identity_command
+    assert not any("OAuthCallbackUrls" in argument for argument in identity_command)
     control_command = commands[-1][0]
     assert ("AxonLLMControlPlaneStack-managed:IdentityStackName=AxonLLMIdentityStack-managed") in control_command
 
@@ -403,10 +401,7 @@ def test_production_cdk_commands_remain_without_rehearsal_parameter(
     assert (
         "AxonLLMIdentityStack:ControlPlaneDomainName=axon.example.com"
     ) in commands[0]
-    assert (
-        "AxonLLMIdentityStack:OAuthCallbackUrls="
-        "https://app.example.com/oauth/callback"
-    ) in commands[0]
+    assert not any("OAuthCallbackUrls" in argument for argument in commands[0])
 
 
 def test_namespaced_control_plane_domain_enforces_dns_bounds() -> None:

@@ -643,8 +643,8 @@ defines the multi-tenant release gate.
 AgentCore is always an authenticated, canonical production profile. There is no
 anonymous AgentCore option. A first adopter chooses either:
 
-- `managed-cognito`: deploy a separate retained Cognito pool, public
-  authorization-code client, and hosted UI; or
+- `managed-cognito`: deploy a separate retained Cognito pool, AgentCore
+  audience client, control-plane login client, and hosted UI; or
 - `external-oidc`: use an existing issuer, client, audience, and explicit
   tenant/project claim names.
 
@@ -677,7 +677,6 @@ uv run axon setup agentcore \
   --tenant tenant-a --project project-a --project-name Production \
   --admin-user-name admin@example.com --admin-email admin@example.com \
   --hosted-ui-domain-prefix axonllm-123456789012 \
-  --oauth-callback-url https://app.example.com/oauth/callback \
   --athena-query-role-arn arn:aws:iam::123456789012:role/AxonAthenaReader \
   --output axonllm-agentcore.json
 
@@ -708,10 +707,11 @@ every `/saml/*` request is subject to the normal Cognito authentication action.
 The tenant-specific SAML IdP must be configured on the retained Cognito pool and
 enabled on the relevant app clients before SAML users are admitted.
 
-The managed client supports only OAuth authorization code. The adopting
-application must send an S256 PKCE challenge and use the returned **ID token**
-as the AgentCore bearer token; that token contains `custom:tenant_id` and
-`custom:project_id`. AxonLLM does not ship an OAuth callback application.
+The retained AgentCore client is a secretless audience marker with OAuth and
+direct authentication disabled. Browser authentication belongs to the control
+plane: custom-domain mode uses its confidential ALB client, while CloudFront
+mode creates a separate secretless authorization-code client with S256 PKCE.
+The protected certification workflow uses its own confidential client.
 Existing OIDC setup and the complete production checks are in the
 [AgentCore Runbook](docs/AGENTCORE_RUNBOOK.md#first-adopter-setup).
 The external-OIDC path currently deploys AgentCore and canonical bootstrap
@@ -1373,8 +1373,8 @@ remain available through `OIDCConfig.claim_mappings` when embedding the service.
 Production SAML is supported only through the managed-Cognito control plane.
 AxonLLM is not a SAML service provider and never receives an assertion. Configure
 the enterprise IdP on the retained Cognito user pool, enable that provider on the
-confidential ALB client and on the public PKCE client when federated users invoke
-AgentCore, and give the IdP Cognito's SP entity ID and SAML response endpoint.
+confidential ALB client or CloudFront browser client, and give the IdP Cognito's
+SP entity ID and SAML response endpoint.
 Require signed responses or assertions and manage IdP metadata/certificate
 rotation in Cognito.
 
