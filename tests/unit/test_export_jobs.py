@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 
@@ -189,7 +189,7 @@ def _queued_job(
     attempts: int = 0,
     restricted: bool = False,
 ) -> ExportJob:
-    now = datetime(2026, 8, 16, 12, 0, tzinfo=timezone.utc)
+    now = datetime.now(timezone.utc)
     return ExportJob(
         job_id="exp_" + "a" * 32,
         tenant_id="tenant-a",
@@ -201,7 +201,7 @@ def _queued_job(
         restricted=restricted,
         status=ExportStatus.QUEUED,
         created_at=now,
-        expires_at=now.replace(day=17),
+        expires_at=now + timedelta(days=1),
         attempt_count=attempts,
         filename=(
             "axonllm-audit-records.json" if kind is ExportKind.AUDIT else f"axonllm-usage-{level.value}.{format.value}"
