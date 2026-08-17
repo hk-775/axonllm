@@ -341,6 +341,7 @@ jobs:
             and (
               (
                 $live[0]
+                | map({ParameterKey, ParameterValue})
                 | map(
                     if .ParameterKey == "BootstrapVersion"
                     then .ParameterValue = "/cdk-bootstrap/axrel/version"

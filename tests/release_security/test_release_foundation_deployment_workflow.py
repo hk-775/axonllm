@@ -122,6 +122,16 @@ def test_foundation_deployment_preserves_every_live_parameter():
     assert "sort_by(.ParameterKey)" in serialized
 
 
+def test_execute_parameter_guard_ignores_ssm_resolved_values():
+    workflow = _workflow()
+    validation = next(
+        step["run"]
+        for step in workflow["jobs"]["deploy"]["steps"]
+        if step.get("name") == "Validate reviewed foundation change set"
+    )
+    assert validation.count("map({ParameterKey, ParameterValue})") == 2
+
+
 def test_null_change_set_role_requires_exact_live_stack_role():
     workflow = _workflow()
     steps = workflow["jobs"]["deploy"]["steps"]
