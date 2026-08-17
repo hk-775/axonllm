@@ -94,6 +94,8 @@ def test_synthesis_requires_zero_cdk_docker_assets() -> None:
         'verify_target "release-foundation" '
         '"AxonLLMReleaseFoundationStack"'
     ) in script
+    assert '[[ "${target}" == "agentcore" ]]' in script
+    assert '"${venv_dir}/bin/cfn-lint" -i W2001 W3005' in script
     assert '"${venv_dir}/bin/cfn-lint" -i W3005' in script
 
 

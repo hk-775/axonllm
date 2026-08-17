@@ -67,9 +67,15 @@ if docker_images != {}:
 print(f"{target} CDK synthesis verified: zero Docker assets")
 ' "${asset_manifest}" "${target}"
 
-  # CDK emits redundant DependsOn entries for several L2 constructs. W3005 is
-  # informational; all schema and IAM-action findings remain fatal.
-  "${venv_dir}/bin/cfn-lint" -i W3005 -t "${template}"
+  # CDK emits redundant DependsOn entries for several L2 constructs. The
+  # production AgentCore facade also retains direct-JWT parameters for isolated
+  # qualification namespaces, so those two parameters are intentionally unused
+  # in the default facade synthesis. All other findings remain fatal.
+  if [[ "${target}" == "agentcore" ]]; then
+    "${venv_dir}/bin/cfn-lint" -i W2001 W3005 -t "${template}"
+  else
+    "${venv_dir}/bin/cfn-lint" -i W3005 -t "${template}"
+  fi
 }
 
 verify_target "fargate" "AxonLLMStack"
