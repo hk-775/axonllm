@@ -1,5 +1,9 @@
 # syntax=docker/dockerfile:1.7@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e
-FROM docker.io/library/python:3.12-slim@sha256:d657ab0ade19f404a6ccc883ab399540de667aff751748ce23c07330c5a89e64
+FROM docker.io/library/python:3.12-slim@sha256:876416ecde9aca2bcc90e1fb0c7a9500bbf749f5788b70f82d4c5a5c2357f8b4
+
+RUN apt-get update \
+    && apt-get upgrade -y --no-install-recommends \
+    && rm -rf /var/lib/apt/lists/*
 
 # uv, pinned — the image build should not change because a new uv shipped.
 COPY --from=ghcr.io/astral-sh/uv:0.10.7@sha256:0ca776d5bd774b0f8a9092100166ac46bf93386da17b8bf626f8e60b1f2d1c77 /uv /uvx /bin/
