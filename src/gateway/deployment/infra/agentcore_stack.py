@@ -17,24 +17,40 @@ from aws_cdk import (
     RemovalPolicy,
     Stack,
     Token,
-    aws_backup as backup,
     aws_bedrockagentcore as agentcore,
     aws_cloudwatch as cloudwatch,
     aws_cloudwatch_actions as cloudwatch_actions,
     custom_resources as cr,
-    aws_dynamodb as dynamodb,
-    aws_ec2 as ec2,
-    aws_events as events,
     aws_iam as iam,
-    aws_kms as kms,
     aws_lambda as lambda_,
     aws_logs as logs,
-    aws_secretsmanager as secretsmanager,
     aws_sns as sns,
     aws_sns_subscriptions as sns_subscriptions,
-    aws_sqs as sqs,
 )
 from constructs import Construct
+
+if __package__:
+    from .application_state import (
+        application_state_mode,
+        build_application_state_resources,
+        external_agentcore_application_state_access,
+        managed_application_state_access,
+    )
+    from .runtime_network import (
+        build_runtime_network,
+        runtime_network_requires_prefix_list,
+    )
+else:
+    from application_state import (
+        application_state_mode,
+        build_application_state_resources,
+        external_agentcore_application_state_access,
+        managed_application_state_access,
+    )
+    from runtime_network import (
+        build_runtime_network,
+        runtime_network_requires_prefix_list,
+    )
 
 
 _ATHENA_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -99,23 +115,6 @@ _AGENTCORE_ENABLED_PROVIDERS = ",".join(
         "together",
         "xai",
     )
-)
-_PROVIDER_SECRET_FIELDS = (
-    "ANTHROPIC_API_KEY",
-    "OPENAI_API_KEY",
-    "AZURE_OPENAI_API_KEY",
-    "AZURE_OPENAI_ENDPOINT",
-    "GCP_CREDENTIALS_JSON",
-    "GCP_PROJECT_ID",
-    "GCP_LOCATION",
-    "VERTEX_AI_ENDPOINT",
-    "GOOGLE_AI_API_KEY",
-    "COHERE_API_KEY",
-    "XAI_API_KEY",
-    "GROQ_API_KEY",
-    "TOGETHER_API_KEY",
-    "FIREWORKS_API_KEY",
-    "AI21_API_KEY",
 )
 _PROVIDER_NAME_PATTERN = (
     r"^(?:ai21|anthropic|azure_openai|bedrock|bedrock-mantle|cohere|"
@@ -1211,7 +1210,6 @@ class AxonLLMAgentCoreStack(Stack):
             if deployment_namespace
             else RemovalPolicy.RETAIN
         )
-        deletion_protection = not bool(deployment_namespace)
         runtime_suffix = deployment_namespace.replace("-", "_")
         runtime_name = (
             f"axonllm_{runtime_suffix}"
@@ -1221,6 +1219,10 @@ class AxonLLMAgentCoreStack(Stack):
         control_plane_stack_name = (
             f"AxonLLMControlPlaneStack{physical_suffix}"
         )
+        state_stack_default = (
+            f"AxonLLMApplicationStateStack{physical_suffix}"
+        )
+        state_mode = application_state_mode(self)
         query_config = load_athena_infrastructure_config(self)
         rehearsal_control_table_arn = (
             CfnParameter(
@@ -1299,17 +1301,24 @@ class AxonLLMAgentCoreStack(Stack):
                 "Signed OIDC claim containing the AxonLLM project hint"
             ),
         )
-        approved_https_prefix_list_id = CfnParameter(
-            self,
-            "ApprovedHttpsPrefixListId",
-            type="String",
-            allowed_pattern=r"^pl-[0-9a-fA-F]+$",
-            constraint_description="must be an EC2 managed prefix list ID",
-            description=(
-                "Managed prefix list containing approved OIDC and provider "
-                "HTTPS destinations, including the regional Bedrock Mantle "
-                "API endpoint and every configured HTTP provider"
-            ),
+        approved_https_prefix_list_id = (
+            CfnParameter(
+                self,
+                "ApprovedHttpsPrefixListId",
+                type="String",
+                allowed_pattern=r"^pl-[0-9a-fA-F]+$",
+                constraint_description=(
+                    "must be an EC2 managed prefix list ID"
+                ),
+                description=(
+                    "Managed prefix list containing approved OIDC and "
+                    "provider HTTPS destinations, including the regional "
+                    "Bedrock Mantle API endpoint and every configured HTTP "
+                    "provider"
+                ),
+            )
+            if runtime_network_requires_prefix_list(self)
+            else None
         )
         bedrock_invoke_resource_arns = CfnParameter(
             self,
@@ -1484,256 +1493,117 @@ class AxonLLMAgentCoreStack(Stack):
             resource_name=image_repository_name,
         )
 
-        vpc = ec2.Vpc(
+        runtime_network = build_runtime_network(
             self,
-            "Vpc",
-            max_azs=2,
-            nat_gateways=2,
-            restrict_default_security_group=True,
-            subnet_configuration=[
-                ec2.SubnetConfiguration(
-                    name="Public",
-                    subnet_type=ec2.SubnetType.PUBLIC,
-                    cidr_mask=24,
-                    map_public_ip_on_launch=False,
-                ),
-                ec2.SubnetConfiguration(
-                    name="Runtime",
-                    subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS,
-                    cidr_mask=24,
-                ),
-            ],
-        )
-        runtime_security_group = ec2.SecurityGroup(
-            self,
-            "RuntimeSecurityGroup",
-            vpc=vpc,
-            allow_all_outbound=False,
-            description="AxonLLM AgentCore explicitly approved egress",
-        )
-        runtime_security_group.add_egress_rule(
-            ec2.Peer.ipv4(vpc.vpc_cidr_block),
-            ec2.Port.udp(53),
-            "DNS to the VPC resolver",
-        )
-        runtime_security_group.add_egress_rule(
-            ec2.Peer.ipv4(vpc.vpc_cidr_block),
-            ec2.Port.tcp(53),
-            "DNS fallback to the VPC resolver",
-        )
-        runtime_security_group.add_egress_rule(
-            ec2.Peer.prefix_list(
+            approved_https_prefix_list_id=(
                 approved_https_prefix_list_id.value_as_string
+                if approved_https_prefix_list_id is not None
+                else None
             ),
-            ec2.Port.tcp(443),
-            "HTTPS to explicitly approved external destinations",
+            query_enabled=query_config.enabled,
         )
 
-        dynamodb_endpoint = vpc.add_gateway_endpoint(
-            "DynamoDbEndpoint",
-            service=ec2.GatewayVpcEndpointAwsService.DYNAMODB,
-            subnets=[
-                ec2.SubnetSelection(
-                    subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS
-                )
-            ],
-        )
-        prefix_lookup_logs = logs.LogGroup(
-            self,
-            "PrefixLookupLogs",
-            retention=logs.RetentionDays.ONE_WEEK,
-            removal_policy=RemovalPolicy.DESTROY,
-        )
-        dynamodb_prefix_list = cr.AwsCustomResource(
-            self,
-            "DynamoDbPrefixList",
-            on_create=cr.AwsSdkCall(
-                service="EC2",
-                action="describeManagedPrefixLists",
-                parameters={
-                    "Filters": [
-                        {
-                            "Name": "prefix-list-name",
-                            "Values": [
-                                f"com.amazonaws.{self.region}.dynamodb"
-                            ],
-                        }
-                    ]
-                },
-                output_paths=["PrefixLists.0.PrefixListId"],
-                physical_resource_id=cr.PhysicalResourceId.from_response(
-                    "PrefixLists.0.PrefixListId"
+        if state_mode == "embedded":
+            state = build_application_state_resources(
+                self,
+                deployment_namespace=deployment_namespace,
+                backup_vault_name=self.node.try_get_context(
+                    "application_state_backup_vault_name"
                 ),
-            ),
-            policy=cr.AwsCustomResourcePolicy.from_statements(
-                [
-                    iam.PolicyStatement(
-                        actions=["ec2:DescribeManagedPrefixLists"],
-                        resources=["*"],
+                security_event_topic_name=self.node.try_get_context(
+                    "application_state_security_event_topic_name"
+                ),
+            )
+            state_access = managed_application_state_access(
+                stack_name=self.stack_name,
+                resources=state,
+            )
+        else:
+            primary_state_table_name_parameter = CfnParameter(
+                self,
+                "PrimaryStateTableName",
+                type="String",
+                min_length=3,
+                max_length=255,
+                allowed_pattern=r"^[A-Za-z0-9_.-]{3,255}$",
+                constraint_description=(
+                    "must be a valid DynamoDB table name"
+                ),
+                description=(
+                    "Primary table from the reviewed application-state "
+                    "descriptor"
+                ),
+            )
+            runtime_state_table_name = CfnParameter(
+                self,
+                "RuntimeStateTableName",
+                type="String",
+                default="",
+                min_length=0,
+                max_length=255,
+                allowed_pattern=r"^$|^[A-Za-z0-9_.-]{3,255}$",
+                constraint_description=(
+                    "must be blank or a valid DynamoDB table name; the "
+                    "recovery guard enforces the restore namespace"
+                ),
+                description=(
+                    "Optional restored table selected through the reviewed "
+                    "AgentCore recovery workflow"
+                ),
+            )
+            use_recovered_state = CfnCondition(
+                self,
+                "UseRecoveredState",
+                expression=Fn.condition_not(
+                    Fn.condition_equals(
+                        runtime_state_table_name.value_as_string,
+                        "",
                     )
-                ]
-            ),
-            install_latest_aws_sdk=False,
-            log_group=prefix_lookup_logs,
-            timeout=Duration.seconds(30),
-        )
-        runtime_security_group.add_egress_rule(
-            ec2.Peer.prefix_list(
-                dynamodb_prefix_list.get_response_field(
-                    "PrefixLists.0.PrefixListId"
+                ),
+            )
+            primary_state_table_name = (
+                primary_state_table_name_parameter.value_as_string
+            )
+            selected_state_table_name = Token.as_string(
+                Fn.condition_if(
+                    use_recovered_state.logical_id,
+                    runtime_state_table_name.value_as_string,
+                    primary_state_table_name,
                 )
-            ),
-            ec2.Port.tcp(443),
-            "DynamoDB through the VPC gateway endpoint",
-        )
-
-        endpoint_security_group = ec2.SecurityGroup(
-            self,
-            "EndpointSecurityGroup",
-            vpc=vpc,
-            allow_all_outbound=False,
-            description="Private AWS service endpoints for AgentCore",
-        )
-        endpoint_security_group.add_ingress_rule(
-            runtime_security_group,
-            ec2.Port.tcp(443),
-            "HTTPS from the AgentCore runtime",
-        )
-        runtime_security_group.add_egress_rule(
-            endpoint_security_group,
-            ec2.Port.tcp(443),
-            "AWS services through private interface endpoints",
-        )
-        bedrock_endpoint = vpc.add_interface_endpoint(
-            "BedrockRuntimeEndpoint",
-            service=ec2.InterfaceVpcEndpointAwsService.BEDROCK_RUNTIME,
-            open=False,
-            private_dns_enabled=True,
-            security_groups=[endpoint_security_group],
-            subnets=ec2.SubnetSelection(
-                subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS
-            ),
-        )
-        kms_endpoint = vpc.add_interface_endpoint(
-            "KmsEndpoint",
-            service=ec2.InterfaceVpcEndpointAwsService.KMS,
-            open=False,
-            private_dns_enabled=True,
-            security_groups=[endpoint_security_group],
-            subnets=ec2.SubnetSelection(
-                subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS
-            ),
-        )
-        athena_endpoint = None
-        sts_endpoint = None
-        if query_config.enabled:
-            athena_endpoint = vpc.add_interface_endpoint(
-                "AthenaEndpoint",
-                service=ec2.InterfaceVpcEndpointAwsService.ATHENA,
-                open=False,
-                private_dns_enabled=True,
-                security_groups=[endpoint_security_group],
-                subnets=ec2.SubnetSelection(
-                    subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS
-                ),
             )
-            sts_endpoint = vpc.add_interface_endpoint(
-                "StsEndpoint",
-                service=ec2.InterfaceVpcEndpointAwsService.STS,
-                open=False,
-                private_dns_enabled=True,
-                security_groups=[endpoint_security_group],
-                subnets=ec2.SubnetSelection(
-                    subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS
-                ),
+            selected_state_table_arn = self.format_arn(
+                service="dynamodb",
+                resource="table",
+                resource_name=selected_state_table_name,
+            )
+            state_access = external_agentcore_application_state_access(
+                self,
+                default_stack_name=state_stack_default,
+                primary_state_table_name=primary_state_table_name,
+                selected_state_table_name=selected_state_table_name,
+                selected_state_table_arn=selected_state_table_arn,
             )
 
-        data_key = kms.Key(
-            self,
-            "DataKey",
-            alias=f"alias/axonllm/agentcore-data{physical_suffix}",
-            description="Encrypts AxonLLM AgentCore state and logs",
-            enable_key_rotation=True,
-            removal_policy=removal_policy,
-            pending_window=Duration.days(30),
+        primary_state_table_name = state_access.primary_state_table_name
+        selected_state_table_name = state_access.selected_state_table_name
+        selected_state_table_arn = state_access.selected_state_table_arn
+        data_key = state_access.data_key
+        routing_config_signing_key = (
+            state_access.routing_config_signing_key
         )
-        routing_config_signing_key = kms.Key(
-            self,
-            "RoutingConfigSigningKey",
-            alias=(
-                f"alias/axonllm/agentcore-routing-config"
-                f"{physical_suffix}"
-            ),
-            description=(
-                "Signs AxonLLM AgentCore routing configuration snapshots"
-            ),
-            key_spec=kms.KeySpec.ECC_NIST_P256,
-            key_usage=kms.KeyUsage.SIGN_VERIFY,
-            removal_policy=removal_policy,
-            pending_window=Duration.days(30),
+        provider_secret = state_access.provider_secret
+        event_dead_letter_queue = state_access.event_dead_letter_queue
+        event_outbox_queue = state_access.event_outbox_queue
+        security_event_topic = state_access.security_event_topic
+        security_event_log_group = state_access.security_event_log_group
+        security_event_log_group_arn = (
+            state_access.security_event_log_group_arn
         )
-        data_key.add_to_resource_policy(
-            iam.PolicyStatement(
-                sid="AllowCloudWatchLogsEncryption",
-                principals=[
-                    iam.ServicePrincipal(
-                        f"logs.{self.region}.{self.url_suffix}"
-                    )
-                ],
-                actions=[
-                    "kms:Decrypt",
-                    "kms:DescribeKey",
-                    "kms:Encrypt",
-                    "kms:GenerateDataKey*",
-                    "kms:ReEncrypt*",
-                ],
-                resources=["*"],
-                conditions={
-                    "ArnLike": {
-                        "kms:EncryptionContext:aws:logs:arn": (
-                            f"arn:{self.partition}:logs:{self.region}:"
-                            f"{self.account}:log-group:*"
-                        )
-                    }
-                },
-            )
-        )
-        data_key.add_to_resource_policy(
-            iam.PolicyStatement(
-                sid="AllowCloudWatchAlarmEncryption",
-                principals=[iam.ServicePrincipal("cloudwatch.amazonaws.com")],
-                actions=["kms:Decrypt", "kms:GenerateDataKey*"],
-                resources=["*"],
-            )
-        )
-        provider_secret = secretsmanager.Secret(
-            self,
-            "ProviderCredentials",
-            description=(
-                "AxonLLM AgentCore HTTP-provider credentials and endpoints"
-            ),
-            encryption_key=data_key,
-            generate_secret_string=secretsmanager.SecretStringGenerator(
-                secret_string_template=json.dumps(
-                    {field_name: "" for field_name in _PROVIDER_SECRET_FIELDS},
-                    separators=(",", ":"),
-                    sort_keys=True,
-                ),
-                generate_string_key="placeholder",
-            ),
-            removal_policy=removal_policy,
-        )
-        secrets_endpoint = vpc.add_interface_endpoint(
-            "SecretsManagerEndpoint",
-            service=ec2.InterfaceVpcEndpointAwsService.SECRETS_MANAGER,
-            open=False,
-            private_dns_enabled=True,
-            security_groups=[endpoint_security_group],
-            subnets=ec2.SubnetSelection(
-                subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS
-            ),
-        )
-        secrets_endpoint.add_to_policy(
+        backup_vault_arn = state_access.backup_vault_arn
+        backup_service_role_arn = state_access.backup_service_role_arn
+
+        runtime_network.add_endpoint_policy(
+            "secrets_endpoint",
             iam.PolicyStatement(
                 principals=[iam.AnyPrincipal()],
                 actions=[
@@ -1742,41 +1612,6 @@ class AxonLLMAgentCoreStack(Stack):
                 ],
                 resources=[provider_secret.secret_arn],
             )
-        )
-        state_table_name = (
-            self.node.try_get_context("agentcore_table_name")
-            or f"axonllm-agentcore-state{physical_suffix}"
-        )
-        restore_table_marker = "-restore-validation-"
-        restore_table_suffix_limit = (
-            255
-            - len(state_table_name)
-            - len(restore_table_marker)
-        )
-        if restore_table_suffix_limit < 21:
-            raise ValueError(
-                "AgentCore state table name must be at most 214 characters "
-                "to preserve the PITR validation suffix"
-            )
-        restored_state_table_pattern = (
-            rf"^$|^{re.escape(state_table_name)}"
-            rf"{restore_table_marker}[A-Za-z0-9_.-]"
-            rf"{{1,{restore_table_suffix_limit}}}$"
-        )
-        runtime_state_table_name = CfnParameter(
-            self,
-            "RuntimeStateTableName",
-            type="String",
-            default="",
-            allowed_pattern=restored_state_table_pattern,
-            constraint_description=(
-                "must be blank or a PITR validation table derived from the "
-                f"{state_table_name} primary table"
-            ),
-            description=(
-                "Optional restored state table selected through the "
-                "reviewed AgentCore recovery workflow"
-            ),
         )
         recovery_cutover_mode = CfnParameter(
             self,
@@ -1807,16 +1642,6 @@ class AxonLLMAgentCoreStack(Stack):
             description=(
                 "Reviewed change or incident identifier bound to a recovery "
                 "cutover and rollback"
-            ),
-        )
-        use_recovered_state = CfnCondition(
-            self,
-            "UseRecoveredState",
-            expression=Fn.condition_not(
-                Fn.condition_equals(
-                    runtime_state_table_name.value_as_string,
-                    "",
-                )
             ),
         )
         production_endpoint_enabled = CfnCondition(
@@ -1885,104 +1710,8 @@ class AxonLLMAgentCoreStack(Stack):
                 recovery_selected,
             ),
         )
-        state_table = dynamodb.Table(
-            self,
-            "StateTable",
-            table_name=state_table_name,
-            partition_key=dynamodb.Attribute(
-                name="PK",
-                type=dynamodb.AttributeType.STRING,
-            ),
-            sort_key=dynamodb.Attribute(
-                name="SK",
-                type=dynamodb.AttributeType.STRING,
-            ),
-            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
-            encryption=dynamodb.TableEncryption.CUSTOMER_MANAGED,
-            encryption_key=data_key,
-            deletion_protection=deletion_protection,
-            point_in_time_recovery_specification=(
-                dynamodb.PointInTimeRecoverySpecification(
-                    point_in_time_recovery_enabled=True
-                )
-            ),
-            time_to_live_attribute="expires_at",
-            removal_policy=removal_policy,
-        )
-        selected_state_table_name = Token.as_string(
-            Fn.condition_if(
-                use_recovered_state.logical_id,
-                runtime_state_table_name.value_as_string,
-                state_table.table_name,
-            )
-        )
-        selected_state_table_arn = self.format_arn(
-            service="dynamodb",
-            resource="table",
-            resource_name=selected_state_table_name,
-        )
-        event_dead_letter_queue = sqs.Queue(
-            self,
-            "SecurityEventDeadLetterQueue",
-            fifo=True,
-            content_based_deduplication=False,
-            encryption=sqs.QueueEncryption.KMS,
-            encryption_master_key=data_key,
-            enforce_ssl=True,
-            retention_period=Duration.days(14),
-            removal_policy=removal_policy,
-        )
-        event_outbox_queue = sqs.Queue(
-            self,
-            "SecurityEventOutboxQueue",
-            fifo=True,
-            content_based_deduplication=False,
-            encryption=sqs.QueueEncryption.KMS,
-            encryption_master_key=data_key,
-            enforce_ssl=True,
-            retention_period=Duration.days(14),
-            receive_message_wait_time=Duration.seconds(20),
-            visibility_timeout=Duration.minutes(2),
-            dead_letter_queue=sqs.DeadLetterQueue(
-                max_receive_count=5,
-                queue=event_dead_letter_queue,
-            ),
-            removal_policy=removal_policy,
-        )
-        security_event_topic = sns.Topic(
-            self,
-            "SecurityEventTopic",
-            display_name="AxonLLM AgentCore durable security events",
-            fifo=True,
-            content_based_deduplication=False,
-            enforce_ssl=True,
-            master_key=data_key,
-        )
-        security_event_log_group = logs.LogGroup(
-            self,
-            "SecurityEventLogGroup",
-            encryption_key=data_key,
-            retention=logs.RetentionDays.ONE_YEAR,
-            removal_policy=removal_policy,
-        )
-        security_event_log_stream = logs.LogStream(
-            self,
-            "SecurityEventLogStream",
-            log_group=security_event_log_group,
-            log_stream_name="events",
-        )
-        security_event_log_stream.apply_removal_policy(removal_policy)
-        sqs_endpoint = vpc.add_interface_endpoint(
-            "SqsEndpoint",
-            service=ec2.InterfaceVpcEndpointAwsService.SQS,
-            open=False,
-            private_dns_enabled=True,
-            security_groups=[endpoint_security_group],
-            subnets=ec2.SubnetSelection(
-                subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS
-            ),
-        )
-        sqs_endpoint.add_to_policy(
+        runtime_network.add_endpoint_policy(
+            "sqs_endpoint",
             iam.PolicyStatement(
                 principals=[iam.AnyPrincipal()],
                 actions=[
@@ -1995,34 +1724,16 @@ class AxonLLMAgentCoreStack(Stack):
                 resources=[event_outbox_queue.queue_arn],
             )
         )
-        sns_endpoint = vpc.add_interface_endpoint(
-            "SnsEndpoint",
-            service=ec2.InterfaceVpcEndpointAwsService.SNS,
-            open=False,
-            private_dns_enabled=True,
-            security_groups=[endpoint_security_group],
-            subnets=ec2.SubnetSelection(
-                subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS
-            ),
-        )
-        sns_endpoint.add_to_policy(
+        runtime_network.add_endpoint_policy(
+            "sns_endpoint",
             iam.PolicyStatement(
                 principals=[iam.AnyPrincipal()],
                 actions=["sns:Publish"],
                 resources=[security_event_topic.topic_arn],
             )
         )
-        logs_endpoint = vpc.add_interface_endpoint(
-            "CloudWatchLogsEndpoint",
-            service=ec2.InterfaceVpcEndpointAwsService.CLOUDWATCH_LOGS,
-            open=False,
-            private_dns_enabled=True,
-            security_groups=[endpoint_security_group],
-            subnets=ec2.SubnetSelection(
-                subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS
-            ),
-        )
-        logs_endpoint.add_to_policy(
+        runtime_network.add_endpoint_policy(
+            "logs_endpoint",
             iam.PolicyStatement(
                 principals=[iam.AnyPrincipal()],
                 actions=[
@@ -2030,12 +1741,13 @@ class AxonLLMAgentCoreStack(Stack):
                     "logs:PutLogEvents",
                 ],
                 resources=[
-                    security_event_log_group.log_group_arn,
-                    f"{security_event_log_group.log_group_arn}:*",
+                    security_event_log_group_arn,
+                    f"{security_event_log_group_arn}:*",
                 ],
             )
         )
-        dynamodb_endpoint.add_to_policy(
+        runtime_network.add_endpoint_policy(
+            "dynamodb_endpoint",
             iam.PolicyStatement(
                 principals=[iam.AnyPrincipal()],
                 actions=[
@@ -2057,7 +1769,8 @@ class AxonLLMAgentCoreStack(Stack):
                 ],
             )
         )
-        bedrock_endpoint.add_to_policy(
+        runtime_network.add_endpoint_policy(
+            "bedrock_endpoint",
             iam.PolicyStatement(
                 principals=[iam.AnyPrincipal()],
                 actions=[
@@ -2066,154 +1779,6 @@ class AxonLLMAgentCoreStack(Stack):
                 ],
                 resources=bedrock_invoke_resource_arns.value_as_list,
             )
-        )
-
-        backup_key = kms.Key(
-            self,
-            "BackupKey",
-            alias=f"alias/axonllm/agentcore-backups{physical_suffix}",
-            description="Encrypts scheduled AxonLLM AgentCore backups",
-            enable_key_rotation=True,
-            removal_policy=removal_policy,
-            pending_window=Duration.days(30),
-        )
-        backup_vault = backup.BackupVault(
-            self,
-            "StateBackupVault",
-            backup_vault_name=Fn.join(
-                "-",
-                [
-                    "axon-agent",
-                    Fn.select(2, Fn.split("/", self.stack_id)),
-                ],
-            ),
-            encryption_key=backup_key,
-            block_recovery_point_deletion=(
-                False if deployment_namespace else None
-            ),
-            lock_configuration=(
-                None
-                if deployment_namespace
-                else backup.LockConfiguration(
-                    min_retention=Duration.days(30),
-                    max_retention=Duration.days(365),
-                )
-            ),
-            removal_policy=removal_policy,
-        )
-        backup_service_role = iam.Role(
-            self,
-            "StateBackupServiceRole",
-            assumed_by=iam.ServicePrincipal(
-                "backup.amazonaws.com",
-                conditions={
-                    "StringEquals": {
-                        "aws:SourceAccount": self.account,
-                    }
-                },
-            ),
-            description=(
-                "AWS Backup service role scoped to AxonLLM AgentCore state"
-            ),
-        )
-        backup_table_arns = [
-            state_table.table_arn,
-            self.format_arn(
-                service="dynamodb",
-                resource="table",
-                resource_name=(
-                    f"{state_table_name}-restore-validation-*"
-                ),
-            ),
-        ]
-        backup_service_role.add_to_policy(
-            iam.PolicyStatement(
-                sid="BackUpAxonLLMStateTables",
-                actions=[
-                    "dynamodb:DescribeContinuousBackups",
-                    "dynamodb:DescribeTable",
-                    "dynamodb:ListTagsOfResource",
-                    "dynamodb:StartAwsBackupJob",
-                ],
-                resources=backup_table_arns,
-            )
-        )
-        backup_service_role.add_to_policy(
-            iam.PolicyStatement(
-                sid="UseAxonLLMStateKeyThroughDynamoDB",
-                actions=[
-                    "kms:Decrypt",
-                    "kms:GenerateDataKey*",
-                ],
-                resources=[data_key.key_arn],
-                conditions={
-                    "StringEquals": {
-                        "kms:CallerAccount": self.account,
-                        "kms:ViaService": (
-                            f"dynamodb.{self.region}.{self.url_suffix}"
-                        ),
-                    }
-                },
-            )
-        )
-        backup_plan = backup.BackupPlan(
-            self,
-            "StateBackupPlan",
-            backup_vault=backup_vault,
-        )
-        backup_plan.add_rule(
-            backup.BackupPlanRule(
-                rule_name="DailyRetainedBackup",
-                schedule_expression=events.Schedule.cron(
-                    minute="30",
-                    hour="5",
-                ),
-                start_window=Duration.hours(1),
-                completion_window=Duration.hours(4),
-                move_to_cold_storage_after=Duration.days(30),
-                delete_after=Duration.days(365),
-                recovery_point_tags={
-                    "Application": "AxonLLM",
-                    "Runtime": "AgentCore",
-                },
-            )
-        )
-        backup.CfnBackupSelection(
-            self,
-            "StateTableSelection",
-            backup_plan_id=backup_plan.backup_plan_id,
-            backup_selection=(
-                backup.CfnBackupSelection
-                .BackupSelectionResourceTypeProperty(
-                    iam_role_arn=backup_service_role.role_arn,
-                    selection_name="StateTableSelection",
-                    resources=[state_table.table_arn],
-                )
-            ),
-        )
-        recovered_backup_selection = backup.CfnBackupSelection(
-            self,
-            "RecoveredStateTableSelection",
-            backup_plan_id=backup_plan.backup_plan_id,
-            backup_selection=(
-                backup.CfnBackupSelection
-                .BackupSelectionResourceTypeProperty(
-                    iam_role_arn=backup_service_role.role_arn,
-                    selection_name="RecoveredStateTableSelection",
-                    resources=[
-                    self.format_arn(
-                        service="dynamodb",
-                        resource="table",
-                        resource_name=(
-                            runtime_state_table_name.value_as_string
-                        ),
-                    )
-                    ],
-                )
-            ),
-        )
-        recovered_backup_selection.cfn_options.condition = (
-            use_recovered_state
         )
 
         application_logs = logs.LogGroup(
@@ -2317,7 +1882,7 @@ class AxonLLMAgentCoreStack(Stack):
                     security_event_topic.topic_arn
                 ),
                 "AXON_SECURITY_EVENT_LOG_GROUP_ARN": (
-                    security_event_log_group.log_group_arn
+                    security_event_log_group_arn
                 ),
                 "AXON_AUTH_MODE": "ENFORCE",
                 "AXON_DEPLOYMENT_PROFILE": "production",
@@ -2371,16 +1936,7 @@ class AxonLLMAgentCoreStack(Stack):
                     ),
                 ),
             ],
-            network_configuration=(
-                agentcore.RuntimeNetworkConfiguration.using_vpc(
-                    self,
-                    vpc=vpc,
-                    security_groups=[runtime_security_group],
-                    vpc_subnets=ec2.SubnetSelection(
-                        subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS
-                    ),
-                )
-            ),
+            network_configuration=runtime_network.configuration,
             protocol_configuration=agentcore.ProtocolType.HTTP,
             request_header_configuration=(
                 agentcore.RequestHeaderConfiguration(
@@ -2426,7 +1982,8 @@ class AxonLLMAgentCoreStack(Stack):
                 resources=[routing_config_signing_key.key_arn],
             )
         )
-        kms_endpoint.add_to_policy(
+        runtime_network.add_endpoint_policy(
+            "kms_endpoint",
             iam.PolicyStatement(
                 principals=[runtime.role],
                 actions=["kms:Verify"],
@@ -2446,7 +2003,8 @@ class AxonLLMAgentCoreStack(Stack):
                     ],
                 )
             )
-            dynamodb_endpoint.add_to_policy(
+            runtime_network.add_endpoint_policy(
+                "dynamodb_endpoint",
                 iam.PolicyStatement(
                     principals=[runtime.role],
                     actions=[
@@ -2579,18 +2137,16 @@ class AxonLLMAgentCoreStack(Stack):
                     resources=list(query_config.role_arns),
                 )
             )
-            if sts_endpoint is None or athena_endpoint is None:
-                raise RuntimeError(
-                    "query endpoints must exist when Athena is enabled"
-                )
-            sts_endpoint.add_to_policy(
+            runtime_network.add_endpoint_policy(
+                "sts_endpoint",
                 iam.PolicyStatement(
                     principals=[runtime.role],
                     actions=ATHENA_ASSUME_ROLE_ACTIONS,
                     resources=list(query_config.role_arns),
                 )
             )
-            athena_endpoint.add_to_policy(
+            runtime_network.add_endpoint_policy(
+                "athena_endpoint",
                 iam.PolicyStatement(
                     principals=[
                         iam.ArnPrincipal(role_arn)
@@ -2747,7 +2303,7 @@ class AxonLLMAgentCoreStack(Stack):
                     _RECOVERY_MIN_QUIESCENCE_SECONDS
                 ),
                 "Mode": recovery_cutover_mode.value_as_string,
-                "PrimaryTable": state_table.table_name,
+                "PrimaryTable": primary_state_table_name,
                 "RuntimeName": runtime_name,
                 "SelectedTable": selected_state_table_name,
             },
@@ -2761,43 +2317,8 @@ class AxonLLMAgentCoreStack(Stack):
         recovery_guard_resource.add_dependency(
             cfn_recovery_transaction_deny_policy
         )
-        routing_seed_security_group = ec2.SecurityGroup(
-            self,
-            "RoutingConfigSeederSecurityGroup",
-            vpc=vpc,
-            allow_all_outbound=False,
-            description=(
-                "One-shot signed routing configuration bootstrap egress"
-            ),
-        )
-        routing_seed_security_group.add_egress_rule(
-            ec2.Peer.ipv4(vpc.vpc_cidr_block),
-            ec2.Port.udp(53),
-            "DNS to the VPC resolver",
-        )
-        routing_seed_security_group.add_egress_rule(
-            ec2.Peer.ipv4(vpc.vpc_cidr_block),
-            ec2.Port.tcp(53),
-            "DNS fallback to the VPC resolver",
-        )
-        routing_seed_security_group.add_egress_rule(
-            ec2.Peer.prefix_list(
-                dynamodb_prefix_list.get_response_field(
-                    "PrefixLists.0.PrefixListId"
-                )
-            ),
-            ec2.Port.tcp(443),
-            "DynamoDB through the VPC gateway endpoint",
-        )
-        endpoint_security_group.add_ingress_rule(
-            routing_seed_security_group,
-            ec2.Port.tcp(443),
-            "HTTPS from the routing configuration seeder",
-        )
-        routing_seed_security_group.add_egress_rule(
-            endpoint_security_group,
-            ec2.Port.tcp(443),
-            "KMS through the private interface endpoint",
+        routing_seed_network_options = (
+            runtime_network.routing_seeder_lambda_options(self)
         )
         routing_seed_handler_logs = logs.LogGroup(
             self,
@@ -2818,11 +2339,7 @@ class AxonLLMAgentCoreStack(Stack):
             timeout=Duration.seconds(60),
             memory_size=256,
             log_group=routing_seed_handler_logs,
-            vpc=vpc,
-            vpc_subnets=ec2.SubnetSelection(
-                subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS
-            ),
-            security_groups=[routing_seed_security_group],
+            **routing_seed_network_options,
         )
         routing_seed_handler.add_to_role_policy(
             iam.PolicyStatement(
@@ -2838,7 +2355,8 @@ class AxonLLMAgentCoreStack(Stack):
                 resources=[routing_config_signing_key.key_arn],
             )
         )
-        kms_endpoint.add_to_policy(
+        runtime_network.add_endpoint_policy(
+            "kms_endpoint",
             iam.PolicyStatement(
                 principals=[routing_seed_handler.role],
                 actions=["kms:Sign", "kms:Verify"],
@@ -2879,11 +2397,9 @@ class AxonLLMAgentCoreStack(Stack):
                 "routing configuration seeder has no CloudFormation child"
             )
         routing_seed_resource.add_dependency(recovery_guard_resource)
-        for endpoint in (dynamodb_endpoint, kms_endpoint):
-            endpoint_resource = endpoint.node.default_child
-            if not isinstance(endpoint_resource, ec2.CfnVPCEndpoint):
-                raise TypeError("routing seeder endpoint is malformed")
-            routing_seed_resource.add_dependency(endpoint_resource)
+        runtime_network.add_routing_seeder_dependencies(
+            routing_seed_resource
+        )
         cfn_runtime = runtime.node.default_child
         if not isinstance(cfn_runtime, agentcore.CfnRuntime):
             raise TypeError("AgentCore runtime has no CfnRuntime child")
@@ -3125,14 +2641,15 @@ class AxonLLMAgentCoreStack(Stack):
         provider_secret_version_output.override_logical_id(
             "ProviderSecretVersion"
         )
-        approved_https_prefix_list_output = CfnOutput(
-            self,
-            "ApprovedHttpsPrefixListIdOutput",
-            value=approved_https_prefix_list_id.value_as_string,
-        )
-        approved_https_prefix_list_output.override_logical_id(
-            "ApprovedHttpsPrefixListId"
-        )
+        if approved_https_prefix_list_id is not None:
+            approved_https_prefix_list_output = CfnOutput(
+                self,
+                "ApprovedHttpsPrefixListIdOutput",
+                value=approved_https_prefix_list_id.value_as_string,
+            )
+            approved_https_prefix_list_output.override_logical_id(
+                "ApprovedHttpsPrefixListId"
+            )
         bedrock_invoke_resource_arns_output = CfnOutput(
             self,
             "BedrockInvokeResourceArnsOutput",
@@ -3206,10 +2723,14 @@ class AxonLLMAgentCoreStack(Stack):
         CfnOutput(
             self,
             "StateTableName",
-            value=state_table.table_name,
-            export_name=Fn.join(
-                ":",
-                [self.stack_name, "StateTableName"],
+            value=primary_state_table_name,
+            export_name=(
+                Fn.join(
+                    ":",
+                    [self.stack_name, "StateTableName"],
+                )
+                if state_mode == "embedded"
+                else None
             ),
         )
         CfnOutput(
@@ -3248,36 +2769,52 @@ class AxonLLMAgentCoreStack(Stack):
             self,
             "DataKeyArn",
             value=data_key.key_arn,
-            export_name=Fn.join(
-                ":",
-                [self.stack_name, "DataKeyArn"],
+            export_name=(
+                Fn.join(
+                    ":",
+                    [self.stack_name, "DataKeyArn"],
+                )
+                if state_mode == "embedded"
+                else None
             ),
         )
         CfnOutput(
             self,
             "RoutingConfigSigningKeyArn",
             value=routing_config_signing_key.key_arn,
-            export_name=Fn.join(
-                ":",
-                [self.stack_name, "RoutingConfigSigningKeyArn"],
+            export_name=(
+                Fn.join(
+                    ":",
+                    [self.stack_name, "RoutingConfigSigningKeyArn"],
+                )
+                if state_mode == "embedded"
+                else None
             ),
         )
         CfnOutput(
             self,
             "SecurityEventOutboxQueueUrl",
             value=event_outbox_queue.queue_url,
-            export_name=Fn.join(
-                ":",
-                [self.stack_name, "SecurityEventOutboxQueueUrl"],
+            export_name=(
+                Fn.join(
+                    ":",
+                    [self.stack_name, "SecurityEventOutboxQueueUrl"],
+                )
+                if state_mode == "embedded"
+                else None
             ),
         )
         CfnOutput(
             self,
             "SecurityEventOutboxQueueArn",
             value=event_outbox_queue.queue_arn,
-            export_name=Fn.join(
-                ":",
-                [self.stack_name, "SecurityEventOutboxQueueArn"],
+            export_name=(
+                Fn.join(
+                    ":",
+                    [self.stack_name, "SecurityEventOutboxQueueArn"],
+                )
+                if state_mode == "embedded"
+                else None
             ),
         )
         CfnOutput(
@@ -3299,18 +2836,26 @@ class AxonLLMAgentCoreStack(Stack):
             self,
             "SecurityEventTopicArn",
             value=security_event_topic.topic_arn,
-            export_name=Fn.join(
-                ":",
-                [self.stack_name, "SecurityEventTopicArn"],
+            export_name=(
+                Fn.join(
+                    ":",
+                    [self.stack_name, "SecurityEventTopicArn"],
+                )
+                if state_mode == "embedded"
+                else None
             ),
         )
         CfnOutput(
             self,
             "SecurityEventLogGroupArn",
-            value=security_event_log_group.log_group_arn,
-            export_name=Fn.join(
-                ":",
-                [self.stack_name, "SecurityEventLogGroupArn"],
+            value=security_event_log_group_arn,
+            export_name=(
+                Fn.join(
+                    ":",
+                    [self.stack_name, "SecurityEventLogGroupArn"],
+                )
+                if state_mode == "embedded"
+                else None
             ),
         )
         CfnOutput(
@@ -3321,13 +2866,22 @@ class AxonLLMAgentCoreStack(Stack):
         CfnOutput(
             self,
             "StateBackupVaultArn",
-            value=backup_vault.backup_vault_arn,
+            value=backup_vault_arn,
         )
         CfnOutput(
             self,
             "StateBackupRoleArn",
-            value=backup_service_role.role_arn,
+            value=backup_service_role_arn,
         )
+        if state_mode == "external":
+            application_state_stack_output = CfnOutput(
+                self,
+                "ApplicationStateStackNameOutput",
+                value=state_access.stack_name,
+            )
+            application_state_stack_output.override_logical_id(
+                "ApplicationStateStackName"
+            )
         CfnOutput(
             self,
             "AlarmTopicArn",

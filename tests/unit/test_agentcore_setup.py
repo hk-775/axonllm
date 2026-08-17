@@ -289,13 +289,32 @@ def test_managed_setup_validates_optional_ses_sender_domain():
     assert config.managed_cognito.ses_from_email == "no-reply@example.com"
     assert config.to_dict()["managed_cognito"]["ses_verified_domain"] == ("example.com")
 
+    email_identity = deepcopy(value)
+    email_identity["managed_cognito"]["ses_verified_domain"] = (
+        "no-reply@example.com"
+    )
+    config = AgentCoreSetupConfig.from_mapping(email_identity)
+    assert config.to_dict()["managed_cognito"]["ses_verified_domain"] == (
+        "no-reply@example.com"
+    )
+
     mismatched = deepcopy(value)
     mismatched["managed_cognito"]["ses_verified_domain"] = "other.example"
     with pytest.raises(
         AgentCoreSetupError,
-        match="must be the lowercase domain",
+        match="must be either the exact sender email",
     ):
         AgentCoreSetupConfig.from_mapping(mismatched)
+
+    mismatched_email = deepcopy(value)
+    mismatched_email["managed_cognito"]["ses_verified_domain"] = (
+        "other@example.com"
+    )
+    with pytest.raises(
+        AgentCoreSetupError,
+        match="must be either the exact sender email",
+    ):
+        AgentCoreSetupConfig.from_mapping(mismatched_email)
 
     incomplete = deepcopy(value)
     incomplete["managed_cognito"].pop("ses_verified_domain")
@@ -304,6 +323,17 @@ def test_managed_setup_validates_optional_ses_sender_domain():
         match="must be supplied together",
     ):
         AgentCoreSetupConfig.from_mapping(incomplete)
+
+
+def test_managed_setup_does_not_require_runtime_oauth_callbacks():
+    value = _base()
+    value["managed_cognito"].pop("oauth_callback_urls")
+
+    config = AgentCoreSetupConfig.from_mapping(value)
+
+    assert config.managed_cognito is not None
+    assert config.managed_cognito.oauth_callback_urls == ()
+    assert "oauth_callback_urls" not in config.to_dict()["managed_cognito"]
 
 
 def test_managed_setup_accepts_scim_secret_and_saml_login_path(tmp_path):
@@ -752,7 +782,7 @@ def test_deploy_commands_pass_only_validated_standard_oidc_inputs(tmp_path):
         assume_yes=True,
     )
     assert "deployment_target=identity" in identity_command
-    assert any(value.startswith("AxonLLMIdentityStack:OAuthCallbackUrls=https://") for value in identity_command)
+    assert not any("OAuthCallbackUrls" in value for value in identity_command)
     assert "AxonLLMIdentityStack:ControlPlaneDomainName=axon.example.com" in identity_command
     assert "AxonLLMIdentityStack:SesFromEmail=admin@example.com" in identity_command
     assert "AxonLLMIdentityStack:SesVerifiedDomain=example.com" in identity_command

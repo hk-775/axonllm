@@ -363,7 +363,7 @@ class AxonLLMReleaseFoundationStack(Stack):
                 target=target,
                 encryption_key=release_key,
             )
-            for target in ("fargate", "agentcore")
+            for target in ("fargate", "agentcore", "standalone")
         }
 
         github_provider = iam.OidcProviderNative(
@@ -794,6 +794,11 @@ class AxonLLMReleaseFoundationStack(Stack):
             self,
             "AgentCoreRepositoryUri",
             value=repositories["agentcore"].repository_uri,
+        )
+        CfnOutput(
+            self,
+            "StandaloneRepositoryUri",
+            value=repositories["standalone"].repository_uri,
         )
 
     def _grant_release_foundation_deployment_access(

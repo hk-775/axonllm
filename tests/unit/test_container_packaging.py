@@ -150,6 +150,23 @@ class TestTheProductionRuntimeIsHardened:
             if instruction.upper().startswith("ENV ")
         )
         assert re.search(r"\bAXON_AUTH_MODE=ENFORCE\b", environment)
+        assert re.search(r"\bAXON_DEPLOYMENT_PROFILE=production\b", environment)
+        assert re.search(r"\bAXON_REQUIRE_CANONICAL_IDENTITY=true\b", environment)
+        assert re.search(r"\bAXON_LOAD_DEMO_DATA=false\b", environment)
+        assert re.search(r"\bAXON_NO_BROWSER=true\b", environment)
+
+    def test_the_image_uses_the_fail_closed_standalone_host(self):
+        instructions = _dockerfile_instructions()
+
+        assert "STOPSIGNAL SIGTERM" in instructions
+        assert 'CMD ["python", "-m", "src.gateway.standalone"]' in instructions
+        healthchecks = [
+            instruction
+            for instruction in instructions
+            if instruction.upper().startswith("HEALTHCHECK ")
+        ]
+        assert len(healthchecks) == 1
+        assert "127.0.0.1:8000/health" in healthchecks[0]
 
     def test_every_sync_installs_the_locked_enterprise_extras(self):
         sync_steps = [
@@ -159,7 +176,7 @@ class TestTheProductionRuntimeIsHardened:
         ]
         assert sync_steps, "Dockerfile does not install dependencies with uv sync"
 
-        required_extras = {"oidc", "otel"}
+        required_extras = {"server", "oidc", "otel"}
         for sync_step in sync_steps:
             assert "--frozen" in sync_step, "container dependencies must use uv.lock"
             installed_extras = set(

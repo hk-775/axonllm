@@ -19,6 +19,7 @@ TOKEN = "scim-secret-token"
 
 @pytest.fixture(autouse=True)
 def _scim_token(monkeypatch):
+    monkeypatch.delenv("AXON_SCIM_TENANTS", raising=False)
     monkeypatch.setenv("AXON_SCIM_TOKEN", TOKEN)
 
 

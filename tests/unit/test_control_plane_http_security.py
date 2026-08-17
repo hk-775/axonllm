@@ -354,6 +354,29 @@ def test_dashboard_request_wrapper_echoes_the_csrf_cookie() -> None:
         assert "credentials: 'same-origin'" in content
 
 
+def test_dashboard_supports_direct_and_asynchronous_exports() -> None:
+    source = (
+        REPO_ROOT / "src" / "gateway" / "admin" / "dashboard.jsx"
+    ).read_text(encoding="utf-8")
+    compiled = (
+        REPO_ROOT
+        / "src"
+        / "gateway"
+        / "admin"
+        / "static"
+        / "dashboard.js"
+    ).read_text(encoding="utf-8")
+
+    for content in (source, compiled):
+        assert "async function downloadExport" in content
+        assert "created.statusUrl" in content
+        assert "job.downloadUrl" in content
+        assert "/admin/usage/export?format=csv&level=records" in content
+        assert "/admin/audit/export" in content
+        assert "Export usage CSV" in content
+        assert "Export audit JSON" in content
+
+
 def test_dashboard_loads_only_external_same_origin_scripts() -> None:
     dashboard = (
         REPO_ROOT

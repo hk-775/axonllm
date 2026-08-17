@@ -54,6 +54,8 @@ on:
         options:
           - fargate
           - agentcore
+          - standalone-amd64
+          - standalone-arm64
       aws_region:
         description: AWS region containing the private ECR image
         required: false

@@ -118,15 +118,12 @@ class ReleaseEvidenceTests(unittest.TestCase):
         self.repository = "AxonLLM/axonllm"
         self.commit = "a" * 40
         self.ref = "refs/tags/v1.2.3"
-        self.workflow_ref = (
-            f"{self.repository}/{release_evidence.WORKFLOW_PATH}@{self.ref}"
-        )
+        self.workflow_ref = f"{self.repository}/{release_evidence.WORKFLOW_PATH}@{self.ref}"
         self.digest = self.digests["fargate"]
         self.agentcore_digest = self.digests["agentcore"]
-        self.signing_key_arn = (
-            "arn:aws:kms:us-east-1:123456789012:key/"
-            "12345678-1234-1234-1234-123456789abc"
-        )
+        self.standalone_amd64_digest = self.digests["standalone-amd64"]
+        self.standalone_arm64_digest = self.digests["standalone-arm64"]
+        self.signing_key_arn = "arn:aws:kms:us-east-1:123456789012:key/12345678-1234-1234-1234-123456789abc"
         self.signing_account_id = "123456789012"
 
     def _create(self) -> None:
@@ -141,6 +138,48 @@ class ReleaseEvidenceTests(unittest.TestCase):
             event_name="push",
             signing_key_arn=self.signing_key_arn,
         )
+
+    def _downgrade_to_schema_v3(self) -> None:
+        manifest_path = self.directory / release_evidence.MANIFEST
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["schema"] = release_evidence.SCHEMA_V3
+        manifest["targets"] = {name: manifest["targets"][name] for name in release_evidence.TARGETS_V3}
+        input_artifacts = release_evidence.SOURCE_ARTIFACTS + release_evidence._target_artifacts(
+            release_evidence.TARGETS_V3,
+        )
+        manifest["artifacts"] = {
+            name: record
+            for name, record in manifest["artifacts"].items()
+            if name in {*input_artifacts, release_evidence.PROVENANCE}
+        }
+        source = manifest["source"]
+        provenance = release_evidence._provenance_statement(
+            repository=source["repository"],
+            commit=source["commit"],
+            ref=source["ref"],
+            workflow_ref=source["workflowRef"],
+            run_id=source["runId"],
+            run_attempt=source["runAttempt"],
+            event_name=source["eventName"],
+            signing_key_arn=manifest["signing"]["keyArn"],
+            artifacts=manifest["artifacts"],
+            targets=manifest["targets"],
+            target_specs=release_evidence.TARGETS_V3,
+            input_artifacts=input_artifacts,
+            build_type=release_evidence.BUILD_TYPE_V3,
+        )
+        release_evidence._write_json(
+            self.directory / release_evidence.PROVENANCE,
+            provenance,
+        )
+        digest, size = release_evidence._hash(
+            self.directory / release_evidence.PROVENANCE,
+        )
+        manifest["artifacts"][release_evidence.PROVENANCE] = {
+            "sha256": digest,
+            "size": size,
+        }
+        release_evidence._write_json(manifest_path, manifest)
 
     def test_create_and_verify_release_evidence(self) -> None:
         self._create()
@@ -162,6 +201,15 @@ class ReleaseEvidenceTests(unittest.TestCase):
             "linux/arm64",
         )
         self.assertEqual(
+            manifest["targets"]["standalone-amd64"]["digest"],
+            self.digest,
+        )
+        self.assertEqual(
+            manifest["targets"]["standalone-arm64"]["digest"],
+            self.standalone_arm64_digest,
+        )
+        self.assertEqual(manifest["schema"], release_evidence.SCHEMA)
+        self.assertEqual(
             manifest["source"]["workflowRef"],
             self.workflow_ref,
         )
@@ -170,14 +218,8 @@ class ReleaseEvidenceTests(unittest.TestCase):
             self.assertIn(target.metadata, manifest["artifacts"])
             self.assertIn(target.scan, manifest["artifacts"])
             self.assertIn(target.sbom, manifest["artifacts"])
-        provenance = json.loads(
-            (self.directory / release_evidence.PROVENANCE).read_text(
-                encoding="utf-8"
-            )
-        )
-        parameters = provenance["predicate"]["buildDefinition"][
-            "externalParameters"
-        ]
+        provenance = json.loads((self.directory / release_evidence.PROVENANCE).read_text(encoding="utf-8"))
+        parameters = provenance["predicate"]["buildDefinition"]["externalParameters"]
         self.assertEqual(parameters["workflowRef"], self.workflow_ref)
         self.assertEqual(
             parameters["signingKeyArn"],
@@ -185,14 +227,16 @@ class ReleaseEvidenceTests(unittest.TestCase):
         )
         self.assertEqual(
             set(parameters["targets"]),
-            {"fargate", "agentcore"},
+            {
+                "fargate",
+                "agentcore",
+                "standalone-amd64",
+                "standalone-arm64",
+            },
         )
 
     def test_account_trust_accepts_rotated_manifest_key(self) -> None:
-        self.signing_key_arn = (
-            "arn:aws:kms:us-east-1:123456789012:key/"
-            "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
-        )
+        self.signing_key_arn = "arn:aws:kms:us-east-1:123456789012:key/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
         self._create()
 
         manifest = release_evidence.verify_evidence(
@@ -208,6 +252,35 @@ class ReleaseEvidenceTests(unittest.TestCase):
             manifest["signing"]["keyArn"],
             self.signing_key_arn,
         )
+
+    def test_schema_v3_evidence_remains_verifiable_for_legacy_targets(self) -> None:
+        self._create()
+        self._downgrade_to_schema_v3()
+
+        manifest = release_evidence.verify_evidence(
+            self.directory,
+            repository=self.repository,
+            commit=self.commit,
+            image_digest=self.digest,
+            require_release_tag=True,
+            signing_key_arn=self.signing_key_arn,
+            target="fargate",
+        )
+
+        self.assertEqual(manifest["schema"], release_evidence.SCHEMA_V3)
+        with self.assertRaisesRegex(
+            release_evidence.EvidenceError,
+            "unknown deployment target",
+        ):
+            release_evidence.verify_evidence(
+                self.directory,
+                repository=self.repository,
+                commit=self.commit,
+                image_digest=self.digest,
+                require_release_tag=True,
+                signing_key_arn=self.signing_key_arn,
+                target="standalone-amd64",
+            )
 
     def test_account_trust_rejects_key_from_another_account(self) -> None:
         self._create()
@@ -250,9 +323,7 @@ class ReleaseEvidenceTests(unittest.TestCase):
         self._create()
         manifest_path = self.directory / release_evidence.MANIFEST
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        manifest["signing"]["keyArn"] = (
-            "arn:aws:kms:us-east-1:123456789012:key/not-a-key-id"
-        )
+        manifest["signing"]["keyArn"] = "arn:aws:kms:us-east-1:123456789012:key/not-a-key-id"
         manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
         with self.assertRaisesRegex(
@@ -319,15 +390,11 @@ class ReleaseEvidenceTests(unittest.TestCase):
                 ]
             )
 
-        by_key = parser.parse_args(
-            [*arguments, "--signing-key-arn", self.signing_key_arn]
-        )
+        by_key = parser.parse_args([*arguments, "--signing-key-arn", self.signing_key_arn])
         self.assertEqual(by_key.signing_key_arn, self.signing_key_arn)
         self.assertIsNone(by_key.signing_account_id)
 
-        by_account = parser.parse_args(
-            [*arguments, "--signing-account-id", self.signing_account_id]
-        )
+        by_account = parser.parse_args([*arguments, "--signing-account-id", self.signing_account_id])
         self.assertEqual(
             by_account.signing_account_id,
             self.signing_account_id,
@@ -351,10 +418,7 @@ class ReleaseEvidenceTests(unittest.TestCase):
             target="agentcore",
             manifest=manifest,
         )
-        values = dict(
-            line.split("=", maxsplit=1)
-            for line in output.read_text(encoding="utf-8").splitlines()
-        )
+        values = dict(line.split("=", maxsplit=1) for line in output.read_text(encoding="utf-8").splitlines())
         self.assertEqual(values["target"], "agentcore")
         self.assertEqual(values["digest"], self.agentcore_digest)
         self.assertEqual(values["platform"], "linux/arm64")
@@ -362,6 +426,35 @@ class ReleaseEvidenceTests(unittest.TestCase):
             values["signing_key_arn"],
             self.signing_key_arn,
         )
+
+    def test_standalone_targets_select_their_exact_platform_digest(self) -> None:
+        self._create()
+        for target, digest, platform in (
+            (
+                "standalone-amd64",
+                self.standalone_amd64_digest,
+                "linux/amd64",
+            ),
+            (
+                "standalone-arm64",
+                self.standalone_arm64_digest,
+                "linux/arm64",
+            ),
+        ):
+            with self.subTest(target=target):
+                manifest = release_evidence.verify_evidence(
+                    self.directory,
+                    repository=self.repository,
+                    commit=self.commit,
+                    image_digest=digest,
+                    require_release_tag=True,
+                    signing_key_arn=self.signing_key_arn,
+                    target=target,
+                )
+                self.assertEqual(
+                    manifest["targets"][target]["platform"],
+                    platform,
+                )
 
     def test_tampered_agentcore_artifact_is_rejected_for_fargate(self) -> None:
         self._create()
@@ -386,10 +479,7 @@ class ReleaseEvidenceTests(unittest.TestCase):
         self._create()
         manifest_path = self.directory / release_evidence.MANIFEST
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        manifest["signing"]["keyArn"] = (
-            "arn:aws:kms:us-east-1:123456789012:key/"
-            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
-        )
+        manifest["signing"]["keyArn"] = "arn:aws:kms:us-east-1:123456789012:key/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
         manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
         with self.assertRaisesRegex(
             release_evidence.EvidenceError,
@@ -475,9 +565,7 @@ class ReleaseEvidenceTests(unittest.TestCase):
         self._create()
         manifest_path = self.directory / release_evidence.MANIFEST
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        manifest["source"]["workflowRef"] = (
-            f"{self.repository}/.github/workflows/other.yml@{self.ref}"
-        )
+        manifest["source"]["workflowRef"] = f"{self.repository}/.github/workflows/other.yml@{self.ref}"
         manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
         with self.assertRaisesRegex(
             release_evidence.EvidenceError,
@@ -494,9 +582,7 @@ class ReleaseEvidenceTests(unittest.TestCase):
 
     def test_non_release_ref_is_rejected_by_deployment_gate(self) -> None:
         self.ref = "refs/heads/main"
-        self.workflow_ref = (
-            f"{self.repository}/{release_evidence.WORKFLOW_PATH}@{self.ref}"
-        )
+        self.workflow_ref = f"{self.repository}/{release_evidence.WORKFLOW_PATH}@{self.ref}"
         self._create()
         with self.assertRaisesRegex(
             release_evidence.EvidenceError,

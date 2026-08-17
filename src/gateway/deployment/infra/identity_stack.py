@@ -73,19 +73,6 @@ class AxonLLMIdentityStack(Stack):
                 "Globally unique Cognito managed-login domain prefix"
             ),
         )
-        oauth_callback_urls = CfnParameter(
-            self,
-            "OAuthCallbackUrls",
-            type="CommaDelimitedList",
-            allowed_pattern=r"^https://[^,\s#]+$",
-            constraint_description=(
-                "each callback must be an HTTPS URL without whitespace, "
-                "commas, or fragments"
-            ),
-            description=(
-                "Comma-separated OAuth authorization-code callback URLs"
-            ),
-        )
         control_plane_domain_name = CfnParameter(
             self,
             "ControlPlaneDomainInput",
@@ -132,20 +119,25 @@ class AxonLLMIdentityStack(Stack):
                 "Verified SES sender used for Cognito invitations and recovery"
             ),
         )
-        ses_verified_domain = CfnParameter(
+        # The logical ID is retained for setup-file compatibility. The value
+        # can be either a verified domain or the exact verified sender address.
+        ses_source_identity = CfnParameter(
             self,
             "SesVerifiedDomain",
             type="String",
             min_length=4,
-            max_length=253,
+            max_length=320,
             allowed_pattern=(
-                r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}"
+                r"^(?:[^@\s]+@)?(?:[a-z0-9](?:[a-z0-9-]{0,61}"
                 r"[a-z0-9])?\.)+[a-z]{2,63}$"
             ),
             constraint_description=(
-                "must be the lowercase SES-verified domain of SesFromEmail"
+                "must be either SesFromEmail exactly or its lowercase "
+                "SES-verified domain"
             ),
-            description="SES-verified domain used by the Cognito user pool",
+            description=(
+                "SES-verified source identity used by the Cognito user pool"
+            ),
         )
 
         user_pool = cognito.UserPool(
@@ -208,7 +200,7 @@ class AxonLLMIdentityStack(Stack):
             self.format_arn(
                 service="ses",
                 resource="identity",
-                resource_name=ses_verified_domain.value_as_string,
+                resource_name=ses_source_identity.value_as_string,
             ),
         )
 
@@ -224,6 +216,8 @@ class AxonLLMIdentityStack(Stack):
             cognito.ClientAttributes().with_standard_attributes(email=True)
         )
         app_client = user_pool.add_client(
+            # Preserve the retained resource identity and physical name so an
+            # existing PKCE client is disabled in place instead of orphaned.
             "PublicPkceClient",
             user_pool_client_name=(
                 f"axonllm-agentcore-pkce{physical_suffix}"
@@ -231,8 +225,9 @@ class AxonLLMIdentityStack(Stack):
             generate_secret=False,
             prevent_user_existence_errors=True,
             enable_token_revocation=True,
-            # The public client authenticates through authorization code plus
-            # S256 PKCE. Direct password and SRP flows stay disabled.
+            disable_o_auth=True,
+            # Browser OAuth is owned by the control-plane client. This
+            # secretless client is a stable AgentCore JWT audience only.
             auth_flows=cognito.AuthFlow(),
             access_token_validity=Duration.minutes(15),
             id_token_validity=Duration.minutes(15),
@@ -240,22 +235,6 @@ class AxonLLMIdentityStack(Stack):
             refresh_token_rotation_grace_period=Duration.seconds(0),
             read_attributes=readable_attributes,
             write_attributes=writable_attributes,
-            supported_identity_providers=[
-                cognito.UserPoolClientIdentityProvider.COGNITO
-            ],
-            o_auth=cognito.OAuthSettings(
-                callback_urls=oauth_callback_urls.value_as_list,
-                flows=cognito.OAuthFlows(
-                    authorization_code_grant=True,
-                    implicit_code_grant=False,
-                    client_credentials=False,
-                ),
-                scopes=[
-                    cognito.OAuthScope.OPENID,
-                    cognito.OAuthScope.EMAIL,
-                    cognito.OAuthScope.PROFILE,
-                ],
-            ),
         )
         app_client.apply_removal_policy(removal_policy)
         certification_client = user_pool.add_client(
@@ -392,7 +371,7 @@ class AxonLLMIdentityStack(Stack):
             self,
             "OidcClientId",
             value=app_client.user_pool_client_id,
-            description="Public authorization-code/PKCE client ID",
+            description="Secretless AgentCore JWT audience client ID",
         )
         CfnOutput(
             self,

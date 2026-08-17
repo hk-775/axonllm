@@ -513,6 +513,16 @@ def build_runtime_services() -> RuntimeServices:
         if callable(shutdown):
             await asyncio.to_thread(shutdown)
 
+    async def _close_trace_forwarder() -> None:
+        forwarder = getattr(
+            components.gateway_agent,
+            "_trace_forwarder",
+            None,
+        )
+        close = getattr(forwarder, "close", None)
+        if callable(close):
+            await close()
+
     # Bootstrap owns the canonical query repository, executor, and audit trail.
     query_service = getattr(components, "query_service", None)
     query_readiness = (
@@ -583,6 +593,10 @@ def build_runtime_services() -> RuntimeServices:
             RuntimeCloseHook(
                 "security_event_outbox",
                 components.event_dispatcher.stop,
+            ),
+            RuntimeCloseHook(
+                "trace_forwarder",
+                _close_trace_forwarder,
             ),
             RuntimeCloseHook("otlp", _shutdown_otlp),
         ),

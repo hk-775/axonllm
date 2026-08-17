@@ -1261,7 +1261,6 @@ class EventDispatcher:
 
     async def _process_outbox_message(self, message: object) -> bool:
         receive_count = self._receive_count(message)
-        tenant_id: str | None = None
         try:
             if not isinstance(message, dict):
                 raise DestinationValidationError("SQS message is invalid")
@@ -1270,9 +1269,7 @@ class EventDispatcher:
                 raise DestinationValidationError(
                     "SQS message receipt handle is invalid"
                 )
-            event, destination = _decode_outbox_message(message.get("Body"))
-            tenant_id = event.tenant_id
-            await self._send_to_destination(event, destination)
+            tenant_id = await self.deliver_outbox_body(message.get("Body"))
             await self._sqs_call(
                 "delete_message",
                 QueueUrl=self._outbox_queue_url,
@@ -1281,22 +1278,37 @@ class EventDispatcher:
         except asyncio.CancelledError:
             raise
         except Exception:
-            if tenant_id is not None:
-                self._error_counts[tenant_id] = (
-                    self._error_counts.get(tenant_id, 0) + 1
-                )
             logger.error(
                 "Security event outbox delivery failed tenant=%s attempt=%d",
-                tenant_id or "unknown",
+                locals().get("tenant_id", "unknown"),
                 receive_count,
             )
             await self._defer_outbox_message(message, receive_count)
             return False
 
+        return True
+
+    async def deliver_outbox_body(self, body: object) -> str:
+        """Deliver one validated outbox envelope without managing SQS state."""
+
+        tenant_id: str | None = None
+        try:
+            event, destination = _decode_outbox_message(body)
+            tenant_id = event.tenant_id
+            await self._send_to_destination(event, destination)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            if tenant_id is not None:
+                self._error_counts[tenant_id] = (
+                    self._error_counts.get(tenant_id, 0) + 1
+                )
+            raise
+
         self._dispatch_counts[tenant_id] = (
             self._dispatch_counts.get(tenant_id, 0) + 1
         )
-        return True
+        return tenant_id
 
     async def _enqueue_outbox_message(
         self,

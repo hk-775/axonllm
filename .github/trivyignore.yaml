@@ -7,6 +7,7 @@ misconfigurations:
   - id: AWS-0013
     paths:
       - AxonLLMControlPlaneStack.template.json
+      - AxonLLMServerlessControlPlaneStack.template.json
     statement: The AWS-managed cloudfront.net certificate does not permit a custom minimum viewer TLS policy; strict TLS 1.2 enforcement requires custom-domain mode.
     expired_at: "2027-08-13T00:00:00Z"
   - id: AWS-0132
@@ -15,6 +16,16 @@ misconfigurations:
       - AxonLLMControlPlaneStack.template.json
     statement: ALB and CloudFront access-log delivery require SSE-S3; the bucket cannot use a customer-managed KMS key.
     expired_at: "2027-08-07T00:00:00Z"
+  - id: AWS-0096
+    paths:
+      - AxonLLMServerlessWorkersStack.template.json
+    statement: The export queues set KmsMasterKeyId to the parameterized customer-managed ApplicationStateDataKeyArn; Trivy cannot resolve the CloudFormation parameter.
+    expired_at: "2027-08-17T00:00:00Z"
+  - id: AWS-0132
+    paths:
+      - AxonLLMServerlessWorkersStack.template.json
+    statement: The export bucket sets KMSMasterKeyID to the parameterized customer-managed ApplicationStateDataKeyArn; Trivy cannot resolve the CloudFormation parameter.
+    expired_at: "2027-08-17T00:00:00Z"
   - id: AWS-0035
     paths:
       - AxonLLMStack.template.json

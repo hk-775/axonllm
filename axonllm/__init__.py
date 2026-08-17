@@ -15,6 +15,25 @@ from src.gateway.models import (
 )
 from src.gateway.router import AllProvidersExhaustedError, ProviderError
 
+from .assemblies import build_ostiari_adapter, build_router
+from .hosts import (
+    CredentialResolver,
+    IdentityContext,
+    OstiariHost,
+    RouterLifecycle,
+    RoutingConfigurationProvider,
+    TelemetrySink,
+    UsageSink,
+)
+from .ostiari import (
+    OstiariAdapterError,
+    OstiariAdapterNotStartedError,
+    OstiariConfigurationError,
+    OstiariResult,
+    OstiariRouterAdapter,
+    OstiariRoutingModeUnavailableError,
+    OstiariUsageRecordingError,
+)
 from .router import AsyncRouter, InvalidRequestError, RouterClosedError
 
 try:
@@ -27,15 +46,31 @@ __all__ = [
     "AsyncRouter",
     "ChatCompletionRequest",
     "ChatCompletionResponse",
+    "CredentialResolver",
     "EmbeddingData",
     "EmbeddingRequest",
     "EmbeddingResponse",
+    "IdentityContext",
     "InvalidRequestError",
     "ModelSummary",
+    "OstiariAdapterError",
+    "OstiariAdapterNotStartedError",
+    "OstiariConfigurationError",
+    "OstiariHost",
+    "OstiariResult",
+    "OstiariRouterAdapter",
+    "OstiariRoutingModeUnavailableError",
+    "OstiariUsageRecordingError",
     "ProviderError",
+    "RouterLifecycle",
     "RouterClosedError",
+    "RoutingConfigurationProvider",
     "StreamChunk",
+    "TelemetrySink",
     "TokenUsage",
+    "UsageSink",
     "ValidationError",
     "__version__",
+    "build_ostiari_adapter",
+    "build_router",
 ]

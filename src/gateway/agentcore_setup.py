@@ -719,7 +719,7 @@ class RuntimeSetup:
 @dataclass(frozen=True)
 class ManagedCognitoSetup:
     hosted_ui_domain_prefix: str
-    oauth_callback_urls: tuple[str, ...]
+    oauth_callback_urls: tuple[str, ...] = ()
     ses_from_email: str | None = None
     ses_verified_domain: str | None = None
 
@@ -728,8 +728,12 @@ class ManagedCognitoSetup:
         value = _strict_object(
             raw,
             "managed_cognito",
-            required={"hosted_ui_domain_prefix", "oauth_callback_urls"},
-            optional={"ses_from_email", "ses_verified_domain"},
+            required={"hosted_ui_domain_prefix"},
+            optional={
+                "oauth_callback_urls",
+                "ses_from_email",
+                "ses_verified_domain",
+            },
         )
         prefix = _required_string(
             value["hosted_ui_domain_prefix"],
@@ -742,9 +746,11 @@ class ManagedCognitoSetup:
                 "lowercase letters, numbers, or hyphens and cannot start or "
                 "end with a hyphen"
             )
-        raw_urls = value["oauth_callback_urls"]
-        if not isinstance(raw_urls, list) or not raw_urls:
-            raise AgentCoreSetupError("managed_cognito.oauth_callback_urls must be a non-empty array")
+        raw_urls = value.get("oauth_callback_urls", [])
+        if not isinstance(raw_urls, list):
+            raise AgentCoreSetupError(
+                "managed_cognito.oauth_callback_urls must be an array"
+            )
         urls: list[str] = []
         for index, raw_url in enumerate(raw_urls):
             url = _https_url(
@@ -771,16 +777,20 @@ class ManagedCognitoSetup:
             ses_verified_domain = _required_string(
                 ses_verified_domain,
                 "managed_cognito.ses_verified_domain",
-                max_length=253,
+                max_length=320,
             )
             if (
-                _DOMAIN_NAME_PATTERN.fullmatch(ses_verified_domain) is None
-                or ses_from_email.rpartition("@")[2].casefold()
-                != ses_verified_domain
+                ses_verified_domain != ses_from_email
+                and (
+                    _DOMAIN_NAME_PATTERN.fullmatch(ses_verified_domain)
+                    is None
+                    or ses_from_email.rpartition("@")[2].casefold()
+                    != ses_verified_domain
+                )
             ):
                 raise AgentCoreSetupError(
-                    "managed_cognito.ses_verified_domain must be the "
-                    "lowercase domain of managed_cognito.ses_from_email"
+                    "managed_cognito.ses_verified_domain must be either the "
+                    "exact sender email or its lowercase domain"
                 )
         return cls(
             hosted_ui_domain_prefix=prefix,
@@ -1130,7 +1140,12 @@ class AgentCoreSetupConfig:
         if self.managed_cognito is None:
             value.pop("managed_cognito")
         else:
-            value["managed_cognito"]["oauth_callback_urls"] = list(self.managed_cognito.oauth_callback_urls)
+            if self.managed_cognito.oauth_callback_urls:
+                value["managed_cognito"]["oauth_callback_urls"] = list(
+                    self.managed_cognito.oauth_callback_urls
+                )
+            else:
+                value["managed_cognito"].pop("oauth_callback_urls")
             if self.managed_cognito.ses_from_email is None:
                 value["managed_cognito"].pop("ses_from_email")
                 value["managed_cognito"].pop("ses_verified_domain")
@@ -1307,8 +1322,9 @@ def config_from_args(args: argparse.Namespace) -> AgentCoreSetupConfig:
             callback_urls = _comma_values(os.environ.get("AXON_OAUTH_CALLBACK_URLS"))
         mapping["managed_cognito"] = {
             "hosted_ui_domain_prefix": args.hosted_ui_domain_prefix,
-            "oauth_callback_urls": callback_urls,
         }
+        if callback_urls:
+            mapping["managed_cognito"]["oauth_callback_urls"] = callback_urls
         if args.ses_from_email or args.ses_verified_domain:
             mapping["managed_cognito"].update(
                 {
@@ -1593,7 +1609,10 @@ def add_setup_subcommands(subparsers: argparse._SubParsersAction) -> None:
     agentcore.add_argument(
         "--oauth-callback-url",
         action="append",
-        help="Repeat for every managed Cognito PKCE callback URL",
+        help=(
+            "Legacy schema-v2 compatibility value; browser OAuth callbacks "
+            "are owned by the deployed control plane"
+        ),
     )
     agentcore.add_argument(
         "--ses-from-email",
@@ -1603,7 +1622,9 @@ def add_setup_subcommands(subparsers: argparse._SubParsersAction) -> None:
     agentcore.add_argument(
         "--ses-verified-domain",
         default=_env("AXON_COGNITO_SES_VERIFIED_DOMAIN"),
-        help="Verified SES domain matching --ses-from-email",
+        help=(
+            "Exact SES-verified sender email or its verified lowercase domain"
+        ),
     )
     agentcore.add_argument(
         "--control-plane-endpoint-mode",

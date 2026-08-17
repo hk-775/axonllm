@@ -7,8 +7,10 @@ import os
 import pytest
 
 from src.gateway.bootstrap import (
+    ControlAPIComponents,
     GatewayComponents,
     _persistence_readiness,
+    build_control_api,
     build_gateway_components,
     build_starlette_app,
     build_gateway_agent,
@@ -157,6 +159,45 @@ class TestBuildStaletteApp:
             assert client.get("/health").status_code == 200
 
         assert len(closed) == 1
+
+    def test_control_api_uses_injected_services_without_data_plane_or_workers(
+        self,
+        minimal_app_config: AppConfig,
+        monkeypatch,
+    ):
+        from starlette.testclient import TestClient
+
+        components = build_gateway_components(minimal_app_config)
+
+        def fail_client_agent(*args, **kwargs):
+            raise AssertionError("control API constructed an inference client")
+
+        def fail_worker(*args, **kwargs):
+            raise AssertionError("control API constructed a worker")
+
+        monkeypatch.setattr(
+            "src.gateway.bootstrap.ClientAgent",
+            fail_client_agent,
+        )
+        monkeypatch.setattr(
+            "src.gateway.bootstrap.build_worker",
+            fail_worker,
+        )
+        app = build_control_api(
+            minimal_app_config,
+            ControlAPIComponents.from_gateway(components),
+        )
+        route_paths = {
+            route.path
+            for route in app.routes
+            if hasattr(route, "path")
+        }
+
+        assert "/admin/dashboard" in route_paths
+        assert "/v1/chat/completions" not in route_paths
+        assert "/api/chat" not in route_paths
+        with TestClient(app) as client:
+            assert client.get("/health").status_code == 200
 
     def test_readiness_route_is_separate_from_liveness(
         self,

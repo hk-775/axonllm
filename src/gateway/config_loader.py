@@ -51,7 +51,11 @@ def load_app_config() -> AppConfig:
     """Build an AppConfig from environment variables, falling back to defaults."""
     return AppConfig(
         deployment_profile=_load_deployment_profile(),
-        aws_region=os.environ.get("AWS_DEFAULT_REGION", "us-east-1"),
+        aws_region=(
+            os.environ.get("AWS_DEFAULT_REGION")
+            or os.environ.get("AWS_REGION")
+            or "us-east-1"
+        ),
         bedrock_region=os.environ.get("AXON_BEDROCK_REGION", "us-east-1"),
         server_host=os.environ.get("AXON_SERVER_HOST", "0.0.0.0"),
         server_port=int(os.environ.get("AXON_SERVER_PORT", "8000")),

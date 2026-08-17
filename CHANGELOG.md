@@ -7,6 +7,97 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Accepted the deployment architecture for embedded Ostiari, standalone, and
+  AgentCore delivery modes. Added a strict versioned AgentCore deployment
+  schema, safe example configurations, and non-mutating validation that
+  rejects unknown fields, duplicate YAML keys, unsafe public production
+  networking, external providers without egress, and unacknowledged managed
+  NAT cost.
+- Added a deterministic, non-mutating deployment planner with versioned
+  planning-context, descriptor, and plan schemas. Plans bind configuration,
+  account, region, source, immutable images, templates, stack state, release
+  evidence, and resource bindings while exposing ownership, replacement, and
+  cost categories.
+- Added explicit router, control API, and worker construction seams plus
+  infrastructure-neutral Ostiari host protocols. Embedded imports and router
+  construction no longer initialize the server, AWS control plane, or
+  background workers, and trace forwarding now uses injected sinks.
+- Added a termination-protected `AxonLLMApplicationStateStack`, a locked
+  migration manifest for all retained resource identities, and an explicit
+  non-secret state descriptor consumed by opt-in AgentCore and control-plane
+  external-state modes. CI now synthesizes, lints, scans, and packages the
+  dedicated state stack.
+- Added explicit existing, managed, and development-only public AgentCore
+  network modes. Existing mode imports verified customer resources without
+  creating networking; managed endpoints-only mode creates no NAT or public
+  subnet; managed NAT requires explicit cost and destination approval; and
+  read-only preflight binds supported Availability Zone IDs, routes,
+  endpoints, security groups, prefix lists, and managed-stack outputs before
+  runtime synthesis.
+- Added an opt-in serverless AgentCore web control plane with a static private
+  S3 UI behind CloudFront/WAF and an origin-key-protected Regional API Gateway
+  invoking an ARM64 control-only Lambda. Deterministic release artifacts are
+  bound to one source commit, exact S3 versions, and SHA-256 digests; the
+  static deployer rejects unsafe archives and creates no ALB, ECS service,
+  VPC, subnet, or NAT gateway.
+- Added an isolated serverless worker stack for FIFO security-event delivery,
+  scheduled query reconciliation, and durable usage/audit exports. Export jobs
+  are tenant- and requester-bound, retry through an encrypted FIFO queue, write
+  private one-day S3 objects, and expose only 60-second presigned downloads.
+  The dashboard supports both immediate standalone downloads and asynchronous
+  AgentCore export jobs.
+- Added a non-mutating edge-transition planner and opt-in reversible
+  CloudFront selector for the Fargate-to-serverless control-plane migration.
+  The existing distribution, hostname, WAF, Cognito callback, and Fargate
+  origin remain intact while a qualified S3/API Gateway origin pair is
+  attached. Plans require passing Fargate and serverless validation reports,
+  exact artifact/state bindings, seven supplemental canary domains, and an
+  edge-only no-replacement change set.
+- Added productized AgentCore runtime lifecycle contracts. Park and resume use
+  the existing runtime and managed-network stack identities with schema-valid
+  empty parked shells, prepare-only CDK change sets, immutable release and
+  configuration bindings, protected-state removal guards, explicit
+  post-operation observations, and content-addressed verification receipts.
+- Added a production Ostiari embedded adapter with explicit host lifecycle,
+  trusted signed-snapshot adoption, opaque credential resolution,
+  request-scoped identity, normalized usage, secret-free telemetry, and
+  specialized post-provider accounting errors that prevent accidental duplicate
+  model calls. The embedded chat path now participates in the shared routing
+  conformance suite without importing Ostiari, a web server, or AWS control
+  services.
+- Added a fail-closed one-image standalone host for the gateway, control API,
+  and UI. The production image disables demo data, enforces canonical identity,
+  handles graceful termination, and exposes a liveness check. Evaluation
+  Compose opts into seeded development behavior explicitly, while production
+  Docker and non-mutating ECS recipes reuse customer networking, identity,
+  durable state, secrets, logging, and ingress.
+- Added schema-v4 release evidence for independently verifiable AMD64 and ARM64
+  standalone images, a retained immutable standalone ECR repository, platform
+  deployment verification, and runbooks for standalone operation plus
+  reversible Fargate-to-serverless migration and legacy retirement.
+
+### Changed
+
+- Split server, AgentCore, Bedrock, Google, and AWS control-plane dependencies
+  into explicit package extras so the embedded router install remains small.
+- Applied retain/update-retain protection to the security-event topic and
+  backup plan before any future state-stack ownership migration.
+- Increased the retained security-event outbox visibility timeout to five
+  minutes so the Lambda event-source timeout remains within the required
+  retry-safety ratio.
+
+## [0.3.1] - 2026-08-15
+
+### Fixed
+
+- Managed Cognito deployments now accept an exact verified SES email identity
+  as the source identity instead of requiring ownership of its domain.
+- Removed the unused runtime OAuth callback requirement. Browser login remains
+  on the control-plane client, while the retained AgentCore client is a
+  non-interactive JWT audience.
+
 ## [0.3.0] - 2026-08-15
 
 ### Added

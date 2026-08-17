@@ -15,6 +15,7 @@ from src.gateway.models import (
     StreamChunk,
     ValidationError,
 )
+from src.gateway.routing_config import RoutingConfigSnapshot
 from src.gateway.routing_runtime import RoutingRuntime
 
 if TYPE_CHECKING:
@@ -29,9 +30,7 @@ class InvalidRequestError(ValueError):
 
     def __init__(self, errors: Sequence[ValidationError]) -> None:
         self.errors = tuple(errors)
-        detail = "; ".join(
-            f"{error.field}: {error.message}" for error in self.errors
-        )
+        detail = "; ".join(f"{error.field}: {error.message}" for error in self.errors)
         super().__init__(detail or "Invalid request")
 
 
@@ -182,9 +181,7 @@ class _Models:
                 ModelSummary(
                     name=model.name,
                     description=model.description,
-                    providers=sorted(
-                        {mapping.provider for mapping in mappings}
-                    ),
+                    providers=sorted({mapping.provider for mapping in mappings}),
                     capabilities=list(model.capabilities or []),
                     routing_strategy=model.routing_strategy.value,
                 )
@@ -272,6 +269,43 @@ class AsyncRouter:
         self._ensure_open()
         return self._runtime.route_snapshot()
 
+    def config_snapshot(self) -> RoutingConfigSnapshot:
+        """Return the active credential-free routing configuration."""
+        self._ensure_open()
+        return self._runtime.config_snapshot()
+
+    def apply_snapshot(self, snapshot: RoutingConfigSnapshot) -> None:
+        """Atomically adopt one host-verified routing configuration snapshot."""
+        self._ensure_open()
+        if not isinstance(snapshot, RoutingConfigSnapshot):
+            raise TypeError("snapshot must be a RoutingConfigSnapshot")
+        snapshot.apply(self._model_registry)
+
+    def configure_routes(self, routes: list[dict]) -> dict[str, int]:
+        """Atomically replace concrete provider routes for future requests."""
+        self._ensure_open()
+        configure = getattr(self._provider_factory, "configure_routes", None)
+        if not callable(configure):
+            raise RuntimeError("embedded provider factory does not support route updates")
+        result = configure(routes)
+        self._router.available_providers = self._provider_factory.available_providers
+        return result
+
+    def knows_model(self, model: str) -> bool:
+        """Return whether the active routing snapshot contains ``model``."""
+        self._ensure_open()
+        return bool(model) and model in self._model_registry.models
+
+    def model_available(self, model: str) -> bool:
+        """Return whether ``model`` has an invocable provider mapping."""
+        self._ensure_open()
+        return self.knows_model(model) and self._router.is_model_available(model)
+
+    def has_available_models(self) -> bool:
+        """Return whether any configured logical model is currently routable."""
+        self._ensure_open()
+        return any(self._router.is_model_available(model) for model in self._model_registry.models)
+
     async def close(self) -> None:
         """Release HTTP sessions and refreshable credential providers."""
         if self._closed:
@@ -323,26 +357,17 @@ class AsyncRouter:
         if model_config is None:
             raise ValueError(f"Unknown model: {request.model}")
         if "embeddings" not in set(model_config.capabilities or []):
-            raise ValueError(
-                f"Model '{request.model}' is not configured for embeddings"
-            )
+            raise ValueError(f"Model '{request.model}' is not configured for embeddings")
         if (
             not isinstance(request.input, list)
             or not request.input
-            or not all(
-                isinstance(value, str) and value
-                for value in request.input
-            )
+            or not all(isinstance(value, str) and value for value in request.input)
         ):
-            raise ValueError(
-                "input must be a non-empty string or list of non-empty strings"
-            )
+            raise ValueError("input must be a non-empty string or list of non-empty strings")
         if request.encoding_format not in {"float", "base64"}:
             raise ValueError("encoding_format must be 'float' or 'base64'")
         if request.dimensions is not None and (
-            not isinstance(request.dimensions, int)
-            or isinstance(request.dimensions, bool)
-            or request.dimensions <= 0
+            not isinstance(request.dimensions, int) or isinstance(request.dimensions, bool) or request.dimensions <= 0
         ):
             raise ValueError("dimensions must be a positive integer")
         return await self._runtime.embed(

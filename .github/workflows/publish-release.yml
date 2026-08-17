@@ -41,6 +41,8 @@ jobs:
     outputs:
       agentcore_image: ${{ steps.result.outputs.agentcore_image }}
       fargate_image: ${{ steps.result.outputs.fargate_image }}
+      standalone_amd64_image: ${{ steps.result.outputs.standalone_amd64_image }}
+      standalone_arm64_image: ${{ steps.result.outputs.standalone_arm64_image }}
 
     steps:
       - name: Check out exact release source
@@ -69,7 +71,7 @@ jobs:
           repository: ${{ github.repository }}
           run-id: ${{ inputs.evidence_run_id }}
 
-      - name: Verify both signed release targets
+      - name: Verify all signed release targets
         id: evidence
         env:
           EVIDENCE_DIR: ${{ runner.temp }}/release-evidence
@@ -86,6 +88,8 @@ jobs:
 
           fargate_output="${RUNNER_TEMP}/fargate-output"
           agentcore_output="${RUNNER_TEMP}/agentcore-output"
+          standalone_amd64_output="${RUNNER_TEMP}/standalone-amd64-output"
+          standalone_arm64_output="${RUNNER_TEMP}/standalone-arm64-output"
           python scripts/release/release_evidence.py verify \
             --directory "${EVIDENCE_DIR}" \
             --repository "${EXPECTED_REPOSITORY}" \
@@ -104,24 +108,56 @@ jobs:
             --target agentcore \
             --run-id "${EVIDENCE_RUN_ID}" \
             --github-output "${agentcore_output}"
+          python scripts/release/release_evidence.py verify \
+            --directory "${EVIDENCE_DIR}" \
+            --repository "${EXPECTED_REPOSITORY}" \
+            --commit "${EXPECTED_COMMIT}" \
+            --signing-account-id "${EXPECTED_SIGNING_ACCOUNT_ID}" \
+            --require-release-tag \
+            --target standalone-amd64 \
+            --run-id "${EVIDENCE_RUN_ID}" \
+            --github-output "${standalone_amd64_output}"
+          python scripts/release/release_evidence.py verify \
+            --directory "${EVIDENCE_DIR}" \
+            --repository "${EXPECTED_REPOSITORY}" \
+            --commit "${EXPECTED_COMMIT}" \
+            --signing-account-id "${EXPECTED_SIGNING_ACCOUNT_ID}" \
+            --require-release-tag \
+            --target standalone-arm64 \
+            --run-id "${EVIDENCE_RUN_ID}" \
+            --github-output "${standalone_arm64_output}"
 
           fargate_digest=$(sed -n 's/^digest=//p' "${fargate_output}")
           agentcore_digest=$(sed -n 's/^digest=//p' "${agentcore_output}")
+          standalone_amd64_digest=$(sed -n \
+            's/^digest=//p' "${standalone_amd64_output}")
+          standalone_arm64_digest=$(sed -n \
+            's/^digest=//p' "${standalone_arm64_output}")
           release_ref=$(sed -n 's/^release_ref=//p' "${fargate_output}")
           run_attempt=$(sed -n 's/^run_attempt=//p' "${fargate_output}")
           signing_key_arn=$(sed -n 's/^signing_key_arn=//p' "${fargate_output}")
           [[ "${release_ref}" == "refs/tags/${EXPECTED_TAG}" ]]
           [[ "$(sed -n 's/^release_ref=//p' "${agentcore_output}")" == "${release_ref}" ]]
+          [[ "$(sed -n 's/^release_ref=//p' "${standalone_amd64_output}")" == "${release_ref}" ]]
+          [[ "$(sed -n 's/^release_ref=//p' "${standalone_arm64_output}")" == "${release_ref}" ]]
           [[ "${run_attempt}" =~ ^[1-9][0-9]*$ ]]
           [[ "$(sed -n 's/^run_attempt=//p' "${agentcore_output}")" == "${run_attempt}" ]]
+          [[ "$(sed -n 's/^run_attempt=//p' "${standalone_amd64_output}")" == "${run_attempt}" ]]
+          [[ "$(sed -n 's/^run_attempt=//p' "${standalone_arm64_output}")" == "${run_attempt}" ]]
           [[ "${fargate_digest}" =~ ^sha256:[0-9a-f]{64}$ ]]
           [[ "${agentcore_digest}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "${standalone_amd64_digest}" == "${fargate_digest}" ]]
+          [[ "${standalone_arm64_digest}" =~ ^sha256:[0-9a-f]{64}$ ]]
           [[ "${signing_key_arn}" =~ ^arn:aws:kms:us-east-1:${EXPECTED_SIGNING_ACCOUNT_ID}:key/[0-9a-f-]+$ ]]
           [[ "$(sed -n 's/^signing_key_arn=//p' "${agentcore_output}")" == "${signing_key_arn}" ]]
+          [[ "$(sed -n 's/^signing_key_arn=//p' "${standalone_amd64_output}")" == "${signing_key_arn}" ]]
+          [[ "$(sed -n 's/^signing_key_arn=//p' "${standalone_arm64_output}")" == "${signing_key_arn}" ]]
 
           {
             printf 'agentcore_digest=%s\n' "${agentcore_digest}"
             printf 'fargate_digest=%s\n' "${fargate_digest}"
+            printf 'standalone_amd64_digest=%s\n' "${standalone_amd64_digest}"
+            printf 'standalone_arm64_digest=%s\n' "${standalone_arm64_digest}"
             printf 'release_ref=%s\n' "${release_ref}"
             printf 'run_attempt=%s\n' "${run_attempt}"
             printf 'signing_key_arn=%s\n' "${signing_key_arn}"
@@ -187,6 +223,7 @@ jobs:
           AWS_ACCOUNT_ID: ${{ vars.AXON_AWS_ACCOUNT_ID }}
           AWS_REGION: ${{ inputs.aws_region }}
           FARGATE_REPOSITORY: ${{ vars.AXON_FARGATE_ECR_REPOSITORY }}
+          STANDALONE_REPOSITORY: ${{ vars.AXON_STANDALONE_ECR_REPOSITORY }}
         run: |
           set -euo pipefail
           registry="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
@@ -194,6 +231,7 @@ jobs:
           [[ "${AWS_REGION}" =~ ^[a-z]{2}(-gov)?-[a-z]+-[0-9]+$ ]]
           [[ "${FARGATE_REPOSITORY}" == "${registry}/axonllm/fargate" ]]
           [[ "${AGENTCORE_REPOSITORY}" == "${registry}/axonllm/agentcore" ]]
+          [[ "${STANDALONE_REPOSITORY}" == "${registry}/axonllm/standalone" ]]
 
       - name: Configure release-publisher AWS credentials
         uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
@@ -226,7 +264,8 @@ jobs:
                   ],
                   "Resource": [
                     "arn:aws:ecr:${{ inputs.aws_region }}:${{ vars.AXON_AWS_ACCOUNT_ID }}:repository/axonllm/fargate",
-                    "arn:aws:ecr:${{ inputs.aws_region }}:${{ vars.AXON_AWS_ACCOUNT_ID }}:repository/axonllm/agentcore"
+                    "arn:aws:ecr:${{ inputs.aws_region }}:${{ vars.AXON_AWS_ACCOUNT_ID }}:repository/axonllm/agentcore",
+                    "arn:aws:ecr:${{ inputs.aws_region }}:${{ vars.AXON_AWS_ACCOUNT_ID }}:repository/axonllm/standalone"
                   ]
                 },
                 {
@@ -266,7 +305,7 @@ jobs:
           aws ecr get-login-password --region "${AWS_REGION}" |
             oras login --username AWS --password-stdin "${registry}"
 
-      - name: Publish immutable Fargate and AgentCore images
+      - name: Publish immutable release images
         env:
           AGENTCORE_DIGEST: ${{ steps.evidence.outputs.agentcore_digest }}
           AGENTCORE_REPOSITORY: ${{ vars.AXON_AGENTCORE_ECR_REPOSITORY }}
@@ -275,12 +314,16 @@ jobs:
           FARGATE_DIGEST: ${{ steps.evidence.outputs.fargate_digest }}
           FARGATE_REPOSITORY: ${{ vars.AXON_FARGATE_ECR_REPOSITORY }}
           RELEASE_TAG: ${{ inputs.release_tag }}
+          STANDALONE_AMD64_DIGEST: ${{ steps.evidence.outputs.standalone_amd64_digest }}
+          STANDALONE_ARM64_DIGEST: ${{ steps.evidence.outputs.standalone_arm64_digest }}
+          STANDALONE_REPOSITORY: ${{ vars.AXON_STANDALONE_ECR_REPOSITORY }}
         run: |
           set -euo pipefail
           publish_target() {
             local archive=$1
             local digest=$2
             local repository=$3
+            local tag=${4:-${RELEASE_TAG}}
             local repository_name=${repository#*.amazonaws.com/}
             local existing
             local lookup_error="${RUNNER_TEMP}/ecr-lookup-error"
@@ -288,7 +331,7 @@ jobs:
               aws ecr describe-images \
                 --region "${AWS_REGION}" \
                 --repository-name "${repository_name}" \
-                --image-ids "imageTag=${RELEASE_TAG}" \
+                --image-ids "imageTag=${tag}" \
                 --query 'imageDetails[0].imageDigest' \
                 --output text 2>"${lookup_error}"
             ); then
@@ -303,7 +346,7 @@ jobs:
               --from-oci-layout \
               --no-tty \
               "${archive}@${digest}" \
-              "${repository}:${RELEASE_TAG}"
+              "${repository}:${tag}"
           }
 
           publish_target \
@@ -314,6 +357,16 @@ jobs:
             "${EVIDENCE_DIR}/axonllm-agentcore-linux-arm64.oci.tar" \
             "${AGENTCORE_DIGEST}" \
             "${AGENTCORE_REPOSITORY}"
+          publish_target \
+            "${EVIDENCE_DIR}/axonllm-linux-amd64.oci.tar" \
+            "${STANDALONE_AMD64_DIGEST}" \
+            "${STANDALONE_REPOSITORY}" \
+            "${RELEASE_TAG}-amd64"
+          publish_target \
+            "${EVIDENCE_DIR}/axonllm-standalone-linux-arm64.oci.tar" \
+            "${STANDALONE_ARM64_DIGEST}" \
+            "${STANDALONE_REPOSITORY}" \
+            "${RELEASE_TAG}-arm64"
 
       - name: Verify remote image digests
         env:
@@ -322,6 +375,9 @@ jobs:
           AWS_REGION: ${{ inputs.aws_region }}
           FARGATE_DIGEST: ${{ steps.evidence.outputs.fargate_digest }}
           FARGATE_REPOSITORY: ${{ vars.AXON_FARGATE_ECR_REPOSITORY }}
+          STANDALONE_AMD64_DIGEST: ${{ steps.evidence.outputs.standalone_amd64_digest }}
+          STANDALONE_ARM64_DIGEST: ${{ steps.evidence.outputs.standalone_arm64_digest }}
+          STANDALONE_REPOSITORY: ${{ vars.AXON_STANDALONE_ECR_REPOSITORY }}
         run: |
           set -euo pipefail
           verify_target() {
@@ -338,6 +394,10 @@ jobs:
             "${FARGATE_REPOSITORY}" "${FARGATE_DIGEST}"
           verify_target \
             "${AGENTCORE_REPOSITORY}" "${AGENTCORE_DIGEST}"
+          verify_target \
+            "${STANDALONE_REPOSITORY}" "${STANDALONE_AMD64_DIGEST}"
+          verify_target \
+            "${STANDALONE_REPOSITORY}" "${STANDALONE_ARM64_DIGEST}"
 
       - name: Emit immutable publication result
         id: result
@@ -346,16 +406,25 @@ jobs:
           AGENTCORE_REPOSITORY: ${{ vars.AXON_AGENTCORE_ECR_REPOSITORY }}
           FARGATE_DIGEST: ${{ steps.evidence.outputs.fargate_digest }}
           FARGATE_REPOSITORY: ${{ vars.AXON_FARGATE_ECR_REPOSITORY }}
+          STANDALONE_AMD64_DIGEST: ${{ steps.evidence.outputs.standalone_amd64_digest }}
+          STANDALONE_ARM64_DIGEST: ${{ steps.evidence.outputs.standalone_arm64_digest }}
+          STANDALONE_REPOSITORY: ${{ vars.AXON_STANDALONE_ECR_REPOSITORY }}
         run: |
           set -euo pipefail
           agentcore_image="${AGENTCORE_REPOSITORY}@${AGENTCORE_DIGEST}"
           fargate_image="${FARGATE_REPOSITORY}@${FARGATE_DIGEST}"
+          standalone_amd64_image="${STANDALONE_REPOSITORY}@${STANDALONE_AMD64_DIGEST}"
+          standalone_arm64_image="${STANDALONE_REPOSITORY}@${STANDALONE_ARM64_DIGEST}"
           {
             printf 'agentcore_image=%s\n' "${agentcore_image}"
             printf 'fargate_image=%s\n' "${fargate_image}"
+            printf 'standalone_amd64_image=%s\n' "${standalone_amd64_image}"
+            printf 'standalone_arm64_image=%s\n' "${standalone_arm64_image}"
           } >>"${GITHUB_OUTPUT}"
           {
             printf '### Immutable release images\n\n'
             printf -- '- AgentCore: \x60%s\x60\n' "${agentcore_image}"
             printf -- '- Fargate: \x60%s\x60\n' "${fargate_image}"
+            printf -- '- Standalone AMD64: \x60%s\x60\n' "${standalone_amd64_image}"
+            printf -- '- Standalone ARM64: \x60%s\x60\n' "${standalone_arm64_image}"
           } >>"${GITHUB_STEP_SUMMARY}"

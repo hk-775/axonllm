@@ -133,16 +133,9 @@ class TestParsing:
 class TestTheEntrypointDefaultsDemoDataOn:
     """``serve_dashboard.py`` seeds demo data unless told otherwise.
 
-    This is the documented behaviour of the four install paths in the README, and
-    the one that surprises people: the Dockerfile ``CMD`` is this same entrypoint,
-    so *any* container started without the variable comes up with Acme Corp,
-    three fictional users and 66 fabricated usage records — `docker compose up`,
-    a hand-written task definition, App Runner. A "clean install" that silently
-    seeds a demo tenant is worse than one that fails, because the data is
-    indistinguishable from real usage in the UI. ``infra/stack.py`` neutralises
-    the default for the Fargate path only, asserted in
-    ``test_infra_stack_env.py``; this class asserts the default it is
-    neutralising.
+    This is the documented direct-development behavior. Production containers
+    use ``src.gateway.standalone`` and explicitly disable demo data; the root
+    Compose profile explicitly opts into this seeded development behavior.
 
     Asserted here rather than left to the README because the safe-looking change
     — dropping the default so a bare ``python serve_dashboard.py`` starts empty —
@@ -173,11 +166,9 @@ class TestTheEntrypointDefaultsDemoDataOn:
     def test_the_env_file_is_gated_on_the_operator_not_the_default(self, tmp_path, monkeypatch):
         """The ordering that makes one flag mean two things.
 
-        ``load_dev_env_file()`` runs *before* the default is applied, so a
-        container inheriting the default seeds demo data and never reads ``.env``.
-        Both halves matter: it is why a deployed gateway cannot pick up stray
-        credentials from a file baked into the image, and why running locally
-        without setting the flag yourself leaves you with no provider keys.
+        ``load_dev_env_file()`` runs *before* the direct-development default is
+        applied. This is why running locally without setting the flag yourself
+        leaves provider keys in ``.env`` untouched.
         """
         monkeypatch.delenv("AXON_LOAD_DEMO_DATA", raising=False)
         env: dict[str, str] = {}

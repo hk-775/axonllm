@@ -201,6 +201,7 @@ class TestLoadAppConfig:
             if key.startswith("AXON_"):
                 monkeypatch.delenv(key, raising=False)
         monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
+        monkeypatch.delenv("AWS_REGION", raising=False)
         monkeypatch.setenv("AXON_DEPLOYMENT_PROFILE", "development")
 
         config = load_app_config()

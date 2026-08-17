@@ -768,7 +768,7 @@ class AxonLLMStack(Stack):
             enforce_ssl=True,
             retention_period=Duration.days(14),
             receive_message_wait_time=Duration.seconds(20),
-            visibility_timeout=Duration.minutes(2),
+            visibility_timeout=Duration.minutes(5),
             dead_letter_queue=sqs.DeadLetterQueue(
                 max_receive_count=5,
                 queue=event_dead_letter_queue,

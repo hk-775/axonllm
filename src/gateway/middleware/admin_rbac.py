@@ -353,9 +353,13 @@ class AdminRBACMiddleware(BaseHTTPMiddleware):
                 if access == "read"
                 else Action.API_KEY_MANAGE
             )
-        if path == "/admin/audit/export":
+        if path == "/admin/audit/export" or path.startswith(
+            "/admin/audit/exports/"
+        ):
             return Action.AUDIT_EXPORT
-        if path == "/admin/usage/export":
+        if path == "/admin/usage/export" or path.startswith(
+            "/admin/usage/exports/"
+        ):
             return Action.USAGE_EXPORT
         resource = self._extract_resource(path)
         read_action, write_action = TENANT_RESOURCE_ACTIONS.get(

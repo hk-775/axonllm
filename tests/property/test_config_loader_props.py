@@ -214,7 +214,10 @@ def test_app_config_env_override(env_var: str, data):
     # Save and clear relevant env vars
     saved = {}
     for key in list(os.environ):
-        if key.startswith("AXON_") or key == "AWS_DEFAULT_REGION":
+        if key.startswith("AXON_") or key in {
+            "AWS_DEFAULT_REGION",
+            "AWS_REGION",
+        }:
             saved[key] = os.environ.pop(key)
 
     try:
@@ -233,7 +236,10 @@ def test_app_config_env_override(env_var: str, data):
         # Restore env vars
         os.environ.pop(env_var, None)
         for key in list(os.environ):
-            if key.startswith("AXON_") or key == "AWS_DEFAULT_REGION":
+            if key.startswith("AXON_") or key in {
+                "AWS_DEFAULT_REGION",
+                "AWS_REGION",
+            }:
                 os.environ.pop(key, None)
         os.environ.update(saved)
 

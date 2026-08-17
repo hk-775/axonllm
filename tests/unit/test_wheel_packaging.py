@@ -107,47 +107,88 @@ def test_clean_wheel_launchers_and_assets_work_outside_repository(tmp_path):
     wheel = _build_wheel(tmp_path)
     with zipfile.ZipFile(wheel) as archive:
         names = set(archive.namelist())
-        entry_points_name = next(
-            name
-            for name in names
-            if name.endswith(".dist-info/entry_points.txt")
-        )
+        entry_points_name = next(name for name in names if name.endswith(".dist-info/entry_points.txt"))
         entry_points = archive.read(entry_points_name).decode("utf-8")
-        metadata_name = next(
-            name for name in names if name.endswith(".dist-info/METADATA")
-        )
+        metadata_name = next(name for name in names if name.endswith(".dist-info/METADATA"))
         metadata = archive.read(metadata_name).decode("utf-8")
     assert "axon = src.gateway.cli:main" in entry_points
     assert "axon-demo = src.gateway.cli:demo" in entry_points
-    assert (
-        "axon-agentcore-deploy = "
-        "src.gateway.deployment.agentcore_deploy:main"
-    ) in entry_points
+    assert ("axon-agentcore-deploy = src.gateway.deployment.agentcore_deploy:main") in entry_points
     assert "Description-Content-Type: text/markdown" in metadata
     assert "License-File: LICENSE" in metadata
     assert "License-File: THIRD_PARTY_NOTICES.md" in metadata
     assert "# AxonLLM" in metadata
+    requirement_lines = [
+        line.removeprefix("Requires-Dist: ") for line in metadata.splitlines() if line.startswith("Requires-Dist: ")
+    ]
+    for dependency in ("pyyaml", "tiktoken", "aiohttp"):
+        assert any(line.lower().startswith(dependency) and "extra ==" not in line for line in requirement_lines)
+    for dependency in (
+        "boto3",
+        "google-auth",
+        "mangum",
+        "sqlglot",
+        "starlette",
+        "uvicorn",
+    ):
+        matching = [line for line in requirement_lines if line.lower().startswith(dependency)]
+        assert matching
+        assert all("extra ==" in line for line in matching)
     assert any(name.endswith(".dist-info/licenses/LICENSE") for name in names)
-    assert any(
-        name.endswith(".dist-info/licenses/THIRD_PARTY_NOTICES.md")
-        for name in names
-    )
+    assert any(name.endswith(".dist-info/licenses/THIRD_PARTY_NOTICES.md") for name in names)
 
     required = {
         "axonllm/__init__.py",
+        "axonllm/assemblies.py",
+        "axonllm/hosts.py",
+        "axonllm/ostiari.py",
         "axonllm/py.typed",
         "axonllm/router.py",
         "src/gateway/admin/static/index.html",
         "src/gateway/chat/static/index.html",
+        "src/gateway/deployment/config_contract.py",
+        "src/gateway/deployment/edge_transition.py",
+        "src/gateway/deployment/network_preflight.py",
+        "src/gateway/deployment/planning.py",
+        "src/gateway/deployment/runtime_lifecycle.py",
+        "src/gateway/deployment/runtime_lifecycle_status.py",
+        "src/gateway/deployment/standalone_recipe.py",
+        "src/gateway/deployment/infra/agentcore-supported-availability-zones-v1.json",
+        "src/gateway/deployment/infra/application-state-migration-v1.json",
+        "src/gateway/deployment/infra/application_state.py",
+        "src/gateway/deployment/infra/application_state_stack.py",
         "src/gateway/deployment/infra/app.py",
         "src/gateway/deployment/infra/cdk.json",
+        "src/gateway/deployment/infra/managed_network_stack.py",
+        "src/gateway/deployment/infra/parked_stack.py",
         "src/gateway/deployment/infra/requirements.txt",
+        "src/gateway/deployment/infra/runtime_network.py",
+        "src/gateway/deployment/infra/serverless_control_plane_stack.py",
+        "src/gateway/deployment/infra/serverless_workers_stack.py",
+        "src/gateway/deployment/infra/static_asset_deployer.py",
+        "src/gateway/deployment/serverless_artifacts.py",
+        "src/gateway/deployment/schemas/deployment-descriptor-v1.schema.json",
+        "src/gateway/deployment/schemas/deployment-plan-context-v1.schema.json",
+        "src/gateway/deployment/schemas/deployment-plan-v1.schema.json",
+        "src/gateway/deployment/schemas/deployment-v1.schema.json",
+        "src/gateway/deployment/schemas/edge-transition-context-v1.schema.json",
+        "src/gateway/deployment/schemas/edge-transition-plan-v1.schema.json",
+        "src/gateway/deployment/schemas/runtime-lifecycle-context-v1.schema.json",
+        "src/gateway/deployment/schemas/runtime-lifecycle-plan-v1.schema.json",
+        "src/gateway/deployment/schemas/runtime-lifecycle-receipt-v1.schema.json",
+        "src/gateway/deployment/schemas/runtime-lifecycle-status-v1.schema.json",
+        "src/gateway/deployment/schemas/standalone-ecs-context-v1.schema.json",
+        "src/gateway/deployment/schemas/standalone-ecs-plan-v1.schema.json",
+        "src/gateway/control_plane_routes.py",
+        "src/gateway/export_jobs.py",
+        "src/gateway/host_assemblies.py",
+        "src/gateway/serverless_control.py",
+        "src/gateway/serverless_workers.py",
+        "src/gateway/standalone.py",
     }
     required.update(
         path.relative_to(_REPO).as_posix()
-        for path in (
-            _REPO / "src" / "gateway" / "resources" / "runtime"
-        ).rglob("*")
+        for path in (_REPO / "src" / "gateway" / "resources" / "runtime").rglob("*")
         if path.is_file()
     )
     assert required <= names
@@ -223,11 +264,43 @@ def test_clean_wheel_launchers_and_assets_work_outside_repository(tmp_path):
         from starlette.testclient import TestClient
 
         import axonllm
-        from axonllm import AsyncRouter
+        from axonllm import (
+            AsyncRouter,
+            IdentityContext,
+            OstiariHost,
+            OstiariRouterAdapter,
+            build_ostiari_adapter,
+            build_router,
+        )
         from src.gateway import cli
         from src.gateway import local_demo
         from src.gateway import local_server
+        from src.gateway import standalone
         from src.gateway.deployment import agentcore_deploy
+        from src.gateway.deployment.config_contract import (
+            deployment_config_schema,
+        )
+        from src.gateway.deployment.edge_transition import (
+            edge_transition_context_schema,
+            edge_transition_plan_schema,
+        )
+        from src.gateway.deployment.planning import (
+            deployment_descriptor_schema,
+            deployment_plan_context_schema,
+            deployment_plan_schema,
+        )
+        from src.gateway.deployment.runtime_lifecycle import (
+            runtime_lifecycle_context_schema,
+            runtime_lifecycle_plan_schema,
+        )
+        from src.gateway.deployment.runtime_lifecycle_status import (
+            runtime_lifecycle_receipt_schema,
+            runtime_lifecycle_status_schema,
+        )
+        from src.gateway.deployment.standalone_recipe import (
+            standalone_ecs_context_schema,
+            standalone_ecs_plan_schema,
+        )
 
         installed = Path(os.environ["WHEEL_PURELIB"]).resolve()
         for module in (
@@ -235,10 +308,52 @@ def test_clean_wheel_launchers_and_assets_work_outside_repository(tmp_path):
             cli,
             local_demo,
             local_server,
+            standalone,
             agentcore_deploy,
         ):
             assert Path(module.__file__).resolve().is_relative_to(installed)
         assert AsyncRouter.__module__ == "axonllm.router"
+        assert build_router.__module__ == "axonllm.assemblies"
+        assert build_ostiari_adapter.__module__ == "axonllm.assemblies"
+        assert IdentityContext.__module__ == "axonllm.hosts"
+        assert OstiariHost.__module__ == "axonllm.hosts"
+        assert OstiariRouterAdapter.__module__ == "axonllm.ostiari"
+        assert deployment_config_schema()["$id"] == (
+            "urn:axonllm:deployment-config:v1"
+        )
+        assert deployment_plan_context_schema()["$id"] == (
+            "urn:axonllm:deployment-plan-context:v1"
+        )
+        assert deployment_descriptor_schema()["$id"] == (
+            "urn:axonllm:deployment-descriptor:v1"
+        )
+        assert deployment_plan_schema()["$id"] == (
+            "urn:axonllm:deployment-plan:v1"
+        )
+        assert edge_transition_context_schema()["$id"] == (
+            "urn:axonllm:edge-transition-context:v1"
+        )
+        assert edge_transition_plan_schema()["$id"] == (
+            "urn:axonllm:edge-transition-plan:v1"
+        )
+        assert runtime_lifecycle_context_schema()["$id"] == (
+            "urn:axonllm:runtime-lifecycle-context:v1"
+        )
+        assert runtime_lifecycle_plan_schema()["$id"] == (
+            "urn:axonllm:runtime-lifecycle-plan:v1"
+        )
+        assert runtime_lifecycle_status_schema()["$id"] == (
+            "urn:axonllm:runtime-lifecycle-status:v1"
+        )
+        assert runtime_lifecycle_receipt_schema()["$id"] == (
+            "urn:axonllm:runtime-lifecycle-receipt:v1"
+        )
+        assert standalone_ecs_context_schema()["$id"] == (
+            "urn:axonllm:standalone-ecs-context:v1"
+        )
+        assert standalone_ecs_plan_schema()["$id"] == (
+            "urn:axonllm:standalone-ecs-plan:v1"
+        )
 
         invocation_dir = Path.cwd()
         custom_config = invocation_dir / "custom" / "models.yaml"
@@ -281,6 +396,39 @@ def test_clean_wheel_launchers_and_assets_work_outside_repository(tmp_path):
         )
         agentcore_deploy._materialize_infra()
         assert (agentcore_deploy.INFRA_ROOT / "app.py").is_file()
+        assert (
+            agentcore_deploy.INFRA_ROOT / "application_state.py"
+        ).is_file()
+        assert (
+            agentcore_deploy.INFRA_ROOT
+            / "application_state_stack.py"
+        ).is_file()
+        assert (
+            agentcore_deploy.INFRA_ROOT
+            / "application-state-migration-v1.json"
+        ).is_file()
+        assert (
+            agentcore_deploy.INFRA_ROOT
+            / "agentcore-supported-availability-zones-v1.json"
+        ).is_file()
+        assert (
+            agentcore_deploy.INFRA_ROOT / "managed_network_stack.py"
+        ).is_file()
+        assert (
+            agentcore_deploy.INFRA_ROOT / "runtime_network.py"
+        ).is_file()
+        assert (
+            agentcore_deploy.INFRA_ROOT
+            / "serverless_control_plane_stack.py"
+        ).is_file()
+        assert (
+            agentcore_deploy.INFRA_ROOT
+            / "serverless_workers_stack.py"
+        ).is_file()
+        assert (
+            agentcore_deploy.INFRA_ROOT
+            / "static_asset_deployer.py"
+        ).is_file()
         assert (agentcore_deploy.INFRA_ROOT / "cdk.json").is_file()
         print(json.dumps({"routes": len(app.routes)}))
         """

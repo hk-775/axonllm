@@ -12,15 +12,52 @@ provider translation, selection, retry, fallback, streaming, and usage
 telemetry. The control plane owns configuration, virtual keys, policies,
 budgets, analytics, and audit.
 
-The accepted v0.3 boundary is recorded in
+The original v0.3 public-beta boundary is recorded in
 [ADR 0001](docs/adr/0001-v0.3-product-boundary.md). Fleet-wide adaptive load
-balancing, Athena query execution, agent behavior, and Ostiari integration are
-explicitly outside the public-beta release gate.
+balancing, Athena query execution, agent behavior, and Ostiari integration were
+outside that release gate. The accepted post-beta deployment boundary is in
+[ADR 0002](docs/adr/0002-deployment-architecture.md).
 
 For a plain-English feature tour with code flows and diagrams, see
 [AxonLLM In Simple English](docs/AXONLLM_SIMPLE_GUIDE.md).
 
+The accepted deployment redesign, including Ostiari embedding, bring-your-own
+networking, and the serverless AgentCore control plane, is recorded in the
+[Deployment Architecture Plan](docs/DEPLOYMENT_ARCHITECTURE_PLAN.md). It
+describes a target state; the production runbooks remain authoritative until
+the migration is complete.
+
+The first deployment-planning slice is available locally and cannot mutate
+AWS:
+
+```bash
+axon deploy plan \
+  --config config/deployment/agentcore-existing-vpc.yaml \
+  --context config/deployment/agentcore-plan-context.example.json
+```
+
+It writes content-addressed plan and descriptor JSON files under
+`.axon/plans`. The checked-in context is illustrative; production automation
+must replace its account, release, image, template, stack-state, and resource
+evidence with verified values.
+
+The standalone container serves the gateway, control API, and UI from one
+image. The root Compose file is an explicit disposable evaluation profile;
+production Docker and existing-infrastructure ECS recipes are documented in
+[Standalone Deployment](deploy/standalone/README.md) and the
+[Standalone Runbook](docs/STANDALONE_RUNBOOK.md).
+
+The phased state, network, serverless-control, edge-cutover, rollback, and
+legacy-retirement sequence is documented in the
+[Deployment Migration Runbook](docs/DEPLOYMENT_MIGRATION_RUNBOOK.md).
+
 The public embedded API now starts at `axonllm.AsyncRouter`:
+
+```bash
+pip install axon-llm                 # HTTP providers, no web server or AWS SDK
+pip install "axon-llm[bedrock]"      # add the Bedrock transport
+pip install "axon-llm[google]"       # add Vertex workload identity
+```
 
 ```python
 import asyncio
@@ -47,16 +84,19 @@ asyncio.run(main())
 `from_files` is the local/bootstrap path. Production deployments will consume
 the same configuration through versioned control-plane snapshots.
 
+Ostiari embeds the same router through the explicit
+`OstiariRouterAdapter` lifecycle. The host supplies verified routing snapshots,
+opaque credential resolution, canonical identity, usage, and telemetry; the
+adapter imports no Ostiari, server, or AWS control-plane package. See the
+[Ostiari Embedded Adapter](docs/OSTIARI_EMBEDDED_ADAPTER.md) for the integration
+contract and migration safety rules.
+
 ```bash
 git clone https://github.com/AxonLLM/axonllm.git
 cd axonllm
 cp -n config/providers.yaml.example config/providers.yaml
 # Add at least one API key (or just use Bedrock with AWS credentials)
-docker compose run --rm --service-ports \
-  -e AXON_DEPLOYMENT_PROFILE=development \
-  -e AXON_REQUIRE_CANONICAL_IDENTITY=false \
-  -e AXON_AUTH_MODE=LOG_ONLY \
-  axonllm                   # needs the Docker daemon running
+docker compose up --build    # needs the Docker daemon running
 # Open http://localhost:8000 — the landing page, with the dashboard one click away
 # (or go straight to http://localhost:8000/admin/dashboard)
 ```
@@ -203,6 +243,8 @@ mapping.
 > The query and shared control-plane implementation is newer than `v0.2.4`;
 > that release evidence does not certify these additions, and no deployed
 > Athena or shared-control-plane canary has been retained yet.
+> Current source implements schema-v4 evidence for Fargate, AgentCore, and both
+> standalone platforms, but no schema-v4 tag or publication has completed.
 
 For a surface inventory and end-to-end sequences, see
 [Features And Flows](docs/FEATURES_AND_FLOWS.md). `query.mutate` remains an
@@ -321,14 +363,13 @@ where someone might mistake it for a live tenant.
 
 | Flag | Default | What it does |
 |------|---------|--------------|
-| `AXON_LOAD_DEMO_DATA` | `true` in the container, `false` in code | Seeds `config/demo_seed.yaml`: projects, users, policy hierarchy, usage history, audit chain, webhooks. **Also** the gate on reading `.env` |
-| `AXON_AUTH_MODE` | `ENFORCE`, but `serve_dashboard.py` sets `LOG_ONLY` | `ENFORCE` requires an `axon_` key on every request; `LOG_ONLY` accepts anonymous requests and only logs what it would have denied |
+| `AXON_LOAD_DEMO_DATA` | `false` in code and the image; evaluation Compose and `serve_dashboard.py` select `true` | Seeds `config/demo_seed.yaml`: projects, users, policy hierarchy, usage history, audit chain, webhooks. **Also** the gate on reading `.env` |
+| `AXON_AUTH_MODE` | `ENFORCE` in code and the image; evaluation Compose and `serve_dashboard.py` select `LOG_ONLY` | `ENFORCE` requires an `axon_` key on every request; `LOG_ONLY` accepts anonymous requests and only logs what it would have denied |
 
-> **Demo data is opt-out in the container, not opt-in.**
-> `serve_dashboard.py` is the Docker `CMD`, and it defaults
-> `AXON_LOAD_DEMO_DATA` to `true` when the variable is absent. Both checked-in
-> AWS stacks set it explicitly to `false`; any other container definition must
-> do the same.
+> **Demo data is opt-in at the deployment profile.**
+> The production image starts through `src.gateway.standalone` with demo data
+> disabled and authentication enforced. The checked-in root Compose file
+> explicitly selects the disposable seeded profile.
 
 ### 1. Local, clean
 
@@ -554,11 +595,10 @@ reviewed the synthesized change and parameter values. Valid AWS credentials do
 not substitute for that review — they settle whether the calls *can* succeed,
 not whether you meant to grant those particular permissions.
 
-That is the whole install. The stack sets `AXON_LOAD_DEMO_DATA=false` in the task
-definition, so there is no post-deploy step to remember — the value is explicit
-rather than omitted precisely because omitting it means demo data *on* (the
-container `CMD` supplies the default). `tests/unit/test_infra_stack_env.py`
-asserts it, along with `AXON_AUTH_MODE=ENFORCE`, for the same reason.
+That is the whole install. The image and stack both set
+`AXON_LOAD_DEMO_DATA=false`, so there is no post-deploy step to remember.
+`tests/unit/test_infra_stack_env.py` asserts it, along with
+`AXON_AUTH_MODE=ENFORCE`.
 
 **Step 3 — put your provider keys in Secrets Manager.** The stack creates a
 retained secret with a CloudFormation-generated physical name, initializes it
@@ -643,8 +683,8 @@ defines the multi-tenant release gate.
 AgentCore is always an authenticated, canonical production profile. There is no
 anonymous AgentCore option. A first adopter chooses either:
 
-- `managed-cognito`: deploy a separate retained Cognito pool, public
-  authorization-code client, and hosted UI; or
+- `managed-cognito`: deploy a separate retained Cognito pool, AgentCore
+  audience client, control-plane login client, and hosted UI; or
 - `external-oidc`: use an existing issuer, client, audience, and explicit
   tenant/project claim names.
 
@@ -677,7 +717,6 @@ uv run axon setup agentcore \
   --tenant tenant-a --project project-a --project-name Production \
   --admin-user-name admin@example.com --admin-email admin@example.com \
   --hosted-ui-domain-prefix axonllm-123456789012 \
-  --oauth-callback-url https://app.example.com/oauth/callback \
   --athena-query-role-arn arn:aws:iam::123456789012:role/AxonAthenaReader \
   --output axonllm-agentcore.json
 
@@ -708,10 +747,11 @@ every `/saml/*` request is subject to the normal Cognito authentication action.
 The tenant-specific SAML IdP must be configured on the retained Cognito pool and
 enabled on the relevant app clients before SAML users are admitted.
 
-The managed client supports only OAuth authorization code. The adopting
-application must send an S256 PKCE challenge and use the returned **ID token**
-as the AgentCore bearer token; that token contains `custom:tenant_id` and
-`custom:project_id`. AxonLLM does not ship an OAuth callback application.
+The retained AgentCore client is a secretless audience marker with OAuth and
+direct authentication disabled. Browser authentication belongs to the control
+plane: custom-domain mode uses its confidential ALB client, while CloudFront
+mode creates a separate secretless authorization-code client with S256 PKCE.
+The protected certification workflow uses its own confidential client.
 Existing OIDC setup and the complete production checks are in the
 [AgentCore Runbook](docs/AGENTCORE_RUNBOOK.md#first-adopter-setup).
 The external-OIDC path currently deploys AgentCore and canonical bootstrap
@@ -1373,8 +1413,8 @@ remain available through `OIDCConfig.claim_mappings` when embedding the service.
 Production SAML is supported only through the managed-Cognito control plane.
 AxonLLM is not a SAML service provider and never receives an assertion. Configure
 the enterprise IdP on the retained Cognito user pool, enable that provider on the
-confidential ALB client and on the public PKCE client when federated users invoke
-AgentCore, and give the IdP Cognito's SP entity ID and SAML response endpoint.
+confidential ALB client or CloudFront browser client, and give the IdP Cognito's
+SP entity ID and SAML response endpoint.
 Require signed responses or assertions and manage IdP metadata/certificate
 rotation in Cognito.
 
@@ -2360,7 +2400,7 @@ traffic":
 | Every routed provider has credentials | A model has no usable provider | Providers without keys are dropped silently at startup |
 | API authentication is enforced | `AXON_AUTH_MODE=LOG_ONLY` | Requests are served *and* logged as denied |
 | Tenant membership is authoritative | `AXON_REQUIRE_CANONICAL_IDENTITY=false` | Legacy token roles, scopes, tenant, and project claims can still supply authority |
-| Demo seed data is not loaded | `AXON_LOAD_DEMO_DATA` is unset or true | `serve_dashboard.py` — the container `CMD` — defaults it to `true` |
+| Demo seed data is not loaded | `AXON_LOAD_DEMO_DATA` is unset or true | The direct local-development entrypoint defaults it to `true`; the production image sets it to `false` |
 | State survives a restart | DynamoDB is disabled or unreachable | Writes are swallowed by design, so billing data vanishes silently |
 | Issued API keys are scoped and expire | A legacy key carries no expiry, or scope posture needs review | **WARN, not FAIL.** Canonical tenant keys default to 90 days and are capped at 365; the service principal's stored scopes govern mapped data-plane routes |
 
@@ -2563,14 +2603,15 @@ tenant admin and datasource routes, suppresses chat/model/query execution with
 `AXON_CONTROL_PLANE_ONLY=true`, and has no Athena/STS authority. The
 `external-oidc` path currently deploys AgentCore only and does not receive this
 Cognito-authenticated web control plane.
-The release workflow records Fargate and AgentCore as distinct targets in its
-schema-v3 manifest and KMS-signed multi-target SLSA provenance. Deployment
-verification selects `fargate` or `agentcore`, binds the selected private ECR
-digest to its target evidence, verifies both KMS signatures and the remote
-image, and rescans it. A separate protected workflow copies the signed OCI
-archives into retained KMS-encrypted immutable ECR repositories without
-rebuilding and verifies both remote digests. Those release workflows do not
-deploy either runtime.
+The release workflow records Fargate, AgentCore, standalone AMD64, and
+standalone ARM64 as distinct targets in its schema-v4 manifest and KMS-signed
+multi-target SLSA provenance. Deployment verification binds the selected
+private ECR digest to its exact target and platform evidence, verifies both KMS
+signatures and the remote image, and rescans it. A separate protected workflow
+copies the signed OCI archives into retained KMS-encrypted immutable ECR
+repositories without rebuilding and verifies every remote digest. Historical
+schema-v3 Fargate and AgentCore evidence remains verifiable. These release
+workflows do not deploy a runtime or service.
 
 `launch-agentcore-production.yml` is the only manual AgentCore production
 entry point. It certifies an isolated external-OIDC runtime, updates an
@@ -2641,7 +2682,7 @@ state or rebuild the image after configuration changes.
 | OIDC | Set exact issuer and audience; verify key rotation and fail-closed outage behavior |
 | TLS | Terminate TLS at ALB/CloudFront, not at the gateway |
 | Budgets | Set org-level budget limits before granting project access |
-| Release image | Deploy only the private ECR `@sha256` URI that passed verification for the selected `fargate` or `agentcore` target |
+| Release image | Deploy only the private ECR `@sha256` URI that passed verification for the exact Fargate, AgentCore, or standalone platform target |
 | Recovery | Verify PITR and a recent AWS Backup recovery point; complete and retain evidence from a real AWS restore exercise |
 
 Do not use a green liveness probe as the release gate. Run
@@ -2652,10 +2693,11 @@ categories and bodyless read load, and use
 `scripts/operations/fargate_recovery.py status --minimum-healthy-targets 2` to
 prove a Fargate service has at least two healthy ALB targets. This combination
 does not identify which task served each request.
-Require green CI and schema-v3 target-aware release evidence for the exact
-deployed digest. `v0.2.4` has retained private-ECR/KMS evidence, but no hardened
-runtime deployment, AWS restore exercise, or application recovery rehearsal has
-been verified.
+Require green CI and supported target-aware release evidence for the exact
+deployed digest. Historical `v0.2.4` evidence is schema v3; new four-target
+evidence is schema v4. `v0.2.4` has retained private-ECR/KMS evidence, but no
+hardened runtime deployment, AWS restore exercise, or application recovery
+rehearsal has been verified.
 
 ## Contributing
 

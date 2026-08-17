@@ -1703,7 +1703,7 @@ def test_security_event_outbox_is_fifo_encrypted_and_redriven(
         if "RedrivePolicy" in queue["Properties"]
     )
     assert outbox["Properties"]["ReceiveMessageWaitTimeSeconds"] == 20
-    assert outbox["Properties"]["VisibilityTimeout"] == 120
+    assert outbox["Properties"]["VisibilityTimeout"] == 300
     assert outbox["Properties"]["RedrivePolicy"]["maxReceiveCount"] == 5
     assert outbox["DeletionPolicy"] == "Retain"
     assert outbox["UpdateReplacePolicy"] == "Retain"
@@ -1940,7 +1940,7 @@ def test_runtime_image_is_release_verified_digest_pinned_and_non_root(
     ) in dockerfile
     assert (
         "FROM docker.io/library/python:3.12-slim@sha256:"
-        "adbc7c33e0abc183557d1d14ce5eb5d261aaadff5451c81a8db636b3ebefcdf6"
+        "0568e6111802e74c03e8dda76565cdf4b88881d77de0d9b769846e9dfcb8d80a"
     ) in dockerfile
     assert (
         "COPY --from=ghcr.io/astral-sh/uv:0.10.7@sha256:"

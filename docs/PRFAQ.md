@@ -32,12 +32,14 @@ release requirements.
 
 The production implementation includes tenant SCIM version/snapshot reads and
 transactional version increments. Focused hardening regressions are green
-locally, and schema-v3 evidence plus target-aware deployment verification cover
-both Fargate and AgentCore. Promotion still requires successful repository CI
-for the exact commit. `v0.2.4` completed the private-ECR/KMS-signature flow for
-both target digests, but predates the query and shared control-plane work. Those
-additions have no tagged evidence or deployed canary. A hardened runtime
-deployment and real AWS restore exercise remain externally unverified.
+locally. Current source implements schema-v4 evidence and target-aware
+deployment verification for Fargate, AgentCore, standalone AMD64, and
+standalone ARM64. Promotion still requires successful repository CI for the
+exact commit. Historical `v0.2.4` completed the schema-v3
+private-ECR/KMS-signature flow for the Fargate and AgentCore digests, but
+predates the query and shared control-plane work. Those additions have no
+tagged evidence or deployed canary. A hardened runtime deployment and real AWS
+restore exercise remain externally unverified.
 
 ## Frequently Asked Questions
 
@@ -378,15 +380,16 @@ the infrastructure source of truth.
 
 **Q: Is ARM64 release evidence generated?**
 
-A: Yes. `release-security.yml` builds, scans, and SBOMs both images, records
-their digests in schema-v3 multi-target SLSA provenance, and KMS-signs both the
-provenance and manifest. `deploy-verification.yml` selects either target, binds
-the supplied private ECR digest to that target's metadata, scan, SBOM, source
-commit, release tag, and CI result, verifies both KMS signatures and the remote
-image, and rescans it. `v0.2.4` completed the real tagged
-private-ECR/KMS-signature run for both targets. It predates the query and
-shared control-plane implementation; a newer tagged run and deployed canaries
-are required before those capabilities can rely on release evidence.
+A: Yes. `release-security.yml` builds, scans, and SBOMs the distinct AMD64
+Fargate, ARM64 AgentCore, and ARM64 standalone images; the AMD64 standalone
+target is cryptographically bound to the exact Fargate image bytes. Schema-v4
+SLSA provenance records all four platform targets, and KMS signs the provenance
+and manifest. `deploy-verification.yml` selects one exact target, binds the
+private ECR digest to its metadata, scan, SBOM, source commit, release tag, and
+CI result, verifies both KMS signatures and the remote image, and rescans it.
+Historical `v0.2.4` completed the real schema-v3 tagged run for Fargate and
+AgentCore. A newer tagged run and deployed canaries are required before newer
+capabilities can rely on release evidence.
 
 **Q: How is an AgentCore production launch gated?**
 

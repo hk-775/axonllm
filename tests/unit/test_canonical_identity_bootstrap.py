@@ -97,6 +97,7 @@ def test_production_profile_requires_durable_persistence(monkeypatch) -> None:
 def test_production_profile_accepts_the_canonical_durable_contract(
     monkeypatch,
 ) -> None:
+    monkeypatch.setenv("AWS_DEFAULT_REGION", "us-east-1")
     monkeypatch.setenv("AXON_DEPLOYMENT_PROFILE", "production")
     monkeypatch.setenv("AXON_AUTH_MODE", "ENFORCE")
     monkeypatch.setenv("AXON_REQUIRE_CANONICAL_IDENTITY", "true")

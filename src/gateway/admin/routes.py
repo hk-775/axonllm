@@ -24,7 +24,12 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 
 from starlette.requests import Request
-from starlette.responses import HTMLResponse, JSONResponse, StreamingResponse
+from starlette.responses import (
+    HTMLResponse,
+    JSONResponse,
+    RedirectResponse,
+    StreamingResponse,
+)
 from starlette.routing import Route
 
 _STATIC_DIR = pathlib.Path(__file__).resolve().parent / "static"
@@ -122,6 +127,15 @@ from src.gateway.auth.cedar_policy import CedarPolicyService, parse_policy
 from src.gateway.config import AppConfig
 from src.gateway.cost_tracker import _EPOCH, CostTracker
 from src.gateway.efficiency_analyzer import EfficiencyAnalyzer
+from src.gateway.export_jobs import (
+    ExportJobError,
+    ExportJobNotFound,
+    ExportJobNotReady,
+    ExportJobService,
+    ExportKind,
+    export_job_public,
+    request_export_identity,
+)
 from src.gateway.health_tracker import ProviderHealthTracker
 from src.gateway.model_registry import ModelRegistry
 from src.gateway.models import GuardrailRule, Project, UsageFilters
@@ -132,6 +146,7 @@ from src.gateway.persistence import (
 )
 from src.gateway.provider_config import ProviderConfig
 from src.gateway.routing_config import RoutingConfigSnapshot
+from src.gateway.security.audit_trail import LEGACY_TENANT_ID
 from src.gateway.semantic_efficiency import SemanticEfficiencyEngine
 from .page_style import (
     BASE_STYLE,
@@ -350,6 +365,7 @@ class AdminAPI:
         semantic_cache: object | None = None,
         policy_service: CedarPolicyService | None = None,
         config_sync: object | None = None,
+        export_jobs: ExportJobService | None = None,
     ) -> None:
         self.cost_tracker = cost_tracker
         self.health_tracker = health_tracker
@@ -406,6 +422,7 @@ class AdminAPI:
         # did not wire one; the endpoint then reports it as unavailable, which is
         # distinguishable from a wired cache with no hits.
         self._semantic_cache = semantic_cache
+        self._export_jobs = export_jobs
 
     # ------------------------------------------------------------------
     # Fleet-wide read helpers
@@ -1635,6 +1652,54 @@ class AdminAPI:
                 {"error": {"type": "invalid_request", "message": "level must be records or breakdown"}},
                 status_code=400,
             )
+        if self._export_jobs is not None:
+            tenant_id = _request_tenant_id(request) or LEGACY_TENANT_ID
+            try:
+                job = await self._export_jobs.create_usage(
+                    tenant_id=tenant_id,
+                    requested_by=request_export_identity(request),
+                    format=fmt,
+                    level=level,
+                    filters={
+                        "start_time": params.get("start_time"),
+                        "end_time": params.get("end_time"),
+                        "provider": params.get("provider"),
+                        "model": params.get("model"),
+                        "project_id": params.get("project_id"),
+                        "user_id": params.get("user_id"),
+                    },
+                )
+            except ValueError:
+                return JSONResponse(
+                    {
+                        "error": {
+                            "type": "invalid_request",
+                            "message": "Usage export filters are invalid.",
+                        }
+                    },
+                    status_code=400,
+                )
+            except ExportJobError:
+                logger.error(
+                    "Unable to create usage export",
+                    exc_info=True,
+                )
+                return JSONResponse(
+                    {
+                        "error": {
+                            "type": "export_unavailable",
+                            "message": "Usage export could not be queued.",
+                        }
+                    },
+                    status_code=503,
+                )
+            body = export_job_public(job)
+            body["statusUrl"] = f"/admin/usage/exports/{job.job_id}"
+            return JSONResponse(
+                body,
+                status_code=202,
+                headers={"Retry-After": "2"},
+            )
 
         # A chargeback export that silently covered one task of N would allocate
         # cost to the wrong owners, so this refresh matters more here than on any
@@ -1704,6 +1769,94 @@ class AdminAPI:
             media_type="text/csv",
             headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )
+
+    async def usage_export_status(self, request: Request) -> JSONResponse:
+        """Return one requester-owned asynchronous usage export."""
+
+        if self._export_jobs is None:
+            return JSONResponse(
+                {"error": {"type": "not_found", "message": "Export jobs are not enabled."}},
+                status_code=404,
+            )
+        try:
+            job = await self._export_jobs.get(
+                tenant_id=_request_tenant_id(request) or LEGACY_TENANT_ID,
+                requested_by=request_export_identity(request),
+                job_id=request.path_params["job_id"],
+                kind=ExportKind.USAGE,
+            )
+        except ExportJobNotFound:
+            return JSONResponse(
+                {"error": {"type": "not_found", "message": "Export job was not found."}},
+                status_code=404,
+            )
+        except ExportJobError:
+            logger.error(
+                "Unable to read usage export status",
+                exc_info=True,
+            )
+            return JSONResponse(
+                {
+                    "error": {
+                        "type": "export_unavailable",
+                        "message": "Usage export status is temporarily unavailable.",
+                    }
+                },
+                status_code=503,
+            )
+        body = export_job_public(job)
+        if job.status.value == "complete":
+            body["downloadUrl"] = (
+                f"/admin/usage/exports/{job.job_id}/download"
+            )
+        return JSONResponse(body)
+
+    async def usage_export_download(self, request: Request):
+        """Redirect an authorized requester to a short-lived S3 URL."""
+
+        if self._export_jobs is None:
+            return JSONResponse(
+                {"error": {"type": "not_found", "message": "Export jobs are not enabled."}},
+                status_code=404,
+            )
+        try:
+            url = await self._export_jobs.download_url(
+                tenant_id=_request_tenant_id(request) or LEGACY_TENANT_ID,
+                requested_by=request_export_identity(request),
+                job_id=request.path_params["job_id"],
+                kind=ExportKind.USAGE,
+            )
+        except ExportJobNotFound:
+            return JSONResponse(
+                {"error": {"type": "not_found", "message": "Export job was not found."}},
+                status_code=404,
+            )
+        except ExportJobNotReady:
+            return JSONResponse(
+                {
+                    "error": {
+                        "type": "export_not_ready",
+                        "message": "Export job is not complete.",
+                    }
+                },
+                status_code=409,
+                headers={"Retry-After": "2"},
+            )
+        except ExportJobError:
+            logger.error(
+                "Unable to authorize usage export download",
+                exc_info=True,
+            )
+            return JSONResponse(
+                {
+                    "error": {
+                        "type": "export_unavailable",
+                        "message": "Usage export download is temporarily unavailable.",
+                    }
+                },
+                status_code=503,
+            )
+        return RedirectResponse(url, status_code=303)
 
     # ------------------------------------------------------------------
     # GET /admin/policies
@@ -3634,6 +3787,16 @@ def create_admin_routes(admin_api: AdminAPI) -> list[Route]:
         Route("/admin/projects/{id}", admin_api.update_project, methods=["PUT"]),
         Route("/admin/usage", admin_api.usage, methods=["GET"]),
         Route("/admin/usage/export", admin_api.usage_export, methods=["GET"]),
+        Route(
+            "/admin/usage/exports/{job_id}",
+            admin_api.usage_export_status,
+            methods=["GET"],
+        ),
+        Route(
+            "/admin/usage/exports/{job_id}/download",
+            admin_api.usage_export_download,
+            methods=["GET"],
+        ),
         Route("/admin/users", admin_api.list_users, methods=["GET"]),
         Route("/admin/users/{id:path}/allowed-models", admin_api.set_user_allowed_models, methods=["PUT"]),
         Route("/admin/users/{id:path}/budget", admin_api.set_user_budget, methods=["PUT"]),

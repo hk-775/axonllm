@@ -40,10 +40,8 @@ logger = logging.getLogger(__name__)
 EnvMapping = MutableMapping[str, str]
 
 # The file is only read when the operator explicitly set AXON_LOAD_DEMO_DATA
-# themselves. The dev entrypoint defaults that variable to "true" when it is
-# absent, and the Dockerfile CMD runs that same entrypoint — so "present in the
-# environment" is the signal that distinguishes a human typing the documented
-# demo command from a container inheriting a default.
+# themselves. The direct development entrypoint defaults that variable to
+# "true" after this check, while container hosts select their profile explicitly.
 _DEMO_FLAG = "AXON_LOAD_DEMO_DATA"
 _PATH_OVERRIDE = "AXON_DEV_ENV_FILE"
 _DEFAULT_PATH = ".env"

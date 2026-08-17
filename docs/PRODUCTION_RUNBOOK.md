@@ -9,10 +9,15 @@ The canonical SCIM convergence contract is implemented: tenant user/group
 transactions advance `SCIM#VERSION`, and `DynamoPersistence` provides strongly
 consistent tenant version and snapshot reads.
 
-Focused hardening regressions are green locally. Release evidence uses
-schema-v3 with distinct Fargate and AgentCore targets. Controlled publication
-copies both signed OCI archives into retained immutable private ECR
-repositories, and deployment verification selects and verifies either target.
+Focused hardening regressions are green locally. The current source implements
+schema-v4 release evidence with distinct Fargate, AgentCore, standalone AMD64,
+and standalone ARM64 targets. Controlled publication copies verified OCI
+archives into retained immutable private ECR repositories, and deployment
+verification selects the exact target and platform. Schema-v3 verification
+remains supported for historical Fargate and AgentCore releases. No schema-v4
+tag has been published yet. Do not create one until `uv lock && uv lock
+--check` succeeds and frozen AMD64/ARM64 container builds pass from the updated
+lockfile.
 
 The repository also contains the newer shared HTTP/AgentCore Athena query
 service, credential-free datasource administration, and managed-Cognito
@@ -306,6 +311,8 @@ See [Features And Flows](FEATURES_AND_FLOWS.md) for request sequences.
   `release` environment;
 - an `AxonLLMReleaseVerifier` role trusted only by the protected GitHub
   `production` environment;
+- retained, immutable, KMS-encrypted `axonllm/fargate`,
+  `axonllm/agentcore`, and `axonllm/standalone` ECR repositories;
 - an `AxonLLMOperationsAudit` role that can read recovery, secret-version, and
   key-rotation metadata but cannot read secret values or restore data;
 - an `AxonLLMOperationsRecovery` role that can run PITR validation and remove
@@ -480,6 +487,7 @@ Configure `release` with:
 | Variable | `AXON_AWS_ACCOUNT_ID` | Twelve-digit deployment account |
 | Variable | `AXON_FARGATE_ECR_REPOSITORY` | `FargateRepositoryUri` output |
 | Variable | `AXON_AGENTCORE_ECR_REPOSITORY` | `AgentCoreRepositoryUri` output |
+| Variable | `AXON_STANDALONE_ECR_REPOSITORY` | `StandaloneRepositoryUri` output |
 
 Configure `production` with `AXON_AWS_ACCOUNT_ID`. Set
 `AXON_RELEASE_VERIFY_ROLE_ARN` to the `ReleaseVerifierRoleArn` output,
@@ -511,7 +519,7 @@ terminal key, and numeric broker-version outputs as documented in
 tag-producing signer. Publication and production do not read it. Their trust
 root is `AXON_AWS_ACCOUNT_ID` plus retained KMS aliases matching
 `alias/axonllm/release-signing-v*`. Each consumer obtains the exact key ARN from
-the schema-v3 manifest, requires that ARN to belong to the trusted account and
+the schema-v3 or schema-v4 manifest, requires that ARN to belong to the trusted account and
 to be the target of one of those version aliases, and only then verifies both
 KMS signatures.
 
@@ -703,13 +711,16 @@ output, passes it as the control plane's required `PrimaryStateTableName`
 parameter, and compares the resulting outputs. A manual control-plane
 deployment must pass that exact output; `PrimaryStateTableName` has no default.
 
-The managed AgentCore client is authorization-code only and has no client
-secret. The adopting application must use S256 PKCE and submit the Cognito
-**ID token** to AgentCore because that token carries `custom:tenant_id` and
-`custom:project_id`. The custom attributes select resources but grant no role;
-canonical DynamoDB principals remain authoritative.
+The managed AgentCore client is a secretless audience marker with OAuth and
+direct authentication disabled. Browser authorization belongs to the control
+plane: custom-domain mode uses the confidential ALB client, and CloudFront mode
+uses its generated secretless S256-PKCE client. The protected certification
+workflow uses a separate confidential client. Custom tenant/project attributes
+select resources but grant no role; canonical DynamoDB principals remain
+authoritative.
 
-The public AgentCore client is secretless. The endpoint contract is:
+The AgentCore audience client is secretless and non-interactive. The endpoint
+contract is:
 
 | `control_plane.endpoint_mode` | Ingress and identity contract |
 |---|---|
@@ -747,8 +758,7 @@ request-correlation, replay, and RelayState validation. `/saml/acs` and
 The first-adopter deployer does not ingest tenant-specific IdP metadata. Before
 launch, configure the SAML IdP on the retained Cognito pool and enable it on the
 confidential ALB client for custom-domain or the generated browser client for
-CloudFront. Enable it on the public AgentCore client when federated users invoke
-AgentCore. Configure the enterprise IdP with Cognito's SP entity ID and SAML
+CloudFront. Configure the enterprise IdP with Cognito's SP entity ID and SAML
 response endpoint. Provision every canonical user with the exact Cognito issuer
 and Cognito `sub`; if SCIM creates the user, those values must be its tenant
 issuer and `externalId`. SAML claims, groups, roles, tenant values, and project
@@ -870,31 +880,35 @@ delivery IDs, root cause, redrive task result, and receiver confirmation.
 It:
 
 - scans source for high/critical vulnerabilities and secrets;
-- builds AMD64 Fargate and ARM64 AgentCore OCI images;
-- scans both images and emits CycloneDX SBOMs;
+- builds AMD64 Fargate, ARM64 AgentCore, and ARM64 standalone OCI images;
+- aliases the exact AMD64 Fargate image bytes as the AMD64 standalone target;
+- scans each distinct image and emits CycloneDX SBOMs;
 - creates a deterministic source archive;
-- creates a schema-v3 manifest and multi-target SLSA provenance record with
-  distinct Fargate and AgentCore image digests;
+- creates a schema-v4 manifest and multi-target SLSA provenance record with
+  Fargate, AgentCore, standalone AMD64, and standalone ARM64 identities;
 - signs both records with the retained asymmetric AWS KMS key and immediately
   verifies the signatures;
 - stores private evidence for 90 days.
 
 `.github/workflows/publish-release.yml` is the controlled publication step. It
 runs only in the protected `release` environment, validates the exact tag,
-commit, release workflow run and attempt, successful CI, signed manifest, both
+commit, release workflow run and attempt, successful CI, signed manifest, all
 target identities, KMS signatures, and fixed account/region repository names.
 It then uses a checksum-pinned ORAS client to copy each signed OCI digest
-without rebuilding, verifies both remote digests, and emits immutable
-`@sha256` references. Existing immutable tags are accepted only when their
-digest already matches; AWS lookup failures fail closed.
+without rebuilding, verifies every remote digest, and emits immutable
+`@sha256` references. Standalone tags are platform-qualified. Existing
+immutable tags are accepted only when their digest already matches; AWS lookup
+failures fail closed.
 
 `.github/workflows/deploy-verification.yml` requires a release tag, successful
 CI for the exact commit, signed evidence, an immutable private ECR digest, and a
-fresh image scan. Its `target` input selects `fargate` or `agentcore`; the
-schema-v3 verifier binds the supplied digest to the selected target, source
-commit, release tag, workflow run, platform, manifest, and SLSA provenance.
-The workflow verifies both KMS signatures, the selected target's remote
-private ECR digest, and then rescans that exact image.
+fresh image scan. Its `target` input selects `fargate`, `agentcore`,
+`standalone-amd64`, or `standalone-arm64`; the schema-v4 verifier binds the
+supplied digest to the selected target, source commit, release tag, workflow
+run, platform, manifest, and SLSA provenance. Historical schema-v3 evidence
+continues to support its two legacy targets. The workflow verifies both KMS
+signatures, the selected target's remote private ECR digest, and then rescans
+that exact image.
 
 Publication and deployment take the exact signing key ARN from the manifest,
 not from the current signer variable. They accept it only when its account is

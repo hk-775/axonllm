@@ -175,6 +175,26 @@ jobs:
           --exit-code 1
           infra/agentcore-image/Dockerfile
 
+      - name: Scan standalone ARM64 Dockerfile configuration
+        run: >-
+          trivy config
+          --disable-telemetry
+          --skip-check-update
+          --ignorefile .github/trivyignore.yaml
+          --severity HIGH,CRITICAL
+          --exit-code 1
+          infra/standalone-image/Dockerfile
+
+      - name: Scan serverless artifact Dockerfile configuration
+        run: >-
+          trivy config
+          --disable-telemetry
+          --skip-check-update
+          --ignorefile .github/trivyignore.yaml
+          --severity HIGH,CRITICAL
+          --exit-code 1
+          infra/serverless-control-artifacts/Dockerfile
+
       - name: Synthesize and verify CDK assets
         env:
           CDK_CI_OUTDIR: ${{ runner.temp }}/cdk.out
@@ -205,6 +225,54 @@ jobs:
           --exit-code 1
           "${CDK_CI_OUTDIR}/agentcore/AxonLLMAgentCoreStack.template.json"
 
+      - name: Scan synthesized application-state CloudFormation
+        env:
+          CDK_CI_OUTDIR: ${{ runner.temp }}/cdk.out
+        run: >-
+          trivy config
+          --disable-telemetry
+          --skip-check-update
+          --ignorefile .github/trivyignore.yaml
+          --severity HIGH,CRITICAL
+          --exit-code 1
+          "${CDK_CI_OUTDIR}/application-state/AxonLLMApplicationStateStack.template.json"
+
+      - name: Scan synthesized managed-network CloudFormation
+        env:
+          CDK_CI_OUTDIR: ${{ runner.temp }}/cdk.out
+        run: >-
+          trivy config
+          --disable-telemetry
+          --skip-check-update
+          --ignorefile .github/trivyignore.yaml
+          --severity HIGH,CRITICAL
+          --exit-code 1
+          "${CDK_CI_OUTDIR}/managed-network/AxonLLMManagedNetworkStack.template.json"
+
+      - name: Scan synthesized parked managed-network CloudFormation
+        env:
+          CDK_CI_OUTDIR: ${{ runner.temp }}/cdk.out
+        run: >-
+          trivy config
+          --disable-telemetry
+          --skip-check-update
+          --ignorefile .github/trivyignore.yaml
+          --severity HIGH,CRITICAL
+          --exit-code 1
+          "${CDK_CI_OUTDIR}/managed-network-parked/AxonLLMManagedNetworkStack.template.json"
+
+      - name: Scan synthesized parked AgentCore CloudFormation
+        env:
+          CDK_CI_OUTDIR: ${{ runner.temp }}/cdk.out
+        run: >-
+          trivy config
+          --disable-telemetry
+          --skip-check-update
+          --ignorefile .github/trivyignore.yaml
+          --severity HIGH,CRITICAL
+          --exit-code 1
+          "${CDK_CI_OUTDIR}/agentcore-parked/AxonLLMAgentCoreStack.template.json"
+
       - name: Scan synthesized identity CloudFormation
         env:
           CDK_CI_OUTDIR: ${{ runner.temp }}/cdk.out
@@ -228,6 +296,54 @@ jobs:
           --severity HIGH,CRITICAL
           --exit-code 1
           "${CDK_CI_OUTDIR}/control-plane/AxonLLMControlPlaneStack.template.json"
+
+      - name: Scan synthesized edge-ready control-plane CloudFormation
+        env:
+          CDK_CI_OUTDIR: ${{ runner.temp }}/cdk.out
+        run: >-
+          trivy config
+          --disable-telemetry
+          --skip-check-update
+          --ignorefile .github/trivyignore.yaml
+          --severity HIGH,CRITICAL
+          --exit-code 1
+          "${CDK_CI_OUTDIR}/control-plane-edge/AxonLLMControlPlaneStack.template.json"
+
+      - name: Scan synthesized serverless control-plane CloudFormation
+        env:
+          CDK_CI_OUTDIR: ${{ runner.temp }}/cdk.out
+        run: >-
+          trivy config
+          --disable-telemetry
+          --skip-check-update
+          --ignorefile .github/trivyignore.yaml
+          --severity HIGH,CRITICAL
+          --exit-code 1
+          "${CDK_CI_OUTDIR}/serverless-control-plane/AxonLLMServerlessControlPlaneStack.template.json"
+
+      - name: Scan synthesized production-attached serverless control-plane CloudFormation
+        env:
+          CDK_CI_OUTDIR: ${{ runner.temp }}/cdk.out
+        run: >-
+          trivy config
+          --disable-telemetry
+          --skip-check-update
+          --ignorefile .github/trivyignore.yaml
+          --severity HIGH,CRITICAL
+          --exit-code 1
+          "${CDK_CI_OUTDIR}/serverless-control-plane-edge/AxonLLMServerlessControlPlaneStack.template.json"
+
+      - name: Scan synthesized serverless workers CloudFormation
+        env:
+          CDK_CI_OUTDIR: ${{ runner.temp }}/cdk.out
+        run: >-
+          trivy config
+          --disable-telemetry
+          --skip-check-update
+          --ignorefile .github/trivyignore.yaml
+          --severity HIGH,CRITICAL
+          --exit-code 1
+          "${CDK_CI_OUTDIR}/serverless-workers/AxonLLMServerlessWorkersStack.template.json"
 
       - name: Scan synthesized release-foundation CloudFormation
         env:
@@ -256,7 +372,7 @@ jobs:
   container:
     name: Container build and scan
     runs-on: ubuntu-24.04
-    timeout-minutes: 35
+    timeout-minutes: 50
 
     steps:
       - name: Check out source
@@ -269,10 +385,64 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Set up pinned ARM64 emulation
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+        with:
+          cache-image: false
+          image: docker.io/tonistiigi/binfmt@sha256:465d3fdd28d0f2b871ba4b4ec98bd183292e96167f00d9fd40bd249f8632d705
+          platforms: arm64
+
+      - name: Set up pinned Buildx action
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+        with:
+          cache-binary: false
+          cleanup: true
+
       - name: Install checksum-verified scanners
         run: |
           scripts/ci/install_security_tools.sh "${RUNNER_TEMP}/bin"
           printf '%s\n' "${RUNNER_TEMP}/bin" >>"${GITHUB_PATH}"
+
+      - name: Build and verify ARM64 serverless control artifacts
+        env:
+          SERVERLESS_ARTIFACT_DIR: ${{ runner.temp }}/serverless-control
+        run: >-
+          scripts/ci/build_serverless_control_artifacts.sh
+          "${SERVERLESS_ARTIFACT_DIR}"
+          "${GITHUB_SHA}"
+
+      - name: Scan serverless control artifacts
+        env:
+          SERVERLESS_ARTIFACT_DIR: ${{ runner.temp }}/serverless-control
+          SERVERLESS_SCAN_DIR: ${{ runner.temp }}/serverless-control-scan
+        run: |
+          set -euo pipefail
+          receipt="${SERVERLESS_ARTIFACT_DIR}/serverless-control-artifacts.json"
+          control_name=$(jq -er '.artifacts.controlApi.fileName' "${receipt}")
+          static_name=$(jq -er '.artifacts.staticAssets.fileName' "${receipt}")
+          mkdir -m 0700 "${SERVERLESS_SCAN_DIR}"
+          mkdir -m 0700 \
+            "${SERVERLESS_SCAN_DIR}/control" \
+            "${SERVERLESS_SCAN_DIR}/static"
+          unzip -q \
+            "${SERVERLESS_ARTIFACT_DIR}/${control_name}" \
+            -d "${SERVERLESS_SCAN_DIR}/control"
+          unzip -q \
+            "${SERVERLESS_ARTIFACT_DIR}/${static_name}" \
+            -d "${SERVERLESS_SCAN_DIR}/static"
+          trivy fs \
+            --disable-telemetry \
+            --scanners vuln,secret \
+            --ignore-unfixed \
+            --severity HIGH,CRITICAL \
+            --exit-code 1 \
+            "${SERVERLESS_SCAN_DIR}/control"
+          trivy fs \
+            --disable-telemetry \
+            --scanners secret \
+            --severity HIGH,CRITICAL \
+            --exit-code 1 \
+            "${SERVERLESS_SCAN_DIR}/static"
 
       - name: Build production image
         run: >-
@@ -294,3 +464,31 @@ jobs:
           --severity HIGH,CRITICAL
           --exit-code 1
           axonllm-ci:verify
+
+      - name: Build standalone ARM64 image
+        run: >-
+          docker buildx build
+          --pull
+          --platform linux/arm64
+          --file infra/standalone-image/Dockerfile
+          --build-context project=.
+          --load
+          --tag axonllm-standalone-arm64-ci:verify
+          .
+
+      - name: Verify standalone ARM64 image
+        run: >-
+          python scripts/ci/verify_image.py
+          axonllm-standalone-arm64-ci:verify
+          --platform linux/arm64
+
+      - name: Scan standalone ARM64 image
+        run: >-
+          trivy image
+          --disable-telemetry
+          --platform linux/arm64
+          --scanners vuln,secret
+          --ignore-unfixed
+          --severity HIGH,CRITICAL
+          --exit-code 1
+          axonllm-standalone-arm64-ci:verify

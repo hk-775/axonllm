@@ -580,7 +580,7 @@ def _load_provider_secret() -> dict[str, str]:
     if boto3 is None or _SECRETS_MANAGER_CONFIG is None:
         raise RuntimeError(
             "Secrets Manager provider loading requires the "
-            "'axon-llm[aws]' extra"
+            "'axon-llm[aws-control]' or 'axon-llm[server]' extra"
         )
     requested_version = os.environ.get(
         _PROVIDER_SECRET_VERSION_ENV,
