@@ -2150,6 +2150,16 @@ def test_foundation_uses_dedicated_bounded_cdk_domain(
     )
     inspect_resources = inspect["Resource"] if isinstance(inspect["Resource"], list) else [inspect["Resource"]]
     assert len(inspect_resources) == 5
+    inspect_stacks = next(
+        statement
+        for statement in deployer
+        if statement.get("Sid") == "InspectReleaseFoundationStacks"
+    )
+    assert _actions(inspect_stacks) == {
+        "cloudformation:DescribeStacks",
+        "cloudformation:GetTemplate",
+        "cloudformation:ListStackResources",
+    }
 
 
 def test_foundation_deployer_describes_change_sets_only_on_foundation_stack(

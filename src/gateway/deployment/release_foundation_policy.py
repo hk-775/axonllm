@@ -387,7 +387,7 @@ def _regional_infrastructure_statements(
                 f"arn:{partition}:ecr:{region}:{account_id}:repository/"
                 f"axonllm/{target}"
             )
-            for target in ("agentcore", "fargate")
+            for target in ("agentcore", "fargate", "standalone")
         ],
         "lambda": [
             (
