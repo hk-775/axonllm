@@ -616,18 +616,30 @@ def test_control_plane_recovery_selector_is_fail_closed(
     assert parameters["RecoveryApprovalId"]["Default"] == ""
     assert parameters["DeploymentTransitionId"] == {
         "Type": "String",
-        "Default": "",
+        "Default": "unbound",
         "MaxLength": 64,
-        "AllowedPattern": r"^$|^[0-9a-f]{64}$",
+        "AllowedPattern": r"^(?:unbound|[0-9a-f]{64})$",
         "ConstraintDescription": (
-            "must be blank or the signed 64-character deployment "
+            "must be 'unbound' or the signed 64-character deployment "
             "transition identifier"
         ),
         "Description": (
-            "Signed production transition that owns this exact "
-            "control-plane deployment"
+            "Signed production transition that owns this control-plane "
+            "deployment, or 'unbound' for a reviewed first deployment "
+            "outside the protected promotion workflow"
         ),
     }
+    transition_tags = [
+        tag
+        for resource in template["Resources"].values()
+        for tag in resource.get("Properties", {}).get("Tags", [])
+        if tag.get("Key") == "AxonLLMDeploymentTransitionId"
+    ]
+    assert transition_tags
+    assert all(
+        tag["Value"] == {"Ref": "DeploymentTransitionId"}
+        for tag in transition_tags
+    )
     assert template["Conditions"]["RecoveryAccessBlocked"] == {
         "Fn::Or": [
             {"Condition": "RecoveryQuiesced"},
