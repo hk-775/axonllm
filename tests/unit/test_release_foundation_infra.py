@@ -2152,6 +2152,35 @@ def test_foundation_uses_dedicated_bounded_cdk_domain(
     assert len(inspect_resources) == 5
 
 
+def test_foundation_deployer_describes_only_reviewed_change_sets(
+    synthesized_template,
+):
+    deployer = _role_statements(
+        synthesized_template,
+        "AxonLLMReleaseFoundationDeployRole",
+    )
+    inspect = next(
+        statement
+        for statement in deployer
+        if statement.get("Sid") == "InspectReviewedReleaseFoundationChangeSet"
+    )
+    assert _actions(inspect) == {"cloudformation:DescribeChangeSet"}
+    resources = (
+        inspect["Resource"]
+        if isinstance(inspect["Resource"], list)
+        else [inspect["Resource"]]
+    )
+    assert len(resources) == 1
+    assert _literal_parts(resources[0]).endswith(
+        ":stack/AxonLLMReleaseFoundationStack/*"
+    )
+    assert inspect["Condition"] == {
+        "StringLike": {
+            "cloudformation:ChangeSetName": "AxonLLMReleaseFoundation-*",
+        }
+    }
+
+
 def test_foundation_outputs_all_operator_inputs(synthesized_template):
     assert set(synthesized_template["Outputs"]) == {
         "AgentCoreDeployRoleArn",
