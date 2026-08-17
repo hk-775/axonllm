@@ -921,13 +921,6 @@ class AxonLLMReleaseFoundationStack(Stack):
                         resource_name="AxonLLMReleaseFoundationStack/*",
                     )
                 ],
-                conditions={
-                    "StringLike": {
-                        "cloudformation:ChangeSetName": (
-                            "AxonLLMReleaseFoundation-*"
-                        )
-                    }
-                },
             )
         )
         role.add_to_policy(
