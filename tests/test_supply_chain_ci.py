@@ -291,6 +291,32 @@ def test_trivy_exception_is_narrow_and_expires() -> None:
                 "expired_at": "2027-08-07T00:00:00Z",
             },
             {
+                "id": "AWS-0096",
+                "paths": [
+                    "AxonLLMServerlessWorkersStack.template.json",
+                ],
+                "statement": (
+                    "The export queues set KmsMasterKeyId to the "
+                    "parameterized customer-managed "
+                    "ApplicationStateDataKeyArn; Trivy cannot resolve the "
+                    "CloudFormation parameter."
+                ),
+                "expired_at": "2027-08-17T00:00:00Z",
+            },
+            {
+                "id": "AWS-0132",
+                "paths": [
+                    "AxonLLMServerlessWorkersStack.template.json",
+                ],
+                "statement": (
+                    "The export bucket sets KMSMasterKeyID to the "
+                    "parameterized customer-managed "
+                    "ApplicationStateDataKeyArn; Trivy cannot resolve the "
+                    "CloudFormation parameter."
+                ),
+                "expired_at": "2027-08-17T00:00:00Z",
+            },
+            {
                 "id": "AWS-0035",
                 "paths": [
                     "AxonLLMStack.template.json",

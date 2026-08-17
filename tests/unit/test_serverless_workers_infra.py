@@ -184,6 +184,38 @@ def test_export_bucket_is_private_short_lived_and_download_only_cors(
     ]
 
 
+def test_export_storage_uses_the_customer_managed_state_key(
+    serverless_workers_template: dict,
+) -> None:
+    queues = _resources(
+        serverless_workers_template,
+        "AWS::SQS::Queue",
+    )
+    _, bucket = _one(
+        serverless_workers_template,
+        "AWS::S3::Bucket",
+    )
+
+    assert len(queues) == 2
+    assert all(
+        queue["Properties"]["KmsMasterKeyId"]
+        == {"Ref": "ApplicationStateDataKeyArn"}
+        for _, queue in queues
+    )
+    assert bucket["Properties"]["BucketEncryption"] == {
+        "ServerSideEncryptionConfiguration": [
+            {
+                "ServerSideEncryptionByDefault": {
+                    "KMSMasterKeyID": {
+                        "Ref": "ApplicationStateDataKeyArn"
+                    },
+                    "SSEAlgorithm": "aws:kms",
+                }
+            }
+        ]
+    }
+
+
 def test_worker_uses_exact_arm64_artifact_without_networking(
     serverless_workers_template: dict,
 ) -> None:
