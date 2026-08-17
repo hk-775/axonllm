@@ -2,13 +2,23 @@
 
 from __future__ import annotations
 
-import json
 from typing import TYPE_CHECKING
 
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, RedirectResponse
 from starlette.routing import Route
 
+from src.gateway.export_jobs import (
+    ExportJobError,
+    ExportJobNotFound,
+    ExportJobNotReady,
+    ExportJobService,
+    ExportKind,
+    export_job_public,
+    redact_audit_value,
+    request_export_identity,
+    serialize_audit_export_row,
+)
 from src.gateway.security.audit_trail import (
     LEGACY_TENANT_ID,
     AuditEventType,
@@ -30,35 +40,6 @@ _CANONICAL_ROLES = frozenset(
         "platform_admin",
     }
 )
-_ALWAYS_REDACT_KEYS = (
-    "secret",
-    "token",
-    "password",
-    "api_key",
-    "credential",
-    "authorization",
-    "cookie",
-    "header",
-    "exception",
-    "traceback",
-    "stack_trace",
-    "raw_error",
-    "error",
-)
-_READER_REDACT_KEYS = (
-    "url",
-    "uri",
-    "endpoint",
-    "topic",
-    "log_group",
-    "log_stream",
-    "log_target",
-    "destination",
-    "target",
-    "source_ip",
-)
-
-
 class _TenantScopeError(ValueError):
     def __init__(self, message: str, status_code: int = 400) -> None:
         super().__init__(message)
@@ -138,32 +119,6 @@ def _is_restricted_reader(request: Request) -> bool:
     return bool(roles & _READ_ONLY_ROLES) and not bool(roles & _ADMIN_ROLES)
 
 
-def _redact_audit_value(value, *, restricted: bool, key: str = ""):
-    key_lower = key.lower()
-    if any(part in key_lower for part in _ALWAYS_REDACT_KEYS):
-        return "[REDACTED]"
-    if restricted and any(part in key_lower for part in _READER_REDACT_KEYS):
-        return "[REDACTED]"
-    if isinstance(value, dict):
-        return {
-            child_key: _redact_audit_value(
-                child_value,
-                restricted=restricted,
-                key=str(child_key),
-            )
-            for child_key, child_value in value.items()
-        }
-    if isinstance(value, list):
-        return [_redact_audit_value(item, restricted=restricted) for item in value]
-    if isinstance(value, str):
-        lowered = value.lower()
-        if lowered.startswith(("http://", "https://")):
-            return "[REDACTED_URL]"
-        if lowered.startswith(("bearer ", "basic ")):
-            return "[REDACTED]"
-    return value
-
-
 def _serialize_record(record: AuditRecord, *, restricted: bool) -> dict:
     return {
         "record_id": record.record_id,
@@ -173,30 +128,28 @@ def _serialize_record(record: AuditRecord, *, restricted: bool) -> dict:
         "user_id": record.user_id,
         "project_id": record.project_id,
         "request_id": record.request_id,
-        "data": _redact_audit_value(record.data, restricted=restricted),
+        "data": redact_audit_value(record.data, restricted=restricted),
     }
 
 
 def _serialize_export_row(row: dict, *, restricted: bool) -> dict:
-    output = dict(row)
-    raw_data = output.get("data")
-    if isinstance(raw_data, str):
-        try:
-            raw_data = json.loads(raw_data)
-        except (TypeError, ValueError):
-            raw_data = {}
-    output["data"] = _redact_audit_value(
-        raw_data or {},
+    return serialize_audit_export_row(
+        row,
         restricted=restricted,
     )
-    return output
 
 
 class AuditAPI:
     """Query and verify audit trail records."""
 
-    def __init__(self, audit_trail: AuditTrail) -> None:
+    def __init__(
+        self,
+        audit_trail: AuditTrail,
+        *,
+        export_jobs: ExportJobService | None = None,
+    ) -> None:
         self.audit_trail = audit_trail
+        self._export_jobs = export_jobs
 
     async def query_records(self, request: Request) -> JSONResponse:
         """GET /admin/audit/records?tenant_id=&project_id=&event_type=&limit="""
@@ -311,6 +264,43 @@ class AuditAPI:
             tenant_id = _request_tenant_id(request)
         except _TenantScopeError as exc:
             return _scope_error_response(exc)
+        if self._export_jobs is not None:
+            try:
+                job = await self._export_jobs.create_audit(
+                    tenant_id=tenant_id,
+                    requested_by=request_export_identity(request),
+                    project_id=request.query_params.get("project_id"),
+                    restricted=_is_restricted_reader(request),
+                )
+            except ValueError:
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "tenant_id": tenant_id,
+                        "error": {
+                            "type": "invalid_request",
+                            "message": "Audit export filters are invalid.",
+                        },
+                    },
+                )
+            except ExportJobError:
+                return JSONResponse(
+                    status_code=503,
+                    content={
+                        "tenant_id": tenant_id,
+                        "error": {
+                            "type": "export_unavailable",
+                            "message": "Audit export could not be queued.",
+                        },
+                    },
+                )
+            body = export_job_public(job)
+            body["statusUrl"] = f"/admin/audit/exports/{job.job_id}"
+            return JSONResponse(
+                body,
+                status_code=202,
+                headers={"Retry-After": "2"},
+            )
         try:
             records = await self.audit_trail.export_records(
                 project_id=request.query_params.get("project_id"),
@@ -335,6 +325,92 @@ class AuditAPI:
                 "records": [_serialize_export_row(row, restricted=restricted) for row in records],
             }
         )
+
+    async def export_status(self, request: Request) -> JSONResponse:
+        """Return one requester-owned asynchronous audit export."""
+
+        if self._export_jobs is None:
+            return JSONResponse(
+                {"error": {"type": "not_found", "message": "Export jobs are not enabled."}},
+                status_code=404,
+            )
+        try:
+            tenant_id = _request_tenant_id(request)
+            job = await self._export_jobs.get(
+                tenant_id=tenant_id,
+                requested_by=request_export_identity(request),
+                job_id=request.path_params["job_id"],
+                kind=ExportKind.AUDIT,
+            )
+        except _TenantScopeError as exc:
+            return _scope_error_response(exc)
+        except ExportJobNotFound:
+            return JSONResponse(
+                {"error": {"type": "not_found", "message": "Export job was not found."}},
+                status_code=404,
+            )
+        except ExportJobError:
+            return JSONResponse(
+                {
+                    "error": {
+                        "type": "export_unavailable",
+                        "message": "Audit export status is temporarily unavailable.",
+                    }
+                },
+                status_code=503,
+            )
+        body = export_job_public(job)
+        if job.status.value == "complete":
+            body["downloadUrl"] = (
+                f"/admin/audit/exports/{job.job_id}/download"
+            )
+        return JSONResponse(body)
+
+    async def export_download(self, request: Request):
+        """Redirect an authorized requester to a short-lived S3 URL."""
+
+        if self._export_jobs is None:
+            return JSONResponse(
+                {"error": {"type": "not_found", "message": "Export jobs are not enabled."}},
+                status_code=404,
+            )
+        try:
+            tenant_id = _request_tenant_id(request)
+            url = await self._export_jobs.download_url(
+                tenant_id=tenant_id,
+                requested_by=request_export_identity(request),
+                job_id=request.path_params["job_id"],
+                kind=ExportKind.AUDIT,
+            )
+        except _TenantScopeError as exc:
+            return _scope_error_response(exc)
+        except ExportJobNotFound:
+            return JSONResponse(
+                {"error": {"type": "not_found", "message": "Export job was not found."}},
+                status_code=404,
+            )
+        except ExportJobNotReady:
+            return JSONResponse(
+                {
+                    "error": {
+                        "type": "export_not_ready",
+                        "message": "Export job is not complete.",
+                    }
+                },
+                status_code=409,
+                headers={"Retry-After": "2"},
+            )
+        except ExportJobError:
+            return JSONResponse(
+                {
+                    "error": {
+                        "type": "export_unavailable",
+                        "message": "Audit export download is temporarily unavailable.",
+                    }
+                },
+                status_code=503,
+            )
+        return RedirectResponse(url, status_code=303)
 
     async def get_stats(self, request: Request) -> JSONResponse:
         """GET /admin/audit/stats"""
@@ -561,6 +637,16 @@ def create_audit_routes(audit_api: AuditAPI) -> list[Route]:
         Route("/admin/audit/records", audit_api.query_records, methods=["GET"]),
         Route("/admin/audit/verify", audit_api.verify_integrity, methods=["GET"]),
         Route("/admin/audit/export", audit_api.export_records, methods=["GET"]),
+        Route(
+            "/admin/audit/exports/{job_id}",
+            audit_api.export_status,
+            methods=["GET"],
+        ),
+        Route(
+            "/admin/audit/exports/{job_id}/download",
+            audit_api.export_download,
+            methods=["GET"],
+        ),
         Route("/admin/audit/stats", audit_api.get_stats, methods=["GET"]),
         Route("/admin/audit/security", audit_api.get_security_events, methods=["GET"]),
         Route("/admin/pii/preview", audit_api.preview_pii_redaction, methods=["POST"]),

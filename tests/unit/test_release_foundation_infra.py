@@ -177,10 +177,11 @@ def test_release_repositories_are_retained_immutable_and_kms_encrypted(
         synthesized_template,
         "AWS::ECR::Repository",
     )
-    assert len(repositories) == 2
+    assert len(repositories) == 3
     assert {repository["Properties"]["RepositoryName"] for repository in repositories} == {
         "axonllm/fargate",
         "axonllm/agentcore",
+        "axonllm/standalone",
     }
 
     for repository in repositories:
@@ -453,9 +454,7 @@ def test_github_oidc_trust_is_exact_and_retained(synthesized_template):
         "AxonLLMLaunchGatesRole": (":environment:agentcore-production-launch-gates"),
         "AxonLLMOperationsAudit": ":environment:production",
         "AxonLLMOperationsRecovery": ":environment:production",
-        "AxonLLMReleaseFoundationDeployRole": (
-            ":environment:release-foundation"
-        ),
+        "AxonLLMReleaseFoundationDeployRole": (":environment:release-foundation"),
         "AxonLLMReleasePublisher": ":environment:release",
         "AxonLLMReleaseVerifier": ":environment:production",
     }
@@ -547,6 +546,22 @@ def test_signer_publisher_and_verifier_permissions_are_separate(
     assert "kms:Verify" in verifier_actions
     assert "kms:Sign" not in verifier_actions
     assert signer_actions == {"kms:Sign", "kms:Verify"}
+
+    repository_logical_ids = {
+        logical_id
+        for logical_id, resource in synthesized_template["Resources"].items()
+        if resource["Type"] == "AWS::ECR::Repository"
+    }
+    for statements in (publisher, verifier):
+        registry = next(
+            statement
+            for statement in statements
+            if statement.get("Sid") in {"PublishReleaseImages", "VerifyReleaseImages"}
+        )
+        resources = registry["Resource"]
+        if not isinstance(resources, list):
+            resources = [resources]
+        assert {resource["Fn::GetAtt"][0] for resource in resources} == repository_logical_ids
 
     signing_key_logical_id = next(
         logical_id
@@ -718,9 +733,7 @@ def test_launch_authorities_have_prefix_scoped_separate_capabilities(
                 f"{_EXTERNAL_OIDC_EVIDENCE_PREFIX}/*",
             },
             "write": {f"{_TRANSITION_EVIDENCE_PREFIX}/*"},
-            "signing_key": (
-                "Signs AgentCore production transition intent and deployment evidence"
-            ),
+            "signing_key": ("Signs AgentCore production transition intent and deployment evidence"),
             "required": {
                 "cloudformation:CreateChangeSet",
                 "kms:Sign",
@@ -823,9 +836,7 @@ def test_launch_authorities_have_prefix_scoped_separate_capabilities(
         synthesized_template,
         "AxonLLMAgentCoreTransitionWatchdogRole",
     )
-    watchdog_actions = {
-        action for statement in watchdog for action in _actions(statement)
-    }
+    watchdog_actions = {action for statement in watchdog for action in _actions(statement)}
     assert {
         "kms:Sign",
         "kms:Verify",
@@ -839,25 +850,11 @@ def test_launch_authorities_have_prefix_scoped_separate_capabilities(
         "elasticloadbalancing:ModifyLoadBalancerAttributes",
         "iam:PassRole",
     }.isdisjoint(watchdog_actions)
-    writes = next(
-        statement
-        for statement in watchdog
-        if statement.get("Sid") == "AppendTerminalTransitionEvidence"
-    )
-    write_resources = (
-        writes["Resource"]
-        if isinstance(writes["Resource"], list)
-        else [writes["Resource"]]
-    )
-    assert {
-        _literal_parts(resource).removeprefix("/")
-        for resource in write_resources
-    } == {
+    writes = next(statement for statement in watchdog if statement.get("Sid") == "AppendTerminalTransitionEvidence")
+    write_resources = writes["Resource"] if isinstance(writes["Resource"], list) else [writes["Resource"]]
+    assert {_literal_parts(resource).removeprefix("/") for resource in write_resources} == {
         f"{_TRANSITION_EVIDENCE_PREFIX}/*/transition-terminal.json",
-        (
-            f"{_TRANSITION_EVIDENCE_PREFIX}/*/"
-            "transition-terminal-kms-signature.json"
-        ),
+        (f"{_TRANSITION_EVIDENCE_PREFIX}/*/transition-terminal-kms-signature.json"),
     }
     terminal_key_id = next(
         logical_id
@@ -865,17 +862,12 @@ def test_launch_authorities_have_prefix_scoped_separate_capabilities(
             synthesized_template,
             "AWS::KMS::Key",
         )
-        if key["Properties"]["Description"]
-        == "Signs terminal records produced by the production transition watchdog"
+        if key["Properties"]["Description"] == "Signs terminal records produced by the production transition watchdog"
     )
     terminal_signing = next(
-        statement
-        for statement in watchdog
-        if statement.get("Sid") == "SignTerminalTransitionEvidence"
+        statement for statement in watchdog if statement.get("Sid") == "SignTerminalTransitionEvidence"
     )
-    assert terminal_signing["Resource"] == {
-        "Fn::GetAtt": [terminal_key_id, "Arn"]
-    }
+    assert terminal_signing["Resource"] == {"Fn::GetAtt": [terminal_key_id, "Arn"]}
 
     role_qualifiers = {
         "AxonLLMAgentCoreDeployRole": "axprod",
@@ -895,9 +887,7 @@ def test_launch_authorities_have_prefix_scoped_separate_capabilities(
             statement = next(candidate for candidate in statements if candidate.get("Sid") == sid)
             assert statement["Resource"] != "*"
         bootstrap_policies = next(
-            statement
-            for statement in statements
-            if statement.get("Sid") == "InspectCdkBootstrapPolicies"
+            statement for statement in statements if statement.get("Sid") == "InspectCdkBootstrapPolicies"
         )
         resources = (
             bootstrap_policies["Resource"]
@@ -906,9 +896,7 @@ def test_launch_authorities_have_prefix_scoped_separate_capabilities(
         )
         names = {_literal_parts(resource).rsplit("/", 1)[-1] for resource in resources}
         assert {
-            "AxonLLMAgentCoreCloudFormationExecution-"
-            f"{qualifier}-us-east-1-part{part}"
-            for part in range(1, 4)
+            f"AxonLLMAgentCoreCloudFormationExecution-{qualifier}-us-east-1-part{part}" for part in range(1, 4)
         } <= names
 
 
@@ -1185,9 +1173,7 @@ def test_launch_coordinator_storage_is_retained_encrypted_and_fenced(
         "aws:SourceAccount": {"Ref": "AWS::AccountId"},
     }
     source_arn = sns_key_use["Condition"]["ArnEquals"]["aws:SourceArn"]
-    assert _literal_parts(source_arn).endswith(
-        ":sns:us-east-1::axonllm-launch-coordinator-alarms"
-    )
+    assert _literal_parts(source_arn).endswith(":sns:us-east-1::axonllm-launch-coordinator-alarms")
     assert topic_logical_id not in json.dumps(key)
 
     receipt_queue_logical_id, _ = next(
@@ -1238,9 +1224,7 @@ def test_rehearsal_control_ledger_is_separate_retained_and_encrypted(
         "axonllm-rehearsal-control-ledger",
     }
     lease_id, lease = tables["axonllm-launch-rehearsal-leases"]
-    authorization_id, authorization = tables[
-        "axonllm-qualification-mutation-authorizations"
-    ]
+    authorization_id, authorization = tables["axonllm-qualification-mutation-authorizations"]
     ledger_id, ledger = tables["axonllm-rehearsal-control-ledger"]
     assert len({lease_id, authorization_id, ledger_id}) == 3
     properties = ledger["Properties"]
@@ -1264,16 +1248,15 @@ def test_rehearsal_control_ledger_is_separate_retained_and_encrypted(
         "Bool": {"aws:SecureTransport": "false"}
     }
     authorization_properties = authorization["Properties"]
-    assert authorization_properties["KeySchema"] == [
-        {"AttributeName": "authorizationId", "KeyType": "HASH"}
-    ]
+    assert authorization_properties["KeySchema"] == [{"AttributeName": "authorizationId", "KeyType": "HASH"}]
     assert authorization_properties["TimeToLiveSpecification"] == {
         "AttributeName": "expiresAtEpoch",
         "Enabled": True,
     }
     assert authorization_properties["DeletionProtectionEnabled"] is True
-    assert authorization_properties["SSESpecification"]["KMSMasterKeyId"] == (
-        lease["Properties"]["SSESpecification"]["KMSMasterKeyId"]
+    assert (
+        authorization_properties["SSESpecification"]["KMSMasterKeyId"]
+        == (lease["Properties"]["SSESpecification"]["KMSMasterKeyId"])
     )
     assert authorization["DeletionPolicy"] == "Retain"
     assert authorization["UpdateReplacePolicy"] == "Retain"
@@ -1441,9 +1424,7 @@ def test_launch_coordinator_is_versioned_standard_and_dispatches_29_actions(
     assert attribute == "Arn"
     log_group = synthesized_template["Resources"][log_group_logical_id]
     assert log_group["Type"] == "AWS::Logs::LogGroup"
-    assert log_group["Properties"]["LogGroupName"] == (
-        "/aws/vendedlogs/states/AxonLLMLaunchCoordinator"
-    )
+    assert log_group["Properties"]["LogGroupName"] == ("/aws/vendedlogs/states/AxonLLMLaunchCoordinator")
     assert properties["TracingConfiguration"] == {"Enabled": True}
     assert {tag["Key"]: tag["Value"] for tag in properties["Tags"]} == {
         "Application": "AxonLLM",
@@ -1796,9 +1777,7 @@ def test_coordinator_worker_roles_are_separate_activity_pollers(
         )
 
         selectors = next(
-            statement
-            for statement in statements
-            if statement.get("Sid") == "InspectReviewedQualificationSelectors"
+            statement for statement in statements if statement.get("Sid") == "InspectReviewedQualificationSelectors"
         )
         assert _actions(selectors) == {"cloudformation:DescribeStacks"}
         assert all(
@@ -1810,19 +1789,11 @@ def test_coordinator_worker_roles_are_separate_activity_pollers(
         )
         assert "AxonLLMAgentCoreStack/*" not in json.dumps(selectors["Resource"])
 
-        broker_invoke = next(
-            statement
-            for statement in statements
-            if _actions(statement) == {"lambda:InvokeFunction"}
-        )
+        broker_invoke = next(statement for statement in statements if _actions(statement) == {"lambda:InvokeFunction"})
         assert set(broker_invoke["Resource"]) == {"Ref"}
         version_id = broker_invoke["Resource"]["Ref"]
-        assert synthesized_template["Resources"][version_id]["Type"] == (
-            "AWS::Lambda::Version"
-        )
-        all_actions = {
-            action for statement in statements for action in _actions(statement)
-        }
+        assert synthesized_template["Resources"][version_id]["Type"] == ("AWS::Lambda::Version")
+        all_actions = {action for statement in statements for action in _actions(statement)}
         assert {
             "cloudformation:UpdateStack",
             "iam:PassRole",
@@ -1890,61 +1861,40 @@ def test_coordinator_worker_roles_are_separate_activity_pollers(
         "AxonLLMLaunchCoordinatorExecutionRole",
     )
     execution_encryption = next(
-        statement
-        for statement in execution_statements
-        if statement.get("Sid") == "EncryptLaunchCoordinatorExecutions"
+        statement for statement in execution_statements if statement.get("Sid") == "EncryptLaunchCoordinatorExecutions"
     )
     assert _actions(execution_encryption) == {
         "kms:Decrypt",
         "kms:GenerateDataKey",
     }
-    execution_encryption_conditions = execution_encryption["Condition"][
-        "StringEquals"
-    ]
-    assert execution_encryption_conditions["kms:CallerAccount"] == {
-        "Ref": "AWS::AccountId"
-    }
-    assert _literal_parts(
-        execution_encryption_conditions[
-            "kms:EncryptionContext:aws:states:stateMachineArn"
-        ]
-    ).endswith(":stateMachine:AxonLLMLaunchCoordinator")
+    execution_encryption_conditions = execution_encryption["Condition"]["StringEquals"]
+    assert execution_encryption_conditions["kms:CallerAccount"] == {"Ref": "AWS::AccountId"}
+    assert _literal_parts(execution_encryption_conditions["kms:EncryptionContext:aws:states:stateMachineArn"]).endswith(
+        ":stateMachine:AxonLLMLaunchCoordinator"
+    )
     assert "kms:ViaService" not in json.dumps(execution_encryption)
 
     activity_encryption = next(
-        statement
-        for statement in execution_statements
-        if statement.get("Sid") == "EncryptLaunchCoordinatorActivities"
+        statement for statement in execution_statements if statement.get("Sid") == "EncryptLaunchCoordinatorActivities"
     )
     assert _actions(activity_encryption) == {
         "kms:Decrypt",
         "kms:GenerateDataKey",
     }
-    activity_arns = activity_encryption["Condition"]["StringEquals"][
-        "kms:EncryptionContext:aws:states:activityArn"
-    ]
-    assert {
-        synthesized_template["Resources"][arn["Fn::GetAtt"][0]]["Properties"][
-            "Name"
-        ]
-        for arn in activity_arns
-    } == {
+    activity_arns = activity_encryption["Condition"]["StringEquals"]["kms:EncryptionContext:aws:states:activityArn"]
+    assert {synthesized_template["Resources"][arn["Fn::GetAtt"][0]]["Properties"]["Name"] for arn in activity_arns} == {
         "axonllm-agentcore-launch-actions",
         "axonllm-agentcore-launch-cleanup",
     }
     assert "kms:ViaService" not in json.dumps(activity_encryption)
 
     log_encryption = next(
-        statement
-        for statement in execution_statements
-        if statement.get("Sid") == "EncryptLaunchCoordinatorLogDelivery"
+        statement for statement in execution_statements if statement.get("Sid") == "EncryptLaunchCoordinatorLogDelivery"
     )
     assert _actions(log_encryption) == {"kms:GenerateDataKey"}
-    assert _literal_parts(
-        log_encryption["Condition"]["StringEquals"][
-            "kms:EncryptionContext:SourceArn"
-        ]
-    ).endswith(":logs:us-east-1::*")
+    assert _literal_parts(log_encryption["Condition"]["StringEquals"]["kms:EncryptionContext:SourceArn"]).endswith(
+        ":logs:us-east-1::*"
+    )
     assert "kms:ViaService" not in json.dumps(log_encryption)
 
     lease_statement = next(
@@ -1971,13 +1921,11 @@ def test_coordinator_worker_roles_are_separate_activity_pollers(
     ]
     assert len(transaction_policies) == 3
     assert all(
-        policy.get("Metadata")
-        == {"cfn-lint": {"config": {"ignore_checks": ["W3037"]}}}
+        policy.get("Metadata") == {"cfn-lint": {"config": {"ignore_checks": ["W3037"]}}}
         for policy in transaction_policies
     )
     assert not any(
-        "W3037"
-        in json.dumps(policy.get("Metadata", {}))
+        "W3037" in json.dumps(policy.get("Metadata", {}))
         for policy in _resources(
             synthesized_template,
             "AWS::IAM::Policy",
@@ -2000,9 +1948,7 @@ def test_coordinator_worker_roles_are_separate_activity_pollers(
         synthesized_template,
         "AWS::Lambda::Function",
     )
-    assert {
-        function["Properties"]["FunctionName"] for function in functions
-    } == {
+    assert {function["Properties"]["FunctionName"] for function in functions} == {
         "axonllm-production-transition-mutation-broker",
         "axonllm-qualification-selector-mutation-broker",
     }
@@ -2082,34 +2028,19 @@ def test_cleanup_and_watchdog_are_durable_scheduled_and_actionable(
         "AxonLLMLaunchCoordinatorSchedulerRole",
     )
     scheduled_start = next(
-        statement
-        for statement in scheduler_statements
-        if statement.get("Sid") == "StartScheduledLaunchCoordinator"
+        statement for statement in scheduler_statements if statement.get("Sid") == "StartScheduledLaunchCoordinator"
     )
     assert _actions(scheduled_start) == {"states:StartExecution"}
-    assert _literal_parts(scheduled_start["Resource"]).endswith(
-        ":stateMachine:AxonLLMLaunchCoordinator"
-    )
-    assert not any(
-        statement.get("Sid") == "UseCoordinatorKeyViaStates"
-        for statement in scheduler_statements
-    )
+    assert _literal_parts(scheduled_start["Resource"]).endswith(":stateMachine:AxonLLMLaunchCoordinator")
+    assert not any(statement.get("Sid") == "UseCoordinatorKeyViaStates" for statement in scheduler_statements)
     payload_decrypt = next(
-        statement
-        for statement in scheduler_statements
-        if statement.get("Sid") == "DecryptBoundSchedulePayloads"
+        statement for statement in scheduler_statements if statement.get("Sid") == "DecryptBoundSchedulePayloads"
     )
     assert _actions(payload_decrypt) == {"kms:Decrypt"}
     assert payload_decrypt["Resource"]["Fn::GetAtt"][1] == "Arn"
-    assert payload_decrypt["Condition"]["StringEquals"] == {
-        "kms:CallerAccount": {"Ref": "AWS::AccountId"}
-    }
-    schedule_arns = payload_decrypt["Condition"]["ArnEquals"][
-        "kms:EncryptionContext:aws:scheduler:schedule:arn"
-    ]
-    assert {
-        _literal_parts(arn).rsplit(":schedule/", 1)[1] for arn in schedule_arns
-    } == {
+    assert payload_decrypt["Condition"]["StringEquals"] == {"kms:CallerAccount": {"Ref": "AWS::AccountId"}}
+    schedule_arns = payload_decrypt["Condition"]["ArnEquals"]["kms:EncryptionContext:aws:scheduler:schedule:arn"]
+    assert {_literal_parts(arn).rsplit(":schedule/", 1)[1] for arn in schedule_arns} == {
         "axonllm-launch-coordinator/axonllm-launch-coordinator-cleanup",
         "axonllm-launch-coordinator/axonllm-launch-coordinator-watchdog",
     }
@@ -2159,8 +2090,7 @@ def test_cleanup_and_watchdog_are_durable_scheduled_and_actionable(
             synthesized_template,
             "AWS::Logs::LogGroup",
         )
-        if resource["Properties"]["LogGroupName"]
-        == "/aws/vendedlogs/states/AxonLLMLaunchCoordinator"
+        if resource["Properties"]["LogGroupName"] == "/aws/vendedlogs/states/AxonLLMLaunchCoordinator"
     )
     assert log_group["Properties"]["LogGroupName"] == ("/aws/vendedlogs/states/AxonLLMLaunchCoordinator")
     assert log_group["Properties"]["DeletionProtectionEnabled"] is True
@@ -2191,22 +2121,13 @@ def test_foundation_uses_dedicated_bounded_cdk_domain(
 ):
     serialized = json.dumps(synthesized_template, sort_keys=True)
     assert "hnb659fds" not in serialized
-    assert (
-        synthesized_template["Parameters"]["BootstrapVersion"]["Default"]
-        == "/cdk-bootstrap/axrel/version"
-    )
+    assert synthesized_template["Parameters"]["BootstrapVersion"]["Default"] == "/cdk-bootstrap/axrel/version"
 
     for role in _resources(synthesized_template, "AWS::IAM::Role"):
-        assert _literal_parts(
-            role["Properties"]["PermissionsBoundary"]
-        ).endswith(
-            ":policy/"
-            "AxonLLMReleaseFoundationRoleBoundary-axrel-us-east-1"
+        assert _literal_parts(role["Properties"]["PermissionsBoundary"]).endswith(
+            ":policy/AxonLLMReleaseFoundationRoleBoundary-axrel-us-east-1"
         )
-        tags = {
-            item["Key"]: item["Value"]
-            for item in role["Properties"]["Tags"]
-        }
+        tags = {item["Key"]: item["Value"] for item in role["Properties"]["Tags"]}
         assert tags["Application"] == "AxonLLM"
         assert tags["AxonLLMTrustDomain"] == "axrel"
 
@@ -2214,41 +2135,20 @@ def test_foundation_uses_dedicated_bounded_cdk_domain(
         synthesized_template,
         "AxonLLMReleaseFoundationDeployRole",
     )
-    actions = {
-        action
-        for statement in deployer
-        for action in _actions(statement)
-    }
+    actions = {action for statement in deployer for action in _actions(statement)}
     assert "sts:AssumeRole" in actions
     assert "iam:PassRole" not in actions
     assert "iam:ListRoleTags" in actions
-    assume = next(
-        statement
-        for statement in deployer
-        if statement.get("Sid") == "UseBoundedReleaseFoundationCdkRoles"
-    )
-    resources = (
-        assume["Resource"]
-        if isinstance(assume["Resource"], list)
-        else [assume["Resource"]]
-    )
+    assume = next(statement for statement in deployer if statement.get("Sid") == "UseBoundedReleaseFoundationCdkRoles")
+    resources = assume["Resource"] if isinstance(assume["Resource"], list) else [assume["Resource"]]
     assert len(resources) == 2
     assert all("cdk-axrel-" in _literal_parts(resource) for resource in resources)
     assert all("hnb659fds" not in _literal_parts(resource) for resource in resources)
-    assert all(
-        purpose not in json.dumps(resources)
-        for purpose in ("image-publishing", "lookup")
-    )
+    assert all(purpose not in json.dumps(resources) for purpose in ("image-publishing", "lookup"))
     inspect = next(
-        statement
-        for statement in deployer
-        if statement.get("Sid") == "InspectBoundedReleaseFoundationCdkRoles"
+        statement for statement in deployer if statement.get("Sid") == "InspectBoundedReleaseFoundationCdkRoles"
     )
-    inspect_resources = (
-        inspect["Resource"]
-        if isinstance(inspect["Resource"], list)
-        else [inspect["Resource"]]
-    )
+    inspect_resources = inspect["Resource"] if isinstance(inspect["Resource"], list) else [inspect["Resource"]]
     assert len(inspect_resources) == 5
 
 
@@ -2303,6 +2203,7 @@ def test_foundation_outputs_all_operator_inputs(synthesized_template):
         "ReleaseSigningKeyArn",
         "ReleaseSignerRoleArn",
         "ReleaseVerifierRoleArn",
+        "StandaloneRepositoryUri",
     }
 
 

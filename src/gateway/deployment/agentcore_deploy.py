@@ -23,8 +23,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from typing import Any, Callable
-from urllib.parse import unquote
+from typing import TYPE_CHECKING, Any, Callable
+from urllib.parse import unquote, urlsplit
 import zlib
 
 try:
@@ -73,20 +73,35 @@ from src.gateway.deployment.provider_secret import (
     synchronize_provider_secret,
 )
 
+if TYPE_CHECKING:
+    from src.gateway.deployment.network_preflight import (
+        NetworkPreflightResult,
+    )
+
 
 class AgentCoreDeploymentError(RuntimeError):
     """Raised when deployment cannot prove a safe resulting configuration."""
 
 
 _INFRA_RESOURCE_NAMES = (
+    "application-state-migration-v1.json",
+    "application_state.py",
+    "application_state_stack.py",
+    "agentcore-supported-availability-zones-v1.json",
     "agentcore_stack.py",
     "app.py",
     "cdk.json",
     "control_plane_stack.py",
     "identity_stack.py",
+    "managed_network_stack.py",
+    "parked_stack.py",
     "package-lock.json",
     "package.json",
     "requirements.txt",
+    "runtime_network.py",
+    "serverless_control_plane_stack.py",
+    "serverless_workers_stack.py",
+    "static_asset_deployer.py",
 )
 
 
@@ -379,11 +394,23 @@ def _cdk_cli_path() -> Path:
 _PRODUCTION_IDENTITY_STACK = "AxonLLMIdentityStack"
 _PRODUCTION_AGENTCORE_STACK = "AxonLLMAgentCoreStack"
 _PRODUCTION_CONTROL_PLANE_STACK = "AxonLLMControlPlaneStack"
+_PRODUCTION_SERVERLESS_CONTROL_PLANE_STACK = (
+    "AxonLLMServerlessControlPlaneStack"
+)
+_PRODUCTION_SERVERLESS_WORKERS_STACK = "AxonLLMServerlessWorkersStack"
+_PRODUCTION_APPLICATION_STATE_STACK = "AxonLLMApplicationStateStack"
+_PRODUCTION_MANAGED_NETWORK_STACK = "AxonLLMManagedNetworkStack"
 _PRODUCTION_STATE_TABLE_NAME = "axonllm-agentcore-state"
 _PRODUCTION_USER_POOL_NAME = "axonllm-agentcore-users"
 IDENTITY_STACK = _PRODUCTION_IDENTITY_STACK
 AGENTCORE_STACK = _PRODUCTION_AGENTCORE_STACK
 CONTROL_PLANE_STACK = _PRODUCTION_CONTROL_PLANE_STACK
+SERVERLESS_CONTROL_PLANE_STACK = (
+    _PRODUCTION_SERVERLESS_CONTROL_PLANE_STACK
+)
+SERVERLESS_WORKERS_STACK = _PRODUCTION_SERVERLESS_WORKERS_STACK
+APPLICATION_STATE_STACK = _PRODUCTION_APPLICATION_STATE_STACK
+MANAGED_NETWORK_STACK = _PRODUCTION_MANAGED_NETWORK_STACK
 CDK_BOOTSTRAP_STACK = bootstrap_toolkit_stack_name(bootstrap_qualifier_for_namespace(""))
 _PRIMARY_STATE_TABLE_NAME = _PRODUCTION_STATE_TABLE_NAME
 _MANAGED_USER_POOL_NAME = _PRODUCTION_USER_POOL_NAME
@@ -402,6 +429,9 @@ _TRANSITION_RUN_PATTERN = re.compile(r"^[1-9][0-9]*$")
 _TRANSITION_COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 _TRANSITION_CHANGE_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{2,127}$")
 _TRANSITION_ID_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+_LIFECYCLE_CHANGE_SET_NAME_PATTERN = re.compile(
+    r"^[A-Za-z][A-Za-z0-9-]{0,127}$"
+)
 CommandRunner = Callable[[list[str], Path], None]
 
 
@@ -411,6 +441,10 @@ class DeploymentNames:
     identity_stack: str
     agentcore_stack: str
     control_plane_stack: str
+    serverless_control_plane_stack: str
+    serverless_workers_stack: str
+    application_state_stack: str
+    managed_network_stack: str
     state_table: str
     user_pool: str
 
@@ -432,6 +466,18 @@ def deployment_names(namespace: str | None = None) -> DeploymentNames:
         identity_stack=f"{_PRODUCTION_IDENTITY_STACK}{suffix}",
         agentcore_stack=f"{_PRODUCTION_AGENTCORE_STACK}{suffix}",
         control_plane_stack=(f"{_PRODUCTION_CONTROL_PLANE_STACK}{suffix}"),
+        serverless_control_plane_stack=(
+            f"{_PRODUCTION_SERVERLESS_CONTROL_PLANE_STACK}{suffix}"
+        ),
+        serverless_workers_stack=(
+            f"{_PRODUCTION_SERVERLESS_WORKERS_STACK}{suffix}"
+        ),
+        application_state_stack=(
+            f"{_PRODUCTION_APPLICATION_STATE_STACK}{suffix}"
+        ),
+        managed_network_stack=(
+            f"{_PRODUCTION_MANAGED_NETWORK_STACK}{suffix}"
+        ),
         state_table=f"{_PRODUCTION_STATE_TABLE_NAME}{suffix}",
         user_pool=f"{_PRODUCTION_USER_POOL_NAME}{suffix}",
     )
@@ -445,8 +491,12 @@ def _activate_deployment_namespace(
     namespace: str | None,
 ) -> DeploymentNames:
     global AGENTCORE_STACK
+    global APPLICATION_STATE_STACK
     global CONTROL_PLANE_STACK
     global IDENTITY_STACK
+    global MANAGED_NETWORK_STACK
+    global SERVERLESS_CONTROL_PLANE_STACK
+    global SERVERLESS_WORKERS_STACK
     global _ACTIVE_DEPLOYMENT_NAMESPACE
     global _MANAGED_USER_POOL_NAME
     global _PRIMARY_STATE_TABLE_NAME
@@ -456,7 +506,13 @@ def _activate_deployment_namespace(
     _ACTIVE_DEPLOYMENT_NAMESPACE = selected.namespace
     IDENTITY_STACK = selected.identity_stack
     AGENTCORE_STACK = selected.agentcore_stack
+    APPLICATION_STATE_STACK = selected.application_state_stack
+    MANAGED_NETWORK_STACK = selected.managed_network_stack
     CONTROL_PLANE_STACK = selected.control_plane_stack
+    SERVERLESS_CONTROL_PLANE_STACK = (
+        selected.serverless_control_plane_stack
+    )
+    SERVERLESS_WORKERS_STACK = selected.serverless_workers_stack
     _PRIMARY_STATE_TABLE_NAME = selected.state_table
     _MANAGED_USER_POOL_NAME = selected.user_pool
     return previous
@@ -468,6 +524,94 @@ def _deployment_context_arguments(namespace: str) -> list[str]:
     if namespace:
         arguments.extend(["-c", f"deployment_namespace={namespace}"])
     return arguments
+
+
+def _append_verified_network_context(
+    command: list[str],
+    context: Mapping[str, Any],
+    *,
+    namespace: str,
+) -> None:
+    context_namespace = context.get("deployment_namespace", "")
+    if context_namespace != namespace:
+        raise AgentCoreDeploymentError(
+            "network preflight namespace does not match deployment namespace"
+        )
+    allowed = {
+        "deployment_namespace",
+        "deployment_profile",
+        "runtime_network_availability_zones",
+        "runtime_network_egress_mode",
+        "runtime_network_mode",
+        "runtime_network_private_subnet_ids",
+        "runtime_network_security_group_ids",
+        "runtime_network_vpc_cidr",
+        "runtime_network_vpc_id",
+    }
+    unknown = sorted(set(context).difference(allowed))
+    if unknown:
+        raise AgentCoreDeploymentError(
+            "network preflight contains unsupported CDK context: "
+            f"{', '.join(unknown)}"
+        )
+    for name in sorted(set(context).difference({"deployment_namespace"})):
+        value = context[name]
+        encoded = (
+            json.dumps(value, separators=(",", ":"), sort_keys=True)
+            if isinstance(value, (bool, dict, int, list))
+            else value
+        )
+        if not isinstance(encoded, str) or not encoded:
+            raise AgentCoreDeploymentError(
+                f"network preflight context {name} is invalid"
+            )
+        command.extend(["-c", f"{name}={encoded}"])
+
+
+def _append_managed_network_context(
+    command: list[str],
+    preflight: NetworkPreflightResult,
+    *,
+    namespace: str,
+) -> None:
+    context = preflight.managed_stack_context
+    if preflight.mode != "managed" or context is None:
+        raise AgentCoreDeploymentError(
+            "managed-network deployment requires managed preflight"
+        )
+    context_namespace = context.get("deployment_namespace", "")
+    if context_namespace != namespace:
+        raise AgentCoreDeploymentError(
+            "managed-network preflight namespace does not match deployment"
+        )
+    allowed = {
+        "deployment_namespace",
+        "deployment_profile",
+        "managed_network_availability_zone_ids",
+        "managed_network_availability_zones",
+        "managed_network_cost_acknowledgement",
+        "managed_network_egress_mode",
+        "managed_network_nat_gateway_count",
+        "managed_network_vpc_cidr",
+    }
+    unknown = sorted(set(context).difference(allowed))
+    if unknown:
+        raise AgentCoreDeploymentError(
+            "managed-network preflight contains unsupported CDK context: "
+            f"{', '.join(unknown)}"
+        )
+    for name in sorted(set(context).difference({"deployment_namespace"})):
+        value = context[name]
+        encoded = (
+            json.dumps(value, separators=(",", ":"), sort_keys=True)
+            if isinstance(value, (bool, dict, int, list))
+            else value
+        )
+        if not isinstance(encoded, str) or not encoded:
+            raise AgentCoreDeploymentError(
+                f"managed-network preflight context {name} is invalid"
+            )
+        command.extend(["-c", f"{name}={encoded}"])
 
 
 def validate_rehearsal_control_table_arn(
@@ -519,6 +663,326 @@ def deployment_control_plane_domain(
 class AwsIdentity:
     account_id: str
     partition: str
+
+
+@dataclass(frozen=True)
+class ApplicationStateValues:
+    """Non-secret outputs passed explicitly to state consumers."""
+
+    stack_name: str
+    state_table_name: str
+    selected_state_table_name: str
+    data_key_arn: str
+    routing_config_signing_key_arn: str
+    provider_secret_arn: str
+    event_outbox_queue_url: str
+    event_outbox_queue_arn: str
+    event_dead_letter_queue_url: str
+    event_dead_letter_queue_arn: str
+    security_event_topic_arn: str
+    security_event_log_group_arn: str
+    backup_vault_arn: str
+    backup_role_arn: str
+
+    def common_parameters(self) -> dict[str, str]:
+        """Return the state parameters shared by runtime and control plane."""
+
+        return {
+            "ApplicationStateStackName": self.stack_name,
+            "ApplicationStateDataKeyArn": self.data_key_arn,
+            "ApplicationStateRoutingConfigSigningKeyArn": (
+                self.routing_config_signing_key_arn
+            ),
+            "ApplicationStateSecurityEventOutboxQueueUrl": (
+                self.event_outbox_queue_url
+            ),
+            "ApplicationStateSecurityEventOutboxQueueArn": (
+                self.event_outbox_queue_arn
+            ),
+            "ApplicationStateSecurityEventTopicArn": (
+                self.security_event_topic_arn
+            ),
+            "ApplicationStateSecurityEventLogGroupArn": (
+                self.security_event_log_group_arn
+            ),
+        }
+
+    def agentcore_parameters(self) -> dict[str, str]:
+        """Return the full external-state contract consumed by AgentCore."""
+
+        runtime_table = (
+            ""
+            if self.selected_state_table_name == self.state_table_name
+            else self.selected_state_table_name
+        )
+        return {
+            **self.common_parameters(),
+            "PrimaryStateTableName": self.state_table_name,
+            "RuntimeStateTableName": runtime_table,
+            "ApplicationStateProviderSecretArn": self.provider_secret_arn,
+            "ApplicationStateSecurityEventDeadLetterQueueUrl": (
+                self.event_dead_letter_queue_url
+            ),
+            "ApplicationStateSecurityEventDeadLetterQueueArn": (
+                self.event_dead_letter_queue_arn
+            ),
+            "ApplicationStateBackupVaultArn": self.backup_vault_arn,
+            "ApplicationStateBackupRoleArn": self.backup_role_arn,
+        }
+
+    def control_plane_parameters(
+        self,
+        *,
+        selected_state_table_name: str,
+    ) -> dict[str, str]:
+        """Return state parameters after checking runtime/state agreement."""
+
+        if selected_state_table_name != self.selected_state_table_name:
+            raise AgentCoreDeploymentError(
+                "application-state and AgentCore selected tables do not match"
+            )
+        return self.common_parameters()
+
+    def security_event_worker_parameters(self) -> dict[str, str]:
+        """Return only retained identifiers required by event delivery."""
+
+        return {
+            "ApplicationStateStackName": self.stack_name,
+            "ApplicationStateDataKeyArn": self.data_key_arn,
+            "ApplicationStateSecurityEventOutboxQueueArn": (
+                self.event_outbox_queue_arn
+            ),
+            "ApplicationStateSecurityEventTopicArn": (
+                self.security_event_topic_arn
+            ),
+            "ApplicationStateSecurityEventLogGroupArn": (
+                self.security_event_log_group_arn
+            ),
+        }
+
+    def query_reconciliation_parameters(self) -> dict[str, str]:
+        """Return selected-table parameters for scheduled reconciliation."""
+
+        runtime_table = (
+            ""
+            if self.selected_state_table_name == self.state_table_name
+            else self.selected_state_table_name
+        )
+        return {
+            "PrimaryStateTableName": self.state_table_name,
+            "RuntimeStateTableName": runtime_table,
+        }
+
+
+@dataclass(frozen=True)
+class ServerlessControlArtifactValues:
+    """Published, non-secret serverless artifacts bound to one source commit."""
+
+    source_revision: str
+    artifact_bucket_name: str
+    artifact_bucket_key_arn: str
+    control_api_object_key: str
+    control_api_object_version: str
+    control_api_sha256: str
+    static_assets_object_key: str
+    static_assets_object_version: str
+    static_assets_sha256: str
+
+    def validate(
+        self,
+        *,
+        identity: AwsIdentity,
+        region: str,
+    ) -> None:
+        if _TRANSITION_COMMIT_PATTERN.fullmatch(self.source_revision) is None:
+            raise AgentCoreDeploymentError(
+                "serverless artifact source revision is invalid"
+            )
+        if (
+            re.fullmatch(
+                r"[a-z0-9](?:[a-z0-9.-]{1,61}[a-z0-9])?",
+                self.artifact_bucket_name,
+            )
+            is None
+            or ".." in self.artifact_bucket_name
+            or re.fullmatch(r"[0-9.]+", self.artifact_bucket_name)
+        ):
+            raise AgentCoreDeploymentError(
+                "serverless artifact bucket name is invalid"
+            )
+        expected_key_prefix = (
+            f"arn:{identity.partition}:kms:{region}:"
+            f"{identity.account_id}:key/"
+        )
+        if (
+            not self.artifact_bucket_key_arn.startswith(
+                expected_key_prefix
+            )
+            or re.fullmatch(
+                re.escape(expected_key_prefix) + r"[0-9a-fA-F-]{36}",
+                self.artifact_bucket_key_arn,
+            )
+            is None
+        ):
+            raise AgentCoreDeploymentError(
+                "serverless artifact KMS key does not match deployment "
+                "account and region"
+            )
+        for label, key, version, digest, prefix in (
+            (
+                "control API",
+                self.control_api_object_key,
+                self.control_api_object_version,
+                self.control_api_sha256,
+                "axonllm-control-api",
+            ),
+            (
+                "static assets",
+                self.static_assets_object_key,
+                self.static_assets_object_version,
+                self.static_assets_sha256,
+                "axonllm-static-assets",
+            ),
+        ):
+            if (
+                re.fullmatch(r"[0-9a-f]{64}", digest) is None
+                or re.fullmatch(r"[A-Za-z0-9._~-]{1,1024}", version)
+                is None
+                or not key
+                or key.startswith("/")
+                or "\\" in key
+                or any(part in {"", ".", ".."} for part in key.split("/"))
+                or len(key) > 1024
+                or key.rsplit("/", 1)[-1]
+                != f"{prefix}-{digest}.zip"
+            ):
+                raise AgentCoreDeploymentError(
+                    f"serverless {label} artifact binding is invalid"
+                )
+
+    def parameters(self) -> dict[str, str]:
+        return {
+            "SourceRevision": self.source_revision,
+            "ArtifactBucketName": self.artifact_bucket_name,
+            "ArtifactBucketKeyArn": self.artifact_bucket_key_arn,
+            "ControlApiCodeObjectKey": self.control_api_object_key,
+            "ControlApiCodeObjectVersion": (
+                self.control_api_object_version
+            ),
+            "ControlApiCodeSha256": self.control_api_sha256,
+            "StaticAssetsObjectKey": self.static_assets_object_key,
+            "StaticAssetsObjectVersion": (
+                self.static_assets_object_version
+            ),
+            "StaticAssetsSha256": self.static_assets_sha256,
+        }
+
+    def worker_parameters(self) -> dict[str, str]:
+        """Return the exact-version code binding used by worker Lambdas."""
+
+        return {
+            "SourceRevision": self.source_revision,
+            "ArtifactBucketName": self.artifact_bucket_name,
+            "WorkerCodeObjectKey": self.control_api_object_key,
+            "WorkerCodeObjectVersion": self.control_api_object_version,
+            "WorkerCodeSha256": self.control_api_sha256,
+        }
+
+
+@dataclass(frozen=True)
+class ServerlessWorkersValues:
+    """Non-secret worker outputs consumed by the serverless control API."""
+
+    stack_name: str
+    export_queue_url: str
+    export_queue_arn: str
+    export_bucket_name: str
+    export_bucket_arn: str
+
+    def control_plane_parameters(self) -> dict[str, str]:
+        return {
+            "ExportQueueUrl": self.export_queue_url,
+            "ExportQueueArn": self.export_queue_arn,
+            "ExportBucketName": self.export_bucket_name,
+        }
+
+
+@dataclass(frozen=True)
+class ProductionEdgeValues:
+    """Validated, non-secret outputs from the existing production edge."""
+
+    stack_name: str
+    distribution_id: str
+    distribution_arn: str
+    hostname: str
+    state_table_name: str
+    browser_client_id: str
+    web_acl_arn: str
+
+    def serverless_attachment_parameters(self) -> dict[str, str]:
+        return {
+            "ProductionDistributionArn": self.distribution_arn,
+            "ProductionDistributionId": self.distribution_id,
+            "ProductionControlPlaneHostname": self.hostname,
+        }
+
+
+@dataclass(frozen=True)
+class ServerlessEdgeValues:
+    """Qualified serverless origins bound to the existing production edge."""
+
+    stack_name: str
+    production_stack_name: str
+    production_distribution_id: str
+    production_distribution_arn: str
+    production_hostname: str
+    qualification_distribution_id: str
+    qualification_url: str
+    state_table_name: str
+    source_revision: str
+    control_api_sha256: str
+    static_assets_sha256: str
+    control_api_domain_name: str
+    control_api_origin_path: str
+    origin_credential_secret_arn: str
+    static_bucket_domain_name: str
+
+    def control_plane_parameters(
+        self,
+        *,
+        backend_mode: str,
+        migration_id: str,
+    ) -> dict[str, str]:
+        if backend_mode not in {"fargate", "serverless"}:
+            raise AgentCoreDeploymentError(
+                "edge backend mode must be fargate or serverless"
+            )
+        if _TRANSITION_ID_PATTERN.fullmatch(migration_id) is None:
+            raise AgentCoreDeploymentError(
+                "edge migration ID must be 64 lowercase hexadecimal "
+                "characters"
+            )
+        return {
+            "EdgeBackendMode": backend_mode,
+            "EdgeMigrationId": migration_id,
+            "ServerlessControlApiDomainName": (
+                self.control_api_domain_name
+            ),
+            "ServerlessControlApiOriginPath": (
+                self.control_api_origin_path
+            ),
+            "ServerlessOriginCredentialSecretArn": (
+                self.origin_credential_secret_arn
+            ),
+            "ServerlessStaticBucketRegionalDomainName": (
+                self.static_bucket_domain_name
+            ),
+            "ServerlessSourceRevision": self.source_revision,
+            "ServerlessControlApiSha256": self.control_api_sha256,
+            "ServerlessStaticAssetsSha256": (
+                self.static_assets_sha256
+            ),
+        }
 
 
 @dataclass(frozen=True)
@@ -1196,6 +1660,300 @@ def identity_deploy_command(
     return command
 
 
+def application_state_deploy_command(
+    config: AgentCoreSetupConfig,
+    *,
+    outputs_file: Path,
+    assume_yes: bool,
+    runtime_state_table_name: str = "",
+    deployment_namespace: str | None = None,
+    backup_vault_name: str | None = None,
+    security_event_topic_name: str | None = None,
+) -> list[str]:
+    """Build a dedicated application-state deployment command."""
+
+    names = (
+        _current_deployment_names()
+        if deployment_namespace is None
+        else deployment_names(deployment_namespace)
+    )
+    command = [
+        str(_cdk_cli_path()),
+        "deploy",
+        names.application_state_stack,
+        "-c",
+        "deployment_target=application-state",
+        "-c",
+        f"region={config.aws_region}",
+    ]
+    command.extend(_deployment_context_arguments(names.namespace))
+    if backup_vault_name is not None:
+        command.extend(
+            [
+                "-c",
+                f"application_state_backup_vault_name={backup_vault_name}",
+            ]
+        )
+    if security_event_topic_name is not None:
+        command.extend(
+            [
+                "-c",
+                (
+                    "application_state_security_event_topic_name="
+                    f"{security_event_topic_name}"
+                ),
+            ]
+        )
+    if runtime_state_table_name:
+        command.extend(
+            _parameter(
+                "RuntimeStateTableName",
+                runtime_state_table_name,
+                stack=names.application_state_stack,
+            )
+        )
+    command.extend(
+        [
+            "--require-approval",
+            "never" if assume_yes else "broadening",
+            "--outputs-file",
+            str(outputs_file),
+        ]
+    )
+    return command
+
+
+def agentcore_parked_change_set_command(
+    config: AgentCoreSetupConfig,
+    *,
+    change_set_name: str,
+    deployment_namespace: str | None = None,
+) -> list[str]:
+    """Build a prepare-only change set for the parked runtime shell."""
+
+    names = (
+        _current_deployment_names()
+        if deployment_namespace is None
+        else deployment_names(deployment_namespace)
+    )
+    return _parked_change_set_command(
+        region=config.aws_region,
+        stack_name=names.agentcore_stack,
+        deployment_target="agentcore-parked",
+        deployment_namespace=names.namespace,
+        change_set_name=change_set_name,
+    )
+
+
+def managed_network_parked_change_set_command(
+    config: AgentCoreSetupConfig,
+    *,
+    change_set_name: str,
+    deployment_namespace: str | None = None,
+) -> list[str]:
+    """Build a prepare-only change set for the parked network shell."""
+
+    names = (
+        _current_deployment_names()
+        if deployment_namespace is None
+        else deployment_names(deployment_namespace)
+    )
+    return _parked_change_set_command(
+        region=config.aws_region,
+        stack_name=names.managed_network_stack,
+        deployment_target="managed-network-parked",
+        deployment_namespace=names.namespace,
+        change_set_name=change_set_name,
+    )
+
+
+def prepare_change_set_command(
+    deploy_command: list[str],
+    *,
+    change_set_name: str,
+) -> list[str]:
+    """Convert one validated CDK deploy command into a preview-only command."""
+
+    name = _validate_lifecycle_change_set_name(change_set_name)
+    command = list(deploy_command)
+    if len(command) < 3 or command[1] != "deploy":
+        raise AgentCoreDeploymentError(
+            "lifecycle preview requires a CDK deploy command"
+        )
+    if "--method" in command or "--change-set-name" in command:
+        raise AgentCoreDeploymentError(
+            "lifecycle preview command already selects a deployment method"
+        )
+    while "--outputs-file" in command:
+        index = command.index("--outputs-file")
+        if index + 1 >= len(command):
+            raise AgentCoreDeploymentError(
+                "deployment command has an incomplete outputs-file option"
+            )
+        del command[index : index + 2]
+    if "--require-approval" in command:
+        index = command.index("--require-approval")
+        if index + 1 >= len(command):
+            raise AgentCoreDeploymentError(
+                "deployment command has an incomplete approval option"
+            )
+        command[index + 1] = "never"
+    else:
+        command.extend(["--require-approval", "never"])
+    command.extend(
+        [
+            "--method",
+            "prepare-change-set",
+            "--change-set-name",
+            name,
+        ]
+    )
+    return command
+
+
+def managed_network_deploy_command(
+    config: AgentCoreSetupConfig,
+    preflight: NetworkPreflightResult,
+    application_state: ApplicationStateValues,
+    *,
+    outputs_file: Path,
+    assume_yes: bool,
+    deployment_namespace: str | None = None,
+    rehearsal_control_table_arn: str | None = None,
+) -> list[str]:
+    """Build the optional managed-network deployment command."""
+
+    names = (
+        _current_deployment_names()
+        if deployment_namespace is None
+        else deployment_names(deployment_namespace)
+    )
+    if application_state.stack_name != names.application_state_stack:
+        raise AgentCoreDeploymentError(
+            "application-state descriptor does not match the deployment "
+            "namespace"
+        )
+    command = [
+        str(_cdk_cli_path()),
+        "deploy",
+        names.managed_network_stack,
+        "-c",
+        "deployment_target=managed-network",
+        "-c",
+        f"region={config.aws_region}",
+    ]
+    command.extend(_deployment_context_arguments(names.namespace))
+    _append_managed_network_context(
+        command,
+        preflight,
+        namespace=names.namespace,
+    )
+    rehearsal_arn = validate_rehearsal_control_table_arn(
+        aws_region=config.aws_region,
+        deployment_namespace=names.namespace,
+        rehearsal_control_table_arn=rehearsal_control_table_arn,
+    )
+    parameters = {
+        "SelectedStateTableName": (
+            application_state.selected_state_table_name
+        ),
+        "ApplicationStateDataKeyArn": application_state.data_key_arn,
+        "ApplicationStateRoutingConfigSigningKeyArn": (
+            application_state.routing_config_signing_key_arn
+        ),
+        "ApplicationStateProviderSecretArn": (
+            application_state.provider_secret_arn
+        ),
+        "ApplicationStateSecurityEventOutboxQueueArn": (
+            application_state.event_outbox_queue_arn
+        ),
+        "ApplicationStateSecurityEventTopicArn": (
+            application_state.security_event_topic_arn
+        ),
+        "ApplicationStateSecurityEventLogGroupArn": (
+            application_state.security_event_log_group_arn
+        ),
+        "BedrockInvokeResourceArns": ",".join(
+            config.runtime.bedrock_invoke_resource_arns
+        ),
+        "VerifiedImageUri": config.runtime.verified_image_uri,
+    }
+    if preflight.egress_mode == "managed-nat":
+        prefix_list_id = preflight.approved_https_prefix_list_id
+        if prefix_list_id is None:
+            raise AgentCoreDeploymentError(
+                "managed-nat preflight is missing the approved HTTPS "
+                "prefix list"
+            )
+        parameters["ApprovedHttpsPrefixListId"] = prefix_list_id
+    if rehearsal_arn is not None:
+        parameters["RehearsalControlTableArn"] = rehearsal_arn
+    for name, value in parameters.items():
+        command.extend(
+            _parameter(
+                name,
+                value,
+                stack=names.managed_network_stack,
+            )
+        )
+    _append_athena_contexts(command, config)
+    command.extend(
+        [
+            "--require-approval",
+            "never" if assume_yes else "broadening",
+            "--outputs-file",
+            str(outputs_file),
+        ]
+    )
+    return command
+
+
+def _parked_change_set_command(
+    *,
+    region: str,
+    stack_name: str,
+    deployment_target: str,
+    deployment_namespace: str,
+    change_set_name: str,
+) -> list[str]:
+    name = _validate_lifecycle_change_set_name(change_set_name)
+    command = [
+        str(_cdk_cli_path()),
+        "deploy",
+        stack_name,
+        "-c",
+        f"deployment_target={deployment_target}",
+        "-c",
+        f"region={region}",
+    ]
+    command.extend(
+        _deployment_context_arguments(deployment_namespace)
+    )
+    command.extend(
+        [
+            "--require-approval",
+            "never",
+            "--method",
+            "prepare-change-set",
+            "--change-set-name",
+            name,
+        ]
+    )
+    return command
+
+
+def _validate_lifecycle_change_set_name(value: str) -> str:
+    if (
+        not isinstance(value, str)
+        or _LIFECYCLE_CHANGE_SET_NAME_PATTERN.fullmatch(value) is None
+    ):
+        raise AgentCoreDeploymentError(
+            "lifecycle change-set name must start with a letter and contain "
+            "only letters, digits, or hyphens"
+        )
+    return value
+
+
 def _athena_contexts(
     config: AgentCoreSetupConfig,
 ) -> dict[str, str]:
@@ -1333,6 +2091,9 @@ def agentcore_deploy_command(
     publish_candidate_endpoint: bool = True,
     publish_production_endpoint: bool = False,
     production_runtime_version: str = "",
+    application_state: ApplicationStateValues | None = None,
+    network_preflight: NetworkPreflightResult | None = None,
+    managed_network_outputs: Mapping[str, str] | None = None,
     deployment_namespace: str | None = None,
     rehearsal_control_table_arn: str | None = None,
 ) -> list[str]:
@@ -1348,6 +2109,47 @@ def agentcore_deploy_command(
         f"region={config.aws_region}",
     ]
     command.extend(_deployment_context_arguments(names.namespace))
+    verified_network_context = None
+    if network_preflight is not None:
+        from src.gateway.deployment.network_preflight import (
+            NetworkPreflightError,
+            runtime_network_context,
+        )
+
+        try:
+            verified_network_context = runtime_network_context(
+                network_preflight,
+                managed_outputs=(
+                    dict(managed_network_outputs)
+                    if managed_network_outputs is not None
+                    else None
+                ),
+                expected_managed_stack_name=(
+                    names.managed_network_stack
+                    if network_preflight.mode == "managed"
+                    else None
+                ),
+            )
+        except NetworkPreflightError as exc:
+            raise AgentCoreDeploymentError(
+                f"runtime network preflight is invalid: {exc}"
+            ) from exc
+        _append_verified_network_context(
+            command,
+            verified_network_context,
+            namespace=names.namespace,
+        )
+    elif managed_network_outputs is not None:
+        raise AgentCoreDeploymentError(
+            "managed network outputs require network preflight"
+        )
+    if application_state is not None:
+        if application_state.stack_name != names.application_state_stack:
+            raise AgentCoreDeploymentError(
+                "application-state descriptor does not match the deployment "
+                "namespace"
+            )
+        command.extend(["-c", "application_state_mode=external"])
     rehearsal_arn = validate_rehearsal_control_table_arn(
         aws_region=config.aws_region,
         deployment_namespace=names.namespace,
@@ -1361,7 +2163,6 @@ def agentcore_deploy_command(
         "OidcAudiences": ",".join(identity.audiences),
         "OidcTenantClaim": identity.tenant_claim,
         "OidcProjectClaim": identity.project_claim,
-        "ApprovedHttpsPrefixListId": (config.runtime.approved_https_prefix_list_id),
         "BedrockInvokeResourceArns": ",".join(config.runtime.bedrock_invoke_resource_arns),
         "AlarmNotificationEmail": config.admin.email,
         "CandidateEndpointName": candidate_endpoint_name,
@@ -1374,8 +2175,33 @@ def agentcore_deploy_command(
         "PublishProductionEndpoint": ("true" if publish_production_endpoint else "false"),
         "ProductionRuntimeVersion": production_runtime_version,
     }
+    if verified_network_context is None:
+        parameters["ApprovedHttpsPrefixListId"] = (
+            config.runtime.approved_https_prefix_list_id
+        )
+    elif (
+        verified_network_context["runtime_network_mode"] == "existing"
+        and verified_network_context["runtime_network_egress_mode"]
+        == "existing-egress"
+        and not verified_network_context[
+            "runtime_network_security_group_ids"
+        ]
+    ):
+        prefix_list_id = (
+            network_preflight.approved_https_prefix_list_id
+            if network_preflight is not None
+            else None
+        )
+        if prefix_list_id is None:
+            raise AgentCoreDeploymentError(
+                "existing-egress with an AxonLLM security group requires "
+                "an approved HTTPS prefix list"
+            )
+        parameters["ApprovedHttpsPrefixListId"] = prefix_list_id
     if rehearsal_arn is not None:
         parameters["RehearsalControlTableArn"] = rehearsal_arn
+    if application_state is not None:
+        parameters.update(application_state.agentcore_parameters())
     for name, value in parameters.items():
         command.extend(_parameter(name, value, stack=names.agentcore_stack))
     _append_athena_contexts(command, config)
@@ -1397,6 +2223,7 @@ def _control_plane_parameters(
     runtime_state_table_name: str = "",
     recovery_approval_id: str = "",
     deployment_transition_id: str = "",
+    application_state: ApplicationStateValues | None = None,
     deployment_namespace: str | None = None,
     rehearsal_control_table_arn: str | None = None,
 ) -> dict[str, str]:
@@ -1418,6 +2245,25 @@ def _control_plane_parameters(
         "RecoveryApprovalId": recovery_approval_id,
         "DeploymentTransitionId": deployment_transition_id,
     }
+    if application_state is not None:
+        if (
+            application_state.stack_name
+            != names.application_state_stack
+            or application_state.state_table_name
+            != primary_state_table_name
+        ):
+            raise AgentCoreDeploymentError(
+                "application-state descriptor does not match the control-plane "
+                "deployment"
+            )
+        selected_state_table_name = (
+            runtime_state_table_name or primary_state_table_name
+        )
+        parameters.update(
+            application_state.control_plane_parameters(
+                selected_state_table_name=selected_state_table_name,
+            )
+        )
     if control_plane.endpoint_mode == CLOUDFRONT:
         parameters["EndpointMode"] = CLOUDFRONT
     if control_plane.endpoint_mode == CUSTOM_DOMAIN:
@@ -1473,8 +2319,12 @@ def control_plane_deploy_command(
     runtime_state_table_name: str = "",
     recovery_approval_id: str = "",
     deployment_transition_id: str = "",
+    application_state: ApplicationStateValues | None = None,
     deployment_namespace: str | None = None,
     rehearsal_control_table_arn: str | None = None,
+    serverless_edge: ServerlessEdgeValues | None = None,
+    edge_backend_mode: str = "fargate",
+    edge_migration_id: str = "",
 ) -> list[str]:
     names = _current_deployment_names() if deployment_namespace is None else deployment_names(deployment_namespace)
     command = [
@@ -1487,15 +2337,46 @@ def control_plane_deploy_command(
         f"region={config.aws_region}",
     ]
     command.extend(_deployment_context_arguments(names.namespace))
+    if application_state is not None:
+        command.extend(["-c", "application_state_mode=external"])
+    if serverless_edge is not None:
+        if (
+            serverless_edge.stack_name
+            != names.serverless_control_plane_stack
+            or serverless_edge.production_stack_name
+            != names.control_plane_stack
+        ):
+            raise AgentCoreDeploymentError(
+                "serverless edge descriptor does not match the control-plane "
+                "namespace"
+            )
+        if serverless_edge.state_table_name != primary_state_table_name:
+            raise AgentCoreDeploymentError(
+                "serverless edge descriptor does not match canonical state"
+            )
+        command.extend(["-c", "edge_cutover_enabled=true"])
+    elif edge_backend_mode != "fargate" or edge_migration_id:
+        raise AgentCoreDeploymentError(
+            "edge backend selection requires a qualified serverless edge "
+            "descriptor"
+        )
     parameters = _control_plane_parameters(
         config,
         primary_state_table_name=primary_state_table_name,
         runtime_state_table_name=runtime_state_table_name,
         recovery_approval_id=recovery_approval_id,
         deployment_transition_id=deployment_transition_id,
+        application_state=application_state,
         deployment_namespace=names.namespace,
         rehearsal_control_table_arn=rehearsal_control_table_arn,
     )
+    if serverless_edge is not None:
+        parameters.update(
+            serverless_edge.control_plane_parameters(
+                backend_mode=edge_backend_mode,
+                migration_id=edge_migration_id,
+            )
+        )
     for name, value in parameters.items():
         command.extend(
             _parameter(
@@ -1513,6 +2394,213 @@ def control_plane_deploy_command(
                 "-c",
                 (f"scim_tenants_secret_arn={control_plane.scim_tenants_secret_arn}"),
             ]
+        )
+    _append_athena_contexts(command, config)
+    command.extend(
+        [
+            "--require-approval",
+            "never" if assume_yes else "broadening",
+            "--outputs-file",
+            str(outputs_file),
+        ]
+    )
+    return command
+
+
+def serverless_control_plane_deploy_command(
+    config: AgentCoreSetupConfig,
+    identity: IdentityValues,
+    application_state: ApplicationStateValues,
+    artifacts: ServerlessControlArtifactValues,
+    workers: ServerlessWorkersValues,
+    *,
+    aws_identity: AwsIdentity,
+    outputs_file: Path,
+    assume_yes: bool,
+    deployment_namespace: str | None = None,
+    production_edge: ProductionEdgeValues | None = None,
+) -> list[str]:
+    """Build a serverless control-plane command without executing it."""
+
+    names = (
+        _current_deployment_names()
+        if deployment_namespace is None
+        else deployment_names(deployment_namespace)
+    )
+    if config.identity_mode != MANAGED_COGNITO:
+        raise AgentCoreDeploymentError(
+            "serverless control plane requires managed Cognito"
+        )
+    control_plane = config.control_plane
+    if control_plane is None or control_plane.endpoint_mode != CLOUDFRONT:
+        raise AgentCoreDeploymentError(
+            "serverless control plane currently requires CloudFront mode"
+        )
+    if (
+        identity.user_pool_id is None
+        or identity.hosted_ui_domain is None
+    ):
+        raise AgentCoreDeploymentError(
+            "serverless control plane requires complete managed identity "
+            "outputs"
+        )
+    if application_state.stack_name != names.application_state_stack:
+        raise AgentCoreDeploymentError(
+            "application-state descriptor does not match the serverless "
+            "control-plane namespace"
+        )
+    if workers.stack_name != names.serverless_workers_stack:
+        raise AgentCoreDeploymentError(
+            "serverless-workers descriptor does not match the control-plane "
+            "namespace"
+        )
+    if production_edge is not None:
+        if production_edge.stack_name != names.control_plane_stack:
+            raise AgentCoreDeploymentError(
+                "production edge descriptor does not match the serverless "
+                "control-plane namespace"
+            )
+        if (
+            production_edge.state_table_name
+            != application_state.state_table_name
+        ):
+            raise AgentCoreDeploymentError(
+                "production edge and serverless control plane do not share "
+                "canonical state"
+            )
+    artifacts.validate(
+        identity=aws_identity,
+        region=config.aws_region,
+    )
+    hosted_ui = urlsplit(identity.hosted_ui_domain)
+    if (
+        hosted_ui.scheme != "https"
+        or hosted_ui.hostname is None
+        or hosted_ui.path not in {"", "/"}
+        or hosted_ui.query
+        or hosted_ui.fragment
+    ):
+        raise AgentCoreDeploymentError(
+            "managed Cognito hosted UI output is invalid"
+        )
+    runtime_state_table = (
+        ""
+        if application_state.selected_state_table_name
+        == application_state.state_table_name
+        else application_state.selected_state_table_name
+    )
+    parameters = {
+        **application_state.control_plane_parameters(
+            selected_state_table_name=(
+                application_state.selected_state_table_name
+            )
+        ),
+        **artifacts.parameters(),
+        **workers.control_plane_parameters(),
+        "AllowedViewerCidrs": ",".join(
+            control_plane.allowed_viewer_cidrs
+        ),
+        "IdentityHostedUiDomainName": hosted_ui.hostname,
+        "IdentityOidcIssuer": identity.issuer,
+        "IdentityUserPoolId": identity.user_pool_id,
+        "OidcProjectClaim": identity.project_claim,
+        "OidcTenantClaim": identity.tenant_claim,
+        "PrimaryStateTableName": application_state.state_table_name,
+        "RuntimeStateTableName": runtime_state_table,
+    }
+    if production_edge is not None:
+        parameters.update(
+            production_edge.serverless_attachment_parameters()
+        )
+    command = [
+        str(_cdk_cli_path()),
+        "deploy",
+        names.serverless_control_plane_stack,
+        "-c",
+        "deployment_target=serverless-control-plane",
+        "-c",
+        f"region={config.aws_region}",
+    ]
+    command.extend(_deployment_context_arguments(names.namespace))
+    if production_edge is not None:
+        command.extend(["-c", "edge_attachment_enabled=true"])
+    if control_plane.scim_tenants_secret_arn is not None:
+        command.extend(
+            [
+                "-c",
+                (
+                    "scim_tenants_secret_arn="
+                    f"{control_plane.scim_tenants_secret_arn}"
+                ),
+            ]
+        )
+    for name, value in parameters.items():
+        command.extend(
+            _parameter(
+                name,
+                value,
+                stack=names.serverless_control_plane_stack,
+            )
+        )
+    command.extend(
+        [
+            "--require-approval",
+            "never" if assume_yes else "broadening",
+            "--outputs-file",
+            str(outputs_file),
+        ]
+    )
+    return command
+
+
+def serverless_workers_deploy_command(
+    config: AgentCoreSetupConfig,
+    application_state: ApplicationStateValues,
+    artifacts: ServerlessControlArtifactValues,
+    *,
+    aws_identity: AwsIdentity,
+    outputs_file: Path,
+    assume_yes: bool,
+    deployment_namespace: str | None = None,
+) -> list[str]:
+    """Build a serverless-workers command without executing it."""
+
+    names = (
+        _current_deployment_names()
+        if deployment_namespace is None
+        else deployment_names(deployment_namespace)
+    )
+    if application_state.stack_name != names.application_state_stack:
+        raise AgentCoreDeploymentError(
+            "application-state descriptor does not match the serverless "
+            "workers namespace"
+        )
+    artifacts.validate(
+        identity=aws_identity,
+        region=config.aws_region,
+    )
+    parameters = {
+        **application_state.security_event_worker_parameters(),
+        **application_state.query_reconciliation_parameters(),
+        **artifacts.worker_parameters(),
+    }
+    command = [
+        str(_cdk_cli_path()),
+        "deploy",
+        names.serverless_workers_stack,
+        "-c",
+        "deployment_target=serverless-workers",
+        "-c",
+        f"region={config.aws_region}",
+    ]
+    command.extend(_deployment_context_arguments(names.namespace))
+    for name, value in parameters.items():
+        command.extend(
+            _parameter(
+                name,
+                value,
+                stack=names.serverless_workers_stack,
+            )
         )
     _append_athena_contexts(command, config)
     command.extend(
@@ -1615,6 +2703,490 @@ def _required_output(outputs: dict[str, str], name: str) -> str:
     ):
         raise AgentCoreDeploymentError(f"deployment output {name} is missing or invalid")
     return value
+
+
+def _validated_application_state_arn(
+    value: str,
+    *,
+    identity: AwsIdentity,
+    region: str,
+    service: str,
+    resource_pattern: str,
+    location: str,
+    regional: bool = True,
+) -> str:
+    parts = value.split(":", 5)
+    expected_region = region if regional else ""
+    if (
+        len(parts) != 6
+        or parts[:2] != ["arn", identity.partition]
+        or parts[2] != service
+        or parts[3] != expected_region
+        or parts[4] != identity.account_id
+        or re.fullmatch(resource_pattern, parts[5]) is None
+    ):
+        raise AgentCoreDeploymentError(
+            f"application-state output {location} is not bound to the "
+            "deployment account and region"
+        )
+    return value
+
+
+def _validated_state_queue_url(
+    value: str,
+    *,
+    identity: AwsIdentity,
+    region: str,
+    location: str,
+) -> str:
+    suffix = "amazonaws.com.cn" if identity.partition == "aws-cn" else "amazonaws.com"
+    parsed = urlsplit(value)
+    expected_host = f"sqs.{region}.{suffix}"
+    path_parts = parsed.path.removeprefix("/").split("/")
+    if (
+        parsed.scheme != "https"
+        or parsed.netloc != expected_host
+        or parsed.query
+        or parsed.fragment
+        or len(path_parts) != 2
+        or path_parts[0] != identity.account_id
+        or re.fullmatch(r"[A-Za-z0-9_-]{1,75}\.fifo", path_parts[1])
+        is None
+    ):
+        raise AgentCoreDeploymentError(
+            f"application-state output {location} is not a FIFO queue URL "
+            "in the deployment account and region"
+        )
+    return value
+
+
+def application_state_values_from_outputs(
+    outputs: Mapping[str, str],
+    *,
+    identity: AwsIdentity,
+    region: str,
+    expected_stack_name: str,
+) -> ApplicationStateValues:
+    """Validate the non-secret descriptor emitted by the state stack."""
+
+    values = dict(outputs)
+    stack_name = _required_output(values, "ApplicationStateStackName")
+    if stack_name != expected_stack_name:
+        raise AgentCoreDeploymentError(
+            "application-state outputs are bound to an unexpected stack"
+        )
+    state_table_name = _required_output(values, "StateTableName")
+    if re.fullmatch(r"[A-Za-z0-9_.-]{3,255}", state_table_name) is None:
+        raise AgentCoreDeploymentError(
+            "application-state output StateTableName is invalid"
+        )
+    selected_state_table_name = _required_output(
+        values,
+        "SelectedRuntimeStateTableName",
+    )
+    if (
+        selected_state_table_name != state_table_name
+        and re.fullmatch(
+            re.escape(state_table_name)
+            + r"-restore-validation-[A-Za-z0-9_.-]{1,64}",
+            selected_state_table_name,
+        )
+        is None
+    ):
+        raise AgentCoreDeploymentError(
+            "application-state selected table is outside the recovery namespace"
+        )
+
+    data_key_arn = _validated_application_state_arn(
+        _required_output(values, "DataKeyArn"),
+        identity=identity,
+        region=region,
+        service="kms",
+        resource_pattern=r"key/[0-9a-fA-F-]{36}",
+        location="DataKeyArn",
+    )
+    routing_key_arn = _validated_application_state_arn(
+        _required_output(values, "RoutingConfigSigningKeyArn"),
+        identity=identity,
+        region=region,
+        service="kms",
+        resource_pattern=r"key/[0-9a-fA-F-]{36}",
+        location="RoutingConfigSigningKeyArn",
+    )
+    provider_secret_arn = _validated_application_state_arn(
+        _required_output(values, "ProviderSecretArn"),
+        identity=identity,
+        region=region,
+        service="secretsmanager",
+        resource_pattern=r"secret:[A-Za-z0-9/_+=.@-]{1,512}",
+        location="ProviderSecretArn",
+    )
+    outbox_queue_arn = _validated_application_state_arn(
+        _required_output(values, "SecurityEventOutboxQueueArn"),
+        identity=identity,
+        region=region,
+        service="sqs",
+        resource_pattern=r"[A-Za-z0-9_-]{1,75}\.fifo",
+        location="SecurityEventOutboxQueueArn",
+    )
+    dead_letter_queue_arn = _validated_application_state_arn(
+        _required_output(values, "SecurityEventDeadLetterQueueArn"),
+        identity=identity,
+        region=region,
+        service="sqs",
+        resource_pattern=r"[A-Za-z0-9_-]{1,75}\.fifo",
+        location="SecurityEventDeadLetterQueueArn",
+    )
+    security_event_topic_arn = _validated_application_state_arn(
+        _required_output(values, "SecurityEventTopicArn"),
+        identity=identity,
+        region=region,
+        service="sns",
+        resource_pattern=r"[A-Za-z0-9_-]{1,251}\.fifo",
+        location="SecurityEventTopicArn",
+    )
+    security_event_log_group_arn = _validated_application_state_arn(
+        _required_output(values, "SecurityEventLogGroupArn"),
+        identity=identity,
+        region=region,
+        service="logs",
+        resource_pattern=r"log-group:[A-Za-z0-9._/#-]{1,512}",
+        location="SecurityEventLogGroupArn",
+    )
+    backup_vault_arn = _validated_application_state_arn(
+        _required_output(values, "StateBackupVaultArn"),
+        identity=identity,
+        region=region,
+        service="backup",
+        resource_pattern=r"backup-vault:[A-Za-z0-9._-]{2,50}",
+        location="StateBackupVaultArn",
+    )
+    backup_role_arn = _validated_application_state_arn(
+        _required_output(values, "StateBackupRoleArn"),
+        identity=identity,
+        region=region,
+        service="iam",
+        resource_pattern=r"role/[A-Za-z0-9+=,.@_/-]{1,512}",
+        location="StateBackupRoleArn",
+        regional=False,
+    )
+    return ApplicationStateValues(
+        stack_name=stack_name,
+        state_table_name=state_table_name,
+        selected_state_table_name=selected_state_table_name,
+        data_key_arn=data_key_arn,
+        routing_config_signing_key_arn=routing_key_arn,
+        provider_secret_arn=provider_secret_arn,
+        event_outbox_queue_url=_validated_state_queue_url(
+            _required_output(values, "SecurityEventOutboxQueueUrl"),
+            identity=identity,
+            region=region,
+            location="SecurityEventOutboxQueueUrl",
+        ),
+        event_outbox_queue_arn=outbox_queue_arn,
+        event_dead_letter_queue_url=_validated_state_queue_url(
+            _required_output(
+                values,
+                "SecurityEventDeadLetterQueueUrl",
+            ),
+            identity=identity,
+            region=region,
+            location="SecurityEventDeadLetterQueueUrl",
+        ),
+        event_dead_letter_queue_arn=dead_letter_queue_arn,
+        security_event_topic_arn=security_event_topic_arn,
+        security_event_log_group_arn=security_event_log_group_arn,
+        backup_vault_arn=backup_vault_arn,
+        backup_role_arn=backup_role_arn,
+    )
+
+
+def serverless_workers_values_from_outputs(
+    outputs: Mapping[str, str],
+    *,
+    identity: AwsIdentity,
+    region: str,
+    expected_stack_name: str,
+) -> ServerlessWorkersValues:
+    """Validate the non-secret export handoff emitted by worker CDK."""
+
+    values = dict(outputs)
+    stack_name = _required_output(
+        values,
+        "ServerlessWorkersStackName",
+    )
+    if stack_name != expected_stack_name:
+        raise AgentCoreDeploymentError(
+            "serverless-workers outputs are bound to an unexpected stack"
+        )
+    queue_arn = _validated_application_state_arn(
+        _required_output(values, "ExportQueueArn"),
+        identity=identity,
+        region=region,
+        service="sqs",
+        resource_pattern=r"[A-Za-z0-9_-]{1,75}\.fifo",
+        location="ExportQueueArn",
+    )
+    queue_url = _validated_state_queue_url(
+        _required_output(values, "ExportQueueUrl"),
+        identity=identity,
+        region=region,
+        location="ExportQueueUrl",
+    )
+    if queue_arn.rsplit(":", 1)[-1] != queue_url.rsplit("/", 1)[-1]:
+        raise AgentCoreDeploymentError(
+            "serverless-workers export queue ARN and URL do not match"
+        )
+    bucket_name = _required_output(values, "ExportBucketName")
+    if (
+        re.fullmatch(
+            r"[a-z0-9](?:[a-z0-9.-]{1,61}[a-z0-9])?",
+            bucket_name,
+        )
+        is None
+        or ".." in bucket_name
+        or re.fullmatch(r"[0-9.]+", bucket_name)
+    ):
+        raise AgentCoreDeploymentError(
+            "serverless-workers export bucket name is invalid"
+        )
+    bucket_arn = _required_output(values, "ExportBucketArn")
+    expected_bucket_arn = (
+        f"arn:{identity.partition}:s3:::{bucket_name}"
+    )
+    if bucket_arn != expected_bucket_arn:
+        raise AgentCoreDeploymentError(
+            "serverless-workers export bucket ARN does not match its name"
+        )
+    return ServerlessWorkersValues(
+        stack_name=stack_name,
+        export_queue_url=queue_url,
+        export_queue_arn=queue_arn,
+        export_bucket_name=bucket_name,
+        export_bucket_arn=bucket_arn,
+    )
+
+
+def production_edge_values_from_outputs(
+    outputs: Mapping[str, str],
+    *,
+    identity: AwsIdentity,
+    expected_stack_name: str,
+) -> ProductionEdgeValues:
+    """Validate the existing CloudFront edge without reading secrets."""
+
+    values = dict(outputs)
+    if values.get("EndpointMode") != CLOUDFRONT:
+        raise AgentCoreDeploymentError(
+            "production edge outputs are not in CloudFront mode"
+        )
+    if values.get("ControlPlaneAuthMode") != "application-oidc":
+        raise AgentCoreDeploymentError(
+            "production edge outputs have an unexpected authentication mode"
+        )
+    distribution_id = _required_output(values, "DistributionId")
+    if re.fullmatch(r"[A-Z0-9]{13,32}", distribution_id) is None:
+        raise AgentCoreDeploymentError(
+            "production edge distribution ID is invalid"
+        )
+    distribution_arn = (
+        f"arn:{identity.partition}:cloudfront::"
+        f"{identity.account_id}:distribution/{distribution_id}"
+    )
+    emitted_arn = values.get("ProductionDistributionArn")
+    if emitted_arn is not None and emitted_arn != distribution_arn:
+        raise AgentCoreDeploymentError(
+            "production edge distribution ARN does not match its account "
+            "and ID"
+        )
+    hostname = _required_output(values, "DistributionDomainName")
+    if (
+        re.fullmatch(
+            r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
+            r"(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+",
+            hostname,
+        )
+        is None
+        or not hostname.endswith(".cloudfront.net")
+        or values.get("ControlPlaneUrl") != f"https://{hostname}"
+    ):
+        raise AgentCoreDeploymentError(
+            "production edge hostname is invalid"
+        )
+    web_acl_arn = _required_output(values, "WebAclArn")
+    expected_waf_prefix = (
+        f"arn:{identity.partition}:wafv2:us-east-1:"
+        f"{identity.account_id}:global/webacl/"
+    )
+    if not web_acl_arn.startswith(expected_waf_prefix):
+        raise AgentCoreDeploymentError(
+            "production edge WebACL is not bound to the deployment account"
+        )
+    return ProductionEdgeValues(
+        stack_name=expected_stack_name,
+        distribution_id=distribution_id,
+        distribution_arn=distribution_arn,
+        hostname=hostname,
+        state_table_name=_required_output(
+            values,
+            "PrimaryStateTableName",
+        ),
+        browser_client_id=_required_output(
+            values,
+            "BrowserClientId",
+        ),
+        web_acl_arn=web_acl_arn,
+    )
+
+
+def serverless_edge_values_from_outputs(
+    outputs: Mapping[str, str],
+    *,
+    identity: AwsIdentity,
+    region: str,
+    expected_stack_name: str,
+    production_edge: ProductionEdgeValues,
+    artifacts: ServerlessControlArtifactValues,
+) -> ServerlessEdgeValues:
+    """Validate qualified serverless origins against reviewed receipts."""
+
+    values = dict(outputs)
+    if (
+        values.get("EndpointMode") != CLOUDFRONT
+        or values.get("ControlPlaneAuthMode") != "application-oidc"
+    ):
+        raise AgentCoreDeploymentError(
+            "serverless edge outputs have an unexpected endpoint or "
+            "authentication mode"
+        )
+    expected_bindings = {
+        "ProductionDistributionArn": (
+            production_edge.distribution_arn
+        ),
+        "ProductionDistributionId": (
+            production_edge.distribution_id
+        ),
+        "ProductionControlPlaneHostname": production_edge.hostname,
+        "PrimaryStateTableName": production_edge.state_table_name,
+        "SourceRevision": artifacts.source_revision,
+        "ControlApiArtifactSha256": artifacts.control_api_sha256,
+        "StaticAssetsSha256": artifacts.static_assets_sha256,
+    }
+    mismatched = sorted(
+        name
+        for name, expected in expected_bindings.items()
+        if values.get(name) != expected
+    )
+    if mismatched:
+        raise AgentCoreDeploymentError(
+            "serverless edge outputs do not match reviewed production "
+            "bindings: "
+            + ", ".join(mismatched)
+        )
+    api_domain = _required_output(
+        values,
+        "ControlApiOriginDomainName",
+    )
+    suffix = (
+        "amazonaws.com.cn"
+        if identity.partition == "aws-cn"
+        else "amazonaws.com"
+    )
+    if (
+        re.fullmatch(
+            rf"[a-z0-9]+\.execute-api\.{re.escape(region)}\."
+            rf"{re.escape(suffix)}",
+            api_domain,
+        )
+        is None
+    ):
+        raise AgentCoreDeploymentError(
+            "serverless control API origin is not in the deployment region"
+        )
+    origin_path = _required_output(
+        values,
+        "ControlApiOriginPath",
+    )
+    if re.fullmatch(r"/[A-Za-z0-9_-]{1,128}", origin_path) is None:
+        raise AgentCoreDeploymentError(
+            "serverless control API origin path is invalid"
+        )
+    origin_secret = _validated_application_state_arn(
+        _required_output(values, "OriginCredentialSecretArn"),
+        identity=identity,
+        region=region,
+        service="secretsmanager",
+        resource_pattern=r"secret:[A-Za-z0-9/_+=.@-]{1,512}",
+        location="OriginCredentialSecretArn",
+    )
+    static_domain = _required_output(
+        values,
+        "StaticSiteBucketRegionalDomainName",
+    )
+    if (
+        re.fullmatch(
+            rf"[a-z0-9][a-z0-9.-]{{1,61}}[a-z0-9]\.s3\."
+            rf"{re.escape(region)}\.{re.escape(suffix)}",
+            static_domain,
+        )
+        is None
+    ):
+        raise AgentCoreDeploymentError(
+            "serverless static bucket origin is not in the deployment region"
+        )
+    qualification_url = _required_output(values, "ControlPlaneUrl")
+    parsed = urlsplit(qualification_url)
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname is None
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+        or parsed.hostname == production_edge.hostname
+        or values.get("ControlPlaneDomainName") != parsed.hostname
+    ):
+        raise AgentCoreDeploymentError(
+            "serverless qualification URL is invalid or aliases production"
+        )
+    qualification_distribution_id = _required_output(
+        values,
+        "DistributionId",
+    )
+    if (
+        re.fullmatch(
+            r"[A-Z0-9]{13,32}",
+            qualification_distribution_id,
+        )
+        is None
+        or qualification_distribution_id
+        == production_edge.distribution_id
+    ):
+        raise AgentCoreDeploymentError(
+            "serverless qualification distribution ID is invalid"
+        )
+    return ServerlessEdgeValues(
+        stack_name=expected_stack_name,
+        production_stack_name=production_edge.stack_name,
+        production_distribution_id=(
+            production_edge.distribution_id
+        ),
+        production_distribution_arn=(
+            production_edge.distribution_arn
+        ),
+        production_hostname=production_edge.hostname,
+        qualification_distribution_id=(
+            qualification_distribution_id
+        ),
+        qualification_url=qualification_url,
+        state_table_name=production_edge.state_table_name,
+        source_revision=artifacts.source_revision,
+        control_api_sha256=artifacts.control_api_sha256,
+        static_assets_sha256=artifacts.static_assets_sha256,
+        control_api_domain_name=api_domain,
+        control_api_origin_path=origin_path,
+        origin_credential_secret_arn=origin_secret,
+        static_bucket_domain_name=static_domain,
+    )
 
 
 def managed_identity_from_outputs(

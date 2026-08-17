@@ -102,17 +102,32 @@ def _synth(
     if not _INFRA_PYTHON.is_file():
         pytest.skip("infra/.venv is required for CDK synthesis tests")
     out_dir = tmp_path / target
+    context: dict[str, object] = {
+        "account": "123456789012",
+        "deployment_namespace": namespace,
+        "deployment_target": target,
+        "region": "us-east-1",
+    }
+    if target == "managed-network":
+        context.update(
+            {
+                "deployment_profile": "production",
+                "managed_network_egress_mode": "endpoints-only",
+                "managed_network_vpc_cidr": "10.42.0.0/16",
+                "managed_network_availability_zones": [
+                    "us-east-1a",
+                    "us-east-1c",
+                ],
+                "managed_network_availability_zone_ids": [
+                    "use1-az4",
+                    "use1-az1",
+                ],
+            }
+        )
     environment = os.environ.copy()
     environment.update(
         {
-            "CDK_CONTEXT_JSON": json.dumps(
-                {
-                    "account": "123456789012",
-                    "deployment_namespace": namespace,
-                    "deployment_target": target,
-                    "region": "us-east-1",
-                }
-            ),
+            "CDK_CONTEXT_JSON": json.dumps(context),
             "CDK_OUTDIR": str(out_dir),
             "JSII_RUNTIME_PACKAGE_CACHE_ROOT": str(tmp_path / "jsii-cache"),
             "PYTHONPYCACHEPREFIX": str(tmp_path / "pycache"),
@@ -131,8 +146,12 @@ def _synth(
     assert completed.returncode == 0, completed.stdout
     base = {
         "agentcore": "AxonLLMAgentCoreStack",
+        "application-state": "AxonLLMApplicationStateStack",
         "control-plane": "AxonLLMControlPlaneStack",
         "identity": "AxonLLMIdentityStack",
+        "managed-network": "AxonLLMManagedNetworkStack",
+        "serverless-control-plane": "AxonLLMServerlessControlPlaneStack",
+        "serverless-workers": "AxonLLMServerlessWorkersStack",
     }[target]
     suffix = f"-{namespace}" if namespace else ""
     return json.loads((out_dir / f"{base}{suffix}.template.json").read_text(encoding="utf-8"))
@@ -215,6 +234,14 @@ def test_default_and_qualification_names_do_not_collide() -> None:
 
     assert production.identity_stack == "AxonLLMIdentityStack"
     assert production.agentcore_stack == "AxonLLMAgentCoreStack"
+    assert (
+        production.application_state_stack
+        == "AxonLLMApplicationStateStack"
+    )
+    assert (
+        production.managed_network_stack
+        == "AxonLLMManagedNetworkStack"
+    )
     assert production.control_plane_stack == "AxonLLMControlPlaneStack"
     assert production.state_table == "axonllm-agentcore-state"
     assert production.user_pool == "axonllm-agentcore-users"
@@ -230,6 +257,8 @@ def test_default_and_qualification_names_do_not_collide() -> None:
     )
     assert external.agentcore_stack.endswith("-external-oidc")
     assert managed.control_plane_stack.endswith("-managed")
+    assert managed.application_state_stack.endswith("-managed")
+    assert managed.managed_network_stack.endswith("-managed")
 
 
 @pytest.mark.parametrize(
@@ -697,7 +726,7 @@ def test_default_templates_have_no_rehearsal_wiring(
         for logical_id, resource in template["Resources"].items()
         if resource.get("DeletionPolicy") == "Retain" and resource.get("UpdateReplacePolicy") == "Retain"
     }
-    assert len(retained) == (16 if target == "agentcore" else 5)
+    assert len(retained) == (18 if target == "agentcore" else 5)
     if target == "agentcore":
         table = _resources(
             template,
@@ -719,3 +748,108 @@ def test_default_templates_have_no_rehearsal_wiring(
         )[0]["Properties"]
         attributes = {item["Key"]: item["Value"] for item in load_balancer["LoadBalancerAttributes"]}
         assert attributes["deletion_protection.enabled"] == "true"
+
+
+def test_namespaced_application_state_is_fully_destroyable(
+    tmp_path: Path,
+) -> None:
+    template = _synth(
+        tmp_path,
+        target="application-state",
+        namespace="managed",
+    )
+
+    _assert_fully_destroyable(template)
+    table = _resources(
+        template,
+        "AWS::DynamoDB::Table",
+    )[0]["Properties"]
+    assert table["DeletionProtectionEnabled"] is False
+    backup_vault = _resources(
+        template,
+        "AWS::Backup::BackupVault",
+    )[0]["Properties"]
+    assert "LockConfiguration" not in backup_vault
+    aliases = {
+        resource["Properties"]["AliasName"]
+        for resource in _resources(template, "AWS::KMS::Alias")
+    }
+    assert aliases == {
+        "alias/axonllm/agentcore-backups-managed",
+        "alias/axonllm/agentcore-data-managed",
+        "alias/axonllm/agentcore-routing-config-managed",
+    }
+    _assert_role_trust_domain(template, qualifier="axqual")
+
+
+def test_namespaced_managed_network_is_fully_destroyable(
+    tmp_path: Path,
+) -> None:
+    template = _synth(
+        tmp_path,
+        target="managed-network",
+        namespace="managed",
+    )
+
+    _assert_fully_destroyable(template)
+    assert len(_resources(template, "AWS::EC2::VPC")) == 1
+    assert len(_resources(template, "AWS::EC2::Subnet")) == 2
+    assert _resources(template, "AWS::EC2::NatGateway") == []
+    assert _resources(template, "AWS::EC2::InternetGateway") == []
+    assert (
+        template["Outputs"]["DeploymentNamespace"]["Value"]
+        == "managed"
+    )
+    _assert_role_trust_domain(template, qualifier="axqual")
+
+
+def test_namespaced_serverless_control_plane_is_fully_destroyable(
+    tmp_path: Path,
+) -> None:
+    template = _synth(
+        tmp_path,
+        target="serverless-control-plane",
+        namespace="managed",
+    )
+
+    _assert_fully_destroyable(template)
+    assert _resources(template, "AWS::EC2::VPC") == []
+    assert _resources(template, "AWS::EC2::NatGateway") == []
+    assert _resources(
+        template,
+        "AWS::ElasticLoadBalancingV2::LoadBalancer",
+    ) == []
+    assert _resources(template, "AWS::ECS::Service") == []
+    assert len(_resources(template, "AWS::CloudFront::Distribution")) == 1
+    assert len(_resources(template, "AWS::ApiGateway::RestApi")) == 1
+    _assert_role_trust_domain(template, qualifier="axqual")
+
+
+def test_namespaced_serverless_workers_are_fully_destroyable(
+    tmp_path: Path,
+) -> None:
+    template = _synth(
+        tmp_path,
+        target="serverless-workers",
+        namespace="managed",
+    )
+
+    _assert_fully_destroyable(template)
+    assert _resources(template, "AWS::EC2::VPC") == []
+    assert _resources(template, "AWS::DynamoDB::Table") == []
+    queues = _resources(template, "AWS::SQS::Queue")
+    assert len(queues) == 2
+    assert all(queue["Properties"]["FifoQueue"] is True for queue in queues)
+    assert len(_resources(template, "AWS::S3::Bucket")) == 1
+    handlers = {
+        function["Properties"]["Handler"]
+        for function in _resources(template, "AWS::Lambda::Function")
+    }
+    assert {
+        "src.gateway.serverless_workers.export_lambda_handler",
+        "src.gateway.serverless_workers.security_event_lambda_handler",
+    } <= handlers
+    assert len(
+        _resources(template, "AWS::Lambda::EventSourceMapping")
+    ) == 2
+    _assert_role_trust_domain(template, qualifier="axqual")

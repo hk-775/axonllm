@@ -767,6 +767,23 @@ class TestDurableEventOutbox:
         assert dispatcher.stats_for_tenant("tenant-a")["dispatched"] == 1
         assert dispatcher.worker_running is False
 
+    def test_delivery_body_is_independent_from_sqs_message_ownership(self):
+        sqs = _RecordingSQSClient()
+        producer = _outbox_dispatcher(sqs)
+        producer.add_destination(_tenant_webhook_destination())
+        _run(producer.dispatch(_tenant_event()))
+        consumer = _outbox_dispatcher(_RecordingSQSClient())
+
+        tenant_id = _run(
+            consumer.deliver_outbox_body(sqs.send_calls[0]["MessageBody"])
+        )
+
+        assert tenant_id == "tenant-a"
+        assert consumer.stats_for_tenant("tenant-a")["dispatched"] == 1
+        assert consumer._http_client.calls
+        assert consumer._sqs_client.delete_calls == []
+        assert consumer._sqs_client.visibility_calls == []
+
     def test_worker_failure_retries_without_delete(self):
         sqs = _RecordingSQSClient()
         dispatcher = _outbox_dispatcher(sqs, http_status=503)

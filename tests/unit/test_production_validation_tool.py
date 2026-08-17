@@ -143,7 +143,7 @@ def _configuration(
             for canary in configuration["canaries"]
             if canary["category"] != "authenticated_query_allowed"
         ]
-    if target == "fargate":
+    if target in validation.CONTROL_PLANE_TARGETS:
         configuration["canaries"] = [
             canary
             for canary in configuration["canaries"]
@@ -831,6 +831,10 @@ def test_missing_credential_fails_without_calling_transport() -> None:
             "production_validation.cloudfront.example.json",
             "browser-session-cookie",
         ),
+        (
+            "production_validation.serverless.example.json",
+            "browser-session-cookie",
+        ),
     ],
 )
 def test_example_configuration_is_valid_and_load_is_read_only(
@@ -848,7 +852,7 @@ def test_example_configuration_is_valid_and_load_is_read_only(
     assert parsed.load.minimum_endpoints == 1
     assert {
         canary["category"] for canary in example["canaries"]
-    } == validation.REQUIRED_CANARY_CATEGORIES_BY_TARGET["fargate"]
+    } == validation.REQUIRED_CANARY_CATEGORIES_BY_TARGET[example["target"]]
     assert all(
         canary["category"] != "authenticated_query_allowed"
         for canary in example["canaries"]
@@ -889,6 +893,60 @@ def test_fargate_validation_accepts_application_browser_sessions() -> None:
             parsed.load.request,
         )
     } == {"browser-session-cookie"}
+
+
+def test_serverless_control_uses_browser_canaries_without_elb_health(
+    tmp_path: Path,
+) -> None:
+    parsed = validation.parse_config(
+        _configuration(
+            target="serverless-control",
+            fargate_credential_type="browser-session-cookie",
+        )
+    )
+
+    report = validation.run_validation(
+        parsed,
+        ENDPOINTS,
+        environ=TOKENS,
+        rollback=_rollback_journal(
+            tmp_path,
+            "serverless-control-rollback.json",
+        ),
+        transport=ContractTransport(),
+    )
+
+    assert report["overallStatus"] == "PASS"
+    assert report["target"] == "serverless-control"
+    assert report["targetHealth"] is None
+    assert report["claims"]["backingInstanceIdentityValidated"] is False
+
+
+def test_serverless_control_rejects_elb_target_health(
+    tmp_path: Path,
+) -> None:
+    parsed = validation.parse_config(
+        _configuration(
+            target="serverless-control",
+            fargate_credential_type="browser-session-cookie",
+        )
+    )
+
+    with pytest.raises(
+        validation.ConfigurationError,
+        match="valid only for Fargate",
+    ):
+        validation.run_validation(
+            parsed,
+            ENDPOINTS,
+            environ=TOKENS,
+            rollback=_rollback_journal(
+                tmp_path,
+                "serverless-control-health.json",
+            ),
+            target_health_collector=RecordingTargetHealthCollector(),
+            transport=ContractTransport(),
+        )
 
 
 def test_fargate_validation_rejects_non_browser_credentials() -> None:

@@ -6,15 +6,10 @@ import asyncio
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
 
-import pytest
-
 from src.gateway.models import UsageRecord
-from src.gateway.observability import trace_forwarder as tf
 from src.gateway.observability.trace_forwarder import (
     TraceForwarder,
     map_usage_to_trace_event,
-    register_sink,
-    unregister_sink,
 )
 
 
@@ -28,29 +23,27 @@ def _record(status: str = "success") -> UsageRecord:
     )
 
 
-@pytest.fixture(autouse=True)
-def _clean(monkeypatch):
-    monkeypatch.delenv("OSTIARI_TRACES_URL", raising=False)
-    monkeypatch.delenv("OSTIARI_GATEWAY_ID", raising=False)
-    # ensure no sinks leak between tests
-    for s in list(tf._sinks):
-        unregister_sink(s)
-    yield
-    for s in list(tf._sinks):
-        unregister_sink(s)
-
-
 class TestActivation:
     def test_disabled_when_standalone(self):
         assert TraceForwarder().enabled is False
 
-    def test_enabled_by_url(self, monkeypatch):
-        monkeypatch.setenv("OSTIARI_TRACES_URL", "http://cp:8000/api/traces/ingest")
-        assert TraceForwarder().enabled is True
+    def test_enabled_by_explicit_url(self):
+        assert TraceForwarder(
+            url="http://cp:8000/api/traces/ingest"
+        ).enabled is True
 
-    def test_enabled_by_registered_sink(self):
-        register_sink(lambda ev: None)
-        assert TraceForwarder().enabled is True
+    def test_environment_does_not_implicitly_enable_embedded_forwarding(
+        self,
+        monkeypatch,
+    ):
+        monkeypatch.setenv(
+            "OSTIARI_TRACES_URL",
+            "http://cp:8000/api/traces/ingest",
+        )
+        assert TraceForwarder().enabled is False
+
+    def test_enabled_by_injected_sink(self):
+        assert TraceForwarder(sinks=[lambda ev: None]).enabled is True
 
     def test_forward_is_noop_when_disabled(self):
         # No sink, no URL → forward does nothing and does not raise.
@@ -78,16 +71,18 @@ class TestMapping:
     def test_error_status_maps_to_error_tier(self):
         assert map_usage_to_trace_event(_record(status="error"))["tier"] == "error"
 
-    def test_gateway_id_override(self, monkeypatch):
-        monkeypatch.setenv("OSTIARI_GATEWAY_ID", "axon-prod-1")
-        assert map_usage_to_trace_event(_record())["gateway_id"] == "axon-prod-1"
+    def test_gateway_id_override(self):
+        assert map_usage_to_trace_event(
+            _record(),
+            gateway_id="axon-prod-1",
+        )["gateway_id"] == "axon-prod-1"
 
 
 class TestSinkDelivery:
     def test_sync_sink_receives_event(self):
         captured = []
-        register_sink(lambda ev: captured.append(ev))
-        asyncio.run(TraceForwarder().forward(_record()))
+        forwarder = TraceForwarder(sinks=[lambda ev: captured.append(ev)])
+        asyncio.run(forwarder.forward(_record()))
         assert len(captured) == 1
         assert captured[0]["metadata"]["request_id"] == "req-1"
 
@@ -97,17 +92,27 @@ class TestSinkDelivery:
         async def sink(ev):
             captured.append(ev)
 
-        register_sink(sink)
-        asyncio.run(TraceForwarder().forward(_record()))
+        asyncio.run(TraceForwarder(sinks=[sink]).forward(_record()))
         assert len(captured) == 1
 
     def test_failing_sink_does_not_raise(self):
         def bad(ev):
             raise RuntimeError("boom")
 
-        register_sink(bad)
         # Must not propagate — forwarding is best-effort.
-        asyncio.run(TraceForwarder().forward(_record()))
+        asyncio.run(TraceForwarder(sinks=[bad]).forward(_record()))
+
+    def test_protocol_sink_receives_event(self):
+        class Sink:
+            def __init__(self):
+                self.events = []
+
+            async def emit(self, event):
+                self.events.append(event)
+
+        sink = Sink()
+        asyncio.run(TraceForwarder(sinks=[sink]).forward(_record()))
+        assert sink.events[0]["metadata"]["request_id"] == "req-1"
 
 
 class TestHttpDelivery:
@@ -129,9 +134,11 @@ class TestHttpDelivery:
         # No ingest key configured → no X-Ingest-Key header.
         assert "X-Ingest-Key" not in call.kwargs["headers"]
 
-    def test_sends_ingest_key_header_when_configured(self, monkeypatch):
-        monkeypatch.setenv("OSTIARI_INGEST_KEY", "s3cret")
-        fwd = TraceForwarder(url="http://cp:8000/api/traces/ingest")
+    def test_sends_explicit_ingest_key_header(self):
+        fwd = TraceForwarder(
+            url="http://cp:8000/api/traces/ingest",
+            ingest_key="s3cret",
+        )
         mock_client = MagicMock()
         mock_resp = MagicMock()
         mock_resp.status_code = 200
@@ -150,3 +157,14 @@ class TestHttpDelivery:
         fwd._http_client = mock_client
         # Best-effort: a broken Ostiari must never fail the request path.
         asyncio.run(fwd.forward(_record()))
+
+    def test_close_releases_lazy_http_client(self):
+        fwd = TraceForwarder(url="http://cp:8000/api/traces/ingest")
+        mock_client = MagicMock()
+        mock_client.aclose = AsyncMock()
+        fwd._http_client = mock_client
+
+        asyncio.run(fwd.close())
+
+        mock_client.aclose.assert_awaited_once()
+        assert fwd._http_client is None

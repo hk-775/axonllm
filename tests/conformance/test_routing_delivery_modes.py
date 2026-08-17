@@ -11,7 +11,12 @@ import httpx
 import pytest
 from starlette.applications import Starlette
 
-from axonllm import AsyncRouter, InvalidRequestError
+from axonllm import (
+    AsyncRouter,
+    IdentityContext,
+    InvalidRequestError,
+    OstiariRouterAdapter,
+)
 from src.gateway.agent import GatewayAgent
 from src.gateway.agentcore.errors import AgentCoreAdapterError
 from src.gateway.agentcore.router_adapter import AgentCoreRouterAdapter
@@ -512,12 +517,26 @@ class _EmbeddedDelivery:
             validator=self.bundle.runtime.validator,
             runtime=self.bundle.runtime,
         )
+        self.host = _ConformanceOstiariHost(self.bundle.source_snapshot)
+        self.adapter = OstiariRouterAdapter(
+            self.router,
+            self.host,
+            trusted_signing_key_arn=_SIGNING_KEY_ARN,
+        )
+
+    async def start(self) -> None:
+        await self.adapter.start()
 
     async def chat(self, body: dict[str, Any]) -> dict[str, Any]:
         try:
-            response = await self.router.chat.completions.create(
+            response = await self.adapter.route(
+                body.get("messages", []),
+                identity=IdentityContext(
+                    principal_id=_USER_ID,
+                    tenant_id="routing-conformance-tenant",
+                    project_id=_PROJECT_ID,
+                ),
                 model=body.get("model", ""),
-                messages=body.get("messages", []),
                 temperature=body.get("temperature"),
                 max_tokens=body.get("max_tokens"),
                 top_p=body.get("top_p"),
@@ -532,12 +551,17 @@ class _EmbeddedDelivery:
             return _error_observation(status_code)
         except AllProvidersExhaustedError:
             return _error_observation(502)
-        assert isinstance(response, ChatCompletionResponse)
-        return _completion_observation(
-            model=response.model,
-            choices=response.choices,
-            usage=response.usage,
-        )
+        return {
+            "model": response.model,
+            "content": response.content,
+            "tool_calls": list(response.tool_calls),
+            "finish_reason": response.finish_reason,
+            "usage": {
+                "prompt_tokens": response.input_tokens,
+                "completion_tokens": response.output_tokens,
+                "total_tokens": (response.input_tokens + response.output_tokens),
+            },
+        }
 
     async def stream(self, body: dict[str, Any]) -> dict[str, Any]:
         stream = await self.router.chat.completions.create(
@@ -584,7 +608,35 @@ class _EmbeddedDelivery:
         return [model.name for model in await self.router.models.list()]
 
     async def close(self) -> None:
-        await self.router.close()
+        await self.adapter.close()
+
+
+class _ConformanceOstiariHost:
+    def __init__(self, snapshot: RoutingConfigSnapshot) -> None:
+        self.snapshot = snapshot
+
+    async def load_snapshot(self):
+        return self.snapshot
+
+    async def publish_snapshot(self, config, *, expected_revision):
+        del config, expected_revision
+        raise AssertionError("conformance host is read-only")
+
+    async def resolve(self, *, provider, reference):
+        del provider, reference
+        raise AssertionError("conformance routes are preconfigured")
+
+    async def emit(self, event):
+        del event
+
+    async def record(self, usage):
+        del usage
+
+    async def start(self):
+        return None
+
+    async def close(self):
+        return None
 
 
 class _StandaloneDelivery:
@@ -820,6 +872,9 @@ class _AgentCoreDelivery:
 )
 async def delivery(request):
     instance = request.param()
+    start = getattr(instance, "start", None)
+    if start is not None:
+        await start()
     try:
         yield instance
     finally:

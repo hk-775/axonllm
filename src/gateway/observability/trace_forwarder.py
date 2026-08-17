@@ -2,14 +2,14 @@
 
 When AxonLLM runs embedded inside Ostiari, each completed request (a UsageRecord)
 is forwarded as a trace event so it shows up in Ostiari's Live Traces view. Two
-delivery paths, either or both of which may be active ("Ostiari detected"):
+explicitly configured delivery paths may be active:
 
 1. HTTP sink — POST the event to Ostiari's control-plane ingest endpoint
-   (`OSTIARI_TRACES_URL`, e.g. http://control-plane:8000/api/traces/ingest).
-   Loosely coupled; works across processes/containers.
-2. In-process sink — an embedding Ostiari registers a callback via
-   register_sink(); AxonLLM calls it directly. No dependency on the `ostiari`
-   package, no network hop.
+   supplied by the standalone host adapter. Loosely coupled; works across
+   processes/containers.
+2. In-process sinks — an embedding Ostiari passes sink objects or callables to
+   the constructor. No global registration, no Ostiari dependency, and no
+   network hop.
 
 Design rules:
 - Forwarding is best-effort and MUST NOT affect the request path. Every failure
@@ -17,56 +17,40 @@ Design rules:
 - AxonLLM is a routing/cost layer, not a risk scorer. It sends neutral risk
   fields (tier="allow", score=0) and puts its real signal (tokens, cost,
   latency, provider) in params/metadata. Ostiari owns risk scoring.
-- Standalone AxonLLM is unaffected: with no URL and no registered sink, the
+- Standalone AxonLLM is unaffected: with no URL and no injected sink, the
   forwarder is a no-op.
 """
 
 from __future__ import annotations
 
 import logging
-import os
-from collections.abc import Awaitable, Callable
-from typing import TYPE_CHECKING, Any
+from collections.abc import Awaitable, Callable, Iterable
+from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
     from src.gateway.models import UsageRecord
 
 logger = logging.getLogger("gateway.observability.traces")
 
-# In-process sinks registered by an embedding host (e.g. Ostiari). Each receives
-# the mapped trace-event dict. May be sync or async.
-Sink = Callable[[dict[str, Any]], None] | Callable[[dict[str, Any]], Awaitable[None]]
-_sinks: list[Sink] = []
+class TraceSink(Protocol):
+    """Structural subset implemented by ``axonllm.TelemetrySink`` hosts."""
+
+    async def emit(self, event: dict[str, Any]) -> None:
+        """Record one mapped trace event."""
 
 
-def register_sink(sink: Sink) -> None:
-    """Register an in-process trace sink (called by an embedding Ostiari).
-
-    The sink receives the Ostiari-shaped trace-event dict for every forwarded
-    request. Safe to call at startup; idempotent per distinct callable.
-    """
-    if sink not in _sinks:
-        _sinks.append(sink)
+Sink = (
+    TraceSink
+    | Callable[[dict[str, Any]], None]
+    | Callable[[dict[str, Any]], Awaitable[None]]
+)
 
 
-def unregister_sink(sink: Sink) -> None:
-    """Remove a previously registered in-process sink."""
-    if sink in _sinks:
-        _sinks.remove(sink)
-
-
-def _ostiari_url() -> str | None:
-    """The Ostiari trace-ingest URL, if configured."""
-    url = os.environ.get("OSTIARI_TRACES_URL", "").strip()
-    return url or None
-
-
-def _gateway_id() -> str:
-    """Identifier this AxonLLM instance reports as, in Ostiari's Live Traces."""
-    return os.environ.get("OSTIARI_GATEWAY_ID", "axonllm").strip() or "axonllm"
-
-
-def map_usage_to_trace_event(record: UsageRecord) -> dict[str, Any]:
+def map_usage_to_trace_event(
+    record: UsageRecord,
+    *,
+    gateway_id: str = "axonllm",
+) -> dict[str, Any]:
     """Map an AxonLLM UsageRecord to Ostiari's trace-event shape.
 
     Matches the flat event dict Ostiari's control-plane `/api/traces/ingest`
@@ -80,8 +64,8 @@ def map_usage_to_trace_event(record: UsageRecord) -> dict[str, Any]:
     ts = record.timestamp.timestamp() if getattr(record, "timestamp", None) else None
 
     return {
-        "sidecar_id": _gateway_id(),
-        "gateway_id": _gateway_id(),
+        "sidecar_id": gateway_id,
+        "gateway_id": gateway_id,
         "action": "chat.completion",
         "tier": tier,
         "score": 0,  # AxonLLM is a routing/cost layer; Ostiari owns risk scoring
@@ -117,15 +101,30 @@ def map_usage_to_trace_event(record: UsageRecord) -> dict[str, Any]:
 class TraceForwarder:
     """Best-effort forwarder of AxonLLM request traces to Ostiari."""
 
-    def __init__(self, url: str | None = None, gateway_id: str | None = None) -> None:
-        self._url = url if url is not None else _ostiari_url()
-        self._gateway_id = gateway_id or _gateway_id()
+    def __init__(
+        self,
+        *,
+        url: str | None = None,
+        gateway_id: str = "axonllm",
+        sinks: Iterable[Sink] = (),
+        ingest_key: str | None = None,
+        timeout_seconds: float = 3.0,
+    ) -> None:
+        if not isinstance(gateway_id, str) or not gateway_id.strip():
+            raise ValueError("gateway_id must be a non-empty string")
+        if timeout_seconds <= 0:
+            raise ValueError("timeout_seconds must be positive")
+        self._url = url.strip() if url else None
+        self._gateway_id = gateway_id.strip()
+        self._sinks = tuple(sinks)
+        self._ingest_key = ingest_key
+        self._timeout_seconds = float(timeout_seconds)
         self._http_client: Any = None
 
     @property
     def enabled(self) -> bool:
-        """True when Ostiari is 'detected': a URL is set or a sink is registered."""
-        return bool(self._url) or bool(_sinks)
+        """True when the host explicitly configured HTTP or in-process delivery."""
+        return bool(self._url) or bool(self._sinks)
 
     def _get_http_client(self) -> Any:
         if self._http_client is None:
@@ -139,7 +138,10 @@ class TraceForwarder:
         if not self.enabled:
             return
         try:
-            event = map_usage_to_trace_event(record)
+            event = map_usage_to_trace_event(
+                record,
+                gateway_id=self._gateway_id,
+            )
         except Exception:
             logger.debug("failed to map usage record to trace event", exc_info=True)
             return
@@ -150,9 +152,10 @@ class TraceForwarder:
     async def _deliver_to_sinks(self, event: dict[str, Any]) -> None:
         import inspect
 
-        for sink in list(_sinks):
+        for sink in self._sinks:
             try:
-                result = sink(event)
+                callback = getattr(sink, "emit", None)
+                result = callback(event) if callable(callback) else sink(event)
                 if inspect.isawaitable(result):
                     await result
             except Exception:
@@ -162,18 +165,15 @@ class TraceForwarder:
         if not self._url:
             return
         headers = {"Content-Type": "application/json"}
-        # Shared secret Ostiari requires when OSTIARI_INGEST_KEY is set on its side
-        # (control-plane traces ingest). Sent as X-Ingest-Key; omitted if unset.
-        ingest_key = os.environ.get("OSTIARI_INGEST_KEY", "").strip()
-        if ingest_key:
-            headers["X-Ingest-Key"] = ingest_key
+        if self._ingest_key:
+            headers["X-Ingest-Key"] = self._ingest_key
         try:
             client = self._get_http_client()
             resp = await client.post(
                 self._url,
                 json=event,
                 headers=headers,
-                timeout=float(os.environ.get("OSTIARI_TRACES_TIMEOUT", "3.0")),
+                timeout=self._timeout_seconds,
             )
             if resp.status_code >= 400:
                 logger.warning(
@@ -185,3 +185,12 @@ class TraceForwarder:
             logger.warning("httpx not installed — Ostiari trace HTTP forwarding unavailable")
         except Exception:
             logger.debug("Ostiari trace HTTP forward failed", exc_info=True)
+
+    async def close(self) -> None:
+        """Close the lazily created HTTP client, if any."""
+
+        client = self._http_client
+        self._http_client = None
+        close = getattr(client, "aclose", None)
+        if callable(close):
+            await close()

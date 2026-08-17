@@ -675,6 +675,7 @@ def test_app_browser_session_receives_and_must_echo_csrf_cookie() -> None:
 def test_cloudfront_config_loader_requires_public_cognito_contract(
     monkeypatch,
 ) -> None:
+    monkeypatch.setenv("AWS_DEFAULT_REGION", "us-east-1")
     values = {
         "AXON_DEPLOYMENT_PROFILE": "production",
         "AXON_AUTH_MODE": "ENFORCE",

@@ -14,15 +14,14 @@ from pathlib import Path
 from typing import Any
 
 
-SCHEMA = "https://axonllm.dev/schemas/release-evidence/v3"
+SCHEMA_V3 = "https://axonllm.dev/schemas/release-evidence/v3"
+SCHEMA = "https://axonllm.dev/schemas/release-evidence/v4"
 PROVENANCE_TYPE = "https://slsa.dev/provenance/v1"
 STATEMENT_TYPE = "https://in-toto.io/Statement/v1"
 SIGNING_PROVIDER = "AWS_KMS"
 SIGNING_ALGORITHM = "ECDSA_SHA_256"
-BUILD_TYPE = (
-    "https://github.com/AxonLLM/axonllm/"
-    ".github/workflows/release-security.yml@v3"
-)
+BUILD_TYPE_V3 = "https://github.com/AxonLLM/axonllm/.github/workflows/release-security.yml@v3"
+BUILD_TYPE = "https://github.com/AxonLLM/axonllm/.github/workflows/release-security.yml@v4"
 WORKFLOW_PATH = ".github/workflows/release-security.yml"
 SHA256 = re.compile(r"^sha256:([0-9a-f]{64})$")
 COMMIT = re.compile(r"^[0-9a-f]{40}$")
@@ -46,6 +45,10 @@ AGENTCORE_IMAGE_ARCHIVE = "axonllm-agentcore-linux-arm64.oci.tar"
 AGENTCORE_BUILD_METADATA = "agentcore-build-metadata.json"
 AGENTCORE_IMAGE_SBOM = "agentcore-image.cyclonedx.json"
 AGENTCORE_IMAGE_SCAN = "agentcore-image-security.json"
+STANDALONE_ARM64_IMAGE_ARCHIVE = "axonllm-standalone-linux-arm64.oci.tar"
+STANDALONE_ARM64_BUILD_METADATA = "standalone-arm64-build-metadata.json"
+STANDALONE_ARM64_IMAGE_SBOM = "standalone-arm64-image.cyclonedx.json"
+STANDALONE_ARM64_IMAGE_SCAN = "standalone-arm64-image-security.json"
 PROVENANCE = "provenance.intoto.json"
 MANIFEST = "release-manifest.json"
 PROVENANCE_SIGNATURE = "provenance-kms-signature.json"
@@ -64,7 +67,7 @@ class TargetSpec:
     scan: str
 
 
-TARGETS = {
+TARGETS_V3 = {
     "fargate": TargetSpec(
         subject="axonllm-linux-amd64",
         platform="linux/amd64",
@@ -82,16 +85,50 @@ TARGETS = {
         scan=AGENTCORE_IMAGE_SCAN,
     ),
 }
+TARGETS = {
+    **TARGETS_V3,
+    "standalone-amd64": TargetSpec(
+        subject="axonllm-standalone-linux-amd64",
+        platform="linux/amd64",
+        archive=IMAGE_ARCHIVE,
+        metadata=BUILD_METADATA,
+        sbom=IMAGE_SBOM,
+        scan=IMAGE_SCAN,
+    ),
+    "standalone-arm64": TargetSpec(
+        subject="axonllm-standalone-linux-arm64",
+        platform="linux/arm64",
+        archive=STANDALONE_ARM64_IMAGE_ARCHIVE,
+        metadata=STANDALONE_ARM64_BUILD_METADATA,
+        sbom=STANDALONE_ARM64_IMAGE_SBOM,
+        scan=STANDALONE_ARM64_IMAGE_SCAN,
+    ),
+}
 SOURCE_ARTIFACTS = (
     SOURCE_ARCHIVE,
     SOURCE_SBOM,
     SOURCE_SCAN,
 )
-TARGET_ARTIFACTS = tuple(
-    artifact
-    for target in TARGETS.values()
-    for artifact in (target.archive, target.metadata, target.sbom, target.scan)
-)
+
+
+def _target_artifacts(
+    targets: dict[str, TargetSpec],
+) -> tuple[str, ...]:
+    return tuple(
+        dict.fromkeys(
+            artifact
+            for target in targets.values()
+            for artifact in (
+                target.archive,
+                target.metadata,
+                target.sbom,
+                target.scan,
+            )
+        )
+    )
+
+
+TARGET_ARTIFACTS = _target_artifacts(TARGETS)
 INPUT_ARTIFACTS = SOURCE_ARTIFACTS + TARGET_ARTIFACTS
 
 
@@ -145,14 +182,10 @@ def _validate_source(
 
 def _validate_signing_key_arn(signing_key_arn: str) -> re.Match[str]:
     if not isinstance(signing_key_arn, str):
-        raise EvidenceError(
-            "signing key must be a full us-east-1 AWS KMS key ARN"
-        )
+        raise EvidenceError("signing key must be a full us-east-1 AWS KMS key ARN")
     match = KMS_KEY_ARN.fullmatch(signing_key_arn)
     if match is None:
-        raise EvidenceError(
-            "signing key must be a full us-east-1 AWS KMS key ARN"
-        )
+        raise EvidenceError("signing key must be a full us-east-1 AWS KMS key ARN")
     return match
 
 
@@ -163,14 +196,11 @@ def _trusted_signing_key_arn(
     signing_account_id: str | None,
 ) -> str:
     if (signing_key_arn is None) == (signing_account_id is None):
-        raise EvidenceError(
-            "exactly one signing key ARN or signing account ID is required"
-        )
+        raise EvidenceError("exactly one signing key ARN or signing account ID is required")
     if signing_key_arn is not None:
         _validate_signing_key_arn(signing_key_arn)
     if signing_account_id is not None and (
-        not isinstance(signing_account_id, str)
-        or not AWS_ACCOUNT_ID.fullmatch(signing_account_id)
+        not isinstance(signing_account_id, str) or not AWS_ACCOUNT_ID.fullmatch(signing_account_id)
     ):
         raise EvidenceError("signing account ID must be exactly 12 digits")
 
@@ -197,13 +227,8 @@ def _trusted_signing_key_arn(
         raise EvidenceError("release signing identity does not match expectation")
     if signing_key_arn is not None and manifest_key_arn != signing_key_arn:
         raise EvidenceError("release signing identity does not match expectation")
-    if (
-        signing_account_id is not None
-        and match.group("account_id") != signing_account_id
-    ):
-        raise EvidenceError(
-            "release signing key is not in the trusted AWS account"
-        )
+    if signing_account_id is not None and match.group("account_id") != signing_account_id:
+        raise EvidenceError("release signing key is not in the trusted AWS account")
     return manifest_key_arn
 
 
@@ -262,12 +287,7 @@ def _verify_descriptor_blob(
 ) -> None:
     digest = descriptor.get("digest")
     size = descriptor.get("size")
-    if (
-        not isinstance(digest, str)
-        or not isinstance(size, int)
-        or isinstance(size, bool)
-        or size < 0
-    ):
+    if not isinstance(digest, str) or not isinstance(size, int) or isinstance(size, bool) or size < 0:
         raise EvidenceError("OCI descriptor lacks a valid digest or size")
     name = _oci_blob_name(digest)
     member = members.get(name)
@@ -302,21 +322,26 @@ def _verify_oci_platform(
         for child in manifests:
             if isinstance(child, dict):
                 platform = child.get("platform")
-                if not isinstance(platform, dict) or (
-                    platform.get("os"),
-                    platform.get("architecture"),
-                ) == expected:
+                if (
+                    not isinstance(platform, dict)
+                    or (
+                        platform.get("os"),
+                        platform.get("architecture"),
+                    )
+                    == expected
+                ):
                     candidates.append(child)
-        return any(
-            _verify_oci_platform(image, members, child, seen, expected)
-            for child in candidates
-        )
+        return any(_verify_oci_platform(image, members, child, seen, expected) for child in candidates)
 
     platform = descriptor.get("platform")
-    if isinstance(platform, dict) and (
-        platform.get("os"),
-        platform.get("architecture"),
-    ) != expected:
+    if (
+        isinstance(platform, dict)
+        and (
+            platform.get("os"),
+            platform.get("architecture"),
+        )
+        != expected
+    ):
         return False
     config_descriptor = value.get("config")
     layers = value.get("layers")
@@ -352,11 +377,7 @@ def verify_oci_archive(archive: Path, digest: str, platform: str) -> None:
             descriptors = index.get("manifests")
             if not isinstance(descriptors, list):
                 raise EvidenceError("OCI index does not reference the signed digest")
-            matching = [
-                item
-                for item in descriptors
-                if isinstance(item, dict) and item.get("digest") == digest
-            ]
+            matching = [item for item in descriptors if isinstance(item, dict) and item.get("digest") == digest]
             if len(matching) != 1:
                 raise EvidenceError("OCI index does not reference the signed digest")
             if not _verify_oci_platform(
@@ -396,10 +417,7 @@ def _assert_clean_scan(path: Path) -> None:
             if entries:
                 findings.append(f"{target}:{key}={len(entries)}")
     if findings:
-        raise EvidenceError(
-            f"release scan contains blocked findings in {path.name}: "
-            + ", ".join(findings)
-        )
+        raise EvidenceError(f"release scan contains blocked findings in {path.name}: " + ", ".join(findings))
 
 
 def _target_record(spec: TargetSpec, digest: str) -> dict[str, str]:
@@ -426,20 +444,23 @@ def _provenance_statement(
     signing_key_arn: str,
     artifacts: dict[str, dict[str, Any]],
     targets: dict[str, dict[str, str]],
+    target_specs: dict[str, TargetSpec],
+    input_artifacts: tuple[str, ...],
+    build_type: str,
 ) -> dict[str, Any]:
     subjects = [
         {
             "name": name,
             "digest": {"sha256": artifacts[name]["sha256"]},
         }
-        for name in INPUT_ARTIFACTS
+        for name in input_artifacts
     ]
     subjects.extend(
         {
-            "name": TARGETS[name].subject,
+            "name": target_specs[name].subject,
             "digest": {"sha256": targets[name]["digest"].removeprefix("sha256:")},
         }
-        for name in TARGETS
+        for name in target_specs
     )
     return {
         "_type": STATEMENT_TYPE,
@@ -447,7 +468,7 @@ def _provenance_statement(
         "predicateType": PROVENANCE_TYPE,
         "predicate": {
             "buildDefinition": {
-                "buildType": BUILD_TYPE,
+                "buildType": build_type,
                 "externalParameters": {
                     "commit": commit,
                     "ref": ref,
@@ -456,9 +477,9 @@ def _provenance_statement(
                     "targets": {
                         name: {
                             "digest": targets[name]["digest"],
-                            "platform": TARGETS[name].platform,
+                            "platform": target_specs[name].platform,
                         }
-                        for name in TARGETS
+                        for name in target_specs
                     },
                     "workflowRef": workflow_ref,
                 },
@@ -476,10 +497,7 @@ def _provenance_statement(
             "runDetails": {
                 "builder": {"id": f"https://github.com/{workflow_ref}"},
                 "metadata": {
-                    "invocationId": (
-                        f"https://github.com/{repository}/actions/runs/{run_id}"
-                        f"/attempts/{run_attempt}"
-                    )
+                    "invocationId": (f"https://github.com/{repository}/actions/runs/{run_id}/attempts/{run_attempt}")
                 },
             },
         },
@@ -533,6 +551,9 @@ def create_evidence(
         signing_key_arn=signing_key_arn,
         artifacts=artifact_records,
         targets=target_records,
+        target_specs=TARGETS,
+        input_artifacts=INPUT_ARTIFACTS,
+        build_type=BUILD_TYPE,
     )
     _write_json(directory / PROVENANCE, provenance)
     provenance_digest, provenance_size = _hash(directory / PROVENANCE)
@@ -578,14 +599,21 @@ def verify_evidence(
     target: str = "fargate",
     expected_run_id: str | None = None,
 ) -> dict[str, Any]:
-    if target not in TARGETS:
-        raise EvidenceError(f"unknown deployment target: {target}")
     manifest_path = directory / MANIFEST
     if not manifest_path.is_file() or manifest_path.is_symlink():
         raise EvidenceError("release manifest is missing or unsafe")
     manifest = _read_json(manifest_path)
-    if not isinstance(manifest, dict) or manifest.get("schema") != SCHEMA:
+    if not isinstance(manifest, dict) or manifest.get("schema") not in {
+        SCHEMA_V3,
+        SCHEMA,
+    }:
         raise EvidenceError("unsupported release manifest schema")
+    schema = manifest["schema"]
+    target_specs = TARGETS_V3 if schema == SCHEMA_V3 else TARGETS
+    input_artifacts = SOURCE_ARTIFACTS + _target_artifacts(target_specs)
+    build_type = BUILD_TYPE_V3 if schema == SCHEMA_V3 else BUILD_TYPE
+    if target not in target_specs:
+        raise EvidenceError(f"unknown deployment target: {target}")
     if set(manifest) != {
         "schema",
         "source",
@@ -630,19 +658,17 @@ def verify_evidence(
         or not re.fullmatch(r"[A-Za-z0-9_]+", event_name)
     ):
         raise EvidenceError("release source ref is malformed")
-    if expected_run_id is not None and (
-        not expected_run_id.isdigit() or expected_run_id != run_id
-    ):
+    if expected_run_id is not None and (not expected_run_id.isdigit() or expected_run_id != run_id):
         raise EvidenceError("release workflow run ID does not match expectation")
     _validate_source(repository, commit, ref, workflow_ref)
     if require_release_tag and not re.fullmatch(r"refs/tags/v[0-9A-Za-z._+-]+", ref):
         raise EvidenceError("deployment evidence must originate from a v* tag")
 
     target_records = manifest.get("targets")
-    if not isinstance(target_records, dict) or set(target_records) != set(TARGETS):
+    if not isinstance(target_records, dict) or set(target_records) != set(target_specs):
         raise EvidenceError("release manifest target set is incomplete or unexpected")
     target_digests: dict[str, str] = {}
-    for name, spec in TARGETS.items():
+    for name, spec in target_specs.items():
         record = target_records.get(name)
         if not isinstance(record, dict):
             raise EvidenceError(f"release target is malformed: {name}")
@@ -653,15 +679,13 @@ def verify_evidence(
             raise EvidenceError(f"release target identity is malformed: {name}")
         target_digests[name] = digest
     signed_digest = target_digests[target]
-    if image_digest is not None and (
-        not SHA256.fullmatch(image_digest) or image_digest != signed_digest
-    ):
+    if image_digest is not None and (not SHA256.fullmatch(image_digest) or image_digest != signed_digest):
         raise EvidenceError("deployment image digest differs from release evidence")
 
     artifacts = manifest.get("artifacts")
     if not isinstance(artifacts, dict):
         raise EvidenceError("release manifest lacks artifacts")
-    expected_artifacts = {*INPUT_ARTIFACTS, PROVENANCE}
+    expected_artifacts = {*input_artifacts, PROVENANCE}
     if set(artifacts) != expected_artifacts:
         raise EvidenceError("release manifest artifact set is incomplete or unexpected")
     for name, record in artifacts.items():
@@ -682,13 +706,11 @@ def verify_evidence(
             raise EvidenceError(f"artifact digest mismatch: {name}")
 
     _assert_clean_scan(directory / SOURCE_SCAN)
-    for name, spec in TARGETS.items():
+    for name, spec in target_specs.items():
         _assert_clean_scan(directory / spec.scan)
         metadata_digest = _image_digest(directory, spec)
         if metadata_digest != target_digests[name]:
-            raise EvidenceError(
-                f"OCI digest differs from release manifest: {name}"
-            )
+            raise EvidenceError(f"OCI digest differs from release manifest: {name}")
 
     provenance = _read_json(directory / PROVENANCE)
     if not isinstance(provenance, dict):
@@ -704,6 +726,9 @@ def verify_evidence(
         signing_key_arn=manifest_signing_key_arn,
         artifacts=artifacts,
         targets=target_records,
+        target_specs=target_specs,
+        input_artifacts=input_artifacts,
+        build_type=build_type,
     )
     if provenance != expected_provenance:
         raise EvidenceError("provenance does not match signed release manifest")
@@ -722,9 +747,7 @@ def _create_command(args: argparse.Namespace) -> int:
         event_name=args.event_name,
         signing_key_arn=args.signing_key_arn,
     )
-    identities = ", ".join(
-        f"{name}={manifest['targets'][name]['digest']}" for name in TARGETS
-    )
+    identities = ", ".join(f"{name}={manifest['targets'][name]['digest']}" for name in TARGETS)
     print(f"release evidence created: {identities}")
     return 0
 

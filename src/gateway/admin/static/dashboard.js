@@ -87,6 +87,99 @@ const api = {
   put: (url, body) => request('PUT', url, body),
   del: url => request('DELETE', url)
 };
+const sleep = milliseconds => new Promise(resolve => {
+  window.setTimeout(resolve, milliseconds);
+});
+const sameOriginAdminPath = value => typeof value === 'string' && value.startsWith('/admin/') && !value.startsWith('//');
+async function authorizedDownloadRequest(url, _retried) {
+  if (!sameOriginAdminPath(url)) {
+    throw new Error('The export service returned an invalid download path.');
+  }
+  let response;
+  try {
+    response = await fetch(url, {
+      method: 'GET',
+      headers: authHeaders({
+        'Accept': 'application/json, text/csv'
+      }),
+      credentials: 'same-origin',
+      redirect: 'follow'
+    });
+  } catch (netErr) {
+    throw new Error('Network error: ' + (netErr && netErr.message ? netErr.message : 'request failed'));
+  }
+  if (response.status === 401 && !_retried) {
+    let payload = null;
+    try {
+      payload = await response.clone().json();
+    } catch (e) {/* non-JSON body */}
+    const loginUrl = payload && payload.error && payload.error.login_url;
+    if (typeof loginUrl === 'string' && loginUrl.startsWith('/auth/login')) {
+      browserSessionMode = true;
+      setApiKey('');
+      window.location.assign(loginUrl);
+      throw new Error('Authentication required (401). Redirecting to sign in.');
+    }
+    browserSessionMode = false;
+    if (promptForKey()) return authorizedDownloadRequest(url, true);
+    throw new Error('Authentication required (401). Provide an admin API key.');
+  }
+  if (!response.ok) {
+    let payload = null;
+    try {
+      payload = await response.clone().json();
+    } catch (e) {/* non-JSON body */}
+    const message = payload && payload.error && (payload.error.message || payload.error.type) || payload && payload.message || 'HTTP ' + response.status;
+    throw new Error(message);
+  }
+  return response;
+}
+function saveResponseFile(response, fallbackFilename) {
+  return response.blob().then(blob => {
+    const disposition = response.headers.get('content-disposition') || '';
+    const match = disposition.match(/filename="?([^";]+)"?/i);
+    const filename = match && match[1] ? match[1] : fallbackFilename;
+    const objectUrl = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = objectUrl;
+    link.download = filename;
+    link.style.display = 'none';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.setTimeout(() => URL.revokeObjectURL(objectUrl), 0);
+    return filename;
+  });
+}
+async function downloadExport(url, fallbackFilename, onProgress) {
+  const initial = await authorizedDownloadRequest(url);
+  if (initial.status !== 202) {
+    return saveResponseFile(initial, fallbackFilename);
+  }
+  const created = await initial.json();
+  if (!sameOriginAdminPath(created.statusUrl)) {
+    throw new Error('The export service returned an invalid status path.');
+  }
+  onProgress('Preparing export...');
+  for (let attempt = 0; attempt < 150; attempt += 1) {
+    await sleep(2000);
+    const statusResponse = await authorizedDownloadRequest(created.statusUrl);
+    const job = await statusResponse.json();
+    if (job.status === 'failed') {
+      throw new Error('The export job failed. Try again or contact an administrator.');
+    }
+    if (job.status === 'complete') {
+      if (!sameOriginAdminPath(job.downloadUrl)) {
+        throw new Error('The export service returned an invalid download path.');
+      }
+      onProgress('Downloading export...');
+      const download = await authorizedDownloadRequest(job.downloadUrl);
+      return saveResponseFile(download, fallbackFilename);
+    }
+    onProgress(job.status === 'processing' ? 'Generating export...' : 'Export queued...');
+  }
+  throw new Error('The export is still running. Try again shortly.');
+}
 const fmt = {
   cost: v => `$${(v || 0).toFixed(4)}`,
   num: v => (v || 0).toLocaleString(),
@@ -2923,6 +3016,9 @@ function EfficiencyPage({
   const [userReport, setUserReport] = useState(null);
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [exporting, setExporting] = useState(false);
+  const [exportMessage, setExportMessage] = useState(null);
+  const [exportError, setExportError] = useState(null);
   useEffect(() => {
     api.get('/admin/efficiency').then(d => {
       setOverview(d);
@@ -2938,6 +3034,20 @@ function EfficiencyPage({
     api.get(`/admin/users/${encodeURIComponent(userId)}/efficiency`).then(setUserReport).catch(() => setUserReport({
       error: 'Failed to load user efficiency report.'
     }));
+  };
+  const exportUsage = async () => {
+    setExporting(true);
+    setExportError(null);
+    setExportMessage('Starting export...');
+    try {
+      const filename = await downloadExport('/admin/usage/export?format=csv&level=records', 'axonllm-usage-records.csv', setExportMessage);
+      setExportMessage(`Downloaded ${filename}`);
+    } catch (exportFailure) {
+      setExportMessage(null);
+      setExportError(exportFailure && exportFailure.message ? exportFailure.message : 'Usage export failed.');
+    } finally {
+      setExporting(false);
+    }
   };
   if (error) return /*#__PURE__*/React.createElement(Flash, {
     type: "error"
@@ -3410,8 +3520,17 @@ function EfficiencyPage({
     text: `Loading report for ${selectedUser}...`
   });
   return /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
-    className: "page-header"
-  }, /*#__PURE__*/React.createElement("h1", null, "Token Efficiency"), /*#__PURE__*/React.createElement("p", null, "Analyze token utilization, detect waste patterns, and optimize costs")), /*#__PURE__*/React.createElement("div", {
+    className: "page-header page-header-actions"
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("h1", null, "Token Efficiency"), /*#__PURE__*/React.createElement("p", null, "Analyze token utilization, detect waste patterns, and optimize costs")), /*#__PURE__*/React.createElement(Btn, {
+    onClick: exportUsage,
+    disabled: exporting
+  }, exporting ? 'Preparing CSV...' : 'Export usage CSV')), exportError && /*#__PURE__*/React.createElement(Flash, {
+    type: "error",
+    onDismiss: () => setExportError(null)
+  }, exportError), exportMessage && /*#__PURE__*/React.createElement(Flash, {
+    type: "info",
+    onDismiss: () => setExportMessage(null)
+  }, exportMessage), /*#__PURE__*/React.createElement("div", {
     className: "stat-grid"
   }, /*#__PURE__*/React.createElement("div", {
     className: "stat-card"
@@ -4305,6 +4424,9 @@ function SecurityPage() {
   const [stats, setStats] = useState(null);
   const [integrity, setIntegrity] = useState(null);
   const [error, setError] = useState(null);
+  const [exporting, setExporting] = useState(false);
+  const [exportMessage, setExportMessage] = useState(null);
+  const [exportError, setExportError] = useState(null);
   const loadEvents = useCallback(() => {
     api.get('/admin/audit/security?limit=50').then(r => setRecords(r.records)).catch(e => setError('Failed to load events: ' + (e && e.message ? e.message : 'unknown error')));
   }, []);
@@ -4319,16 +4441,39 @@ function SecurityPage() {
     loadStats();
     loadIntegrity();
   }, [loadEvents, loadStats, loadIntegrity]);
+  const exportAudit = async () => {
+    setExporting(true);
+    setExportError(null);
+    setExportMessage('Starting export...');
+    try {
+      const filename = await downloadExport('/admin/audit/export', 'axonllm-audit-records.json', setExportMessage);
+      setExportMessage(`Downloaded ${filename}`);
+    } catch (exportFailure) {
+      setExportMessage(null);
+      setExportError(exportFailure && exportFailure.message ? exportFailure.message : 'Audit export failed.');
+    } finally {
+      setExporting(false);
+    }
+  };
   const severityColor = type => {
     if (type.includes('blocked')) return 'badge-red';
     if (type.includes('detected') || type.includes('failure')) return 'badge-grey';
     return 'badge-blue';
   };
   return /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
-    className: "page-header"
-  }, /*#__PURE__*/React.createElement("h1", null, "Security & Audit"), /*#__PURE__*/React.createElement("p", null, "Injection attempts, PII redaction events, audit trail integrity")), error && /*#__PURE__*/React.createElement(Flash, {
+    className: "page-header page-header-actions"
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("h1", null, "Security & Audit"), /*#__PURE__*/React.createElement("p", null, "Injection attempts, PII redaction events, audit trail integrity")), /*#__PURE__*/React.createElement(Btn, {
+    onClick: exportAudit,
+    disabled: exporting
+  }, exporting ? 'Preparing JSON...' : 'Export audit JSON')), error && /*#__PURE__*/React.createElement(Flash, {
     type: "error"
-  }, error), /*#__PURE__*/React.createElement("div", {
+  }, error), exportError && /*#__PURE__*/React.createElement(Flash, {
+    type: "error",
+    onDismiss: () => setExportError(null)
+  }, exportError), exportMessage && /*#__PURE__*/React.createElement(Flash, {
+    type: "info",
+    onDismiss: () => setExportMessage(null)
+  }, exportMessage), /*#__PURE__*/React.createElement("div", {
     className: "stat-grid"
   }, /*#__PURE__*/React.createElement("div", {
     className: "stat-card"

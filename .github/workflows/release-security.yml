@@ -23,6 +23,8 @@ jobs:
     outputs:
       agentcore_digest: ${{ steps.evidence.outputs.agentcore_digest }}
       fargate_digest: ${{ steps.evidence.outputs.fargate_digest }}
+      standalone_amd64_digest: ${{ steps.evidence.outputs.standalone_amd64_digest }}
+      standalone_arm64_digest: ${{ steps.evidence.outputs.standalone_arm64_digest }}
     permissions:
       contents: read
       id-token: write
@@ -105,6 +107,18 @@ jobs:
           --output "type=oci,dest=${EVIDENCE_DIR}/axonllm-agentcore-linux-arm64.oci.tar"
           .
 
+      - name: Build standalone ARM64 OCI release image
+        run: >-
+          docker buildx build
+          --pull
+          --platform linux/arm64
+          --provenance=mode=max
+          --file infra/standalone-image/Dockerfile
+          --build-context project=.
+          --metadata-file "${EVIDENCE_DIR}/standalone-arm64-build-metadata.json"
+          --output "type=oci,dest=${EVIDENCE_DIR}/axonllm-standalone-linux-arm64.oci.tar"
+          .
+
       - name: Scan Fargate OCI image and generate image SBOM
         run: |
           oci_layout=$(mktemp -d)
@@ -148,6 +162,28 @@ jobs:
             --format cyclonedx \
             --output "${EVIDENCE_DIR}/agentcore-image.cyclonedx.json"
 
+      - name: Scan standalone ARM64 OCI image and generate image SBOM
+        run: |
+          oci_layout=$(mktemp -d)
+          trap 'rm -rf "${oci_layout}"' EXIT
+          tar -xf "${EVIDENCE_DIR}/axonllm-standalone-linux-arm64.oci.tar" \
+            -C "${oci_layout}"
+          trivy image \
+            --disable-telemetry \
+            --input "${oci_layout}" \
+            --scanners vuln,secret \
+            --ignore-unfixed \
+            --severity HIGH,CRITICAL \
+            --exit-code 1 \
+            --format json \
+            --output "${EVIDENCE_DIR}/standalone-arm64-image-security.json"
+          trivy image \
+            --disable-telemetry \
+            --input "${oci_layout}" \
+            --scanners vuln \
+            --format cyclonedx \
+            --output "${EVIDENCE_DIR}/standalone-arm64-image.cyclonedx.json"
+
       - name: Create deterministic source artifact
         run: >-
           python scripts/release/create_source_archive.py
@@ -184,6 +220,18 @@ jobs:
             --commit "${GITHUB_SHA}" \
             --signing-key-arn "${SIGNING_KEY_ARN}" \
             --target agentcore
+          python scripts/release/release_evidence.py verify \
+            --directory "${EVIDENCE_DIR}" \
+            --repository "${RELEASE_REPOSITORY}" \
+            --commit "${GITHUB_SHA}" \
+            --signing-key-arn "${SIGNING_KEY_ARN}" \
+            --target standalone-amd64
+          python scripts/release/release_evidence.py verify \
+            --directory "${EVIDENCE_DIR}" \
+            --repository "${RELEASE_REPOSITORY}" \
+            --commit "${GITHUB_SHA}" \
+            --signing-key-arn "${SIGNING_KEY_ARN}" \
+            --target standalone-arm64
 
       - name: Read immutable evidence identities
         id: evidence
@@ -194,10 +242,22 @@ jobs:
           agentcore_digest=$(jq -er \
             '.targets.agentcore.digest' \
             "${EVIDENCE_DIR}/release-manifest.json")
+          standalone_amd64_digest=$(jq -er \
+            '.targets["standalone-amd64"].digest' \
+            "${EVIDENCE_DIR}/release-manifest.json")
+          standalone_arm64_digest=$(jq -er \
+            '.targets["standalone-arm64"].digest' \
+            "${EVIDENCE_DIR}/release-manifest.json")
           [[ "${fargate_digest}" =~ ^sha256:[0-9a-f]{64}$ ]]
           [[ "${agentcore_digest}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "${standalone_amd64_digest}" == "${fargate_digest}" ]]
+          [[ "${standalone_arm64_digest}" =~ ^sha256:[0-9a-f]{64}$ ]]
           printf 'fargate_digest=%s\n' "${fargate_digest}" >>"${GITHUB_OUTPUT}"
           printf 'agentcore_digest=%s\n' "${agentcore_digest}" >>"${GITHUB_OUTPUT}"
+          printf 'standalone_amd64_digest=%s\n' \
+            "${standalone_amd64_digest}" >>"${GITHUB_OUTPUT}"
+          printf 'standalone_arm64_digest=%s\n' \
+            "${standalone_arm64_digest}" >>"${GITHUB_OUTPUT}"
 
       - name: Configure release-signing AWS credentials
         uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3

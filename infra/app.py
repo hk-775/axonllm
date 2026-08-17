@@ -128,6 +128,52 @@ elif deployment_target == "agentcore":
         env=environment,
         synthesizer=cdk.DefaultStackSynthesizer(qualifier=qualifier),
     )
+elif deployment_target == "application-state":
+    from application_state_stack import AxonLLMApplicationStateStack
+
+    deployment_stack = AxonLLMApplicationStateStack(
+        app,
+        stack_name("AxonLLMApplicationStateStack", namespace),
+        deployment_namespace=namespace,
+        env=environment,
+        synthesizer=cdk.DefaultStackSynthesizer(qualifier=qualifier),
+        termination_protection=not bool(namespace),
+    )
+elif deployment_target == "managed-network":
+    from managed_network_stack import AxonLLMManagedNetworkStack
+
+    deployment_stack = AxonLLMManagedNetworkStack(
+        app,
+        stack_name("AxonLLMManagedNetworkStack", namespace),
+        deployment_namespace=namespace,
+        env=environment,
+        synthesizer=cdk.DefaultStackSynthesizer(qualifier=qualifier),
+    )
+elif deployment_target in {
+    "agentcore-parked",
+    "managed-network-parked",
+}:
+    from parked_stack import AxonLLMParkedStack
+
+    parked_component = (
+        "agentcore-runtime"
+        if deployment_target == "agentcore-parked"
+        else "managed-network"
+    )
+    parked_stack_name = (
+        "AxonLLMAgentCoreStack"
+        if deployment_target == "agentcore-parked"
+        else "AxonLLMManagedNetworkStack"
+    )
+    deployment_stack = AxonLLMParkedStack(
+        app,
+        stack_name(parked_stack_name, namespace),
+        parked_component=parked_component,
+        env=environment,
+        synthesizer=cdk.DefaultStackSynthesizer(
+            qualifier=qualifier
+        ),
+    )
 elif deployment_target == "identity":
     from identity_stack import AxonLLMIdentityStack
 
@@ -144,6 +190,28 @@ elif deployment_target == "control-plane":
     deployment_stack = AxonLLMControlPlaneStack(
         app,
         stack_name("AxonLLMControlPlaneStack", namespace),
+        deployment_namespace=namespace,
+        env=environment,
+        synthesizer=cdk.DefaultStackSynthesizer(qualifier=qualifier),
+    )
+elif deployment_target == "serverless-control-plane":
+    from serverless_control_plane_stack import (
+        AxonLLMServerlessControlPlaneStack,
+    )
+
+    deployment_stack = AxonLLMServerlessControlPlaneStack(
+        app,
+        stack_name("AxonLLMServerlessControlPlaneStack", namespace),
+        deployment_namespace=namespace,
+        env=environment,
+        synthesizer=cdk.DefaultStackSynthesizer(qualifier=qualifier),
+    )
+elif deployment_target == "serverless-workers":
+    from serverless_workers_stack import AxonLLMServerlessWorkersStack
+
+    deployment_stack = AxonLLMServerlessWorkersStack(
+        app,
+        stack_name("AxonLLMServerlessWorkersStack", namespace),
         deployment_namespace=namespace,
         env=environment,
         synthesizer=cdk.DefaultStackSynthesizer(qualifier=qualifier),
@@ -170,8 +238,12 @@ elif deployment_target == "launch-workers":
     )
 else:
     raise ValueError(
-        "deployment_target must be 'fargate', 'agentcore', 'identity', "
-        "'control-plane', 'release-foundation', or 'launch-workers'"
+        "deployment_target must be 'fargate', 'agentcore', "
+        "'agentcore-parked', 'application-state', 'managed-network', "
+        "'managed-network-parked', 'identity', 'control-plane', "
+        "'serverless-control-plane', 'serverless-workers', "
+        "'release-foundation', or "
+        "'launch-workers'"
     )
 
 if deployment_stack is not None:

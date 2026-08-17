@@ -221,12 +221,8 @@ class TestDemoDataCheck:
         )
         assert result.status is Status.PASS
 
-    def test_unset_warns_because_the_entrypoint_defaults_it_on(self):
-        """serve_dashboard.py — the Dockerfile CMD — defaults this to true.
-
-        So "unset" is not the same as "off": the same image started the ordinary
-        way would seed fabricated spend into a real dashboard.
-        """
+    def test_unset_warns_because_production_must_bind_the_profile(self):
+        """Production does not inherit evaluation or developer defaults."""
         result = check_demo_data(AppConfig(load_demo_data=False), {})
 
         assert result.status is Status.WARN

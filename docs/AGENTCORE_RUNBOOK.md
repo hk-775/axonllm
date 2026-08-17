@@ -13,10 +13,12 @@ consistent snapshot reads used during startup and runtime convergence.
 Managed-Cognito control planes support either the existing custom Route 53/ACM
 endpoint or an AWS-generated CloudFront endpoint with no adopter-owned domain.
 
-The release workflow records Fargate and AgentCore as distinct schema-v3
-targets, controlled publication copies both signed OCI archives to immutable
-private ECR repositories, and deployment verification selects the AgentCore
-ARM64 target. The protected launch orchestrator separately certifies external
+The current release workflow records Fargate, AgentCore, standalone AMD64, and
+standalone ARM64 as distinct schema-v4 targets. Controlled publication copies
+the signed OCI archives to immutable private ECR repositories, and deployment
+verification selects the AgentCore ARM64 target. Historical schema-v3 evidence
+remains valid for its Fargate and AgentCore targets. The protected launch
+orchestrator separately certifies external
 OIDC, stages and exercises managed Cognito, records signed rehearsal and
 qualification-teardown evidence, and only then invokes the production
 deployment leaf. That leaf stages a fresh high-entropy candidate endpoint,
@@ -347,8 +349,9 @@ Cognito ID token in `cloudfront` mode.
 
 `.github/workflows/release-security.yml` creates the ARM64 image with the
 AgentCore Dockerfile, scans it, emits an image SBOM, captures BuildKit metadata,
-and records its digest in KMS-signed SLSA provenance. Its schema-v3 release
-manifest records both deployment targets. The evidence bundle contains:
+and records its digest in KMS-signed SLSA provenance. Its schema-v4 release
+manifest records all four deployment targets. The AgentCore evidence bundle
+contains:
 
 - `axonllm-agentcore-linux-arm64.oci.tar`;
 - `agentcore-build-metadata.json`;

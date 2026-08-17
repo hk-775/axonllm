@@ -216,6 +216,151 @@ def cmd_models(args):
         sys.exit(1)
 
 
+def cmd_deploy_plan(args):
+    """Create immutable deployment artifacts without contacting AWS."""
+
+    from src.gateway.deployment.planning import create_deployment_plan
+
+    plan, plan_path, descriptor_path = create_deployment_plan(
+        config_path=args.config,
+        context_path=args.context,
+        output_directory=args.output_dir,
+    )
+    print(
+        json.dumps(
+            {
+                "plan_id": plan["plan_id"],
+                "plan_path": str(plan_path),
+                "descriptor_id": plan["descriptor"]["descriptor_id"],
+                "descriptor_path": str(descriptor_path),
+                "mutating": False,
+                "replacement_review_required": plan["summary"]["replacement_review_required"],
+                "chargeable_networking": plan["summary"]["chargeable_networking"],
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
+def cmd_deploy_edge_plan(args):
+    """Create a qualified edge-transition plan without contacting AWS."""
+
+    from src.gateway.deployment.edge_transition import (
+        create_edge_transition_plan,
+    )
+
+    plan, plan_path = create_edge_transition_plan(
+        context_path=args.context,
+        legacy_report_path=args.legacy_report,
+        serverless_report_path=args.serverless_report,
+        output_directory=args.output_dir,
+    )
+    print(
+        json.dumps(
+            {
+                "plan_id": plan["plan_id"],
+                "plan_path": str(plan_path),
+                "operation": plan["operation"],
+                "mutating": False,
+                "approval_required": plan["approval_required"],
+                "current_backend": plan["production"][
+                    "current_backend"
+                ],
+                "desired_backend": plan["production"][
+                    "desired_backend"
+                ],
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
+def cmd_deploy_lifecycle_plan(args):
+    """Create a runtime park or resume plan without contacting AWS."""
+
+    from src.gateway.deployment.runtime_lifecycle import (
+        create_runtime_lifecycle_plan,
+    )
+
+    plan, plan_path = create_runtime_lifecycle_plan(
+        context_path=args.context,
+        output_directory=args.output_dir,
+    )
+    print(
+        json.dumps(
+            {
+                "plan_id": plan["plan_id"],
+                "plan_path": str(plan_path),
+                "operation": plan["operation"],
+                "mutating": False,
+                "approval_required": plan["approval_required"],
+                "current_state": plan["current_state"],
+                "desired_state": plan["desired_state"],
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
+def cmd_deploy_lifecycle_receipt(args):
+    """Verify a completed lifecycle operation without contacting AWS."""
+
+    from src.gateway.deployment.runtime_lifecycle_status import (
+        create_runtime_lifecycle_receipt,
+    )
+
+    receipt, receipt_path = create_runtime_lifecycle_receipt(
+        plan_path=args.plan,
+        status_path=args.status,
+        output_directory=args.output_dir,
+    )
+    print(
+        json.dumps(
+            {
+                "receipt_id": receipt["receipt_id"],
+                "receipt_path": str(receipt_path),
+                "operation": receipt["operation"],
+                "final_state": receipt["final_state"],
+                "verified": True,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
+def cmd_deploy_standalone_plan(args):
+    """Create a standalone ECS plan without contacting AWS."""
+
+    from src.gateway.deployment.standalone_recipe import (
+        create_standalone_ecs_plan,
+    )
+
+    plan, plan_path, task_path = create_standalone_ecs_plan(
+        context_path=args.context,
+        output_directory=args.output_dir,
+    )
+    print(
+        json.dumps(
+            {
+                "plan_id": plan["plan_id"],
+                "plan_path": str(plan_path),
+                "task_definition_path": str(task_path),
+                "mutating": False,
+                "approval_required": plan["approval_required"],
+                "created_network_resources": plan["ownership"][
+                    "created_network_resources"
+                ],
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="axon",
@@ -226,6 +371,113 @@ def main():
     from src.gateway.agentcore_setup import add_setup_subcommands
 
     add_setup_subcommands(sub)
+
+    # deploy
+    p_deploy = sub.add_parser(
+        "deploy",
+        help="Plan AxonLLM deployment lifecycle operations",
+    )
+    deploy_sub = p_deploy.add_subparsers(dest="deploy_command", required=True)
+    p_deploy_plan = deploy_sub.add_parser(
+        "plan",
+        help="Write a deterministic, non-mutating deployment plan",
+    )
+    p_deploy_plan.add_argument(
+        "--config",
+        required=True,
+        help="Path to a deployment configuration YAML file",
+    )
+    p_deploy_plan.add_argument(
+        "--context",
+        required=True,
+        help="Path to an explicit non-secret planning context JSON file",
+    )
+    p_deploy_plan.add_argument(
+        "--output-dir",
+        default=".axon/plans",
+        help="Directory for content-addressed plan artifacts",
+    )
+    p_deploy_edge_plan = deploy_sub.add_parser(
+        "edge-plan",
+        help=(
+            "Write a qualified, non-mutating control-plane edge "
+            "transition plan"
+        ),
+    )
+    p_deploy_edge_plan.add_argument(
+        "--context",
+        required=True,
+        help="Path to an explicit non-secret edge transition context",
+    )
+    p_deploy_edge_plan.add_argument(
+        "--legacy-report",
+        required=True,
+        help="Passing Fargate production-validation report",
+    )
+    p_deploy_edge_plan.add_argument(
+        "--serverless-report",
+        required=True,
+        help="Passing serverless-control validation report",
+    )
+    p_deploy_edge_plan.add_argument(
+        "--output-dir",
+        default=".axon/plans",
+        help="Directory for content-addressed edge-plan artifacts",
+    )
+    p_deploy_lifecycle_plan = deploy_sub.add_parser(
+        "lifecycle-plan",
+        help=(
+            "Write a non-mutating AgentCore runtime park or resume plan"
+        ),
+    )
+    p_deploy_lifecycle_plan.add_argument(
+        "--context",
+        required=True,
+        help="Path to an explicit non-secret runtime lifecycle context",
+    )
+    p_deploy_lifecycle_plan.add_argument(
+        "--output-dir",
+        default=".axon/plans",
+        help="Directory for content-addressed lifecycle-plan artifacts",
+    )
+    p_deploy_lifecycle_receipt = deploy_sub.add_parser(
+        "lifecycle-receipt",
+        help=(
+            "Verify observed park or resume state and write a receipt"
+        ),
+    )
+    p_deploy_lifecycle_receipt.add_argument(
+        "--plan",
+        required=True,
+        help="Path to the reviewed runtime lifecycle plan",
+    )
+    p_deploy_lifecycle_receipt.add_argument(
+        "--status",
+        required=True,
+        help="Path to explicit non-secret post-operation observations",
+    )
+    p_deploy_lifecycle_receipt.add_argument(
+        "--output-dir",
+        default=".axon/receipts",
+        help="Directory for content-addressed lifecycle receipts",
+    )
+    p_deploy_standalone_plan = deploy_sub.add_parser(
+        "standalone-plan",
+        help=(
+            "Write a non-mutating standalone ECS plan for existing "
+            "infrastructure"
+        ),
+    )
+    p_deploy_standalone_plan.add_argument(
+        "--context",
+        required=True,
+        help="Path to an explicit non-secret standalone ECS context",
+    )
+    p_deploy_standalone_plan.add_argument(
+        "--output-dir",
+        default=".axon/plans",
+        help="Directory for content-addressed standalone plan artifacts",
+    )
 
     # demo
     sub.add_parser("demo", help="Start server + generate real traffic for a live demo")
@@ -306,6 +558,28 @@ def main():
             cmd_chat(args)
         elif args.command == "models":
             cmd_models(args)
+        elif args.command == "deploy" and args.deploy_command == "plan":
+            cmd_deploy_plan(args)
+        elif (
+            args.command == "deploy"
+            and args.deploy_command == "edge-plan"
+        ):
+            cmd_deploy_edge_plan(args)
+        elif (
+            args.command == "deploy"
+            and args.deploy_command == "lifecycle-plan"
+        ):
+            cmd_deploy_lifecycle_plan(args)
+        elif (
+            args.command == "deploy"
+            and args.deploy_command == "lifecycle-receipt"
+        ):
+            cmd_deploy_lifecycle_receipt(args)
+        elif (
+            args.command == "deploy"
+            and args.deploy_command == "standalone-plan"
+        ):
+            cmd_deploy_standalone_plan(args)
         else:
             parser.print_help()
     except ValueError as exc:

@@ -8,6 +8,8 @@ from aws_cdk import (
     CfnOutput,
     CfnParameter,
     CfnResource,
+    CfnRule,
+    CfnRuleAssertion,
     CustomResource,
     Duration,
     Fn,
@@ -37,8 +39,16 @@ from constructs import Construct
 
 if __package__:
     from .agentcore_stack import load_athena_infrastructure_config
+    from .application_state import (
+        application_state_mode,
+        external_application_state_access,
+    )
 else:
     from agentcore_stack import load_athena_infrastructure_config
+    from application_state import (
+        application_state_mode,
+        external_application_state_access,
+    )
 
 
 _DYNAMODB_STANDARD_ACTIONS = [
@@ -395,8 +405,19 @@ class AxonLLMControlPlaneStack(Stack):
         physical_suffix = f"-{deployment_namespace}" if deployment_namespace else ""
         removal_policy = RemovalPolicy.DESTROY if deployment_namespace else RemovalPolicy.RETAIN
         deletion_protection = not bool(deployment_namespace)
+        edge_cutover_enabled = self.node.try_get_context(
+            "edge_cutover_enabled"
+        )
+        if edge_cutover_enabled is None:
+            edge_cutover_enabled = False
+        if not isinstance(edge_cutover_enabled, bool):
+            raise ValueError("edge_cutover_enabled must be a boolean")
         agentcore_stack_default = f"AxonLLMAgentCoreStack{physical_suffix}"
+        state_stack_default = (
+            f"AxonLLMApplicationStateStack{physical_suffix}"
+        )
         identity_stack_default = f"AxonLLMIdentityStack{physical_suffix}"
+        state_mode = application_state_mode(self)
         query_config = load_athena_infrastructure_config(self)
         rehearsal_control_table_arn = (
             CfnParameter(
@@ -461,6 +482,140 @@ class AxonLLMControlPlaneStack(Stack):
                 "cloudfront",
             ),
         )
+        edge_backend_mode = None
+        edge_migration_id = None
+        serverless_api_domain_name = None
+        serverless_api_origin_path = None
+        serverless_origin_credential_secret_arn = None
+        serverless_static_bucket_domain_name = None
+        serverless_source_revision = None
+        serverless_control_api_sha256 = None
+        serverless_static_assets_sha256 = None
+        if edge_cutover_enabled:
+            edge_backend_mode = CfnParameter(
+                self,
+                "EdgeBackendMode",
+                type="String",
+                default="fargate",
+                allowed_values=["fargate", "serverless"],
+                description=(
+                    "Reviewed control-plane backend selected by the existing "
+                    "CloudFront distribution"
+                ),
+            )
+            edge_migration_id = CfnParameter(
+                self,
+                "EdgeMigrationId",
+                type="String",
+                allowed_pattern=r"^[0-9a-f]{64}$",
+                constraint_description=(
+                    "must be the reviewed 64-character edge migration ID"
+                ),
+                description=(
+                    "Content-addressed qualification and rollback plan that "
+                    "owns this edge selector"
+                ),
+            )
+            serverless_api_domain_name = CfnParameter(
+                self,
+                "ServerlessControlApiDomainName",
+                type="String",
+                allowed_pattern=(
+                    r"^[a-z0-9]+\.execute-api\.[a-z0-9-]+\."
+                    r"(?:amazonaws\.com|amazonaws\.com\.cn)$"
+                ),
+                constraint_description=(
+                    "must be the exact Regional API Gateway hostname"
+                ),
+                description=(
+                    "Qualified serverless control API origin hostname"
+                ),
+            )
+            serverless_api_origin_path = CfnParameter(
+                self,
+                "ServerlessControlApiOriginPath",
+                type="String",
+                allowed_pattern=r"^/[A-Za-z0-9_-]{1,128}$",
+                constraint_description=(
+                    "must be one API Gateway stage path"
+                ),
+                description=(
+                    "Qualified serverless control API stage path"
+                ),
+            )
+            serverless_origin_credential_secret_arn = CfnParameter(
+                self,
+                "ServerlessOriginCredentialSecretArn",
+                type="String",
+                allowed_pattern=(
+                    rf"^arn:(?:aws|aws-us-gov|aws-cn):secretsmanager:"
+                    rf"{re.escape(self.region)}:"
+                    rf"{('[0-9]{12}' if Token.is_unresolved(self.account) else re.escape(self.account))}:"
+                    r"secret:[A-Za-z0-9/_+=.@-]{1,512}$"
+                ),
+                constraint_description=(
+                    "must be the exact serverless origin-credential secret ARN"
+                ),
+                description=(
+                    "Secret containing the CloudFront-only API Gateway "
+                    "origin credential"
+                ),
+            )
+            serverless_static_bucket_domain_name = CfnParameter(
+                self,
+                "ServerlessStaticBucketRegionalDomainName",
+                type="String",
+                allowed_pattern=(
+                    r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]\."
+                    r"s3\.[a-z0-9-]+\."
+                    r"(?:amazonaws\.com|amazonaws\.com\.cn)$"
+                ),
+                constraint_description=(
+                    "must be the exact private static bucket regional hostname"
+                ),
+                description=(
+                    "Qualified serverless static-site S3 origin hostname"
+                ),
+            )
+            serverless_source_revision = CfnParameter(
+                self,
+                "ServerlessSourceRevision",
+                type="String",
+                allowed_pattern=r"^[0-9a-f]{40}$",
+                description=(
+                    "Reviewed source commit shared by the serverless API and "
+                    "static assets"
+                ),
+            )
+            serverless_control_api_sha256 = CfnParameter(
+                self,
+                "ServerlessControlApiSha256",
+                type="String",
+                allowed_pattern=r"^[0-9a-f]{64}$",
+                description="Verified serverless control API ZIP SHA-256",
+            )
+            serverless_static_assets_sha256 = CfnParameter(
+                self,
+                "ServerlessStaticAssetsSha256",
+                type="String",
+                allowed_pattern=r"^[0-9a-f]{64}$",
+                description="Verified serverless static-site ZIP SHA-256",
+            )
+            CfnRule(
+                self,
+                "EdgeCutoverRequiresCloudFrontEndpoint",
+                assertions=[
+                    CfnRuleAssertion(
+                        assert_=Fn.condition_equals(
+                            endpoint_mode.value_as_string,
+                            "cloudfront",
+                        ),
+                        assert_description=(
+                            "edge cutover requires EndpointMode=cloudfront"
+                        ),
+                    )
+                ],
+            )
         agentcore_stack_name = CfnParameter(
             self,
             "AgentCoreStackName",
@@ -709,19 +864,71 @@ class AxonLLMControlPlaneStack(Stack):
             resource="table",
             resource_name=selected_state_table_name,
         )
-        data_key = kms.Key.from_key_arn(
-            self,
-            "AgentCoreDataKey",
-            imported(agentcore_stack_name, "DataKeyArn"),
-        )
-        routing_config_signing_key = kms.Key.from_key_arn(
-            self,
-            "AgentCoreRoutingConfigSigningKey",
-            imported(
+        if state_mode == "external":
+            state_access = external_application_state_access(
+                self,
+                default_stack_name=state_stack_default,
+                primary_state_table_name=primary_state_table_name,
+                selected_state_table_name=selected_state_table_name,
+                selected_state_table_arn=selected_state_table_arn,
+            )
+            data_key = state_access.data_key
+            routing_config_signing_key = (
+                state_access.routing_config_signing_key
+            )
+            event_outbox_queue = state_access.event_outbox_queue
+            security_event_topic = state_access.security_event_topic
+            security_event_log_group_arn = (
+                state_access.security_event_log_group_arn
+            )
+            security_event_log_group = (
+                state_access.security_event_log_group
+            )
+        else:
+            data_key = kms.Key.from_key_arn(
+                self,
+                "AgentCoreDataKey",
+                imported(agentcore_stack_name, "DataKeyArn"),
+            )
+            routing_config_signing_key = kms.Key.from_key_arn(
+                self,
+                "AgentCoreRoutingConfigSigningKey",
+                imported(
+                    agentcore_stack_name,
+                    "RoutingConfigSigningKeyArn",
+                ),
+            )
+            event_outbox_queue = sqs.Queue.from_queue_attributes(
+                self,
+                "AgentCoreEventOutbox",
+                queue_arn=imported(
+                    agentcore_stack_name,
+                    "SecurityEventOutboxQueueArn",
+                ),
+                queue_url=imported(
+                    agentcore_stack_name,
+                    "SecurityEventOutboxQueueUrl",
+                ),
+                key_arn=data_key.key_arn,
+                fifo=True,
+            )
+            security_event_topic = sns.Topic.from_topic_arn(
+                self,
+                "AgentCoreSecurityEventTopic",
+                imported(
+                    agentcore_stack_name,
+                    "SecurityEventTopicArn",
+                ),
+            )
+            security_event_log_group_arn = imported(
                 agentcore_stack_name,
-                "RoutingConfigSigningKeyArn",
-            ),
-        )
+                "SecurityEventLogGroupArn",
+            )
+            security_event_log_group = logs.LogGroup.from_log_group_arn(
+                self,
+                "AgentCoreSecurityEventLogGroup",
+                security_event_log_group_arn,
+            )
         scim_tenants_secret = (
             secretsmanager.Secret.from_secret_complete_arn(
                 self,
@@ -730,37 +937,6 @@ class AxonLLMControlPlaneStack(Stack):
             )
             if scim_tenants_secret_arn is not None
             else None
-        )
-        event_outbox_queue = sqs.Queue.from_queue_attributes(
-            self,
-            "AgentCoreEventOutbox",
-            queue_arn=imported(
-                agentcore_stack_name,
-                "SecurityEventOutboxQueueArn",
-            ),
-            queue_url=imported(
-                agentcore_stack_name,
-                "SecurityEventOutboxQueueUrl",
-            ),
-            key_arn=data_key.key_arn,
-            fifo=True,
-        )
-        security_event_topic = sns.Topic.from_topic_arn(
-            self,
-            "AgentCoreSecurityEventTopic",
-            imported(
-                agentcore_stack_name,
-                "SecurityEventTopicArn",
-            ),
-        )
-        security_event_log_group_arn = imported(
-            agentcore_stack_name,
-            "SecurityEventLogGroupArn",
-        )
-        security_event_log_group = logs.LogGroup.from_log_group_arn(
-            self,
-            "AgentCoreSecurityEventLogGroup",
-            security_event_log_group_arn,
         )
 
         user_pool = cognito.UserPool.from_user_pool_arn(
@@ -1800,6 +1976,156 @@ class AxonLLMControlPlaneStack(Stack):
         if not isinstance(cfn_distribution, cloudfront.CfnDistribution):
             raise RuntimeError("CloudFront distribution did not synthesize")
         cfn_distribution.cfn_options.condition = cloudfront_mode
+        edge_static_oac = None
+        if edge_cutover_enabled:
+            if not all(
+                value is not None
+                for value in (
+                    edge_backend_mode,
+                    edge_migration_id,
+                    serverless_api_domain_name,
+                    serverless_api_origin_path,
+                    serverless_origin_credential_secret_arn,
+                    serverless_static_bucket_domain_name,
+                    serverless_source_revision,
+                    serverless_control_api_sha256,
+                    serverless_static_assets_sha256,
+                )
+            ):
+                raise RuntimeError(
+                    "edge cutover parameters did not initialize"
+                )
+            Tags.of(cfn_distribution).add(
+                "AxonLLMEdgeMigrationId",
+                edge_migration_id.value_as_string,
+            )
+            Tags.of(cfn_strip_untrusted_identity).add(
+                "AxonLLMEdgeMigrationId",
+                edge_migration_id.value_as_string,
+            )
+            edge_static_oac = cloudfront.CfnOriginAccessControl(
+                self,
+                "ServerlessStaticOriginAccessControl",
+                origin_access_control_config=(
+                    cloudfront.CfnOriginAccessControl.OriginAccessControlConfigProperty(
+                        name=(
+                            "axonllm-edge-static"
+                            f"{physical_suffix}"
+                        )[:64],
+                        description=(
+                            "Existing AxonLLM edge access to the qualified "
+                            "private static-site bucket"
+                        ),
+                        origin_access_control_origin_type="s3",
+                        signing_behavior="always",
+                        signing_protocol="sigv4",
+                    )
+                ),
+            )
+            origin_credential = Token.as_string(
+                Fn.join(
+                    "",
+                    [
+                        "{{resolve:secretsmanager:",
+                        serverless_origin_credential_secret_arn.value_as_string,
+                        ":SecretString}}",
+                    ],
+                )
+            )
+            cfn_distribution.add_property_override(
+                "DistributionConfig.Origins.1",
+                {
+                    "Id": "AxonLLMServerlessApiOrigin",
+                    "DomainName": (
+                        serverless_api_domain_name.value_as_string
+                    ),
+                    "OriginPath": (
+                        serverless_api_origin_path.value_as_string
+                    ),
+                    "OriginCustomHeaders": [
+                        {
+                            "HeaderName": "x-api-key",
+                            "HeaderValue": origin_credential,
+                        }
+                    ],
+                    "CustomOriginConfig": {
+                        "HTTPPort": 80,
+                        "HTTPSPort": 443,
+                        "OriginKeepaliveTimeout": 5,
+                        "OriginProtocolPolicy": "https-only",
+                        "OriginReadTimeout": 30,
+                        "OriginSSLProtocols": ["TLSv1.2"],
+                    },
+                },
+            )
+            cfn_distribution.add_property_override(
+                "DistributionConfig.Origins.2",
+                {
+                    "Id": "AxonLLMServerlessStaticOrigin",
+                    "DomainName": (
+                        serverless_static_bucket_domain_name.value_as_string
+                    ),
+                    "OriginAccessControlId": edge_static_oac.attr_id,
+                    "S3OriginConfig": {
+                        "OriginAccessIdentity": "",
+                    },
+                },
+            )
+            cfn_strip_untrusted_identity.function_code = Token.as_string(
+                Fn.join(
+                    "",
+                    [
+                        """import cf from 'cloudfront';
+function handler(event) {
+    var request = event.request;
+    delete request.headers['x-amzn-oidc-data'];
+    delete request.headers['x-amzn-oidc-identity'];
+    delete request.headers['x-amzn-oidc-accesstoken'];
+    delete request.headers['x-axon-public-host'];
+    var backend = '""",
+                        edge_backend_mode.value_as_string,
+                        """';
+    if (backend !== 'serverless') {
+        return request;
+    }
+    var uri = request.uri || '/';
+    var isStatic = (
+        uri === '/' ||
+        uri === '/index.html' ||
+        uri === '/admin/dashboard' ||
+        uri.indexOf('/admin/static/') === 0
+    );
+    if (isStatic) {
+        if (uri === '/' || uri === '/admin/dashboard') {
+            request.uri = '/index.html';
+        }
+        cf.selectRequestOriginById('AxonLLMServerlessStaticOrigin');
+        return request;
+    }
+    var isApi = (
+        uri === '/health' ||
+        uri === '/ready' ||
+        uri.indexOf('/admin/') === 0 ||
+        uri.indexOf('/auth/') === 0 ||
+        uri.indexOf('/saml/') === 0 ||
+        uri.indexOf('/scim/') === 0
+    );
+    if (!isApi) {
+        cf.selectRequestOriginById('AxonLLMServerlessStaticOrigin');
+        return request;
+    }
+    if (request.headers.host) {
+        request.headers['x-axon-public-host'] = {
+            value: request.headers.host.value
+        };
+    }
+    cf.selectRequestOriginById('AxonLLMServerlessApiOrigin');
+    return request;
+}
+""",
+                    ],
+                )
+            )
         cfn_vpc_origins = [
             construct
             for construct in self.node.find_all()
@@ -2542,6 +2868,88 @@ class AxonLLMControlPlaneStack(Stack):
             description="Private CloudFront origin attachment",
         )
         vpc_origin_output.condition = cloudfront_mode
+        if edge_cutover_enabled:
+            if edge_static_oac is None:
+                raise RuntimeError(
+                    "edge static origin access control did not initialize"
+                )
+            def edge_output(
+                name: str,
+                value: str,
+                description: str = "",
+            ) -> None:
+                output = CfnOutput(
+                    self,
+                    f"{name}Output",
+                    value=value,
+                    **(
+                        {"description": description}
+                        if description
+                        else {}
+                    ),
+                )
+                output.override_logical_id(name)
+                output.condition = cloudfront_mode
+
+            edge_output(
+                "EdgeBackendMode",
+                edge_backend_mode.value_as_string,
+                (
+                    "Current reviewed backend selected by the existing "
+                    "CloudFront distribution"
+                ),
+            )
+            edge_output(
+                "EdgeMigrationId",
+                edge_migration_id.value_as_string,
+                "Content-addressed qualification and rollback plan",
+            )
+            edge_output(
+                "ProductionDistributionArn",
+                self.format_arn(
+                    service="cloudfront",
+                    region="",
+                    account=self.account,
+                    resource="distribution",
+                    resource_name=distribution.distribution_id,
+                    arn_format=ArnFormat.SLASH_RESOURCE_NAME,
+                ),
+                (
+                    "Existing customer-facing CloudFront distribution ARN"
+                ),
+            )
+            edge_output(
+                "ServerlessControlApiDomainName",
+                serverless_api_domain_name.value_as_string,
+            )
+            edge_output(
+                "ServerlessControlApiOriginPath",
+                serverless_api_origin_path.value_as_string,
+            )
+            edge_output(
+                "ServerlessOriginCredentialSecretArn",
+                serverless_origin_credential_secret_arn.value_as_string,
+            )
+            edge_output(
+                "ServerlessStaticBucketRegionalDomainName",
+                serverless_static_bucket_domain_name.value_as_string,
+            )
+            edge_output(
+                "ServerlessStaticOriginAccessControlId",
+                edge_static_oac.attr_id,
+            )
+            edge_output(
+                "ServerlessSourceRevision",
+                serverless_source_revision.value_as_string,
+            )
+            edge_output(
+                "ServerlessControlApiSha256",
+                serverless_control_api_sha256.value_as_string,
+            )
+            edge_output(
+                "ServerlessStaticAssetsSha256",
+                serverless_static_assets_sha256.value_as_string,
+            )
         CfnOutput(
             self,
             "LoadBalancerScheme",
@@ -2558,6 +2966,15 @@ class AxonLLMControlPlaneStack(Stack):
             "AgentCoreStackNameOutput",
             value=agentcore_stack_name.value_as_string,
         ).override_logical_id("AgentCoreStackName")
+        if state_mode == "external":
+            application_state_stack_output = CfnOutput(
+                self,
+                "ApplicationStateStackNameOutput",
+                value=state_access.stack_name,
+            )
+            application_state_stack_output.override_logical_id(
+                "ApplicationStateStackName"
+            )
         CfnOutput(
             self,
             "PrimaryStateTableNameOutput",

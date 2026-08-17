@@ -10,8 +10,10 @@ import asyncio
 import contextlib
 import logging
 import math
+import os
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from typing import cast
 
 from starlette.applications import Starlette
 from starlette.requests import Request
@@ -58,6 +60,7 @@ from src.gateway.auth.saml_service import SamlService, load_saml_config
 from src.gateway.auth.scim_routes import ScimAPI, create_scim_routes
 from src.gateway.auth.scim_service import ScimStore
 from src.gateway.efficiency_analyzer import EfficiencyAnalyzer
+from src.gateway.export_jobs import ExportJobService
 from src.gateway.middleware.admin_rbac import AdminRBACMiddleware
 from src.gateway.middleware.auth import AuthMiddleware
 from src.gateway.middleware.tenant_authorization import TenantAuthorizationMiddleware
@@ -103,10 +106,12 @@ from src.gateway.config_loader import (
     load_ensemble_config,
     load_pricing_config,
 )
+from src.gateway.control_plane_routes import control_route_inventory
 from src.gateway.cost_tracker import CostTracker
 from src.gateway.feedback_tracker import FeedbackTracker
 from src.gateway.guardrail_engine import GuardrailEngine
 from src.gateway.health_tracker import ProviderHealthTracker
+from src.gateway.host_assemblies import WorkerAssembly, build_worker
 from src.gateway.model_leaderboard import ModelLeaderboard
 from src.gateway.model_registry import ModelRegistry
 from src.gateway.models import PolicyNode, Project, RateLimitConfig, UsageRecord
@@ -202,6 +207,86 @@ class GatewayComponents:
     query_reconciliation_worker: QueryReconciliationWorker | None = None
 
 
+@dataclass(frozen=True)
+class ControlAPIComponents:
+    """Services required by the administration API, excluding inference."""
+
+    cost_tracker: CostTracker
+    health_tracker: ProviderHealthTracker
+    registry: ModelRegistry
+    projects: dict[str, Project]
+    user_configs: dict[str, dict]
+    policies: list[dict]
+    persistence: DynamoPersistence
+    catalog: dict
+    api_key_service: APIKeyService | None
+    oidc_service: OIDCService | None
+    browser_session_service: BrowserSessionService | None
+    principal_resolver: PrincipalResolver | None
+    project_resolver: ProjectResolver | None
+    scim_store: ScimStore | None
+    saml_service: SamlService | None
+    policy_resolver: PolicyHierarchyResolver | None
+    quota_enforcer: QuotaEnforcer | None
+    audit_trail: AuditTrail | None
+    event_dispatcher: EventDispatcher | None
+    region_router: RegionRouter | None
+    health_monitor: SpokeHealthMonitor | None
+    efficiency_analyzer: EfficiencyAnalyzer | None
+    semantic_engine: SemanticEfficiencyEngine | None
+    semantic_cache: SemanticCache
+    provider_configs: dict[str, ProviderConfig]
+    datasource_repository: DatasourceRepository | None
+    athena_role_bindings: AthenaRoleBindings
+    export_jobs: ExportJobService | None = None
+
+    @classmethod
+    def from_gateway(
+        cls,
+        components: GatewayComponents,
+    ) -> ControlAPIComponents:
+        """Project the legacy combined bundle onto the control contract."""
+
+        return cls(
+            cost_tracker=components.cost_tracker,
+            health_tracker=components.health_tracker,
+            registry=components.registry,
+            projects=components.projects,
+            user_configs=components.user_configs,
+            policies=components.policies,
+            persistence=components.persistence,
+            catalog=components.catalog,
+            api_key_service=components.api_key_service,
+            oidc_service=components.oidc_service,
+            browser_session_service=components.browser_session_service,
+            principal_resolver=components.principal_resolver,
+            project_resolver=components.project_resolver,
+            scim_store=components.scim_store,
+            saml_service=components.saml_service,
+            policy_resolver=components.policy_resolver,
+            quota_enforcer=components.quota_enforcer,
+            audit_trail=components.audit_trail,
+            event_dispatcher=components.event_dispatcher,
+            region_router=components.region_router,
+            health_monitor=components.health_monitor,
+            efficiency_analyzer=components.efficiency_analyzer,
+            semantic_engine=components.semantic_engine,
+            semantic_cache=components.semantic_cache,
+            provider_configs=components.provider_configs,
+            datasource_repository=components.datasource_repository,
+            athena_role_bindings=components.athena_role_bindings,
+            export_jobs=None,
+        )
+
+
+@dataclass(frozen=True)
+class DataPlaneComponents:
+    """Services used only by inference and query execution routes."""
+
+    gateway_agent: GatewayAgent
+    query_service: QueryService | None = None
+
+
 # ---------------------------------------------------------------------------
 # Core builder
 # ---------------------------------------------------------------------------
@@ -257,8 +342,40 @@ def _load_runtime_model_registry(
     return registry
 
 
-def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComponents:
-    """Construct all gateway components from configuration.
+def build_gateway_components(
+    app_config: AppConfig | None = None,
+) -> GatewayComponents:
+    """Construct all standalone gateway components from configuration."""
+
+    return cast(
+        GatewayComponents,
+        _build_process_components(
+            app_config,
+            include_data_plane=True,
+        ),
+    )
+
+
+def build_control_components(
+    app_config: AppConfig | None = None,
+) -> ControlAPIComponents:
+    """Construct administration services without inference or workers."""
+
+    return cast(
+        ControlAPIComponents,
+        _build_process_components(
+            app_config,
+            include_data_plane=False,
+        ),
+    )
+
+
+def _build_process_components(
+    app_config: AppConfig | None,
+    *,
+    include_data_plane: bool,
+) -> GatewayComponents | ControlAPIComponents:
+    """Construct the selected process assembly from shared state services.
 
     If *app_config* is ``None``, one is loaded from environment variables.
     """
@@ -278,7 +395,7 @@ def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComp
             app_config.routing_config_signing_key_arn
         ),
     )
-    if persistence.enabled:
+    if persistence.enabled and include_data_plane:
         asyncio.run(
             persistence.create_table_if_not_exists()
         )
@@ -397,9 +514,20 @@ def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComp
     # policy sets pii_ner_enabled: building it costs nothing (the boto3 client is
     # lazy) and wiring it here keeps the decision in policy rather than in
     # startup config, so one BU can enable name detection without a redeploy.
-    pii_redactor = PIIRedactor(
-        entity_detector=build_entity_detector(region=app_config.aws_region))
-    injection_detector = PromptInjectionDetector()
+    pii_redactor = (
+        PIIRedactor(
+            entity_detector=build_entity_detector(
+                region=app_config.aws_region,
+            )
+        )
+        if include_data_plane
+        else None
+    )
+    injection_detector = (
+        PromptInjectionDetector()
+        if include_data_plane
+        else None
+    )
     audit_trail = AuditTrail(persistence=persistence)
     # Reload the hash-chain head so audit continuity survives restarts. Loop-safe:
     # runs now when standalone, defers to the running loop when embedded (Ostiari)
@@ -418,85 +546,111 @@ def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComp
                 app_config.athena_query_max_datasources_per_tenant
             ),
         )
-        query_admission = QueryAdmissionController(
-            persistence,
-            limits=QueryAdmissionLimits(
-                project_rpm=app_config.athena_query_project_rpm,
-                principal_rpm=app_config.athena_query_principal_rpm,
-                project_concurrency=(
-                    app_config.athena_query_project_concurrency
+        if include_data_plane:
+            query_admission = QueryAdmissionController(
+                persistence,
+                limits=QueryAdmissionLimits(
+                    project_rpm=app_config.athena_query_project_rpm,
+                    principal_rpm=app_config.athena_query_principal_rpm,
+                    project_concurrency=(
+                        app_config.athena_query_project_concurrency
+                    ),
+                    principal_concurrency=(
+                        app_config.athena_query_principal_concurrency
+                    ),
+                    project_scan_bytes_per_minute=(
+                        app_config
+                        .athena_query_project_scan_bytes_per_minute
+                    ),
+                    principal_scan_bytes_per_minute=(
+                        app_config
+                        .athena_query_principal_scan_bytes_per_minute
+                    ),
+                    lease_seconds=max(
+                        30,
+                        math.ceil(
+                            app_config.athena_query_timeout_seconds
+                        )
+                        + 30,
+                    ),
                 ),
-                principal_concurrency=(
-                    app_config.athena_query_principal_concurrency
-                ),
-                project_scan_bytes_per_minute=(
-                    app_config
-                    .athena_query_project_scan_bytes_per_minute
-                ),
-                principal_scan_bytes_per_minute=(
-                    app_config
-                    .athena_query_principal_scan_bytes_per_minute
-                ),
-                lease_seconds=max(
-                    30,
-                    math.ceil(
-                        app_config.athena_query_timeout_seconds
-                    )
-                    + 30,
-                ),
-            ),
-            max_scan_bytes_per_query=(
-                app_config.athena_query_max_bytes_scanned
-            ),
-        )
-        athena_executor = AthenaExecutor(
-            limits=AthenaQueryLimits(
-                timeout_seconds=(
-                    app_config.athena_query_timeout_seconds
-                ),
-                max_rows=app_config.athena_query_max_rows,
-                max_result_bytes=(
-                    app_config.athena_query_max_result_bytes
-                ),
-                max_bytes_scanned=(
+                max_scan_bytes_per_query=(
                     app_config.athena_query_max_bytes_scanned
                 ),
-                poll_interval_seconds=(
-                    app_config.athena_query_poll_interval_seconds
-                ),
             )
-        )
-        query_service = QueryService(
-            repository=datasource_repository,
-            bindings=athena_role_bindings,
-            executor=athena_executor,
-            audit_trail=audit_trail,
-            require_durable_audit=True,
-            admission=query_admission,
-            require_durable_admission=True,
-        )
-        query_reconciliation_worker = QueryReconciliationWorker(
-            QueryLifecycleReconciler(
-                store=persistence,
+            athena_executor = AthenaExecutor(
+                limits=AthenaQueryLimits(
+                    timeout_seconds=(
+                        app_config.athena_query_timeout_seconds
+                    ),
+                    max_rows=app_config.athena_query_max_rows,
+                    max_result_bytes=(
+                        app_config.athena_query_max_result_bytes
+                    ),
+                    max_bytes_scanned=(
+                        app_config.athena_query_max_bytes_scanned
+                    ),
+                    poll_interval_seconds=(
+                        app_config.athena_query_poll_interval_seconds
+                    ),
+                )
+            )
+            query_service = QueryService(
                 repository=datasource_repository,
                 bindings=athena_role_bindings,
                 executor=athena_executor,
                 audit_trail=audit_trail,
-                claim_seconds=300,
-                page_size=5,
-            ),
-            interval_seconds=30,
-            max_pages=10,
-        )
+                require_durable_audit=True,
+                admission=query_admission,
+                require_durable_admission=True,
+            )
+            query_reconciliation_worker = QueryReconciliationWorker(
+                QueryLifecycleReconciler(
+                    store=persistence,
+                    repository=datasource_repository,
+                    bindings=athena_role_bindings,
+                    executor=athena_executor,
+                    audit_trail=audit_trail,
+                    claim_seconds=300,
+                    page_size=5,
+                ),
+                interval_seconds=30,
+                max_pages=10,
+            )
     event_dispatcher = EventDispatcher()
-    # Forwards request traces to an embedding Ostiari when detected (OSTIARI_TRACES_URL
-    # set, or an in-process sink registered via observability.trace_forwarder). No-op
-    # for standalone AxonLLM.
-    trace_forwarder = TraceForwarder()
+    # Host-specific environment discovery ends here. Embedded hosts inject
+    # telemetry sinks directly rather than mutating process-global callbacks.
+    trace_forwarder = None
+    if include_data_plane:
+        try:
+            trace_timeout = float(
+                os.environ.get("OSTIARI_TRACES_TIMEOUT", "3.0")
+            )
+        except ValueError:
+            logger.warning(
+                "OSTIARI_TRACES_TIMEOUT is invalid; using 3 seconds"
+            )
+            trace_timeout = 3.0
+        trace_forwarder = TraceForwarder(
+            url=os.environ.get("OSTIARI_TRACES_URL", "").strip() or None,
+            gateway_id=(
+                os.environ.get("OSTIARI_GATEWAY_ID", "axonllm").strip()
+                or "axonllm"
+            ),
+            ingest_key=(
+                os.environ.get("OSTIARI_INGEST_KEY", "").strip()
+                or None
+            ),
+            timeout_seconds=trace_timeout,
+        )
     # Native OTLP span export for the STANDALONE deploy (opt-in via
     # OTEL_EXPORTER_OTLP_ENDPOINT). Suppressed by the agent when embedded in
     # Ostiari — Ostiari emits the governance span there. No-op if OTEL SDK absent.
-    otlp_exporter = OTLPSpanExporter()
+    otlp_exporter = (
+        OTLPSpanExporter()
+        if include_data_plane
+        else None
+    )
 
     # --- Budget threshold alerting ---
     async def _budget_alert(
@@ -636,113 +790,130 @@ def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComp
     if loaded_feedback:
         feedback_tracker._records.extend(loaded_feedback)
 
-    smart_strategy = SmartRoutingStrategy(
-        classifier=task_classifier,
-        leaderboard=leaderboard,
-        model_registry=registry,
-        health_tracker=health_tracker,
-        cost_tracker=cost_tracker,
-        feedback_tracker=feedback_tracker,
-        confidence_threshold=leaderboard.config.get("confidence_threshold", 0.3),
-        cost_quality_tradeoff=leaderboard.config.get("cost_quality_tradeoff", 0.3),
-        default_model=leaderboard.config.get("default_model", "claude-sonnet"),
-        # The same table CostTracker bills from. models.yaml carries no inline
-        # pricing, so without this the cost half of cost_quality_tradeoff has
-        # nothing to read and collapses to a constant.
-        pricing_config=pricing,
-    )
-
-    # --- Routing / rate limiting / guardrails / cache ---
-    ensemble_config = load_ensemble_config(app_config.ensemble_config_path)
-    router = Router(
-        model_registry=registry,
-        health_tracker=health_tracker,
-        smart_strategy=smart_strategy,
-        ensemble_config=ensemble_config,
-        cost_tracker=cost_tracker,
-        available_providers=None,
-        require_priced_mappings=(
-            app_config.deployment_profile == "production"
-        ),
-    )
-    rate_limiter = SlidingWindowRateLimiter(
-        config=RateLimitConfig(),
-        persistence=persistence,
-    )
-    guardrail_engine = GuardrailEngine()
-    cache_manager = CacheManager()
-
-    # Semantic cache. build_embedder() is only called when the gateway is
-    # configured for it: constructing one resolves AWS credentials, and a
-    # deploy that never asked for the cache should not pay that at startup or
-    # fail because of it.
-    semantic_embedder = None
-    if app_config.semantic_cache_enabled:
-        semantic_embedder = build_embedder(
-            region=app_config.semantic_cache_region,
-            model_id=app_config.semantic_cache_model or None,
-        )
-        if semantic_embedder is None:
-            logger.warning(
-                "AXON_SEMANTIC_CACHE=true but no embedder could be built — "
-                "semantic caching is off; exact-match caching is unaffected"
-            )
-    semantic_cache = SemanticCache(
-        embedder=semantic_embedder,
-        similarity_threshold=(
-            app_config.semantic_cache_threshold
-            if app_config.semantic_cache_threshold is not None
-            else DEFAULT_SIMILARITY_THRESHOLD
-        ),
-    )
-
-    # --- Multi-provider factory ---
-    provider_routes = load_provider_routes(app_config.providers_config_path)
     provider_configs: dict[str, ProviderConfig] = {}
-    for route in provider_routes:
-        provider_configs.setdefault(route.provider, route.to_provider_config())
-    multi_factory = MultiProviderFactory(
-        provider_configs=provider_configs,
-        bedrock_region=app_config.bedrock_region,
-        enabled_providers=app_config.enabled_providers,
-        provider_routes=provider_routes,
-    )
-    router.available_providers = multi_factory.available_providers
+    semantic_cache = SemanticCache()
+    if include_data_plane:
+        smart_strategy = SmartRoutingStrategy(
+            classifier=task_classifier,
+            leaderboard=leaderboard,
+            model_registry=registry,
+            health_tracker=health_tracker,
+            cost_tracker=cost_tracker,
+            feedback_tracker=feedback_tracker,
+            confidence_threshold=leaderboard.config.get(
+                "confidence_threshold",
+                0.3,
+            ),
+            cost_quality_tradeoff=leaderboard.config.get(
+                "cost_quality_tradeoff",
+                0.3,
+            ),
+            default_model=leaderboard.config.get(
+                "default_model",
+                "claude-sonnet",
+            ),
+            # The same table CostTracker bills from. models.yaml carries no
+            # inline pricing, so without this the cost half of
+            # cost_quality_tradeoff has nothing to read.
+            pricing_config=pricing,
+        )
 
-    # --- Request validator ---
-    request_validator = RequestValidator(model_registry=registry)
-    routing_runtime = RoutingRuntime(
-        router=router,
-        provider_factory=multi_factory,
-        model_registry=registry,
-        validator=request_validator,
-    )
+        # --- Routing / rate limiting / guardrails / cache ---
+        ensemble_config = load_ensemble_config(
+            app_config.ensemble_config_path
+        )
+        router = Router(
+            model_registry=registry,
+            health_tracker=health_tracker,
+            smart_strategy=smart_strategy,
+            ensemble_config=ensemble_config,
+            cost_tracker=cost_tracker,
+            available_providers=None,
+            require_priced_mappings=(
+                app_config.deployment_profile == "production"
+            ),
+        )
+        rate_limiter = SlidingWindowRateLimiter(
+            config=RateLimitConfig(),
+            persistence=persistence,
+        )
+        guardrail_engine = GuardrailEngine()
+        cache_manager = CacheManager()
 
-    # --- Gateway agent ---
-    gateway_agent = GatewayAgent(
-        router=router,
-        rate_limiter=rate_limiter,
-        guardrail_engine=guardrail_engine,
-        cache_manager=cache_manager,
-        cost_tracker=cost_tracker,
-        projects=projects,
-        provider_fn_factory=multi_factory,
-        user_configs=user_configs,
-        request_validator=request_validator,
-        smart_routing_enabled=True,
-        quota_enforcer=quota_enforcer,
-        policy_resolver=policy_resolver,
-        pii_redactor=pii_redactor,
-        injection_detector=injection_detector,
-        audit_trail=audit_trail,
-        event_dispatcher=event_dispatcher,
-        region_router=region_router,
-        trace_forwarder=trace_forwarder,
-        otlp_exporter=otlp_exporter,
-        semantic_cache=semantic_cache,
-        persistence=persistence,
-        routing_runtime=routing_runtime,
-    )
+        # Constructing the embedder can resolve AWS credentials, so only the
+        # inference host is allowed to own it.
+        semantic_embedder = None
+        if app_config.semantic_cache_enabled:
+            semantic_embedder = build_embedder(
+                region=app_config.semantic_cache_region,
+                model_id=app_config.semantic_cache_model or None,
+            )
+            if semantic_embedder is None:
+                logger.warning(
+                    "AXON_SEMANTIC_CACHE=true but no embedder could be built "
+                    "— semantic caching is off; exact-match caching is "
+                    "unaffected"
+                )
+        semantic_cache = SemanticCache(
+            embedder=semantic_embedder,
+            similarity_threshold=(
+                app_config.semantic_cache_threshold
+                if app_config.semantic_cache_threshold is not None
+                else DEFAULT_SIMILARITY_THRESHOLD
+            ),
+        )
+
+        # --- Multi-provider factory ---
+        provider_routes = load_provider_routes(
+            app_config.providers_config_path
+        )
+        for route in provider_routes:
+            provider_configs.setdefault(
+                route.provider,
+                route.to_provider_config(),
+            )
+        multi_factory = MultiProviderFactory(
+            provider_configs=provider_configs,
+            bedrock_region=app_config.bedrock_region,
+            enabled_providers=app_config.enabled_providers,
+            provider_routes=provider_routes,
+        )
+        router.available_providers = multi_factory.available_providers
+
+        # --- Request validator ---
+        request_validator = RequestValidator(model_registry=registry)
+        routing_runtime = RoutingRuntime(
+            router=router,
+            provider_factory=multi_factory,
+            model_registry=registry,
+            validator=request_validator,
+        )
+
+        # --- Gateway agent ---
+        gateway_agent = GatewayAgent(
+            router=router,
+            rate_limiter=rate_limiter,
+            guardrail_engine=guardrail_engine,
+            cache_manager=cache_manager,
+            cost_tracker=cost_tracker,
+            projects=projects,
+            provider_fn_factory=multi_factory,
+            user_configs=user_configs,
+            request_validator=request_validator,
+            smart_routing_enabled=True,
+            quota_enforcer=quota_enforcer,
+            policy_resolver=policy_resolver,
+            pii_redactor=pii_redactor,
+            injection_detector=injection_detector,
+            audit_trail=audit_trail,
+            event_dispatcher=event_dispatcher,
+            region_router=region_router,
+            trace_forwarder=trace_forwarder,
+            otlp_exporter=otlp_exporter,
+            semantic_cache=semantic_cache,
+            persistence=persistence,
+            routing_runtime=routing_runtime,
+        )
 
     # --- Efficiency analysis ---
     efficiency_analyzer = EfficiencyAnalyzer(cost_tracker=cost_tracker)
@@ -757,6 +928,38 @@ def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComp
     catalog = load_catalog_config(
         app_config.catalog_config_path, fallback=PROVIDER_MODEL_CATALOG,
     )
+
+    if not include_data_plane:
+        return ControlAPIComponents(
+            cost_tracker=cost_tracker,
+            health_tracker=health_tracker,
+            registry=registry,
+            projects=projects,
+            user_configs=user_configs,
+            policies=policies,
+            persistence=persistence,
+            catalog=catalog,
+            api_key_service=api_key_service,
+            oidc_service=oidc_service,
+            browser_session_service=browser_session_service,
+            principal_resolver=principal_resolver,
+            project_resolver=project_resolver,
+            scim_store=scim_store,
+            saml_service=saml_service,
+            policy_resolver=policy_resolver,
+            quota_enforcer=quota_enforcer,
+            audit_trail=audit_trail,
+            event_dispatcher=event_dispatcher,
+            region_router=region_router,
+            health_monitor=health_monitor,
+            efficiency_analyzer=efficiency_analyzer,
+            semantic_engine=semantic_engine,
+            semantic_cache=semantic_cache,
+            provider_configs=provider_configs,
+            datasource_repository=datasource_repository,
+            athena_role_bindings=athena_role_bindings,
+            export_jobs=None,
+        )
 
     return GatewayComponents(
         cost_tracker=cost_tracker,
@@ -828,12 +1031,14 @@ async def _persistence_readiness(
     return False, {"persistence": "unavailable"}
 
 
-def build_starlette_app(app_config: AppConfig | None = None) -> Starlette:
-    """Build a fully-wired Starlette application."""
-    if app_config is None:
-        app_config = load_app_config()
-
-    comp = build_gateway_components(app_config)
+def _build_http_app(
+    app_config: AppConfig,
+    control: ControlAPIComponents,
+    *,
+    data_plane: DataPlaneComponents | None,
+    worker: WorkerAssembly | None,
+) -> Starlette:
+    """Assemble HTTP routes from already constructed process services."""
 
     # Built before the admin API and wired unchanged into both, so a policy
     # written through POST /admin/policies recompiles the evaluator the auth
@@ -846,46 +1051,49 @@ def build_starlette_app(app_config: AppConfig | None = None) -> Starlette:
     # wrote: without it, POST /admin/policies recompiled only the task that
     # served the write, and behind desired_count=2 the same request was governed
     # or ungoverned depending on the load balancer.
-    cedar_service = CedarPolicyService(comp.policies, persistence=comp.persistence)
+    cedar_service = CedarPolicyService(
+        control.policies,
+        persistence=control.persistence,
+    )
     # Adopt the version those policies were loaded at, so the first request does
     # not re-scan to discover the set startup already has. Read here rather than
     # in _load_persisted_state because it must be the version *after* the load:
     # a bump in between leaves _known_version behind and self-corrects on the
     # next poll, whereas one ahead would skip a change.
-    if comp.persistence.enabled:
+    if control.persistence.enabled:
         cedar_service.note_local_version(
-            asyncio.run(comp.persistence.get_policy_version()))
+            asyncio.run(control.persistence.get_policy_version()))
 
     # Handed the *same* dicts the agent and the admin API hold, so a config write
     # on another task converges into the objects the request path actually reads.
     # The cost tracker and resolver come along because adopting the dicts is not
     # the same as arming enforcement — limits live in the tracker, not the dicts.
     config_sync = ConfigSyncService(
-        projects=comp.projects,
-        user_configs=comp.user_configs,
-        cost_tracker=comp.cost_tracker,
-        persistence=comp.persistence,
-        model_registry=comp.registry,
-        policy_resolver=comp.policy_resolver,
-        region_config=comp.region_router.config,
-        health_monitor=comp.health_monitor,
+        projects=control.projects,
+        user_configs=control.user_configs,
+        cost_tracker=control.cost_tracker,
+        persistence=control.persistence,
+        model_registry=control.registry,
+        policy_resolver=control.policy_resolver,
+        region_config=control.region_router.config,
+        health_monitor=control.health_monitor,
     )
-    if comp.persistence.enabled:
+    if control.persistence.enabled:
         config_sync.note_local_version(
-            asyncio.run(comp.persistence.get_config_version()))
+            asyncio.run(control.persistence.get_config_version()))
 
     admin_api = AdminAPI(
-        cost_tracker=comp.cost_tracker,
-        health_tracker=comp.health_tracker,
-        model_registry=comp.registry,
-        projects=comp.projects,
-        policies=comp.policies,
-        user_configs=comp.user_configs,
+        cost_tracker=control.cost_tracker,
+        health_tracker=control.health_tracker,
+        model_registry=control.registry,
+        projects=control.projects,
+        policies=control.policies,
+        user_configs=control.user_configs,
         config_path=app_config.models_config_path,
-        persistence=comp.persistence,
-        catalog=comp.catalog,
-        efficiency_analyzer=comp.efficiency_analyzer,
-        semantic_engine=comp.semantic_engine,
+        persistence=control.persistence,
+        catalog=control.catalog,
+        efficiency_analyzer=control.efficiency_analyzer,
+        semantic_engine=control.semantic_engine,
         pricing_path=app_config.pricing_config_path,
         catalog_path=app_config.catalog_config_path,
         # For the production-readiness checklist: the settings this process booted
@@ -893,45 +1101,54 @@ def build_starlette_app(app_config: AppConfig | None = None) -> Starlette:
         # service, so the checklist can report the scopes and expiry of issued
         # keys rather than assume they are bounded.
         app_config=app_config,
-        provider_configs=comp.provider_configs,
-        api_key_service=comp.api_key_service,
+        provider_configs=control.provider_configs,
+        api_key_service=control.api_key_service,
         # The same instance the gateway agent holds, so /admin/semantic-cache
         # reports the live counters and DELETE clears the cache requests are
         # actually served from.
-        semantic_cache=comp.semantic_cache,
+        semantic_cache=control.semantic_cache,
         policy_service=cedar_service,
         config_sync=config_sync,
+        export_jobs=control.export_jobs,
     )
 
     # Key, policy, audit, webhook, region, and quota admin APIs
     key_api = KeyManagementAPI(
-        api_key_service=comp.api_key_service,
+        api_key_service=control.api_key_service,
         mode=app_config.auth_mode,
-        audit_trail=comp.audit_trail,
+        audit_trail=control.audit_trail,
     )
-    policy_api = PolicyHierarchyAPI(resolver=comp.policy_resolver)
-    audit_api = AuditAPI(audit_trail=comp.audit_trail)
+    policy_api = PolicyHierarchyAPI(resolver=control.policy_resolver)
+    audit_api = AuditAPI(
+        audit_trail=control.audit_trail,
+        export_jobs=control.export_jobs,
+    )
     webhook_api = WebhookAPI(
-        dispatcher=comp.event_dispatcher, persistence=comp.persistence)
+        dispatcher=control.event_dispatcher,
+        persistence=control.persistence,
+    )
     region_api = RegionAPI(
-        router=comp.region_router, monitor=comp.health_monitor,
-        persistence=comp.persistence, config_sync=config_sync,
-        topology_lock=config_sync.region_lock)
+        router=control.region_router,
+        monitor=control.health_monitor,
+        persistence=control.persistence,
+        config_sync=config_sync,
+        topology_lock=config_sync.region_lock,
+    )
     quota_api = QuotaAPI(
-        quota_enforcer=comp.quota_enforcer,
-        policy_resolver=comp.policy_resolver,
-        cost_tracker=comp.cost_tracker,
+        quota_enforcer=control.quota_enforcer,
+        policy_resolver=control.policy_resolver,
+        cost_tracker=control.cost_tracker,
     )
     scim_api = ScimAPI(
-        store=comp.scim_store,
+        store=control.scim_store,
         canonical_identity_required=(
             app_config.canonical_identity_required
         ),
     )
-    saml_api = SamlAPI(service=comp.saml_service)
-    if comp.browser_session_service is not None:
+    saml_api = SamlAPI(service=control.saml_service)
+    if control.browser_session_service is not None:
         browser_auth_routes = create_browser_auth_routes(
-            BrowserAuthAPI(comp.browser_session_service)
+            BrowserAuthAPI(control.browser_session_service)
         )
     else:
         async def disabled_browser_auth_config(
@@ -956,41 +1173,36 @@ def build_starlette_app(app_config: AppConfig | None = None) -> Starlette:
     query_routes: list[Route] = []
     if app_config.athena_query_enabled:
         if (
-            comp.datasource_repository is None
-            or comp.query_service is None
+            control.datasource_repository is None
         ):
             raise RuntimeError(
                 "Athena query services were not initialized"
             )
         datasource_api = DatasourceAPI(
-            repository=comp.datasource_repository,
-            bindings=comp.athena_role_bindings,
-            project_resolver=comp.project_resolver,
-            audit_trail=comp.audit_trail,
+            repository=control.datasource_repository,
+            bindings=control.athena_role_bindings,
+            project_resolver=control.project_resolver,
+            audit_trail=control.audit_trail,
             require_durable_audit=True,
         )
         datasource_routes = create_datasource_routes(datasource_api)
-        if not app_config.control_plane_only:
+        if data_plane is not None:
+            if data_plane.query_service is None:
+                raise RuntimeError(
+                    "Athena query execution was not initialized"
+                )
             query_routes = create_query_routes(
-                QueryAPI(comp.query_service)
+                QueryAPI(data_plane.query_service)
             )
-
-    # Default chat project is the first demo project or "default"
-    default_project = next(iter(comp.projects), "default")
-    client_agent = ClientAgent(
-        comp.gateway_agent,
-        default_project_id=default_project,
-        default_user_id="chat-user",
-    )
-    chat_api = ChatAPI(client_agent)
-    openai_api = OpenAICompatAPI(client_agent)
 
     async def health_check(request: Request) -> JSONResponse:
         return JSONResponse({"status": "healthy"})
 
     async def readiness_check(request: Request) -> JSONResponse:
-        ready, dependencies = await _persistence_readiness(comp.persistence)
-        dispatcher = comp.event_dispatcher
+        ready, dependencies = await _persistence_readiness(
+            control.persistence,
+        )
+        dispatcher = control.event_dispatcher
         if dispatcher is None or not dispatcher.outbox_enabled:
             dependencies["security_event_outbox"] = "disabled"
         else:
@@ -1048,64 +1260,46 @@ def build_starlette_app(app_config: AppConfig | None = None) -> Starlette:
         + browser_auth_routes
         + datasource_routes
     )
-    data_routes = (
-        []
-        if app_config.control_plane_only
-        else (
+    if data_plane is not None:
+        default_project = next(iter(control.projects), "default")
+        client_agent = ClientAgent(
+            data_plane.gateway_agent,
+            default_project_id=default_project,
+            default_user_id="chat-user",
+        )
+        chat_api = ChatAPI(client_agent)
+        openai_api = OpenAICompatAPI(client_agent)
+        data_routes = (
             create_chat_routes(chat_api)
             + create_openai_routes(openai_api)
             + query_routes
         )
+    else:
+        data_routes = []
+    health_routes = [
+        Route("/health", health_check),
+        Route("/ready", readiness_check),
+    ]
+    site_routes = create_site_routes(admin_api)
+    control_route_inventory(
+        health_routes + control_routes + site_routes
     )
     routes = (
-        [Route("/health", health_check), Route("/ready", readiness_check)]
+        health_routes
         + control_routes
         + data_routes
         # Last: this one is a bare "/{path}" serving site/, and Starlette
         # matches in order, so anything after it would be unreachable.
-        + create_site_routes(admin_api)
-    )
-
-    # Lifespan: reconcile against the live topology rather than capturing the
-    # startup mode. Fleet refresh can add or remove spokes after boot.
-    monitor = comp.health_monitor
-    dispatcher = comp.event_dispatcher
-    query_reconciliation_worker = (
-        comp.query_reconciliation_worker
-        if app_config.athena_query_enabled
-        and not app_config.control_plane_only
-        else None
+        + site_routes
     )
 
     @contextlib.asynccontextmanager
     async def _lifespan(_app):
-        try:
-            if dispatcher is not None and dispatcher.outbox_enabled:
-                if not await dispatcher.check_readiness():
-                    raise RuntimeError(
-                        "security event outbox is unavailable"
-                    )
-                await dispatcher.start()
-            if monitor is not None:
-                await monitor.reconcile()
-            if monitor is not None and monitor.is_running:
-                logger.info(
-                    "Spoke health monitor started (%d spokes)",
-                    len(monitor.config.spokes),
-                )
-            if query_reconciliation_worker is not None:
-                await query_reconciliation_worker.start()
+        if worker is None:
             yield
-        finally:
-            try:
-                if query_reconciliation_worker is not None:
-                    await query_reconciliation_worker.stop()
-                if dispatcher is not None:
-                    await dispatcher.stop()
-                if monitor is not None:
-                    await monitor.stop()
-            finally:
-                await comp.multi_factory.close()
+            return
+        async with worker.lifespan():
+            yield
 
     app = Starlette(routes=routes, lifespan=_lifespan)
 
@@ -1116,7 +1310,7 @@ def build_starlette_app(app_config: AppConfig | None = None) -> Starlette:
     app.add_middleware(
         AdminRBACMiddleware,
         mode=app_config.auth_mode,
-        audit_trail=comp.audit_trail,
+        audit_trail=control.audit_trail,
     )
 
     # Baseline tenant RBAC for the inference and model-list data plane. Added
@@ -1124,23 +1318,23 @@ def build_starlette_app(app_config: AppConfig | None = None) -> Starlette:
     # principal is already attached when this executes.
     app.add_middleware(
         TenantAuthorizationMiddleware,
-        project_resolver=comp.project_resolver,
+        project_resolver=control.project_resolver,
         require_tenant_project=app_config.canonical_identity_required,
     )
 
     # Auth middleware (outermost — runs first on every request)
     app.add_middleware(
         AuthMiddleware,
-        oidc_service=comp.oidc_service,
-        api_key_service=comp.api_key_service,
+        oidc_service=control.oidc_service,
+        api_key_service=control.api_key_service,
         policy_service=cedar_service,
         mode=app_config.auth_mode,
         # Refreshed here, before any handler reads the project or user config, so
         # /api/chat gets the same converged view the admin pages do.
         config_sync=config_sync,
-        principal_resolver=comp.principal_resolver,
+        principal_resolver=control.principal_resolver,
         require_canonical_principal=app_config.canonical_identity_required,
-        browser_session_service=comp.browser_session_service,
+        browser_session_service=control.browser_session_service,
     )
 
     # Outermost: bounds request bodies before authentication does work,
@@ -1152,6 +1346,74 @@ def build_starlette_app(app_config: AppConfig | None = None) -> Starlette:
     )
 
     return app
+
+
+def build_control_api(
+    app_config: AppConfig,
+    components: ControlAPIComponents,
+) -> Starlette:
+    """Build control routes from injected services with no owned workers.
+
+    The caller owns the supplied services. This function does not construct a
+    provider factory, inference client, or background loop.
+    """
+
+    return _build_http_app(
+        app_config,
+        components,
+        data_plane=None,
+        worker=None,
+    )
+
+
+def build_starlette_app(app_config: AppConfig | None = None) -> Starlette:
+    """Build the legacy combined standalone application."""
+
+    if app_config is None:
+        app_config = load_app_config()
+    comp = build_gateway_components(app_config)
+
+    async def _close_provider_factory() -> None:
+        await comp.multi_factory.close()
+
+    async def _close_trace_forwarder() -> None:
+        forwarder = getattr(comp.gateway_agent, "_trace_forwarder", None)
+        close = getattr(forwarder, "close", None)
+        if callable(close):
+            await close()
+
+    query_reconciliation_worker = (
+        comp.query_reconciliation_worker
+        if app_config.athena_query_enabled
+        and not app_config.control_plane_only
+        else None
+    )
+    worker = build_worker(
+        event_worker=comp.event_dispatcher,
+        reconciliation_monitor=comp.health_monitor,
+        periodic_workers=(
+            (query_reconciliation_worker,)
+            if query_reconciliation_worker is not None
+            else ()
+        ),
+        close_hooks=(
+            _close_provider_factory,
+            _close_trace_forwarder,
+        ),
+    )
+    return _build_http_app(
+        app_config,
+        ControlAPIComponents.from_gateway(comp),
+        data_plane=(
+            None
+            if app_config.control_plane_only
+            else DataPlaneComponents(
+                gateway_agent=comp.gateway_agent,
+                query_service=comp.query_service,
+            )
+        ),
+        worker=worker,
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -89,7 +89,7 @@ def create_bedrock_provider_fn(*args, **kwargs):
         )
     except ImportError as exc:
         raise RuntimeError(
-            "Bedrock routes require the 'axon-llm[aws]' extra"
+            "Bedrock routes require the 'axon-llm[bedrock]' extra"
         ) from exc
     return implementation(*args, **kwargs)
 
@@ -102,7 +102,7 @@ def create_mantle_provider_fn(*args, **kwargs):
         )
     except ImportError as exc:
         raise RuntimeError(
-            "Bedrock Mantle routes require the 'axon-llm[aws]' extra"
+            "Bedrock Mantle routes require the 'axon-llm[bedrock]' extra"
         ) from exc
     return implementation(*args, **kwargs)
 

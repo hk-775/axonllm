@@ -11,10 +11,19 @@ uv export \
   --frozen \
   --no-dev \
   --no-emit-project \
+  --extra server \
   --extra oidc \
   --extra otel \
   --format requirements-txt \
   >"${work_dir}/runtime-requirements.txt"
+
+uv export \
+  --frozen \
+  --no-dev \
+  --no-emit-project \
+  --extra serverless-control \
+  --format requirements-txt \
+  >"${work_dir}/serverless-control-requirements.txt"
 
 ignore_arguments=()
 while IFS= read -r line; do
@@ -40,5 +49,8 @@ audit_requirements() {
 }
 
 audit_requirements "gateway runtime" "${work_dir}/runtime-requirements.txt"
+audit_requirements \
+  "serverless control runtime" \
+  "${work_dir}/serverless-control-requirements.txt"
 audit_requirements "AgentCore runtime" requirements.txt
 audit_requirements "CDK tooling" infra/requirements.txt

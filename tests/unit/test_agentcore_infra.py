@@ -1703,7 +1703,7 @@ def test_security_event_outbox_is_fifo_encrypted_and_redriven(
         if "RedrivePolicy" in queue["Properties"]
     )
     assert outbox["Properties"]["ReceiveMessageWaitTimeSeconds"] == 20
-    assert outbox["Properties"]["VisibilityTimeout"] == 120
+    assert outbox["Properties"]["VisibilityTimeout"] == 300
     assert outbox["Properties"]["RedrivePolicy"]["maxReceiveCount"] == 5
     assert outbox["DeletionPolicy"] == "Retain"
     assert outbox["UpdateReplacePolicy"] == "Retain"

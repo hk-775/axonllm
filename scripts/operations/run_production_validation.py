@@ -71,9 +71,14 @@ CORE_REQUIRED_CANARY_CATEGORIES = frozenset(
     }
 )
 TENANT_ADMIN_ROUND_TRIP_CATEGORY = "tenant_admin_mutation_round_trip"
-SUPPORTED_TARGETS = frozenset({"fargate", "agentcore-http", "generic"})
+CONTROL_PLANE_TARGETS = frozenset({"fargate", "serverless-control"})
+SUPPORTED_TARGETS = frozenset(
+    {*CONTROL_PLANE_TARGETS, "agentcore-http", "generic"}
+)
 REQUIRED_CANARY_CATEGORIES_BY_TARGET = {
     "fargate": CORE_REQUIRED_CANARY_CATEGORIES
+    | {TENANT_ADMIN_ROUND_TRIP_CATEGORY},
+    "serverless-control": CORE_REQUIRED_CANARY_CATEGORIES
     | {TENANT_ADMIN_ROUND_TRIP_CATEGORY},
     "agentcore-http": CORE_REQUIRED_CANARY_CATEGORIES
     | {"authenticated_query_allowed"},
@@ -694,7 +699,8 @@ def parse_config(value: Any) -> ValidationConfig:
     if target not in SUPPORTED_TARGETS:
         raise ConfigurationError(
             "invalid_configuration",
-            "configuration.target must be fargate, agentcore-http, or generic",
+            "configuration.target must be fargate, serverless-control, "
+            "agentcore-http, or generic",
         )
     required_categories = REQUIRED_CANARY_CATEGORIES_BY_TARGET[target]
     timeout_seconds = _number(
@@ -764,25 +770,26 @@ def parse_config(value: Any) -> ValidationConfig:
             f"configuration does not cover every required {target} "
             "canary category",
         )
-    if target == "fargate" and any(
+    if target in CONTROL_PLANE_TARGETS and any(
         canary.request.credential_type not in COOKIE_CREDENTIAL_TYPES
         for canary in canaries
     ):
         raise ConfigurationError(
             "invalid_canary_contract",
-            "Fargate canaries must use short-lived browser session cookies",
+            "control-plane canaries must use short-lived browser session "
+            "cookies",
         )
     round_trip_canaries = [
         canary
         for canary in canaries
         if canary.category == TENANT_ADMIN_ROUND_TRIP_CATEGORY
     ]
-    if target != "fargate" and round_trip_canaries:
+    if target not in CONTROL_PLANE_TARGETS and round_trip_canaries:
         raise ConfigurationError(
             "invalid_canary_contract",
-            "tenant-admin project mutation round trips are Fargate-only",
+            "tenant-admin project mutation round trips are control-plane-only",
         )
-    if target == "fargate":
+    if target in CONTROL_PLANE_TARGETS:
         viewer_canaries = [
             canary
             for canary in canaries
@@ -791,7 +798,8 @@ def parse_config(value: Any) -> ValidationConfig:
         if len(viewer_canaries) != 1 or len(round_trip_canaries) != 1:
             raise ConfigurationError(
                 "invalid_canary_contract",
-                "Fargate requires exactly one paired viewer denial and "
+                "control-plane validation requires exactly one paired viewer "
+                "denial and "
                 "tenant-admin mutation round trip",
             )
         viewer = viewer_canaries[0].request
@@ -799,7 +807,8 @@ def parse_config(value: Any) -> ValidationConfig:
         if viewer.path != admin.path or viewer.body != admin.body:
             raise ConfigurationError(
                 "invalid_canary_contract",
-                "Fargate viewer and tenant-admin mutations must use the same "
+                "control-plane viewer and tenant-admin mutations must use the "
+                "same "
                 "project path and JSON body",
             )
         if (
@@ -808,7 +817,8 @@ def parse_config(value: Any) -> ValidationConfig:
         ):
             raise ConfigurationError(
                 "invalid_canary_contract",
-                "Fargate viewer and tenant-admin mutations must use distinct "
+                "control-plane viewer and tenant-admin mutations must use "
+                "distinct "
                 "cookie and CSRF identities",
             )
 
@@ -828,15 +838,15 @@ def parse_config(value: Any) -> ValidationConfig:
             "configuration.load.request must expect only 2xx statuses",
         )
     if (
-        target == "fargate"
+        target in CONTROL_PLANE_TARGETS
         and load_request.credential_type not in COOKIE_CREDENTIAL_TYPES
     ):
         raise ConfigurationError(
             "invalid_canary_contract",
-            "Fargate load must use a short-lived browser session cookie",
+            "control-plane load must use a short-lived browser session cookie",
         )
     if (
-        target == "fargate"
+        target in CONTROL_PLANE_TARGETS
         and {
             load_request.credential_type,
             *(canary.request.credential_type for canary in canaries),
@@ -848,7 +858,7 @@ def parse_config(value: Any) -> ValidationConfig:
     ):
         raise ConfigurationError(
             "invalid_canary_contract",
-            "Fargate canaries and load must use one credential type",
+            "control-plane canaries and load must use one credential type",
         )
     request_count = _integer(
         raw_load.get("requestCount"),
@@ -927,7 +937,7 @@ def parse_config(value: Any) -> ValidationConfig:
             "viewer, cross-tenant, ungranted-project, and authenticated "
             "canaries must use distinct identity classes",
         )
-    if target == "fargate":
+    if target in CONTROL_PLANE_TARGETS:
         admin_env = next(
             iter(credential_envs[TENANT_ADMIN_ROUND_TRIP_CATEGORY])
         )
@@ -2668,20 +2678,20 @@ def run_validation(
             "Fargate validation requires an in-process ELB target-health "
             "collector",
         )
-    if config.target == "fargate" and rollback is None:
+    if config.target in CONTROL_PLANE_TARGETS and rollback is None:
         raise ConfigurationError(
             "missing_rollback_journal",
-            "Fargate validation requires a durable rollback journal",
+            "control-plane validation requires a durable rollback journal",
         )
     if config.target != "fargate" and target_health_collector is not None:
         raise ConfigurationError(
             "unexpected_target_health_collector",
             "ELB target-health collection is valid only for Fargate",
         )
-    if config.target != "fargate" and rollback is not None:
+    if config.target not in CONTROL_PLANE_TARGETS and rollback is not None:
         raise ConfigurationError(
             "unexpected_rollback_journal",
-            "rollback journaling is valid only for Fargate",
+            "rollback journaling is valid only for control-plane targets",
         )
     started_at = _trusted_time(now, "validation start")
     authorization = evaluate_authorization_contract()
@@ -2869,7 +2879,7 @@ def main(
         "--rollback-journal",
         type=Path,
         help=(
-            "New durable journal for Fargate tenant-admin configuration "
+            "New durable journal for control-plane tenant-admin configuration "
             "rollback."
         ),
     )
@@ -2948,11 +2958,11 @@ def main(
             if args.target_group_arn is not None
             else None
         )
-        if config.target == "fargate":
+        if config.target in CONTROL_PLANE_TARGETS:
             if args.rollback_journal is None:
                 raise ConfigurationError(
                     "missing_rollback_journal",
-                    "Fargate validation requires --rollback-journal",
+                    "control-plane validation requires --rollback-journal",
                 )
             try:
                 rollback = rollback_journal.RollbackJournal.create(
@@ -2968,7 +2978,8 @@ def main(
             if args.rollback_journal is not None:
                 raise ConfigurationError(
                     "unexpected_rollback_journal",
-                    "--rollback-journal is valid only for Fargate",
+                    "--rollback-journal is valid only for control-plane "
+                    "targets",
                 )
             rollback = None
         report = run_validation(

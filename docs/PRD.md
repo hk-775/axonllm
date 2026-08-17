@@ -51,8 +51,9 @@ broader tenant administration while suppressing chat/model/query execution and
 holding no Athena/STS authority. That control plane supports either a
 customer-owned Route 53/ACM endpoint with ALB Cognito or an AWS-generated
 CloudFront/WAF/VPC-origin endpoint with application PKCE sessions. Canonical
-SCIM convergence, schema-v3 release evidence for both image targets, and
-target-aware Fargate/AgentCore deployment verification are implemented.
+SCIM convergence, schema-v4 release evidence for Fargate, AgentCore, and both
+standalone platforms, and target-aware deployment verification are implemented
+locally.
 
 `v0.2.4` completed the tagged private-ECR/KMS-signature flow for both image
 targets, but it predates the query and shared control-plane implementation.
@@ -303,7 +304,7 @@ Stakeholders who need visibility into LLM spend and assurance that usage complie
 | FR-AD2 | **Project management** | Project CRUD covers budget configuration, model access lists, cache and semantic-cache settings, and guardrail rules through `PUT /admin/projects/{id}`. Membership uses the dedicated POST/DELETE routes in FR-AC12; canonical create/PUT bulk member writes are rejected. Configuration changes are hot-reloaded without restart: the admin API and request pipeline hold the *same* legacy `projects` dict, and the pipeline reads `project.guardrail_rules` fresh per request. |
 | FR-AD3 | **User management** | View users with usage, set individual budgets and model access restrictions. |
 | FR-AD4 | **Model management** | View, create, update, and delete model configurations. Changes persist to YAML and optionally to DynamoDB. |
-| FR-AD5 | **Usage analytics** | Filterable usage data with breakdowns by time range, provider, model, project, and user, plus CSV export. |
+| FR-AD5 | **Usage analytics** | Filterable usage data with breakdowns by time range, provider, model, project, and user. Standalone hosts may return CSV/JSON directly; the AgentCore serverless control plane creates a tenant/requester-bound export job, reports status, and redirects completed downloads through a 60-second private S3 URL. |
 | FR-AD6 | **Policy management** | Create and view Cedar authorization policies with ENFORCE/LOG_ONLY modes, and manage the four-level policy hierarchy and its quotas. |
 | FR-AD7 | **Provider health** | Real-time per-provider health status (healthy/unhealthy). |
 | FR-AD8 | **API key management** | Issue, list, revoke and rotate keys. The plaintext appears once, in the issue response. |
@@ -360,7 +361,7 @@ stored and no request is slowed.
 | FR-Q6 | **Athena workgroup contract** | The workgroup must be enabled, enforce configuration, publish CloudWatch metrics, set a valid KMS-encrypted S3 result location, and set `BytesScannedCutoffPerQuery` no greater than AxonLLM's configured scan ceiling. |
 | FR-Q7 | **Assume-role trust** | The datasource role trust policy names the exact AgentCore runtime execution role and permits `sts:AssumeRole`, `sts:TagSession`, and `sts:SetSourceIdentity`. The deterministic role name is `axonllm-agentcore-runtime-<region>` and its full ARN is exported/printed as `RuntimeExecutionRoleArn`. AxonLLM sends tenant/project tags, a hashed principal tag, and a hashed session/source identity. |
 | FR-Q8 | **Durable audit** | `query_request`, `query_result`, and `query_rejected` records are durable. They retain query SHA-256 and bounded execution statistics, not SQL literals. Query execution fails closed when durable audit is unavailable. |
-| FR-Q9 | **Shared-state control plane** | Managed Cognito deploys a dedicated private-task AMD64 Fargate stack. Custom-domain mode uses a Cognito-authenticated HTTPS ALB and stable Route 53 name; CloudFront mode uses WAF, a generated distribution and VPC origin in front of an internal ALB, with application-held Cognito PKCE sessions. Both bind AgentCore's verified table output and import its KMS/outbox resources, expose tenant admin/datasource routes, suppress chat/model/query execution, and have no Athena/STS authority. |
+| FR-Q9 | **Shared-state control plane** | The legacy migration source is a dedicated private-task AMD64 Fargate stack. The target AgentCore path uses private S3/CloudFront, origin-key-protected Regional API Gateway, an ARM64 control-only Lambda, and a separate worker stack. Both bind the verified application-state descriptor, expose tenant admin/datasource routes, suppress chat/model/query execution, and grant no query-execution authority to the web API. |
 | FR-Q10 | **Distributed admission** | DynamoDB atomically enforces principal/project fixed-window RPM, expiring concurrency slots, and worst-case aggregate scan-byte reservations. Every terminal path reconciles actual scan bytes and releases slots; enforcement fails closed. |
 | FR-Q11 | **Durable query lifecycle** | `request_id` is unique within a tenant/project. Accepted state is persisted with admission, the Athena execution id is stored before polling, and terminal status, failure code, and actual scan bytes are recorded before the response is returned. |
 
@@ -708,7 +709,9 @@ data: [DONE]
 | `GET` | `/admin/policies` | List Cedar policies |
 | `POST` | `/admin/policies` | Create Cedar policy |
 | `GET` | `/admin/health` | Provider health status |
-| `GET` | `/admin/usage/export` | Chargeback export — `format=csv\|json`, `level=records\|breakdown`, 14 columns |
+| `GET` | `/admin/usage/export` | Chargeback export — immediate standalone response or `202` serverless job; `format=csv\|json`, `level=records\|breakdown`, 14 columns |
+| `GET` | `/admin/usage/exports/{job_id}` | Requester-owned serverless export status |
+| `GET` | `/admin/usage/exports/{job_id}/download` | Authorized redirect to a 60-second private download |
 | `GET` | `/admin/traces` | Recorded request traces |
 | `GET` | `/admin/efficiency` | Token efficiency analytics |
 | `GET` | `/admin/projects/{id}/efficiency` | Per-project efficiency |
@@ -743,7 +746,9 @@ read, with `role_arn` replaced by `role_configured`; `service` is denied.
 |--------|------|-------------|
 | `GET` | `/admin/audit/records` | Hash-chain entries |
 | `GET` | `/admin/audit/verify` | Recompute the chain and report tampering |
-| `GET` | `/admin/audit/export` | Export the chain |
+| `GET` | `/admin/audit/export` | Immediate standalone export or requester-bound serverless export job |
+| `GET` | `/admin/audit/exports/{job_id}` | Requester-owned audit export status |
+| `GET` | `/admin/audit/exports/{job_id}/download` | Authorized redirect to a 60-second private download |
 | `GET` | `/admin/audit/stats` | Aggregate counts |
 | `GET` | `/admin/audit/security` | Security events (injection, guardrail, PII) |
 | `POST` | `/admin/pii/preview` | Before/after redaction on supplied text. Entity detection requires an explicit `ner: true`, because it bills |
@@ -1091,8 +1096,10 @@ must therefore be evaluated separately.
 | **ECS Fargate via CDK** | `infra/stack.py` requires a private regional ECR `@sha256` image. Production mode adds ALB OIDC and canonical identity to CloudFront/WAF, an internal TLS ALB, private tasks, DynamoDB/PITR/AWS Backup with governance Vault Lock, optional SCIM-secret injection, a KMS/TLS FIFO event outbox and DLQ, managed SNS/Logs sinks over private endpoints, alarms, rollback, an ALB `/ready` gate, and guarded restored-table cutover. `deploy-fargate.sh` defaults to staging but supplies the complete production parameter set when `AXON_DEPLOYMENT_MODE=production`. | Production candidate after release and operational gates |
 | **Amazon Bedrock AgentCore via CDK** | `infra/agentcore_stack.py` can deploy the ARM64 `chat`, `list_models`, conditional `query`, viewer-readable `get_tenant_config`, tenant-admin-only CAS `update_tenant_config`, authenticated `readiness`, liveness, and HTTP readiness surfaces with JWT authorization, private VPC mode, canonical identity, exact Bedrock/query-role IAM, digest-only image input, backups, outbox, alarms, and a confirmed administrator-email subscription. Schema-v2 setup supports managed Cognito or external OIDC. The current production launch requires Athena query bindings and a successful `SELECT`; it has no query-disabled certification mode. The protected orchestrator separately certifies external OIDC and a reviewed managed-Cognito namespace, runs seven launch gates, proves qualification teardown, then invokes a production leaf that certifies a high-entropy candidate, exercises backup/restore, promotes the exact version, compensates failures, and persists signed schema-v5 deployment evidence. | Production candidate after a successful `agentcore` target verification and operational gates |
 | **Managed-Cognito shared control plane** | `infra/control_plane_stack.py` deploys a separate verified AMD64 image to private Fargate tasks. The default custom-domain path uses a Cognito-authenticated HTTPS ALB and Route 53 alias. The generated-endpoint path uses IPv4 WAF controls, CloudFront with caching disabled, a VPC origin, an internal ALB, and application Cognito PKCE sessions; it requires no adopter-owned domain. Both import AgentCore state/KMS/outbox resources, set `AXON_CONTROL_PLANE_ONLY=true`, expose admin/datasource routes, and have no Athena/STS execution authority. | Managed-Cognito administration surface; not deployed by external OIDC |
+| **Serverless AgentCore control plane** | `infra/serverless_control_plane_stack.py` deploys exact-version static UI and ARM64 Lambda artifacts behind private S3, WAF/CloudFront, and origin-key-protected Regional API Gateway. `infra/serverless_workers_stack.py` separately owns bounded event, export, and optional reconciliation workers. Neither stack creates an ALB, ECS service, VPC, subnet, or NAT gateway. | Opt-in qualification target pending reviewed production cutover |
 | **AWS App Runner** | `deploy.sh` remains a legacy reference path without the canonical identity, private-network, digest-verification, backup, and readiness controls of the CDK stacks. | Evaluation only |
-| **Docker / Compose** | `docker build` + `docker run`, or `docker compose up` using `docker-compose.yml` (gateway + DynamoDB Local). | Staging, on-premises |
+| **Standalone Docker / Compose** | One image serves the gateway, control API, and UI. Root `docker-compose.yml` is an explicit disposable seeded evaluation profile. `deploy/standalone/compose.production.yml` joins a customer-owned network and requires external durable state, identity, secrets, and a digest-pinned image. | Evaluation, on-premises, customer-managed containers |
+| **Standalone ECS/Fargate recipe** | `axon deploy standalone-plan` emits a deterministic, non-mutating task/service plan using an existing cluster, private subnets, security groups, IP target group, DynamoDB table, KMS keys, IAM roles, log group, and OIDC provider. It creates no VPC or other network resource. | Customer-owned AWS container platform |
 | **Local development** | `uv run python serve_dashboard.py`. Uvicorn dev server with demo data seeded and `AXON_AUTH_MODE=LOG_ONLY`. | Development |
 | **CLI** | `uv run axon serve` (or `uv run axon demo`) runs the local app. `uv run axon setup agentcore` creates a validated schema-v2 setup for managed Cognito or external OIDC and can deploy it; managed Cognito accepts either `custom-domain` or `cloudfront` control-plane ingress. | Development, scripted runs, first-adopter deployment |
 
@@ -1151,6 +1158,7 @@ so invoke it as `uv run axon <subcommand>` (or activate the venv first):
 |---------|---------|
 | `axon setup local-demo` | Label and optionally start the seeded anonymous development mode; starting requires an explicit non-production acknowledgement |
 | `axon setup agentcore` | Generate, validate, or deploy a strict schema-v2 managed-Cognito/external-OIDC first-adopter configuration; managed Cognito requires the shared `control_plane` inputs |
+| `axon deploy standalone-plan` | Validate explicit existing ECS/state/identity inputs and emit content-addressed task/service artifacts without contacting AWS |
 | `axon demo` | Start the server and generate real traffic against it, for a live demo |
 | `axon serve` | Start the gateway server |
 | `axon issue-key` | Mint an API key in-process — the way to bootstrap a key under `ENFORCE`, where the admin API itself needs one |
@@ -1164,9 +1172,9 @@ so invoke it as `uv run axon <subcommand>` (or activate the venv first):
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `AXON_AUTH_MODE` | `ENFORCE` | `ENFORCE` requires an `axon_` key or JWT on every request; `LOG_ONLY` serves anonymous requests and only logs what it would have denied. **The single most consequential variable here** — `serve_dashboard.py` sets `LOG_ONLY`, so a local gateway is open by default and a Fargate one is not. |
+| `AXON_AUTH_MODE` | `ENFORCE` | `ENFORCE` requires an `axon_` key or JWT on every request; `LOG_ONLY` serves anonymous requests and only logs what it would have denied. The direct development entrypoint and evaluation Compose profile explicitly select `LOG_ONLY`; the image defaults to `ENFORCE`. |
 | `AXON_REQUIRE_CANONICAL_IDENTITY` | `false` | Require credentials to resolve through active server-held tenant principals. Requires `AXON_AUTH_MODE=ENFORCE` and DynamoDB; production Fargate and AgentCore set it to `true`. |
-| `AXON_LOAD_DEMO_DATA` | `false` in code, **`true` in `serve_dashboard.py`** | Seeds `config/demo_seed.yaml`. Also the gate on reading `.env` — two behaviours on one flag. |
+| `AXON_LOAD_DEMO_DATA` | `false` in code and the image; `true` in `serve_dashboard.py` and evaluation Compose | Seeds `config/demo_seed.yaml`. Also the gate on reading `.env` — two behaviours on one flag. |
 | `AWS_DEFAULT_REGION` | `us-east-1` | AWS region |
 | `AXON_BEDROCK_REGION` | `us-east-1` | Bedrock-specific region |
 | `AXON_SERVER_HOST` | `0.0.0.0` | Server bind host |
@@ -1291,8 +1299,10 @@ than PASS).
 | Requirement | Specification |
 |-------------|---------------|
 | **Python** | 3.11+ |
-| **Dependencies** | starlette, aiohttp, pyyaml, tiktoken, boto3, sqlglot, `google-auth[requests]`, `uvicorn[standard]` |
-| **Optional extras** | `otel` (opentelemetry-exporter-otlp-proto-http), `oidc` (python-jose[cryptography]), and `dev`. `python-jose` is **fail-closed**: without it, JWT signature verification refuses to decode rather than trusting an unverified token, so an OIDC deployment that omits the extra rejects every token. Managed SAML protocol processing occurs in Cognito and requires no application assertion-processing dependency. |
+| **Core dependencies** | aiohttp, pyyaml, and tiktoken. Importing or constructing the embedded router does not require Starlette, Uvicorn, boto3, Google auth, or SQL query support. |
+| **Ostiari embedding** | `OstiariRouterAdapter` requires an explicit structural host supplying verified signed snapshots, opaque credential resolution, canonical request identity, durable usage, secret-free telemetry, and start/close lifecycle. It imports no Ostiari package and creates no server or AWS infrastructure. |
+| **Host/provider extras** | `bedrock` (boto3), `google` (`google-auth[requests]`), `server` (the combined standalone HTTP host), `agentcore` (AgentCore runtime host), `aws-control` (AWS control API persistence and query support), and `serverless-control` (the Lambda control API adapter). |
+| **Feature/tooling extras** | `otel` (opentelemetry-exporter-otlp-proto-http), `oidc` (python-jose[cryptography]), `deployment` (JSON Schema validation), and `dev`. `python-jose` is **fail-closed**: without it, JWT signature verification refuses to decode rather than trusting an unverified token, so an OIDC deployment that omits the extra rejects every token. Managed SAML protocol processing occurs in Cognito and requires no application assertion-processing dependency. |
 | **Install** | `uv sync`, resolving from the committed `uv.lock`. `requirements.txt` exists only for the AgentCore image build, which reads it instead of `pyproject.toml`. |
 | **AWS Credentials** | Required for Bedrock provider (automatic via IAM role or `aws configure`) |
 | **DynamoDB** | Optional; table auto-created on first startup when enabled |
@@ -1350,7 +1360,7 @@ deployment mode.
 | Path | Module | Behaviour |
 |------|--------|-----------|
 | **OTLP (standalone)** | `observability/otlp_exporter.py` | Maps each `UsageRecord` to one OpenTelemetry span, using GenAI semantic conventions (`gen_ai.*`) where they exist and `axon.*` for what OTEL has no standard for — provider, cost, routing strategy. Opt-in: a no-op unless `OTEL_EXPORTER_OTLP_ENDPOINT` is set, and degrades to disabled rather than failing if the `otel` extra is not installed. |
-| **Ostiari forwarding (embedded)** | `observability/trace_forwarder.py` | Forwards each completed request to an embedding Ostiari, over an HTTP sink (`OSTIARI_TRACES_URL`) or an in-process callback registered via `register_sink()`, or both. |
+| **Ostiari forwarding (embedded)** | `observability/trace_forwarder.py` | Forwards each completed request to an embedding Ostiari through constructor-injected telemetry sinks. The standalone host adapter may also supply an explicit HTTP ingest URL. |
 
 Two design rules matter to anyone reading the traces:
 
@@ -1367,6 +1377,12 @@ Ostiari.
 Forwarding is best-effort and must never affect the request path: every failure
 is swallowed with a log, so a slow or broken Ostiari cannot slow or fail a chat
 call. With no URL and no registered sink, the forwarder is inert.
+
+Durable usage is stricter than trace forwarding. If an embedded Ostiari
+`UsageSink` fails after the provider returns, AxonLLM raises
+`OstiariUsageRecordingError` with the completed result attached. The host may
+return that result while marking accounting degraded, but it must not re-invoke
+the provider or enter a direct-provider fallback.
 
 ---
 
@@ -1458,6 +1474,10 @@ call. With no URL and no registered sink, the forwarder is inert.
 - [x] Managed-Cognito shared-state Fargate control plane that suppresses
       execution routes, has no Athena/STS authority, and supports either a
       customer-owned Route 53/ACM endpoint or a generated CloudFront endpoint
+- [x] Opt-in serverless AgentCore control and worker stacks with exact-version
+      artifacts, private static UI, bounded administration Lambda, durable
+      event delivery, scheduled query reconciliation, and asynchronous
+      tenant/requester-bound exports
 - [x] App Runner / Docker reference deployment
 - [x] ECS Fargate production/staging CDK stack (`infra/stack.py`)
 - [x] PII redaction with re-injection, plus optional Comprehend entity detection
@@ -1520,7 +1540,9 @@ call. With no URL and no registered sink, the forwarder is inert.
       creates and launch-verifies its administrator-email alarm subscription;
       Fargate alarms and both stacks' tenant security-event topics still need
       configured and tested receivers
-- [ ] Usage export to S3 for long-term analytics
+- [x] Short-lived asynchronous usage/audit exports to private S3 with
+      requester-bound status and download authorization
+- [ ] Long-term analytics export and retention policy
 - [ ] Budget reset schedules (daily, weekly, monthly) — *partial*: manual reset
       ships as `POST /admin/quotas/{project_id}/reset`; there is no scheduler
 
@@ -1542,7 +1564,9 @@ call. With no URL and no registered sink, the forwarder is inert.
 - [ ] Advanced guardrails via Amazon Bedrock Guardrails integration
 - [x] Usage chargeback reporting — CSV/JSON ships as
       `GET /admin/usage/export?format=csv|json&level=records|breakdown`, with 14
-      chargeback columns. PDF is not built
+      chargeback columns. Standalone returns the file directly; AgentCore
+      queues a durable export and provides status/download endpoints. PDF is
+      not built
 - [ ] API versioning and backward compatibility guarantees
 - [x] CDK infrastructure-as-code templates — `infra/stack.py` for Fargate and
       `infra/agentcore_stack.py` for AgentCore. Terraform is not built

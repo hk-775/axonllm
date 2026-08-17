@@ -93,10 +93,10 @@ def build_app() -> tuple:
     """Build the Starlette app and return (app, app_config)."""
     _configure_packaged_runtime()
     # Read the local .env before the demo-data default below is applied: the
-    # loader's gate is whether the operator set AXON_LOAD_DEMO_DATA themselves,
-    # and this same entrypoint is the Dockerfile CMD. Applying the default first
-    # would make the file load in production containers too. It never overwrites
-    # an existing variable, so platform-injected secrets always win.
+    # loader's gate is whether the operator set AXON_LOAD_DEMO_DATA themselves.
+    # Applying the direct-development default first would make an implicit demo
+    # run read .env. It never overwrites an existing variable, so injected
+    # secrets always win.
     load_dev_env_file()
 
     # Default to loading demo data when running the dev server directly
@@ -172,10 +172,9 @@ if __name__ == "__main__":
         # line in the startup scroll is exactly the kind of warning that gets
         # missed.
         #
-        # Two guards, because this same file is the Dockerfile CMD: an explicit
-        # AXON_NO_BROWSER, and a tty check. A container or CI runner has no
-        # terminal and nobody watching a browser, and while webbrowser.open
-        # merely fails there, asking is pointless.
+        # Two guards: an explicit AXON_NO_BROWSER and a tty check. A CI runner or
+        # non-interactive local process has nobody watching a browser, and while
+        # webbrowser.open merely fails there, asking is pointless.
         opt_out = os.environ.get("AXON_NO_BROWSER", "").lower() in ("1", "true", "yes")
         if not opt_out and sys.stdout.isatty():
             # uvicorn.run blocks, so the open has to be deferred to a timer: the

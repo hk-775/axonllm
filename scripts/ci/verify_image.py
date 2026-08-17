@@ -20,7 +20,7 @@ def _run(*command: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def verify_image(image: str) -> None:
+def verify_image(image: str, platform: str = "linux/amd64") -> None:
     inspection = json.loads(_run("docker", "image", "inspect", image).stdout)[0]
     config = inspection.get("Config", {})
 
@@ -28,8 +28,12 @@ def verify_image(image: str) -> None:
     match = re.fullmatch(r"([1-9][0-9]*):([1-9][0-9]*)", user)
     if not match:
         raise RuntimeError(f"image has invalid non-root UID:GID: {user!r}")
-    if inspection.get("Os") != "linux" or inspection.get("Architecture") != "amd64":
-        raise RuntimeError("release image must target linux/amd64")
+    try:
+        expected_os, expected_architecture = platform.split("/", maxsplit=1)
+    except ValueError as exc:
+        raise RuntimeError(f"invalid expected platform: {platform}") from exc
+    if inspection.get("Os") != expected_os or inspection.get("Architecture") != expected_architecture:
+        raise RuntimeError(f"release image must target {platform}")
 
     environment = set(config.get("Env") or [])
     required_environment = {
@@ -40,9 +44,7 @@ def verify_image(image: str) -> None:
     }
     missing_environment = required_environment - environment
     if missing_environment:
-        raise RuntimeError(
-            f"image lacks required environment: {sorted(missing_environment)}"
-        )
+        raise RuntimeError(f"image lacks required environment: {sorted(missing_environment)}")
 
     smoke_test = r"""
 import os
@@ -110,10 +112,15 @@ import src.gateway  # noqa: F401
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("image")
+    parser.add_argument(
+        "--platform",
+        choices=("linux/amd64", "linux/arm64"),
+        default="linux/amd64",
+    )
     args = parser.parse_args()
 
     try:
-        verify_image(args.image)
+        verify_image(args.image, args.platform)
     except (RuntimeError, subprocess.CalledProcessError, json.JSONDecodeError) as exc:
         print(f"image verification failed: {exc}", file=sys.stderr)
         return 1

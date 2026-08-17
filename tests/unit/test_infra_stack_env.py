@@ -1,11 +1,9 @@
 """The deployed container's environment, asserted against the CDK source.
 
-`serve_dashboard.py` is the Dockerfile `CMD`, and it defaults
-`AXON_LOAD_DEMO_DATA` to `true` when the variable is absent — a convenience for
-a local run that becomes a liability on Fargate, where it seeds Acme Corp and 66
-fabricated usage records into DynamoDB and they outlive the flag that created
-them. The only place that default can be neutralised for every deploy is the
-task definition's environment, so the value is asserted here.
+The standalone image defaults demo data off, while the evaluation Compose and
+developer entrypoint explicitly turn it on. Fargate still binds the value in
+its task definition so deployment intent is reviewable and cannot change when
+an image entrypoint or orchestration default changes.
 
 Read as source rather than synthesized: `aws-cdk-lib` is not a test dependency
 (`infra/requirements.txt` is installed separately, and CI installs only
@@ -57,12 +55,12 @@ class TestTheTaskDefinitionEnvironment:
     def test_demo_data_is_explicitly_off(self, env):
         """The one value that has to be present rather than merely correct.
 
-        An absent `AXON_LOAD_DEMO_DATA` is not a neutral default here — it is
-        `true`, because the container `CMD` supplies one. This is the assertion
-        that keeps a deploy from coming up with fictional tenants.
+        The image default is safe, but production intent must remain explicit.
+        This assertion prevents a future image or task-definition change from
+        introducing fictional tenants without a visible infrastructure diff.
         """
         assert "AXON_LOAD_DEMO_DATA" in env, (
-            "absent means demo data ON — serve_dashboard.py defaults it to 'true'"
+            "production task definitions must bind demo data off explicitly"
         )
         node = env["AXON_LOAD_DEMO_DATA"]
         assert isinstance(node, ast.Constant), "must be a literal, not computed at synth time"
@@ -71,9 +69,8 @@ class TestTheTaskDefinitionEnvironment:
     def test_auth_is_enforced(self, env):
         """Nothing behind a public ALB should accept unauthenticated requests.
 
-        Same shape of bug as the line above: `serve_dashboard.py` defaults
-        `AXON_AUTH_MODE` to `LOG_ONLY`, so dropping it here would open the
-        deployment rather than fall back to the safe value.
+        The image defaults to enforcement, and the task definition repeats it
+        so the security profile remains explicit in the deployment template.
         """
         node = env["AXON_AUTH_MODE"]
         assert isinstance(node, ast.Constant) and node.value == "ENFORCE"

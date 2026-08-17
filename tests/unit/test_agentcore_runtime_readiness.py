@@ -867,6 +867,10 @@ async def test_production_runtime_probes_and_closes_owned_resources(
         def shutdown(self) -> None:
             events.append("otlp")
 
+    class TraceForwarder:
+        async def close(self) -> None:
+            events.append("trace_forwarder")
+
     class HealthMonitor:
         async def stop(self) -> None:
             events.append("health_monitor")
@@ -913,7 +917,10 @@ async def test_production_runtime_probes_and_closes_owned_resources(
     ]
     query_service = SimpleNamespace()
     components = SimpleNamespace(
-        gateway_agent=SimpleNamespace(_otlp_exporter=OTLP()),
+        gateway_agent=SimpleNamespace(
+            _otlp_exporter=OTLP(),
+            _trace_forwarder=TraceForwarder(),
+        ),
         oidc_service=Verifier(),
         principal_resolver=SimpleNamespace(),
         project_resolver=SimpleNamespace(),
@@ -1011,6 +1018,7 @@ async def test_production_runtime_probes_and_closes_owned_resources(
         "query_reconciliation_stop",
         "service_jwks",
         "startup_jwks",
+        "trace_forwarder",
     ]
 
 

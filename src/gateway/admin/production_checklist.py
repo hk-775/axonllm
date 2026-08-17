@@ -623,9 +623,9 @@ def check_demo_data(app_config: AppConfig, environ: dict[str, str]) -> CheckResu
     """Demo seed data is not loaded.
 
     Reached only when the checklist is rendered, which already requires
-    ``load_demo_data`` to be False — so this check reports the *entrypoint*
-    hazard: ``serve_dashboard.py`` defaults the variable to ``true`` when unset,
-    and it is also the Dockerfile CMD.
+    ``load_demo_data`` to be False. Production still requires an explicit value
+    so an orchestrator, Compose override, or developer entrypoint cannot change
+    the effective profile without leaving evidence in the deployment contract.
     """
     if app_config.load_demo_data:  # pragma: no cover - checklist is gated off here
         return CheckResult(
@@ -647,10 +647,10 @@ def check_demo_data(app_config: AppConfig, environ: dict[str, str]) -> CheckResu
             status=Status.WARN,
             summary="Not loaded, but AXON_LOAD_DEMO_DATA is unset rather than explicitly false.",
             detail=(
-                "serve_dashboard.py — the Dockerfile CMD — defaults this to true "
-                "when unset. This process reached production settings some other "
-                "way, so a container built from the same image would seed demo "
-                "projects and fabricated spend into the real dashboard."
+                "The standalone image defaults this to false, but evaluation "
+                "Compose and the developer entrypoint explicitly enable demo "
+                "data. Production should bind the value rather than inherit an "
+                "entrypoint or orchestration default."
             ),
             fix="Set AXON_LOAD_DEMO_DATA=false explicitly in the deployment environment.",
         )

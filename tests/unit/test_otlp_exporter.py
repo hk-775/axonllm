@@ -158,42 +158,29 @@ class TestSuppressWhenEmbedded:
             forwarder is not None and forwarder.enabled)
 
     def test_standalone_exports(self, monkeypatch):
-        from src.gateway.observability import trace_forwarder as tf
         from src.gateway.observability.trace_forwarder import TraceForwarder
 
         monkeypatch.delenv("OSTIARI_TRACES_URL", raising=False)
-        for s in list(tf._sinks):
-            tf.unregister_sink(s)
         exp = OTLPSpanExporter()
         fwd = TraceForwarder()
         assert fwd.enabled is False
         assert self._should_export(exp, fwd) is True   # standalone → export natively
 
-    def test_embedded_via_sink_suppresses(self, monkeypatch):
-        from src.gateway.observability import trace_forwarder as tf
-        from src.gateway.observability.trace_forwarder import TraceForwarder, register_sink
-
-        monkeypatch.delenv("OSTIARI_TRACES_URL", raising=False)
-        for s in list(tf._sinks):
-            tf.unregister_sink(s)
-        sink = lambda ev: None  # noqa: E731 — an embedding Ostiari registered a sink
-        register_sink(sink)
-        try:
-            exp = OTLPSpanExporter()
-            fwd = TraceForwarder()
-            assert fwd.enabled is True
-            assert self._should_export(exp, fwd) is False  # embedded → suppress
-        finally:
-            tf.unregister_sink(sink)
-
-    def test_embedded_via_url_suppresses(self, monkeypatch):
-        from src.gateway.observability import trace_forwarder as tf
+    def test_embedded_via_sink_suppresses(self):
         from src.gateway.observability.trace_forwarder import TraceForwarder
 
-        for s in list(tf._sinks):
-            tf.unregister_sink(s)
-        monkeypatch.setenv("OSTIARI_TRACES_URL", "http://cp:8000/api/traces/ingest")
+        sink = lambda ev: None  # noqa: E731 - compact injected test sink
         exp = OTLPSpanExporter()
-        fwd = TraceForwarder()
+        fwd = TraceForwarder(sinks=[sink])
+        assert fwd.enabled is True
+        assert self._should_export(exp, fwd) is False  # embedded → suppress
+
+    def test_embedded_via_url_suppresses(self):
+        from src.gateway.observability.trace_forwarder import TraceForwarder
+
+        exp = OTLPSpanExporter()
+        fwd = TraceForwarder(
+            url="http://cp:8000/api/traces/ingest",
+        )
         assert fwd.enabled is True
         assert self._should_export(exp, fwd) is False

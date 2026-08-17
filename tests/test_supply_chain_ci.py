@@ -53,6 +53,7 @@ def test_workflow_enforces_each_release_gate() -> None:
         "git diff --check",
         "gitleaks git",
         "audit_python_dependencies.sh",
+        "build_serverless_control_artifacts.sh",
         "trivy config",
         "synthesize_and_verify_cdk.sh",
         "docker build",
@@ -63,41 +64,38 @@ def test_workflow_enforces_each_release_gate() -> None:
     missing = [command for command in required_commands if command not in workflow]
     assert missing == []
     assert "--extra agentcore" in workflow
+    assert '"${CDK_CI_OUTDIR}/fargate/AxonLLMStack.template.json"' in workflow
+    assert '"${CDK_CI_OUTDIR}/agentcore/AxonLLMAgentCoreStack.template.json"' in workflow
+    assert '"${CDK_CI_OUTDIR}/application-state/AxonLLMApplicationStateStack.template.json"' in workflow
+    assert '"${CDK_CI_OUTDIR}/managed-network/AxonLLMManagedNetworkStack.template.json"' in workflow
+    assert '"${CDK_CI_OUTDIR}/managed-network-parked/AxonLLMManagedNetworkStack.template.json"' in workflow
+    assert '"${CDK_CI_OUTDIR}/agentcore-parked/AxonLLMAgentCoreStack.template.json"' in workflow
+    assert '"${CDK_CI_OUTDIR}/serverless-control-plane/AxonLLMServerlessControlPlaneStack.template.json"' in workflow
+    assert '"${CDK_CI_OUTDIR}/control-plane-edge/AxonLLMControlPlaneStack.template.json"' in workflow
     assert (
-        '"${CDK_CI_OUTDIR}/fargate/AxonLLMStack.template.json"'
-        in workflow
+        '"${CDK_CI_OUTDIR}/serverless-control-plane-edge/AxonLLMServerlessControlPlaneStack.template.json"' in workflow
     )
-    assert (
-        '"${CDK_CI_OUTDIR}/agentcore/'
-        'AxonLLMAgentCoreStack.template.json"'
-        in workflow
-    )
-    assert (
-        '"${CDK_CI_OUTDIR}/release-foundation/'
-        'AxonLLMReleaseFoundationStack.template.json"'
-        in workflow
-    )
-    assert (
-        '"${CDK_CI_OUTDIR}/launch-workers/'
-        'AxonLLMLaunchWorkersStack-managed.template.json"'
-        in workflow
-    )
-    synthesis = (
-        ROOT / "scripts/ci/synthesize_and_verify_cdk.sh"
-    ).read_text(encoding="utf-8")
-    assert (
-        'verify_target "launch-workers" '
-        '"AxonLLMLaunchWorkersStack-managed" "managed"'
-        in synthesis
-    )
+    assert '"${CDK_CI_OUTDIR}/serverless-workers/AxonLLMServerlessWorkersStack.template.json"' in workflow
+    assert '"${CDK_CI_OUTDIR}/release-foundation/AxonLLMReleaseFoundationStack.template.json"' in workflow
+    assert '"${CDK_CI_OUTDIR}/launch-workers/AxonLLMLaunchWorkersStack-managed.template.json"' in workflow
+    synthesis = (ROOT / "scripts/ci/synthesize_and_verify_cdk.sh").read_text(encoding="utf-8")
+    assert 'verify_target "application-state" "AxonLLMApplicationStateStack"' in synthesis
+    assert 'verify_target "managed-network" "AxonLLMManagedNetworkStack"' in synthesis
+    assert 'verify_target "managed-network-parked" "AxonLLMManagedNetworkStack"' in synthesis
+    assert 'verify_target "agentcore-parked" "AxonLLMAgentCoreStack"' in synthesis
+    assert 'verify_target "serverless-control-plane" "AxonLLMServerlessControlPlaneStack"' in synthesis
+    assert '"control-plane-edge"' in synthesis
+    assert '"edge_cutover_enabled":true' in synthesis
+    assert '"serverless-control-plane-edge"' in synthesis
+    assert '"edge_attachment_enabled":true' in synthesis
+    assert 'verify_target "serverless-workers" "AxonLLMServerlessWorkersStack"' in synthesis
+    assert 'verify_target "launch-workers" "AxonLLMLaunchWorkersStack-managed" "managed"' in synthesis
 
 
 def test_ci_compiles_production_and_release_python_syntax() -> None:
     step = _workflow_step("supply-chain", "Compile production and release Python")
 
-    assert step["env"] == {
-        "PYTHONPYCACHEPREFIX": "${{ runner.temp }}/python-syntax-cache"
-    }
+    assert step["env"] == {"PYTHONPYCACHEPREFIX": "${{ runner.temp }}/python-syntax-cache"}
     command = step["run"]
     assert 'python -m py_compile "${source}"' in command
     assert "git ls-files -z -- '*.py' ':!tests/**'" in command
@@ -112,11 +110,7 @@ def test_supply_chain_installs_and_runs_release_security_tests() -> None:
     )
 
     assert install["run"] == "uv sync --frozen --extra security --extra dev"
-    assert (
-        "uv run --frozen --no-sync pytest "
-        "tests/release_security -q --tb=short"
-        in validate["run"]
-    )
+    assert "uv run --frozen --no-sync pytest tests/release_security -q --tb=short" in validate["run"]
     assert "unittest discover" not in validate["run"]
 
 
@@ -182,24 +176,86 @@ def test_ci_scans_agentcore_dockerfile_configuration() -> None:
     )
 
 
+def test_ci_scans_standalone_arm64_dockerfile_configuration() -> None:
+    step = _workflow_step(
+        "supply-chain",
+        "Scan standalone ARM64 Dockerfile configuration",
+    )
+
+    assert step["run"] == (
+        "trivy config "
+        "--disable-telemetry "
+        "--skip-check-update "
+        "--ignorefile .github/trivyignore.yaml "
+        "--severity HIGH,CRITICAL "
+        "--exit-code 1 "
+        "infra/standalone-image/Dockerfile"
+    )
+
+
+def test_ci_scans_serverless_artifact_dockerfile_configuration() -> None:
+    step = _workflow_step(
+        "supply-chain",
+        "Scan serverless artifact Dockerfile configuration",
+    )
+
+    assert step["run"] == (
+        "trivy config "
+        "--disable-telemetry "
+        "--skip-check-update "
+        "--ignorefile .github/trivyignore.yaml "
+        "--severity HIGH,CRITICAL "
+        "--exit-code 1 "
+        "infra/serverless-control-artifacts/Dockerfile"
+    )
+
+
+def test_ci_builds_and_scans_arm64_serverless_artifacts() -> None:
+    build = _workflow_step(
+        "container",
+        "Build and verify ARM64 serverless control artifacts",
+    )
+    scan = _workflow_step(
+        "container",
+        "Scan serverless control artifacts",
+    )
+
+    assert "build_serverless_control_artifacts.sh" in build["run"]
+    assert '"${GITHUB_SHA}"' in build["run"]
+    assert "serverless-control-artifacts.json" in scan["run"]
+    assert ".artifacts.controlApi.fileName" in scan["run"]
+    assert ".artifacts.staticAssets.fileName" in scan["run"]
+    assert scan["run"].count("trivy fs") == 2
+    assert "--scanners vuln,secret" in scan["run"]
+
+
+def test_ci_builds_verifies_and_scans_standalone_arm64_image() -> None:
+    build = _workflow_step("container", "Build standalone ARM64 image")
+    verify = _workflow_step("container", "Verify standalone ARM64 image")
+    scan = _workflow_step("container", "Scan standalone ARM64 image")
+
+    assert "--platform linux/arm64" in build["run"]
+    assert "--file infra/standalone-image/Dockerfile" in build["run"]
+    assert "--build-context project=." in build["run"]
+    assert "--load" in build["run"]
+    assert "--platform linux/arm64" in verify["run"]
+    assert "scripts/ci/verify_image.py" in verify["run"]
+    assert "--platform linux/arm64" in scan["run"]
+    assert "--scanners vuln,secret" in scan["run"]
+
+
 def test_secret_baseline_contains_only_verified_fingerprints() -> None:
     lines = [
-        line
-        for line in (ROOT / ".github/gitleaksignore").read_text().splitlines()
-        if line and not line.startswith("#")
+        line for line in (ROOT / ".github/gitleaksignore").read_text().splitlines() if line and not line.startswith("#")
     ]
-    fingerprint = re.compile(
-        r"^[0-9a-f]{40}:README\.md:curl-auth-header:[0-9]+$"
-    )
+    fingerprint = re.compile(r"^[0-9a-f]{40}:README\.md:curl-auth-header:[0-9]+$")
 
     assert len(lines) == 4
     assert all(fingerprint.fullmatch(line) for line in lines)
 
 
 def test_trivy_exception_is_narrow_and_expires() -> None:
-    ignore = yaml.safe_load(
-        (ROOT / ".github/trivyignore.yaml").read_text(encoding="utf-8")
-    )
+    ignore = yaml.safe_load((ROOT / ".github/trivyignore.yaml").read_text(encoding="utf-8"))
 
     assert ignore == {
         "misconfigurations": [
@@ -249,9 +305,7 @@ def test_trivy_exception_is_narrow_and_expires() -> None:
             },
             {
                 "id": "AWS-0036",
-                "paths": [
-                    "AxonLLMLaunchWorkersStack-managed.template.json"
-                ],
+                "paths": ["AxonLLMLaunchWorkersStack-managed.template.json"],
                 "statement": (
                     "The environment value is an exact Secrets Manager ARN "
                     "used to fetch credentials at runtime; secret material is "
@@ -276,9 +330,7 @@ def test_trivy_exception_is_narrow_and_expires() -> None:
 def test_pip_audit_exception_is_narrow_and_current() -> None:
     exception_file = ROOT / ".github/pip-audit-ignore.txt"
     lines = exception_file.read_text(encoding="utf-8").splitlines()
-    vulnerability_ids = [
-        line for line in lines if line and not line.startswith("#")
-    ]
+    vulnerability_ids = [line for line in lines if line and not line.startswith("#")]
     expiry_line = next(line for line in lines if line.startswith("# expires: "))
     expiry = dt.date.fromisoformat(expiry_line.removeprefix("# expires: "))
 
@@ -289,11 +341,7 @@ def test_pip_audit_exception_is_narrow_and_current() -> None:
 def test_ecdsa_exception_remains_verification_only() -> None:
     runtime_paths = [
         ROOT / "agentcore_agent.py",
-        *(
-            path
-            for path in (ROOT / "src").rglob("*.py")
-            if "node_modules" not in path.parts
-        ),
+        *(path for path in (ROOT / "src").rglob("*.py") if "node_modules" not in path.parts),
     ]
     prohibited: list[str] = []
 
@@ -304,23 +352,14 @@ def test_ecdsa_exception_remains_verification_only() -> None:
         for node in ast.walk(tree):
             if isinstance(node, (ast.Import, ast.ImportFrom)):
                 module = node.module if isinstance(node, ast.ImportFrom) else ""
-                imported = [
-                    alias.name if not module else f"{module}.{alias.name}"
-                    for alias in node.names
-                ]
+                imported = [alias.name if not module else f"{module}.{alias.name}" for alias in node.names]
                 if any(name == "ecdsa" or name.startswith("ecdsa.") for name in imported):
                     prohibited.append(f"{path}: imports python-ecdsa")
                 if isinstance(node, ast.ImportFrom) and node.module == "jose":
-                    jose_jwt_aliases.update(
-                        alias.asname or alias.name
-                        for alias in node.names
-                        if alias.name == "jwt"
-                    )
+                    jose_jwt_aliases.update(alias.asname or alias.name for alias in node.names if alias.name == "jwt")
                 if isinstance(node, ast.ImportFrom) and node.module == "jose.jwt":
                     jose_encode_aliases.update(
-                        alias.asname or alias.name
-                        for alias in node.names
-                        if alias.name == "encode"
+                        alias.asname or alias.name for alias in node.names if alias.name == "encode"
                     )
             elif isinstance(node, ast.Call):
                 if (
@@ -330,10 +369,7 @@ def test_ecdsa_exception_remains_verification_only() -> None:
                     and node.func.value.id in jose_jwt_aliases
                 ):
                     prohibited.append(f"{path}: signs with jose.jwt.encode")
-                if (
-                    isinstance(node.func, ast.Name)
-                    and node.func.id in jose_encode_aliases
-                ):
+                if isinstance(node.func, ast.Name) and node.func.id in jose_encode_aliases:
                     prohibited.append(f"{path}: signs with jose.jwt.encode")
 
     assert prohibited == []
@@ -362,13 +398,7 @@ def _make_cdk_output(tmp_path: Path) -> Path:
         encoding="utf-8",
     )
     (out_dir / "assets.json").write_text(
-        json.dumps(
-            {
-                "dockerImages": {
-                    "image": {"source": {"directory": asset_dir.name}}
-                }
-            }
-        ),
+        json.dumps({"dockerImages": {"image": {"source": {"directory": asset_dir.name}}}}),
         encoding="utf-8",
     )
     return out_dir
@@ -394,9 +424,7 @@ def test_cdk_asset_verifier_accepts_minimal_safe_context(tmp_path: Path) -> None
         "tests/test_private.py",
     ],
 )
-def test_cdk_asset_verifier_rejects_sensitive_paths(
-    tmp_path: Path, relative_path: str
-) -> None:
+def test_cdk_asset_verifier_rejects_sensitive_paths(tmp_path: Path, relative_path: str) -> None:
     out_dir = _make_cdk_output(tmp_path)
     prohibited = out_dir / "asset.test" / relative_path
     prohibited.parent.mkdir(parents=True, exist_ok=True)
@@ -409,11 +437,7 @@ def test_cdk_asset_verifier_rejects_sensitive_paths(
 def test_deployment_requirements_are_hash_locked() -> None:
     for relative_path in ("requirements.txt", "infra/requirements.txt"):
         requirements = (ROOT / relative_path).read_text(encoding="utf-8")
-        package_lines = [
-            line
-            for line in requirements.splitlines()
-            if line and not line.startswith((" ", "#", "-"))
-        ]
+        package_lines = [line for line in requirements.splitlines() if line and not line.startswith((" ", "#", "-"))]
 
         assert package_lines
         assert all("==" in line for line in package_lines)
@@ -421,9 +445,7 @@ def test_deployment_requirements_are_hash_locked() -> None:
 
 
 def test_isolated_build_backend_is_exactly_pinned() -> None:
-    pyproject = tomllib.loads(
-        (ROOT / "pyproject.toml").read_text(encoding="utf-8")
-    )
+    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     build_requirements = pyproject["build-system"]["requires"]
 
     assert build_requirements
@@ -431,13 +453,48 @@ def test_isolated_build_backend_is_exactly_pinned() -> None:
 
 
 def test_oidc_runtime_extra_contains_its_network_client() -> None:
-    pyproject = tomllib.loads(
-        (ROOT / "pyproject.toml").read_text(encoding="utf-8")
-    )
+    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     oidc_dependencies = pyproject["project"]["optional-dependencies"]["oidc"]
 
     assert any(dependency.startswith("httpx") for dependency in oidc_dependencies)
-    assert any(
-        dependency.startswith("python-jose")
-        for dependency in oidc_dependencies
+    assert any(dependency.startswith("python-jose") for dependency in oidc_dependencies)
+
+
+def test_embedded_install_excludes_host_and_aws_dependencies() -> None:
+    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    project = pyproject["project"]
+    base_dependencies = project["dependencies"]
+    extras = project["optional-dependencies"]
+
+    excluded = (
+        "boto3",
+        "google-auth",
+        "sqlglot",
+        "starlette",
+        "uvicorn",
     )
+    assert not any(dependency.startswith(excluded) for dependency in base_dependencies)
+
+    expected = {
+        "bedrock": ("boto3",),
+        "google": ("google-auth",),
+        "server": (
+            "boto3",
+            "google-auth",
+            "sqlglot",
+            "starlette",
+            "uvicorn",
+        ),
+        "aws-control": ("boto3", "sqlglot", "starlette"),
+        "agentcore": (
+            "bedrock-agentcore",
+            "boto3",
+            "google-auth",
+            "sqlglot",
+            "starlette",
+        ),
+    }
+    for extra, required in expected.items():
+        dependencies = extras[extra]
+        for package in required:
+            assert any(dependency.startswith(package) for dependency in dependencies), f"{extra} is missing {package}"
