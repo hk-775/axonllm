@@ -893,6 +893,9 @@ def test_control_plane_deploy_command_is_bound_to_managed_identity(
     assert ("AxonLLMControlPlaneStack:AgentCoreStackName=AxonLLMAgentCoreStack") in command
     assert ("AxonLLMControlPlaneStack:IdentityStackName=AxonLLMIdentityStack") in command
     assert ("AxonLLMControlPlaneStack:PrimaryStateTableName=axonllm-agentcore-state") in command
+    assert (
+        "AxonLLMControlPlaneStack:DeploymentTransitionId=unbound"
+    ) in command
     assert (f"AxonLLMControlPlaneStack:ControlPlaneVerifiedImageUri={_CONTROL_IMAGE}") in command
     assert (f"AxonLLMControlPlaneStack:CertificateArn={_CERTIFICATE_ARN}") in command
     assert (
@@ -2520,7 +2523,10 @@ def test_deploy_control_plane_binds_schema_2_runtime_and_image(
 ):
     config = _managed_transition_config()
     runtime_outputs = _promoted_runtime_outputs(config)
-    target_parameters = _target_control_parameters(config)
+    target_parameters = {
+        **_target_control_parameters(config),
+        "DeploymentTransitionId": "unbound",
+    }
     previous_parameters = _previous_control_parameters(target_parameters)
     target_outputs = _control_outputs(runtime_outputs)
     metadata = _control_transition_metadata(
@@ -2528,6 +2534,8 @@ def test_deploy_control_plane_binds_schema_2_runtime_and_image(
         runtime_outputs,
         previous_parameters=previous_parameters,
     )
+    metadata["schemaVersion"] = 2
+    metadata.pop("transition")
     _write_control_transition(tmp_path, metadata)
     client = _ControlPlaneCloudFormation(
         runtime_outputs,
@@ -2568,6 +2576,7 @@ def test_deploy_control_plane_binds_schema_2_runtime_and_image(
     assert (f"AxonLLMControlPlaneStack:PrimaryStateTableName={_PRIMARY_STATE_TABLE}") in command
     assert (f"AxonLLMControlPlaneStack:RuntimeStateTableName={_SELECTED_STATE_TABLE}") in command
     assert (f"AxonLLMControlPlaneStack:RecoveryApprovalId={_RECOVERY_APPROVAL_ID}") in command
+    assert "AxonLLMControlPlaneStack:DeploymentTransitionId=unbound" in command
     assert client.control_stack is not None
     assert client.control_stack["StackId"] == metadata["controlPlane"]["previousStackId"]
     assert (
