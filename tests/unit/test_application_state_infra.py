@@ -374,6 +374,8 @@ def test_external_state_parameter_patterns_bind_account_and_region(
 def test_unknown_application_state_mode_fails_closed(
     tmp_path: Path,
 ) -> None:
+    if not _INFRA_PYTHON.is_file():
+        pytest.skip("infra/.venv is required for CDK synthesis tests")
     environment = os.environ.copy()
     environment.update(
         {

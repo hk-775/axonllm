@@ -40,3 +40,4 @@ RUN python scripts/release/build_serverless_control_artifacts.py \
 
 FROM scratch AS artifacts
 COPY --from=builder /artifacts/ /
+USER 10001:10001
