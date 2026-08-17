@@ -896,6 +896,7 @@ class AxonLLMReleaseFoundationStack(Stack):
                 actions=[
                     "cloudformation:DescribeStacks",
                     "cloudformation:GetTemplate",
+                    "cloudformation:ListStackResources",
                 ],
                 resources=[
                     self.format_arn(

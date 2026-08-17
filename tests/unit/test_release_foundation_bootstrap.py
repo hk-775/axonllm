@@ -319,6 +319,26 @@ def test_execution_policy_scopes_regional_mutations_to_foundation_resources():
             "secret:axonllm/launch/runtime-identity-*"
         )
     ]
+    ecr_access = next(
+        statement
+        for statement in document["Statement"]
+        if statement["Sid"] == "ManageReleaseFoundationEcr"
+    )
+    assert "ecr:CreateRepository" in ecr_access["Action"]
+    assert set(ecr_access["Resource"]) == {
+        (
+            "arn:aws:ecr:us-east-1:123456789012:"
+            "repository/axonllm/agentcore"
+        ),
+        (
+            "arn:aws:ecr:us-east-1:123456789012:"
+            "repository/axonllm/fargate"
+        ),
+        (
+            "arn:aws:ecr:us-east-1:123456789012:"
+            "repository/axonllm/standalone"
+        ),
+    }
 
 
 def test_bootstrap_command_uses_only_dedicated_policy_parts(tmp_path):
