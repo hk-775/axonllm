@@ -158,6 +158,7 @@ jobs:
         env:
           AWS_ACCOUNT_ID: ${{ vars.AXON_AWS_ACCOUNT_ID }}
           DEPLOY_ROLE_ARN: ${{ secrets.AXON_RELEASE_FOUNDATION_DEPLOY_ROLE_ARN }}
+          INFRA_PYTHON: ${{ runner.temp }}/foundation-infra-venv/bin/python
         run: |
           set -euo pipefail
           session_name="AxonLLMReleaseFoundation-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
@@ -168,7 +169,7 @@ jobs:
             --arg arn "arn:aws:sts::${AWS_ACCOUNT_ID}:assumed-role/${role_name}/${session_name}" '
             .Account == $account and .Arn == $arn
           ' <<<"${caller}" >/dev/null
-          python -m src.gateway.deployment.release_foundation_bootstrap \
+          "${INFRA_PYTHON}" -m src.gateway.deployment.release_foundation_bootstrap \
             verify \
             --region us-east-1
 
@@ -381,6 +382,7 @@ jobs:
         if: inputs.operation == 'execute'
         env:
           AWS_ACCOUNT_ID: ${{ vars.AXON_AWS_ACCOUNT_ID }}
+          INFRA_PYTHON: ${{ runner.temp }}/foundation-infra-venv/bin/python
         run: |
           set -euo pipefail
           stack=$(aws cloudformation describe-stacks \
@@ -402,6 +404,6 @@ jobs:
               == ["/cdk-bootstrap/axrel/version"]
             )
           ' <<<"${stack}" >/dev/null
-          python -m src.gateway.deployment.release_foundation_bootstrap \
+          "${INFRA_PYTHON}" -m src.gateway.deployment.release_foundation_bootstrap \
             verify \
             --region us-east-1

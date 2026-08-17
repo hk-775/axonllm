@@ -53,6 +53,17 @@ def test_foundation_deployment_requires_exact_bounded_bootstrap():
     assert serialized.count(
         "src.gateway.deployment.release_foundation_bootstrap"
     ) == 2
+    assert serialized.count(
+        '"${INFRA_PYTHON}" -m '
+        "src.gateway.deployment.release_foundation_bootstrap"
+    ) == 2
+    assert (
+        serialized.count(
+            "INFRA_PYTHON: "
+            "${{ runner.temp }}/foundation-infra-venv/bin/python"
+        )
+        == 4
+    )
     assert "-c cdk_qualifier=axrel" in serialized
     assert "/cdk-bootstrap/axrel/version" in serialized
     assert "cdk-axrel-cfn-exec-role-" in serialized
