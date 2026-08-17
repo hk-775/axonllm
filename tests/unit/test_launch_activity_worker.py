@@ -39,22 +39,14 @@ OUTBOX_ARN = f"arn:aws:sqs:{REGION}:{ACCOUNT}:axonllm-outbox"
 DLQ_ARN = f"arn:aws:sqs:{REGION}:{ACCOUNT}:axonllm-outbox-dlq"
 ALARM_ARN = f"arn:aws:cloudwatch:{REGION}:{ACCOUNT}:alarm:axonllm-outbox-dlq"
 AGENTCORE_STACK_ARN = (
-    f"arn:aws:cloudformation:{REGION}:{ACCOUNT}:"
-    "stack/AxonLLMAgentCoreStack/11111111-1111-1111-1111-111111111111"
+    f"arn:aws:cloudformation:{REGION}:{ACCOUNT}:stack/AxonLLMAgentCoreStack/11111111-1111-1111-1111-111111111111"
 )
 CONTROL_STACK_ARN = (
-    f"arn:aws:cloudformation:{REGION}:{ACCOUNT}:"
-    "stack/AxonLLMControlPlaneStack/22222222-2222-2222-2222-222222222222"
+    f"arn:aws:cloudformation:{REGION}:{ACCOUNT}:stack/AxonLLMControlPlaneStack/22222222-2222-2222-2222-222222222222"
 )
-OUTBOX_URL = (
-    f"https://sqs.{REGION}.amazonaws.com/{ACCOUNT}/axonllm-outbox"
-)
-DLQ_URL = (
-    f"https://sqs.{REGION}.amazonaws.com/{ACCOUNT}/axonllm-outbox-dlq"
-)
-SECURITY_LOG_GROUP_ARN = (
-    f"arn:aws:logs:{REGION}:{ACCOUNT}:log-group:/axonllm/security"
-)
+OUTBOX_URL = f"https://sqs.{REGION}.amazonaws.com/{ACCOUNT}/axonllm-outbox"
+DLQ_URL = f"https://sqs.{REGION}.amazonaws.com/{ACCOUNT}/axonllm-outbox-dlq"
+SECURITY_LOG_GROUP_ARN = f"arn:aws:logs:{REGION}:{ACCOUNT}:log-group:/axonllm/security"
 
 
 def _time_text(value: datetime) -> str:
@@ -196,20 +188,6 @@ def _action_payload(
         }
     )
     if operation in {
-        "reject-query-boundaries",
-        "interrupt-query",
-        "verify-terminal-reconciliation",
-        "verify-deferred-accounting",
-    }:
-        parameters = {
-            "tenantId": "tenant-launch",
-            "projectId": "project-launch",
-            "datasourceId": "launch-datasource",
-            "selectSql": "SELECT value FROM launch_canary",
-            "maxRows": 100,
-            "scanLimitBytes": 1024 * 1024,
-        }
-    elif operation in {
         "restore-state",
         "cutover-restored-state",
         "verify-restored-state",
@@ -291,9 +269,7 @@ def _action_payload(
             "runId": "41",
             "runAttempt": "2",
             "expiresAt": _time_text(EXPIRES),
-            "authorizationExpiresAtEpoch": str(
-                int((EXPIRES + worker.OWNER_RETENTION).timestamp())
-            ),
+            "authorizationExpiresAtEpoch": str(int((EXPIRES + worker.OWNER_RETENTION).timestamp())),
         },
         "release": deepcopy(_RELEASE_IDENTITY),
         "execution": deepcopy(_EXECUTION_IDENTITY),
@@ -1091,9 +1067,7 @@ def test_complete_replay_cannot_apply_owner_state_after_the_fact() -> None:
         next_revision=base.revision + 1,
         base_state_sha256=base.sha256,
         next_state_json=next_state_json,
-        next_state_sha256=hashlib.sha256(
-            next_state_json.encode()
-        ).hexdigest(),
+        next_state_sha256=hashlib.sha256(next_state_json.encode()).hexdigest(),
         expires_at=task.expires_at,
     )
     store = worker.DurableStateStore(
@@ -1102,9 +1076,7 @@ def test_complete_replay_cannot_apply_owner_state_after_the_fact() -> None:
         now=lambda: NOW,
     )
     store.load_owner = lambda *_args: base
-    store.commit_owner = lambda **_kwargs: pytest.fail(
-        "a COMPLETE replay must never mutate owner state"
-    )
+    store.commit_owner = lambda **_kwargs: pytest.fail("a COMPLETE replay must never mutate owner state")
 
     with pytest.raises(worker.ReplayConflictError):
         store.reconcile_replay(task, replay)
@@ -1343,17 +1315,13 @@ def test_completion_atomically_cas_updates_owner_and_replay() -> None:
         output_sha256=hashlib.sha256(output_json.encode()).hexdigest(),
         previous=previous,
         next_state_json=next_state_json,
-        next_state_sha256=hashlib.sha256(
-            next_state_json.encode()
-        ).hexdigest(),
+        next_state_sha256=hashlib.sha256(next_state_json.encode()).hexdigest(),
     )
 
     request = aws.parameters("transact_write_items")[0]
     items = request["TransactItems"]
     assert len(items) == 3
-    assert items[0]["ConditionCheck"]["Key"] == {
-        "leaseKey": {"S": "production"}
-    }
+    assert items[0]["ConditionCheck"]["Key"] == {"leaseKey": {"S": "production"}}
     owner_update = items[1]["Update"]
     replay_update = items[2]["Update"]
     assert owner_update["ConditionExpression"] == (
@@ -1392,14 +1360,10 @@ def test_completion_cas_failure_never_returns_complete_replay() -> None:
         store.complete_claim(
             task=task,
             output_json=output_json,
-            output_sha256=hashlib.sha256(
-                output_json.encode()
-            ).hexdigest(),
+            output_sha256=hashlib.sha256(output_json.encode()).hexdigest(),
             previous=_owner_state(revision=1),
             next_state_json=next_state_json,
-            next_state_sha256=hashlib.sha256(
-                next_state_json.encode()
-            ).hexdigest(),
+            next_state_sha256=hashlib.sha256(next_state_json.encode()).hexdigest(),
         )
 
     assert aws.operations() == ["transact_write_items"]
@@ -1419,9 +1383,7 @@ def test_expired_owner_scan_is_bounded_for_cleanup_domain_handler() -> None:
                         "recordType": {"S": "OWNER"},
                         "ownerId": {"S": OWNER},
                         "ownerExpiresAt": {"S": _time_text(EXPIRES)},
-                        "ownerExpiresAtEpoch": {
-                            "N": str(int(EXPIRES.timestamp()))
-                        },
+                        "ownerExpiresAtEpoch": {"N": str(int(EXPIRES.timestamp()))},
                         "revision": {"N": "4"},
                         "stateJson": {"S": state_json},
                         "stateSha256": {"S": state_sha},
@@ -1467,12 +1429,8 @@ def test_expired_owner_index_query_preserves_full_cursor_across_pages() -> None:
                             "leaseKey": {"S": f"owner#{OWNER}"},
                             "recordType": {"S": "OWNER"},
                             "ownerId": {"S": OWNER},
-                            "ownerExpiresAt": {
-                                "S": _time_text(EXPIRES)
-                            },
-                            "ownerExpiresAtEpoch": {
-                                "N": str(int(EXPIRES.timestamp()))
-                            },
+                            "ownerExpiresAt": {"S": _time_text(EXPIRES)},
+                            "ownerExpiresAtEpoch": {"N": str(int(EXPIRES.timestamp()))},
                             "revision": {"N": "4"},
                             "stateJson": {"S": state_json},
                             "stateSha256": {"S": state_sha},
@@ -1501,9 +1459,7 @@ def test_expired_owner_index_query_preserves_full_cursor_across_pages() -> None:
     first_request = aws.calls[0][3]
     assert first_request["IndexName"] == "owner-expiry-index"
     assert first_request["ConsistentRead"] is False
-    assert first_request["KeyConditionExpression"] == (
-        "recordType = :ownerType AND ownerExpiresAtEpoch <= :now"
-    )
+    assert first_request["KeyConditionExpression"] == ("recordType = :ownerType AND ownerExpiresAtEpoch <= :now")
     assert aws.calls[1][3]["ExclusiveStartKey"] == cursor
 
 
@@ -1514,9 +1470,7 @@ def test_expired_owner_index_query_preserves_full_cursor_across_pages() -> None:
         {
             "leaseKey": {"S": f"owner#{OWNER}"},
             "recordType": {"S": "REPLAY"},
-            "ownerExpiresAtEpoch": {
-                "N": str(int(EXPIRES.timestamp()))
-            },
+            "ownerExpiresAtEpoch": {"N": str(int(EXPIRES.timestamp()))},
         },
         {
             "leaseKey": {"S": f"owner#{OWNER}"},
@@ -1554,14 +1508,8 @@ def test_expired_owner_listing_rejects_malformed_owner_identity(
     class InvalidExpiryAws(FakeAws):
         def call(self, service, operation, **kwargs):
             super().call(service, operation, **kwargs)
-            lease_key = (
-                "owner#" + "a" * 64
-                if mutation == "lease"
-                else f"owner#{OWNER}"
-            )
-            expiry_epoch = int(EXPIRES.timestamp()) + (
-                1 if mutation == "expiry" else 0
-            )
+            lease_key = "owner#" + "a" * 64 if mutation == "lease" else f"owner#{OWNER}"
+            expiry_epoch = int(EXPIRES.timestamp()) + (1 if mutation == "expiry" else 0)
             return {
                 "Items": [
                     {
@@ -1569,9 +1517,7 @@ def test_expired_owner_listing_rejects_malformed_owner_identity(
                         "recordType": {"S": "OWNER"},
                         "ownerId": {"S": OWNER},
                         "ownerExpiresAt": {"S": _time_text(EXPIRES)},
-                        "ownerExpiresAtEpoch": {
-                            "N": str(expiry_epoch)
-                        },
+                        "ownerExpiresAtEpoch": {"N": str(expiry_epoch)},
                         "revision": {"N": "4"},
                         "stateJson": {"S": state_json},
                         "stateSha256": {"S": state_sha},

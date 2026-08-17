@@ -37,9 +37,7 @@ class TestEnvironmentAlwaysWins:
         """A deploy injecting one key must not have it replaced while still
         picking up nothing else it didn't ask for."""
         env = {"AXON_LOAD_DEMO_DATA": "true", _KEY: "from-the-platform"}
-        loaded = load_dev_env_file(
-            _write(tmp_path, f"{_KEY}=from-the-file\nXAI_API_KEY=xai-file"), env
-        )
+        loaded = load_dev_env_file(_write(tmp_path, f"{_KEY}=from-the-file\nXAI_API_KEY=xai-file"), env)
         assert env[_KEY] == "from-the-platform"
         assert env["XAI_API_KEY"] == "xai-file"
         assert loaded == ["XAI_API_KEY"]
@@ -137,8 +135,8 @@ class TestTheEntrypointDefaultsDemoDataOn:
     the one that surprises people: the Dockerfile ``CMD`` is this same entrypoint,
     so *any* container started without the variable comes up with Acme Corp,
     three fictional users and 66 fabricated usage records — `docker compose up`,
-    a hand-written task definition, App Runner. A "clean install" that silently
-    seeds a demo tenant is worse than one that fails, because the data is
+    or a hand-written task definition. A "clean install" that silently seeds a
+    demo tenant is worse than one that fails, because the data is
     indistinguishable from real usage in the UI. ``infra/stack.py`` neutralises
     the default for the Fargate path only, asserted in
     ``test_infra_stack_env.py``; this class asserts the default it is

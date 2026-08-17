@@ -13,11 +13,16 @@ from src.gateway.auth.principal import (
 from src.gateway.models import AuthMethod, Principal, RequestContext
 
 from .errors import AgentCoreAdapterError
+from .facade_identity import (
+    FACADE_IDENTITY_HEADER,
+    FACADE_IDENTITY_SCHEME,
+    FacadeIdentityError,
+    decode_facade_identity,
+)
 from .runtime import OIDCTokenVerifier
 
 
 AUTHORIZATION_HEADER = "authorization"
-FACADE_IDENTITY_HEADER = "x-amzn-bedrock-agentcore-runtime-custom-identity-token"
 
 
 @dataclass(frozen=True)
@@ -46,8 +51,8 @@ def _single_header(
     return matches[0]
 
 
-def extract_bearer_token(context: Any) -> str:
-    """Read one identity token only from SDK-populated request headers."""
+def _identity_header(context: Any) -> tuple[str, str]:
+    """Read exactly one identity value from SDK-populated request headers."""
     headers = getattr(context, "request_headers", None)
     if not isinstance(headers, Mapping):
         raise AgentCoreAdapterError(
@@ -65,8 +70,15 @@ def extract_bearer_token(context: Any) -> str:
             "invalid_runtime_identity",
             "Exactly one invocation identity is required.",
         )
+    return (
+        AUTHORIZATION_HEADER if authorization is not None else FACADE_IDENTITY_HEADER,
+        candidates[0],
+    )
 
-    scheme, separator, token = candidates[0].partition(" ")
+
+def _bearer_token(value: str) -> str:
+    """Validate one bearer value without accepting alternate token forms."""
+    scheme, separator, token = value.partition(" ")
     if (
         separator != " "
         or scheme.casefold() != "bearer"
@@ -80,6 +92,18 @@ def extract_bearer_token(context: Any) -> str:
             "Invocation identity is invalid.",
         )
     return token
+
+
+def extract_bearer_token(context: Any) -> str:
+    """Read a direct JWT bearer token from the Authorization header."""
+    header_name, value = _identity_header(context)
+    if header_name != AUTHORIZATION_HEADER:
+        raise AgentCoreAdapterError(
+            401,
+            "invalid_runtime_identity",
+            "Invocation identity is invalid.",
+        )
+    return _bearer_token(value)
 
 
 def _required_claim(value: Any, claim_name: str) -> str:
@@ -117,13 +141,11 @@ def _sanitize_verified_context(context: RequestContext) -> RequestContext:
     )
 
 
-async def resolve_invocation_identity(
-    context: Any,
+async def _verified_bearer_context(
+    value: str,
     token_verifier: OIDCTokenVerifier,
-    principal_resolver: PrincipalResolver,
-) -> InvocationIdentity:
-    """Verify the runtime token, then resolve server-held tenant authority."""
-    token = extract_bearer_token(context)
+) -> RequestContext:
+    token = _bearer_token(value)
     try:
         verified = await token_verifier.validate_oidc_jwt(token)
     except Exception as exc:
@@ -138,8 +160,44 @@ async def resolve_invocation_identity(
             "invalid_runtime_identity",
             "Invocation identity is invalid.",
         )
+    return _sanitize_verified_context(verified)
 
-    credential_context = _sanitize_verified_context(verified)
+
+async def resolve_invocation_identity(
+    context: Any,
+    token_verifier: OIDCTokenVerifier,
+    principal_resolver: PrincipalResolver,
+    *,
+    allow_facade_identity: bool = False,
+) -> InvocationIdentity:
+    """Verify the runtime token, then resolve server-held tenant authority."""
+    header_name, value = _identity_header(context)
+    if header_name == AUTHORIZATION_HEADER:
+        credential_context = await _verified_bearer_context(
+            value,
+            token_verifier,
+        )
+    else:
+        if not allow_facade_identity:
+            raise AgentCoreAdapterError(
+                401,
+                "invalid_runtime_identity",
+                "Invocation identity is invalid.",
+            )
+        if value.startswith(f"{FACADE_IDENTITY_SCHEME} "):
+            try:
+                credential_context = decode_facade_identity(value)
+            except FacadeIdentityError as exc:
+                raise AgentCoreAdapterError(
+                    401,
+                    "invalid_runtime_identity",
+                    "Invocation identity is invalid.",
+                ) from exc
+        else:
+            credential_context = await _verified_bearer_context(
+                value,
+                token_verifier,
+            )
     try:
         principal = await principal_resolver.resolve(credential_context)
     except Exception as exc:

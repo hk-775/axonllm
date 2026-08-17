@@ -21,13 +21,16 @@ from typing import Any, Protocol
 from urllib.parse import quote, urlencode
 from uuid import uuid4
 
-import sqlglot
-from sqlglot import exp
+from botocore.auth import SigV4Auth
+from botocore.awsrequest import AWSRequest
 
 
 REPORT_SCHEMA = "axonllm.agentcore-certification/v1"
 ENABLED_PROVIDERS_PROFILE = "enabled-providers"
 PRODUCTION_LAUNCH_PROFILE = "production-launch"
+DIRECT_JWT_INGRESS = "direct-jwt"
+IAM_FACADE_INGRESS = "iam-facade"
+_FACADE_IDENTITY_HEADER = "X-Amzn-Bedrock-AgentCore-Runtime-Custom-Identity-Token"
 PRODUCTION_LAUNCH_PROVIDERS = frozenset(
     {
         "anthropic",
@@ -49,21 +52,11 @@ PRODUCTION_OPTIONAL_PROVIDERS = frozenset(
         "vertex_ai",
     }
 )
-PRODUCTION_ALLOWED_PROVIDERS = (
-    PRODUCTION_LAUNCH_PROVIDERS | PRODUCTION_OPTIONAL_PROVIDERS
-)
-SUPPORTED_PROVIDER_FEATURES = frozenset(
-    {"completion", "stream", "tool_calling"}
-)
-PRODUCTION_REQUIRED_PROVIDER_FEATURES = frozenset(
-    {"completion", "stream"}
-)
+PRODUCTION_ALLOWED_PROVIDERS = PRODUCTION_LAUNCH_PROVIDERS | PRODUCTION_OPTIONAL_PROVIDERS
+SUPPORTED_PROVIDER_FEATURES = frozenset({"completion", "stream", "tool_calling"})
+PRODUCTION_REQUIRED_PROVIDER_FEATURES = frozenset({"completion", "stream"})
 PRODUCTION_PROVIDER_FEATURES_BY_PROVIDER = {
-    provider: (
-        PRODUCTION_REQUIRED_PROVIDER_FEATURES
-        if provider == "fireworks"
-        else SUPPORTED_PROVIDER_FEATURES
-    )
+    provider: (PRODUCTION_REQUIRED_PROVIDER_FEATURES if provider == "fireworks" else SUPPORTED_PROVIDER_FEATURES)
     for provider in PRODUCTION_ALLOWED_PROVIDERS
 }
 _ARN_PATTERN = re.compile(
@@ -74,9 +67,6 @@ _ARN_PATTERN = re.compile(
 _ENV_PATTERN = re.compile(r"^[A-Z_][A-Z0-9_]{0,127}$")
 _NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 _QUALIFIER_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,47}$")
-_ROLE_ARN_PATTERN = re.compile(
-    r"^arn:aws:iam::[0-9]{12}:role/[A-Za-z0-9+=,.@_/-]{1,512}$"
-)
 _MAX_CONFIG_BYTES = 256 * 1024
 _DEFAULT_MAX_RESPONSE_BYTES = 10 * 1024 * 1024
 _CANARY_CONTENT = "AXON_CANARY_OK"
@@ -128,18 +118,6 @@ class ProviderCase:
 
 
 @dataclass(frozen=True)
-class QueryCase:
-    datasource_id: str
-    sql: str
-    max_rows: int
-    role_arn: str
-    region: str
-    catalog: str
-    database: str
-    workgroup: str
-
-
-@dataclass(frozen=True)
 class TenantConfigCase:
     tenant_id: str
     project_id: str
@@ -148,6 +126,7 @@ class TenantConfigCase:
 @dataclass(frozen=True)
 class CertificationConfig:
     profile: str
+    ingress_mode: str
     region: str
     runtime_arn: str
     qualifier: str
@@ -155,7 +134,6 @@ class CertificationConfig:
     max_response_bytes: int
     identities: IdentityCases
     providers: tuple[ProviderCase, ...]
-    query: QueryCase
     tenant_config: TenantConfigCase | None
 
 
@@ -258,24 +236,6 @@ def _positive_number(value: Any, location: str, maximum: float) -> float:
     return float(value)
 
 
-def _select_sql(value: Any) -> str:
-    sql = _string(value, "query.sql", maximum=64 * 1024)
-    try:
-        statements = sqlglot.parse(
-            sql,
-            read="athena",
-            error_level=sqlglot.ErrorLevel.RAISE,
-            error_message_context=0,
-        )
-    except Exception as exc:
-        raise CertificationError("query.sql must be valid Athena SQL") from exc
-    if len(statements) != 1 or not isinstance(statements[0], exp.Query):
-        raise CertificationError("query.sql must contain exactly one SELECT")
-    if any(isinstance(node, (exp.DDL, exp.DML, exp.Command, exp.Into)) for node in statements[0].walk()):
-        raise CertificationError("query.sql must be read-only")
-    return sql
-
-
 def parse_config(value: Any) -> CertificationConfig:
     """Parse a complete launch-certification scenario without accepting secrets."""
     raw = _object(value, "configuration")
@@ -289,9 +249,9 @@ def parse_config(value: Any) -> CertificationConfig:
             "qualifier",
             "identities",
             "providers",
-            "query",
         },
         optional={
+            "ingressMode",
             "timeoutSeconds",
             "maxResponseBytes",
             "profile",
@@ -305,10 +265,10 @@ def parse_config(value: Any) -> CertificationConfig:
         ENABLED_PROVIDERS_PROFILE,
         PRODUCTION_LAUNCH_PROFILE,
     }:
-        raise CertificationError(
-            "configuration.profile must be enabled-providers or "
-            "production-launch"
-        )
+        raise CertificationError("configuration.profile must be enabled-providers or production-launch")
+    ingress_mode = raw.get("ingressMode", DIRECT_JWT_INGRESS)
+    if ingress_mode not in {DIRECT_JWT_INGRESS, IAM_FACADE_INGRESS}:
+        raise CertificationError("configuration.ingressMode must be direct-jwt or iam-facade")
     runtime_arn = _string(raw["runtimeArn"], "runtimeArn")
     arn_match = _ARN_PATTERN.fullmatch(runtime_arn)
     if arn_match is None:
@@ -337,13 +297,11 @@ def parse_config(value: Any) -> CertificationConfig:
     has_tenant_config = "tenantConfig" in raw
     if len({has_admin, has_viewer, has_tenant_config}) != 1:
         raise CertificationError(
-            "adminCredentialEnv, viewerCredentialEnv, and tenantConfig "
-            "must be configured together"
+            "adminCredentialEnv, viewerCredentialEnv, and tenantConfig must be configured together"
         )
     if not has_tenant_config and profile != PRODUCTION_LAUNCH_PROFILE:
         raise CertificationError(
-            "managed certification requires adminCredentialEnv, "
-            "viewerCredentialEnv, and tenantConfig"
+            "managed certification requires adminCredentialEnv, viewerCredentialEnv, and tenantConfig"
         )
     identities = IdentityCases(
         active_env=_environment_name(
@@ -440,31 +398,21 @@ def parse_config(value: Any) -> CertificationConfig:
             not isinstance(raw_features, list)
             or not raw_features
             or any(
-                not isinstance(feature, str)
-                or feature not in SUPPORTED_PROVIDER_FEATURES
-                for feature in raw_features
+                not isinstance(feature, str) or feature not in SUPPORTED_PROVIDER_FEATURES for feature in raw_features
             )
             or len(raw_features) != len(set(raw_features))
         ):
-            raise CertificationError(
-                f"{location}.features must contain unique supported "
-                "provider features"
-            )
+            raise CertificationError(f"{location}.features must contain unique supported provider features")
         features = frozenset(raw_features)
         if not PRODUCTION_REQUIRED_PROVIDER_FEATURES.issubset(features):
-            raise CertificationError(
-                f"{location}.features must include completion and stream"
-            )
+            raise CertificationError(f"{location}.features must include completion and stream")
         expected_features = (
-            PRODUCTION_PROVIDER_FEATURES_BY_PROVIDER.get(provider)
-            if profile == PRODUCTION_LAUNCH_PROFILE
-            else None
+            PRODUCTION_PROVIDER_FEATURES_BY_PROVIDER.get(provider) if profile == PRODUCTION_LAUNCH_PROFILE else None
         )
         if expected_features is not None and features != expected_features:
             expected = ", ".join(sorted(expected_features))
             raise CertificationError(
-                f"{location}.features must exactly match the production "
-                f"launch contract for {provider}: {expected}"
+                f"{location}.features must exactly match the production launch contract for {provider}: {expected}"
             )
         providers.append(
             ProviderCase(
@@ -474,83 +422,20 @@ def parse_config(value: Any) -> CertificationConfig:
             )
         )
     if profile == PRODUCTION_LAUNCH_PROFILE:
-        missing_providers = (
-            PRODUCTION_LAUNCH_PROVIDERS - provider_names
-        )
+        missing_providers = PRODUCTION_LAUNCH_PROVIDERS - provider_names
         if missing_providers:
             raise CertificationError(
-                "production-launch providers are missing mandatory "
-                f"providers: {', '.join(sorted(missing_providers))}"
+                f"production-launch providers are missing mandatory providers: {', '.join(sorted(missing_providers))}"
             )
-        unsupported_providers = (
-            provider_names - PRODUCTION_ALLOWED_PROVIDERS
-        )
+        unsupported_providers = provider_names - PRODUCTION_ALLOWED_PROVIDERS
         if unsupported_providers:
             raise CertificationError(
-                "production-launch providers contain unsupported "
-                f"providers: {', '.join(sorted(unsupported_providers))}"
+                f"production-launch providers contain unsupported providers: {', '.join(sorted(unsupported_providers))}"
             )
 
-    raw_query = _object(raw["query"], "query")
-    _strict_fields(
-        raw_query,
-        "query",
-        required={
-            "catalog",
-            "database",
-            "datasourceId",
-            "region",
-            "roleArn",
-            "sql",
-            "workgroup",
-        },
-        optional={"maxRows"},
-    )
-    role_arn = _string(
-        raw_query["roleArn"],
-        "query.roleArn",
-        maximum=600,
-    )
-    if _ROLE_ARN_PATTERN.fullmatch(role_arn) is None:
-        raise CertificationError(
-            "query.roleArn must be a concrete IAM role ARN"
-        )
-    query_region = _identifier(
-        raw_query["region"],
-        "query.region",
-    )
-    if query_region != region:
-        raise CertificationError(
-            "query.region must match the AgentCore region"
-        )
-    query = QueryCase(
-        datasource_id=_identifier(
-            raw_query["datasourceId"],
-            "query.datasourceId",
-        ),
-        sql=_select_sql(raw_query["sql"]),
-        max_rows=_positive_integer(
-            raw_query.get("maxRows", 10),
-            "query.maxRows",
-            maximum=10_000,
-        ),
-        role_arn=role_arn,
-        region=query_region,
-        catalog=_identifier(
-            raw_query["catalog"],
-            "query.catalog",
-        ),
-        database=_identifier(
-            raw_query["database"],
-            "query.database",
-        ),
-        workgroup=_identifier(
-            raw_query["workgroup"],
-            "query.workgroup",
-        ),
-    )
     return CertificationConfig(
         profile=profile,
+        ingress_mode=ingress_mode,
         region=region,
         runtime_arn=runtime_arn,
         qualifier=qualifier,
@@ -566,7 +451,6 @@ def parse_config(value: Any) -> CertificationConfig:
         ),
         identities=identities,
         providers=tuple(providers),
-        query=query,
         tenant_config=tenant_config,
     )
 
@@ -658,6 +542,73 @@ def urllib_transport(
             content_type="",
             body=b"",
             error_type="transport_error",
+        )
+
+
+class IamFacadeTransport:
+    """SigV4-sign certification requests and forward JWTs as runtime identity."""
+
+    def __init__(
+        self,
+        config: CertificationConfig,
+        *,
+        session: Any,
+    ) -> None:
+        if config.ingress_mode != IAM_FACADE_INGRESS:
+            raise CertificationError("IAM facade transport requires iam-facade ingress")
+        self._config = config
+        self._session = session
+
+    def __call__(
+        self,
+        request: InvocationRequest,
+        timeout_seconds: float,
+        max_response_bytes: int,
+    ) -> InvocationObservation:
+        if request.url != invocation_url(self._config):
+            return InvocationObservation(
+                status_code=None,
+                latency_ms=0,
+                content_type="",
+                body=b"",
+                error_type="invalid_transport_request",
+            )
+        headers = dict(request.headers)
+        bearer = headers.pop("Authorization", None)
+        if bearer is not None:
+            headers[_FACADE_IDENTITY_HEADER] = bearer
+        try:
+            credentials = self._session.get_credentials()
+            if credentials is None:
+                raise CertificationError("AWS credentials are unavailable for IAM facade certification")
+            signed = AWSRequest(
+                method="POST",
+                url=request.url,
+                data=request.payload,
+                headers=headers,
+            )
+            SigV4Auth(
+                credentials.get_frozen_credentials(),
+                "bedrock-agentcore",
+                self._config.region,
+            ).add_auth(signed)
+            signed_request = InvocationRequest(
+                url=request.url,
+                payload=request.payload,
+                headers=dict(signed.headers.items()),
+            )
+        except Exception:
+            return InvocationObservation(
+                status_code=None,
+                latency_ms=0,
+                content_type="",
+                body=b"",
+                error_type="aws_signing_error",
+            )
+        return urllib_transport(
+            signed_request,
+            timeout_seconds,
+            max_response_bytes,
         )
 
 
@@ -910,17 +861,10 @@ def _tool_canary_call(
     if type(choices) is not list or len(choices) != 1:
         return None
     choice = choices[0]
-    if (
-        type(choice) is not dict
-        or choice.get("finish_reason") != "tool_calls"
-    ):
+    if type(choice) is not dict or choice.get("finish_reason") != "tool_calls":
         return None
     message = choice.get("message")
-    calls = (
-        message.get("tool_calls")
-        if type(message) is dict
-        else None
-    )
+    calls = message.get("tool_calls") if type(message) is dict else None
     if type(calls) is not list or len(calls) != 1:
         return None
     call = calls[0]
@@ -1016,10 +960,7 @@ def _valid_stream_tool_canary(
                 (raw_call.get("type"), "type"),
             ):
                 if source is not None:
-                    if not isinstance(source, str) or (
-                        call[target] is not None
-                        and call[target] != source
-                    ):
+                    if not isinstance(source, str) or (call[target] is not None and call[target] != source):
                         return False
                     call[target] = source
             function = raw_call.get("function", {})
@@ -1027,10 +968,7 @@ def _valid_stream_tool_canary(
                 return False
             name = function.get("name")
             if name is not None:
-                if not isinstance(name, str) or (
-                    call["name"] is not None
-                    and call["name"] != name
-                ):
+                if not isinstance(name, str) or (call["name"] is not None and call["name"] != name):
                     return False
                 call["name"] = name
             arguments = function.get("arguments")
@@ -1039,13 +977,7 @@ def _valid_stream_tool_canary(
                     return False
                 call["arguments"].append(arguments)
 
-    if (
-        not done_seen
-        or not finish_seen
-        or not provider_seen
-        or not model_seen
-        or set(calls) != {0}
-    ):
+    if not done_seen or not finish_seen or not provider_seen or not model_seen or set(calls) != {0}:
         return False
     call = calls[0]
     try:
@@ -1134,7 +1066,8 @@ def _tenant_config_snapshot(
 ) -> tuple[int, str] | None:
     if (
         body is None
-        or set(body) != {
+        or set(body)
+        != {
             "tenant_id",
             "project_id",
             "revision",
@@ -1155,12 +1088,7 @@ def _tenant_config_snapshot(
     ):
         return None
     name = project_config.get("name")
-    if (
-        not isinstance(name, str)
-        or not name
-        or name != name.strip()
-        or len(name) > 256
-    ):
+    if not isinstance(name, str) or not name or name != name.strip() or len(name) > 256:
         return None
     return revision, name
 
@@ -1197,11 +1125,7 @@ def _restore_tenant_config(
             token=token,
             expected_statuses={200},
         )
-        snapshot = (
-            _tenant_config_snapshot(read_body, case)
-            if read.status_code == 200
-            else None
-        )
+        snapshot = _tenant_config_snapshot(read_body, case) if read.status_code == 200 else None
         if snapshot is None:
             continue
         revision, current_name = snapshot
@@ -1222,15 +1146,8 @@ def _restore_tenant_config(
             token=token,
             expected_statuses={200},
         )
-        restored = (
-            _tenant_config_snapshot(rollback_body, case)
-            if rollback.status_code == 200
-            else None
-        )
-        if (
-            rollback.error_type is None
-            and restored == (revision + 1, original_name)
-        ):
+        restored = _tenant_config_snapshot(rollback_body, case) if rollback.status_code == 200 else None
+        if rollback.error_type is None and restored == (revision + 1, original_name):
             return True
     return False
 
@@ -1382,10 +1299,7 @@ def _tenant_config_checks(
         token=viewer,
         expected_statuses={403},
     )
-    viewer_denied = (
-        viewer_write.status_code == 403
-        and _error_code(viewer_write_body) == "authorization_denied"
-    )
+    viewer_denied = viewer_write.status_code == 403 and _error_code(viewer_write_body) == "authorization_denied"
     checks.append(
         _check(
             name=mutation_check_names[0][0],
@@ -1403,10 +1317,7 @@ def _tenant_config_checks(
             original_name=original_name,
             canary_name=viewer_canary,
         ):
-            raise CertificationError(
-                "viewer mutation denial failed and tenant configuration "
-                "rollback is incomplete"
-            )
+            raise CertificationError("viewer mutation denial failed and tenant configuration rollback is incomplete")
         append_skipped(1, "viewer_mutation_denial_failed")
         return checks
 
@@ -1446,10 +1357,7 @@ def _tenant_config_checks(
             original_name=original_name,
             canary_name=admin_canary,
         ):
-            raise CertificationError(
-                "admin mutation failed and tenant configuration rollback "
-                "is incomplete"
-            )
+            raise CertificationError("admin mutation failed and tenant configuration rollback is incomplete")
         append_skipped(2, "admin_mutation_failed")
         return checks
 
@@ -1463,9 +1371,7 @@ def _tenant_config_checks(
         token=admin,
         expected_statuses={200},
     )
-    confirmation_passed = (
-        _tenant_config_snapshot(confirmation_body, case) == mutated
-    )
+    confirmation_passed = _tenant_config_snapshot(confirmation_body, case) == mutated
     checks.append(
         _check(
             name=mutation_check_names[2][0],
@@ -1484,8 +1390,7 @@ def _tenant_config_checks(
             canary_name=admin_canary,
         ):
             raise CertificationError(
-                "admin mutation confirmation failed and tenant "
-                "configuration rollback is incomplete"
+                "admin mutation confirmation failed and tenant configuration rollback is incomplete"
             )
         append_skipped(3, "admin_mutation_confirmation_failed")
         return checks
@@ -1525,9 +1430,7 @@ def _tenant_config_checks(
             original_name=original_name,
             canary_name=admin_canary,
         ):
-            raise CertificationError(
-                "tenant configuration rollback is incomplete"
-            )
+            raise CertificationError("tenant configuration rollback is incomplete")
         append_skipped(4, "admin_rollback_evidence_failed")
         return checks
 
@@ -1540,10 +1443,7 @@ def _tenant_config_checks(
         token=admin,
         expected_statuses={200},
     )
-    rollback_confirmed = (
-        _tenant_config_snapshot(rollback_read_body, case)
-        == rolled_back
-    )
+    rollback_confirmed = _tenant_config_snapshot(rollback_read_body, case) == rolled_back
     checks.append(
         _check(
             name=mutation_check_names[4][0],
@@ -1560,10 +1460,7 @@ def _tenant_config_checks(
         original_name=original_name,
         canary_name=admin_canary,
     ):
-        raise CertificationError(
-            "tenant configuration rollback confirmation failed and "
-            "cleanup is incomplete"
-        )
+        raise CertificationError("tenant configuration rollback confirmation failed and cleanup is incomplete")
     return checks
 
 
@@ -1616,7 +1513,7 @@ def run_certification(
     transport: Transport = urllib_transport,
     endpoint_metadata: Mapping[str, str],
 ) -> dict[str, Any]:
-    """Run auth, RBAC, provider, streaming, and query launch canaries."""
+    """Run auth, RBAC, provider, and streaming launch canaries."""
     active = _credential(environ, config.identities.active_env)
     inactive = _credential(environ, config.identities.inactive_env)
     ungranted = _credential(environ, config.identities.ungranted_env)
@@ -1624,16 +1521,8 @@ def run_certification(
         environ,
         config.identities.cross_tenant_env,
     )
-    admin = (
-        _credential(environ, config.identities.admin_env)
-        if config.identities.admin_env is not None
-        else None
-    )
-    viewer = (
-        _credential(environ, config.identities.viewer_env)
-        if config.identities.viewer_env is not None
-        else None
-    )
+    admin = _credential(environ, config.identities.admin_env) if config.identities.admin_env is not None else None
+    viewer = _credential(environ, config.identities.viewer_env) if config.identities.viewer_env is not None else None
     checks: list[dict[str, Any]] = []
 
     denial_cases = (
@@ -1707,9 +1596,7 @@ def run_certification(
 
     if config.tenant_config is not None:
         if admin is None or viewer is None:
-            raise CertificationError(
-                "managed tenant configuration identities are unavailable"
-            )
+            raise CertificationError("managed tenant configuration identities are unavailable")
         checks.extend(
             _tenant_config_checks(
                 config,
@@ -1863,9 +1750,7 @@ def run_certification(
                 "type": "function",
                 "function": {
                     "name": _TOOL_NAME,
-                    "description": (
-                        "Return the production launch probe token."
-                    ),
+                    "description": ("Return the production launch probe token."),
                     "parameters": {
                         "type": "object",
                         "additionalProperties": False,
@@ -1912,9 +1797,7 @@ def run_certification(
                     category="provider_tool_call",
                     observation=tool_observation,
                     passed=tool_call is not None,
-                    validation=(
-                        "automatic_exact_provider_model_tool_call_and_arguments"
-                    ),
+                    validation=("automatic_exact_provider_model_tool_call_and_arguments"),
                     provider=case.provider,
                     model=case.model,
                 )
@@ -1924,9 +1807,7 @@ def run_certification(
                 **tool_payload,
                 "tool_choice": "required",
             }
-            required_statuses = (
-                {400} if case.provider == "cohere" else {200}
-            )
+            required_statuses = {400} if case.provider == "cohere" else {200}
             required_observation, required_body = _invoke_check(
                 config,
                 transport,
@@ -1954,10 +1835,7 @@ def run_certification(
                     validation=(
                         "required_tool_selection_explicitly_unsupported"
                         if case.provider == "cohere"
-                        else (
-                            "required_exact_provider_model_tool_call_and_"
-                            "arguments"
-                        )
+                        else ("required_exact_provider_model_tool_call_and_arguments")
                     ),
                     provider=case.provider,
                     model=case.model,
@@ -2012,9 +1890,7 @@ def run_certification(
                         case,
                         _TOOL_CONTINUATION_CONTENT,
                     ),
-                    validation=(
-                        "provider_tool_result_round_trip_and_exact_continuation"
-                    ),
+                    validation=("provider_tool_result_round_trip_and_exact_continuation"),
                     provider=case.provider,
                     model=case.model,
                 )
@@ -2025,10 +1901,7 @@ def run_certification(
                 "messages": [
                     {
                         "role": "user",
-                        "content": (
-                            "Do not call any tool. Reply with exactly "
-                            f"{_CANARY_CONTENT}."
-                        ),
+                        "content": (f"Do not call any tool. Reply with exactly {_CANARY_CONTENT}."),
                     }
                 ],
                 "tools": [tool_definition],
@@ -2070,9 +1943,7 @@ def run_certification(
                 expected_statuses={200},
             )
             stream_tool_events = (
-                _sse_events(stream_tool_observation)
-                if stream_tool_observation.status_code == 200
-                else None
+                _sse_events(stream_tool_observation) if stream_tool_observation.status_code == 200 else None
             )
             checks.append(
                 _check(
@@ -2083,69 +1954,11 @@ def run_certification(
                         stream_tool_events,
                         case,
                     ),
-                    validation=(
-                        "automatic_streamed_tool_call_and_arguments"
-                    ),
+                    validation=("automatic_streamed_tool_call_and_arguments"),
                     provider=case.provider,
                     model=case.model,
                 )
             )
-
-    request_id = f"cert-{uuid4().hex}"
-    observation, body = _invoke_check(
-        config,
-        transport,
-        name="query-select",
-        category="query_select",
-        payload={
-            "action": "query",
-            "datasource_id": config.query.datasource_id,
-            "sql": config.query.sql,
-            "max_rows": config.query.max_rows,
-            "request_id": request_id,
-        },
-        token=viewer or active,
-        expected_statuses={200},
-    )
-    checks.append(
-        _check(
-            name="query-select",
-            category="query_select",
-            observation=observation,
-            passed=(
-                body is not None
-                and body.get("request_id") == request_id
-                and body.get("datasource_id") == config.query.datasource_id
-                and isinstance(body.get("rows"), list)
-                and isinstance(body.get("statistics"), dict)
-            ),
-            validation="bounded_query_response_contract",
-        )
-    )
-
-    observation, _ = _invoke_check(
-        config,
-        transport,
-        name="query-mutation-denied",
-        category="query_mutation_denied",
-        payload={
-            "action": "query",
-            "datasource_id": config.query.datasource_id,
-            "sql": "DELETE FROM launch_canary",
-            "max_rows": 1,
-        },
-        token=viewer or active,
-        expected_statuses={400, 403},
-    )
-    checks.append(
-        _check(
-            name="query-mutation-denied",
-            category="query_mutation_denied",
-            observation=observation,
-            passed=observation.status_code in {400, 403},
-            validation="mutation_rejected",
-        )
-    )
 
     passed = all(check["passed"] for check in checks)
     return {
@@ -2166,11 +1979,9 @@ def run_certification(
                     key=lambda item: item.provider,
                 )
             },
-            "queryBackendExercised": True,
-            "tenantConfigRbacExercised": (
-                config.tenant_config is not None
-            ),
+            "tenantConfigRbacExercised": (config.tenant_config is not None),
             "agentcoreHttpsInvoked": True,
+            "ingressMode": config.ingress_mode,
         },
         "checks": checks,
     }
@@ -2206,16 +2017,24 @@ def main(argv: list[str] | None = None) -> int:
         config = load_config(args.config)
         import boto3
 
+        session = boto3.Session(region_name=config.region)
         endpoint = resolve_endpoint_metadata(
-            boto3.client(
+            session.client(
                 "bedrock-agentcore-control",
                 region_name=config.region,
             ),
             config,
         )
+        transport: Transport = urllib_transport
+        if config.ingress_mode == IAM_FACADE_INGRESS:
+            transport = IamFacadeTransport(
+                config,
+                session=session,
+            )
         report = run_certification(
             config,
             environ=os.environ,
+            transport=transport,
             endpoint_metadata=endpoint,
         )
         _write_report(

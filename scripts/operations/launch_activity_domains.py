@@ -34,12 +34,6 @@ DOMAIN_OPERATIONS: Mapping[str, tuple[str, ...]] = MappingProxyType(
             "observe-runtime-replacement",
             "verify-replacement-ready",
         ),
-        "query": (
-            "reject-query-boundaries",
-            "interrupt-query",
-            "verify-terminal-reconciliation",
-            "verify-deferred-accounting",
-        ),
         "recovery": (
             "restore-state",
             "cutover-restored-state",
@@ -81,7 +75,6 @@ OPERATION_TO_DOMAIN = MappingProxyType(
 DEFAULT_DOMAIN_MODULES: Mapping[str, str] = MappingProxyType(
     {
         "initialization": "launch_domains.initialization",
-        "query": "launch_domains.query",
         "recovery": "launch_domains.recovery",
         "security": "launch_domains.security",
         "routing": "launch_domains.routing",
@@ -107,7 +100,6 @@ FAULT_REMOVE_OPERATIONS = frozenset(
 FIXTURE_ADD_OPERATIONS = frozenset(
     {
         "restore-state",
-        "interrupt-query",
         "deliver-security-events",
         "exercise-routing-strategies",
     }
@@ -205,7 +197,7 @@ class LaunchDomain(Protocol):
 def _assert_registry() -> None:
     operations = [operation for domain_operations in DOMAIN_OPERATIONS.values() for operation in domain_operations]
     if (
-        len(operations) != 29
+        len(operations) != 25
         or len(operations) != len(set(operations))
         or set(operations) != set(worker.ACTION_OPERATIONS)
         or set(DOMAIN_OPERATIONS) != set(DEFAULT_DOMAIN_MODULES)
@@ -1198,8 +1190,7 @@ class LaunchActivityDomains:
             if (
                 record_type["S"] != "OWNER"
                 or not isinstance(epoch, str)
-                or re.fullmatch(r"(?:0|[1-9][0-9]{0,18})", epoch)
-                is None
+                or re.fullmatch(r"(?:0|[1-9][0-9]{0,18})", epoch) is None
             ):
                 raise worker.HandlerContractError from None
             result["recordType"] = {"S": "OWNER"}

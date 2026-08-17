@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 from typing import Any, AsyncIterator
 
+from src.gateway.models import RequestContext
+
 logger = logging.getLogger(__name__)
 
 
@@ -20,6 +22,7 @@ class ClientAgent:
         self.gateway_agent = gateway_agent
         self.default_user_id = default_user_id
         self.default_project_id = default_project_id
+        self.requires_request_context = bool(getattr(gateway_agent, "requires_request_context", False))
 
     async def list_models(
         self,
@@ -28,6 +31,7 @@ class ClientAgent:
         authorized_project: Any | None = None,
         tenant_id: str | None = None,
         allow_legacy_project_lookup: bool = False,
+        request_context: RequestContext | None = None,
     ) -> list[dict]:
         """Return available models filtered by access context.
 
@@ -47,6 +51,8 @@ class ClientAgent:
             kwargs["authorized_project"] = authorized_project
         if allow_legacy_project_lookup:
             kwargs["allow_legacy_project_lookup"] = True
+        if request_context is not None:
+            kwargs["request_context"] = request_context
         result = await self.gateway_agent.handle_list_models(**kwargs)
         return result.get("models", [])
 
@@ -68,13 +74,20 @@ class ClientAgent:
         authorized_project: Any | None = None,
         tenant_id: str | None = None,
         allow_legacy_project_lookup: bool = False,
+        request_context: RequestContext | None = None,
     ) -> dict:
         """Non-streaming chat completion. Returns simplified response dict."""
         request_data = self._build_request_data(
-            model, messages, stream=False,
-            temperature=temperature, max_tokens=max_tokens,
-            top_p=top_p, stop=stop, system=system,
-            tools=tools, tool_choice=tool_choice,
+            model,
+            messages,
+            stream=False,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            top_p=top_p,
+            stop=stop,
+            system=system,
+            tools=tools,
+            tool_choice=tool_choice,
         )
         context = self._build_context(
             user_id=user_id,
@@ -84,6 +97,7 @@ class ClientAgent:
             authorized_project=authorized_project,
             tenant_id=tenant_id,
             allow_legacy_project_lookup=allow_legacy_project_lookup,
+            request_context=request_context,
         )
         response = await self.gateway_agent.handle_chat_completion(request_data, context)
 
@@ -156,6 +170,7 @@ class ClientAgent:
         authorized_project: Any | None = None,
         tenant_id: str | None = None,
         allow_legacy_project_lookup: bool = False,
+        request_context: RequestContext | None = None,
     ) -> AsyncIterator[dict]:
         """Streaming chat completion. Yields chunk dicts.
 
@@ -165,17 +180,26 @@ class ClientAgent:
         deltas, so a tool call there arrives only in the buffered fallback.
         """
         request_data = self._build_request_data(
-            model, messages, stream=True,
-            temperature=temperature, max_tokens=max_tokens,
-            top_p=top_p, stop=stop, system=system,
-            tools=tools, tool_choice=tool_choice,
+            model,
+            messages,
+            stream=True,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            top_p=top_p,
+            stop=stop,
+            system=system,
+            tools=tools,
+            tool_choice=tool_choice,
         )
         context = self._build_context(
-            user_id=user_id, project_id=project_id, provider=provider,
+            user_id=user_id,
+            project_id=project_id,
+            provider=provider,
             smart_routing=smart_routing,
             authorized_project=authorized_project,
             tenant_id=tenant_id,
             allow_legacy_project_lookup=allow_legacy_project_lookup,
+            request_context=request_context,
         )
         result = await self.gateway_agent.handle_chat_completion(request_data, context)
 
@@ -290,6 +314,7 @@ class ClientAgent:
         authorized_project: Any | None = None,
         tenant_id: str | None = None,
         allow_legacy_project_lookup: bool = False,
+        request_context: RequestContext | None = None,
     ) -> dict:
         resolved_project_id, resolved_tenant_id = self._resolve_scope(
             project_id=project_id,
@@ -310,10 +335,10 @@ class ClientAgent:
             ctx["authorized_project"] = authorized_project
         if allow_legacy_project_lookup:
             if authorized_project is not None:
-                raise ValueError(
-                    "legacy project lookup cannot accompany an authorized project"
-                )
+                raise ValueError("legacy project lookup cannot accompany an authorized project")
             ctx["allow_legacy_project_lookup"] = True
+        if request_context is not None:
+            ctx["request_context"] = request_context
         return ctx
 
     def _resolve_scope(
@@ -324,9 +349,7 @@ class ClientAgent:
         authorized_project: Any | None,
     ) -> tuple[str, str | None]:
         """Resolve tenant/project hints without weakening canonical authority."""
-        if tenant_id is not None and (
-            not isinstance(tenant_id, str) or not tenant_id.strip()
-        ):
+        if tenant_id is not None and (not isinstance(tenant_id, str) or not tenant_id.strip()):
             raise ValueError("tenant_id must be None or a non-empty string")
 
         if authorized_project is None:
@@ -348,17 +371,11 @@ class ClientAgent:
             or not isinstance(authoritative_tenant_id, str)
             or not authoritative_tenant_id.strip()
         ):
-            raise ValueError(
-                "authorized_project must have non-empty project_id and tenant_id"
-            )
+            raise ValueError("authorized_project must have non-empty project_id and tenant_id")
         if project_id and project_id != authoritative_project_id:
-            raise ValueError(
-                "project_id does not match the authorized project"
-            )
+            raise ValueError("project_id does not match the authorized project")
         if tenant_id is not None and tenant_id != authoritative_tenant_id:
-            raise ValueError(
-                "tenant_id does not match the authorized project"
-            )
+            raise ValueError("tenant_id does not match the authorized project")
         return authoritative_project_id, authoritative_tenant_id
 
     async def get_available_users(self) -> list[str]:

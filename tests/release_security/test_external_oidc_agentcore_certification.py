@@ -35,31 +35,14 @@ import certify_agentcore as launch_certification
 import certify_external_oidc_agentcore as external_certification
 
 
-WORKFLOW = (
-    ROOT
-    / ".github"
-    / "workflows"
-    / "certify-agentcore-external-oidc.yml"
-)
-MANAGED_WORKFLOW = (
-    ROOT
-    / ".github"
-    / "workflows"
-    / "deploy-agentcore-production.yml"
-)
+WORKFLOW = ROOT / ".github" / "workflows" / "certify-agentcore-external-oidc.yml"
+MANAGED_WORKFLOW = ROOT / ".github" / "workflows" / "deploy-agentcore-production.yml"
 ACCOUNT = "123456789012"
 REGION = "us-east-1"
 DIGEST = "a" * 64
-IMAGE = (
-    f"{ACCOUNT}.dkr.ecr.{REGION}.amazonaws.com/"
-    f"axonllm/agentcore@sha256:{DIGEST}"
-)
-RUNTIME_ARN = (
-    "arn:aws:bedrock-agentcore:us-east-1:123456789012:"
-    "runtime/axonllm-AbCdEf1234"
-)
+IMAGE = f"{ACCOUNT}.dkr.ecr.{REGION}.amazonaws.com/axonllm/agentcore@sha256:{DIGEST}"
+RUNTIME_ARN = "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/axonllm-AbCdEf1234"
 CANDIDATE = "candidate_" + "b" * 32
-ROLE_ARN = "arn:aws:iam::123456789012:role/axon-athena-certification"
 ISSUER = "https://idp.example.com/oauth2/default"
 MIXUP_ISSUER = "https://other-idp.example.net/oauth2/default"
 AUDIENCE = "api://axonllm"
@@ -67,14 +50,8 @@ TENANT_CLAIM = "https://axonllm.example/tenant"
 PROJECT_CLAIM = "https://axonllm.example/project"
 NOW = 2_000_000_000
 EXTERNAL_STACK = "AxonLLMAgentCoreStack-external"
-WORKFLOW_REF = (
-    "AxonLLM/axonllm/.github/workflows/"
-    "certify-agentcore-external-oidc.yml@refs/heads/main"
-)
-PARENT_WORKFLOW_REF = (
-    "AxonLLM/axonllm/.github/workflows/"
-    "launch-agentcore-production.yml@refs/heads/main"
-)
+WORKFLOW_REF = "AxonLLM/axonllm/.github/workflows/certify-agentcore-external-oidc.yml@refs/heads/main"
+PARENT_WORKFLOW_REF = "AxonLLM/axonllm/.github/workflows/launch-agentcore-production.yml@refs/heads/main"
 
 
 def _workflow() -> dict[str, Any]:
@@ -87,9 +64,7 @@ def _workflow() -> dict[str, Any]:
 
 
 def _launch_providers(*, include_ai21: bool) -> set[str]:
-    providers = set(
-        launch_certification.PRODUCTION_LAUNCH_PROVIDERS
-    )
+    providers = set(launch_certification.PRODUCTION_LAUNCH_PROVIDERS)
     if include_ai21:
         providers.add("ai21")
     return providers
@@ -120,24 +95,14 @@ def _setup(
             "runtime": {
                 "verified_image_uri": IMAGE,
                 "bedrock_invoke_resource_arns": [
-                    (
-                        "arn:aws:bedrock:us-east-1::foundation-model/"
-                        "anthropic.claude-3-5-sonnet-20241022-v2:0"
-                    )
+                    ("arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-5-sonnet-20241022-v2:0")
                 ],
                 "approved_https_prefix_list_id": "pl-123abc",
-                "enabled_providers": sorted(
-                    _launch_providers(include_ai21=include_ai21)
-                ),
-                "athena_query": {
-                    "role_arns": [ROLE_ARN],
-                },
+                "enabled_providers": sorted(_launch_providers(include_ai21=include_ai21)),
             },
             "external_oidc": {
                 "issuer": ISSUER,
-                "discovery_url": (
-                    f"{ISSUER}/.well-known/openid-configuration"
-                ),
+                "discovery_url": (f"{ISSUER}/.well-known/openid-configuration"),
                 "client_id": "axonllm-client",
                 "audience": AUDIENCE,
                 "tenant_claim": TENANT_CLAIM,
@@ -170,25 +135,10 @@ def _certification(
             {
                 "provider": provider,
                 "model": f"{provider}-certification",
-                "features": sorted(
-                    launch_certification
-                    .PRODUCTION_PROVIDER_FEATURES_BY_PROVIDER[
-                        provider
-                    ]
-                ),
+                "features": sorted(launch_certification.PRODUCTION_PROVIDER_FEATURES_BY_PROVIDER[provider]),
             }
             for provider in sorted(providers)
         ],
-        "query": {
-            "catalog": "AwsDataCatalog",
-            "database": "default",
-            "datasourceId": "external-oidc-launch",
-            "region": REGION,
-            "roleArn": ROLE_ARN,
-            "sql": "SELECT 1 AS ready",
-            "maxRows": 10,
-            "workgroup": "axon_read_only",
-        },
     }
     if tenant_id is not None or project_id is not None:
         value["identities"]["adminCredentialEnv"] = "ADMIN_IDENTITY"
@@ -204,17 +154,13 @@ def _runtime_binding() -> external_certification.RuntimeBinding:
     return external_certification.RuntimeBinding(
         stack_name=EXTERNAL_STACK,
         stack_id=(
-            "arn:aws:cloudformation:us-east-1:123456789012:"
-            f"stack/{EXTERNAL_STACK}/"
-            "11111111-2222-3333-4444-555555555555"
+            f"arn:aws:cloudformation:us-east-1:123456789012:stack/{EXTERNAL_STACK}/11111111-2222-3333-4444-555555555555"
         ),
         stack_status="UPDATE_COMPLETE",
         runtime_arn=RUNTIME_ARN,
         runtime_version="7",
         endpoint_name=CANDIDATE,
-        endpoint_arn=(
-            f"{RUNTIME_ARN}/runtime-endpoint/{CANDIDATE}"
-        ),
+        endpoint_arn=(f"{RUNTIME_ARN}/runtime-endpoint/{CANDIDATE}"),
         image=IMAGE,
         table_name="axonllm-agentcore-state-external",
         endpoint_status="READY",
@@ -229,10 +175,7 @@ def _full_launch_report(
     launch_certification.CertificationConfig,
 ]:
     certification = _certification(include_ai21=include_ai21)
-    provider_features = {
-        case.provider: sorted(case.features)
-        for case in certification.providers
-    }
+    provider_features = {case.provider: sorted(case.features) for case in certification.providers}
     checks = [
         {
             "category": category,
@@ -250,8 +193,6 @@ def _full_launch_report(
             "liveness",
             "dependency_readiness",
             "model_listing",
-            "query_select",
-            "query_mutation_denied",
         )
     ]
     tool_categories = (
@@ -296,11 +237,8 @@ def _full_launch_report(
                 "passed": len(checks),
                 "failed": 0,
                 "providerCount": len(certification.providers),
-                "profile": (
-                    launch_certification.PRODUCTION_LAUNCH_PROFILE
-                ),
+                "profile": (launch_certification.PRODUCTION_LAUNCH_PROFILE),
                 "providerFeatures": provider_features,
-                "queryBackendExercised": True,
                 "tenantConfigRbacExercised": False,
                 "agentcoreHttpsInvoked": True,
             },
@@ -409,11 +347,7 @@ def _token_bundle() -> tuple[
             issuer=ISSUER,
             case=case,
             subject=f"subject-{case}",
-            tenant=(
-                "tenant-cross"
-                if case == "crossTenant"
-                else "tenant-a"
-            ),
+            tenant=("tenant-cross" if case == "crossTenant" else "tenant-a"),
         )
         for case in (
             "admin",
@@ -545,17 +479,14 @@ def _runtime_stack(
 ) -> dict[str, Any]:
     return {
         "StackId": (
-            "arn:aws:cloudformation:us-east-1:123456789012:"
-            f"stack/{EXTERNAL_STACK}/11111111-2222-3333-4444-555555555555"
+            f"arn:aws:cloudformation:us-east-1:123456789012:stack/{EXTERNAL_STACK}/11111111-2222-3333-4444-555555555555"
         ),
         "StackStatus": "UPDATE_COMPLETE",
         "Parameters": [
             {"ParameterKey": "OidcIssuer", "ParameterValue": issuer},
             {
                 "ParameterKey": "OidcDiscoveryUrl",
-                "ParameterValue": (
-                    f"{ISSUER}/.well-known/openid-configuration"
-                ),
+                "ParameterValue": (f"{ISSUER}/.well-known/openid-configuration"),
             },
             {
                 "ParameterKey": "OidcClientIds",
@@ -591,9 +522,7 @@ def _runtime_stack(
             },
             {
                 "OutputKey": "CandidateRuntimeEndpointArn",
-                "OutputValue": (
-                    f"{RUNTIME_ARN}/runtime-endpoint/{CANDIDATE}"
-                ),
+                "OutputValue": (f"{RUNTIME_ARN}/runtime-endpoint/{CANDIDATE}"),
             },
             {"OutputKey": "RuntimeImageUri", "OutputValue": IMAGE},
             {
@@ -629,9 +558,7 @@ class _Control:
         }
         return {
             "agentRuntimeArn": RUNTIME_ARN,
-            "agentRuntimeEndpointArn": (
-                f"{RUNTIME_ARN}/runtime-endpoint/{CANDIDATE}"
-            ),
+            "agentRuntimeEndpointArn": (f"{RUNTIME_ARN}/runtime-endpoint/{CANDIDATE}"),
             "name": CANDIDATE,
             "status": "READY",
             "liveVersion": "7",
@@ -713,9 +640,7 @@ class _AgentCoreTransport:
         assert timeout_seconds == self._certification.timeout_seconds
         assert max_response_bytes == self._certification.max_response_bytes
         payload = json.loads(request.payload)
-        token = request.headers.get("Authorization", "").removeprefix(
-            "Bearer "
-        )
+        token = request.headers.get("Authorization", "").removeprefix("Bearer ")
         case = self._cases.get(token)
         action = payload.get("action")
 
@@ -761,39 +686,11 @@ class _AgentCoreTransport:
             if expected != self.revision:
                 return self._response(
                     409,
-                    {
-                        "error": {
-                            "code": "tenant_config_write_conflict"
-                        }
-                    },
+                    {"error": {"code": "tenant_config_write_conflict"}},
                 )
             self.revision += 1
             self.name = name
             return self._response(200, self._config())
-        if action == "query":
-            if payload["sql"].startswith("DELETE"):
-                return self._response(
-                    400,
-                    {"error": {"code": "query_read_only"}},
-                )
-            return self._response(
-                200,
-                {
-                    "request_id": payload["request_id"],
-                    "datasource_id": payload["datasource_id"],
-                    "project_id": "project-a",
-                    "query_execution_id": "query-123",
-                    "columns": [],
-                    "rows": [[1]],
-                    "row_count": 1,
-                    "truncated": False,
-                    "statistics": {
-                        "data_scanned_bytes": 0,
-                        "engine_execution_ms": 1,
-                        "result_bytes": 1,
-                    },
-                },
-            )
         raise AssertionError(payload)
 
 
@@ -809,21 +706,13 @@ def _verified_identities() -> dict[
         identities[case] = external_certification.VerifiedIdentity(
             case=case,
             token=f"header{index}.payload{index}.signature{index}",
-            issuer=(
-                MIXUP_ISSUER
-                if case == "issuerMixup"
-                else ISSUER
-            ),
+            issuer=(MIXUP_ISSUER if case == "issuerMixup" else ISSUER),
             subject=f"subject-{case}",
             audience=(AUDIENCE,),
             expires_at=NOW + 600,
             issued_at=NOW,
             jwt_id=f"jti-{case}",
-            tenant_id=(
-                "tenant-cross"
-                if case == "crossTenant"
-                else "tenant-a"
-            ),
+            tenant_id=("tenant-cross" if case == "crossTenant" else "tenant-a"),
             project_id="project-a",
         )
     return identities
@@ -844,7 +733,7 @@ def _principal(
         auth_method=AuthMethod.OIDC_JWT,
         membership_status=MembershipStatus.ACTIVE,
         project_ids=frozenset({"project-a"}),
-        scopes=frozenset({"inference.invoke", "model.list", "query.select"}),
+        scopes=frozenset({"inference.invoke", "model.list"}),
         authorization_version=1,
     )
 
@@ -900,18 +789,10 @@ def test_external_provider_contract_accepts_baseline_and_optional_ai21(
     )
 
     expected = {
-        provider: (
-            launch_certification
-            .PRODUCTION_PROVIDER_FEATURES_BY_PROVIDER[provider]
-        )
-        for provider in _launch_providers(
-            include_ai21=include_ai21
-        )
+        provider: (launch_certification.PRODUCTION_PROVIDER_FEATURES_BY_PROVIDER[provider])
+        for provider in _launch_providers(include_ai21=include_ai21)
     }
-    assert {
-        case.provider: case.features
-        for case in certification.providers
-    } == expected
+    assert {case.provider: case.features for case in certification.providers} == expected
 
 
 @pytest.mark.parametrize(
@@ -937,13 +818,8 @@ def test_external_provider_contract_requires_exact_reviewed_match(
 def test_full_launch_evidence_accepts_only_the_canonical_provider_matrix(
     include_ai21: bool,
 ) -> None:
-    report, certification = _full_launch_report(
-        include_ai21=include_ai21
-    )
-    expected = {
-        case.provider: case.features
-        for case in certification.providers
-    }
+    report, certification = _full_launch_report(include_ai21=include_ai21)
+    expected = {case.provider: case.features for case in certification.providers}
 
     external_certification._verify_full_launch_certification(
         report,
@@ -970,10 +846,7 @@ def test_full_launch_evidence_must_match_reviewed_provider_selection() -> None:
             report,
             binding=_runtime_binding(),
             region=REGION,
-            expected_provider_features={
-                case.provider: case.features
-                for case in baseline.providers
-            },
+            expected_provider_features={case.provider: case.features for case in baseline.providers},
         )
 
 
@@ -1039,10 +912,7 @@ def test_portable_evidence_rejects_missing_declared_tool_check() -> None:
     report["checks"] = [
         check
         for check in report["checks"]
-        if not (
-            check.get("provider") == "anthropic"
-            and check["category"] == "provider_tool_none"
-        )
+        if not (check.get("provider") == "anthropic" and check["category"] == "provider_tool_none")
     ]
     report["summary"]["checkCount"] -= 1
     report["summary"]["passed"] -= 1
@@ -1081,16 +951,8 @@ def test_portable_evidence_rejects_missing_mandatory_provider() -> None:
     report, _ = _full_launch_report()
     report["summary"]["providerFeatures"].pop("xai")
     report["summary"]["providerCount"] -= 1
-    removed = [
-        check
-        for check in report["checks"]
-        if check.get("provider") == "xai"
-    ]
-    report["checks"] = [
-        check
-        for check in report["checks"]
-        if check.get("provider") != "xai"
-    ]
+    removed = [check for check in report["checks"] if check.get("provider") == "xai"]
+    report["checks"] = [check for check in report["checks"] if check.get("provider") != "xai"]
     report["summary"]["checkCount"] -= len(removed)
     report["summary"]["passed"] -= len(removed)
 
@@ -1109,10 +971,7 @@ def test_external_checks_mutate_confirm_and_restore_tenant_config() -> None:
     certification = _certification()
     verified = _verified_identities()
     transport = _AgentCoreTransport(
-        {
-            case: identity.token
-            for case, identity in verified.items()
-        },
+        {case: identity.token for case, identity in verified.items()},
         certification,
     )
     principals = {
@@ -1140,9 +999,7 @@ def test_external_checks_mutate_confirm_and_restore_tenant_config() -> None:
         transport=transport,
     )
 
-    assert {check["id"] for check in checks} == (
-        external_certification.REQUIRED_CHECKS
-    )
+    assert {check["id"] for check in checks} == (external_certification.REQUIRED_CHECKS)
     assert all(check["passed"] is True for check in checks)
     assert transport.name == "Production"
     assert transport.revision == 5
@@ -1157,10 +1014,7 @@ def test_external_checks_restore_config_after_ambiguous_confirmation() -> None:
     certification = _certification()
     verified = _verified_identities()
     transport = _AgentCoreTransport(
-        {
-            case: identity.token
-            for case, identity in verified.items()
-        },
+        {case: identity.token for case, identity in verified.items()},
         certification,
         fail_config_reads={3},
     )
@@ -1208,9 +1062,7 @@ def test_external_oidc_workflow_is_disjoint_protected_and_self_hosted() -> None:
         "id-token": "write",
     }
     assert set(triggers) == {"workflow_call"}
-    assert certify["environment"] == (
-        "agentcore-external-oidc-production-like"
-    )
+    assert certify["environment"] == ("agentcore-external-oidc-production-like")
     assert certify["runs-on"] == [
         "self-hosted",
         "linux",
@@ -1224,14 +1076,8 @@ def test_external_oidc_workflow_is_disjoint_protected_and_self_hosted() -> None:
     }
     assert "ubuntu" not in json.dumps(certify["runs-on"]).casefold()
     assert WORKFLOW.name != MANAGED_WORKFLOW.name
-    assert (
-        workflow["jobs"]["verify-release"]["uses"]
-        == "./.github/workflows/deploy-verification.yml"
-    )
-    assert (
-        workflow["jobs"]["verify-release"]["with"]["target"]
-        == "agentcore"
-    )
+    assert workflow["jobs"]["verify-release"]["uses"] == "./.github/workflows/deploy-verification.yml"
+    assert workflow["jobs"]["verify-release"]["with"]["target"] == "agentcore"
     assert "secrets" not in workflow["jobs"]["verify-release"]
     assert "secrets" not in workflow["on"]["workflow_call"]
 
@@ -1249,27 +1095,15 @@ def test_external_oidc_workflow_has_no_hand_authored_report_input() -> None:
         assert "issuer" not in inputs
         assert inputs["setup_config_s3_version_id"]["required"] == "true"
         assert inputs["setup_config_sha256"]["required"] == "true"
-        assert (
-            inputs["certification_config_s3_version_id"]["required"]
-            == "true"
-        )
-        assert (
-            inputs["certification_config_sha256"]["required"]
-            == "true"
-        )
+        assert inputs["certification_config_s3_version_id"]["required"] == "true"
+        assert inputs["certification_config_sha256"]["required"] == "true"
 
-    assert names.index(
-        "Fetch exact reviewed external-OIDC contracts"
-    ) < names.index("Run live external-OIDC launch certification")
-    assert names.index(
+    assert names.index("Fetch exact reviewed external-OIDC contracts") < names.index(
         "Run live external-OIDC launch certification"
-    ) < names.index("Revalidate live-produced report")
-    assert names.index(
-        "Revalidate live-produced report"
-    ) < names.index("KMS-sign and verify external-OIDC report")
-    assert names.index(
-        "KMS-sign and verify external-OIDC report"
-    ) < names.index(
+    )
+    assert names.index("Run live external-OIDC launch certification") < names.index("Revalidate live-produced report")
+    assert names.index("Revalidate live-produced report") < names.index("KMS-sign and verify external-OIDC report")
+    assert names.index("KMS-sign and verify external-OIDC report") < names.index(
         "Persist and reverify locked external-OIDC evidence"
     )
     assert "certify_external_oidc_agentcore.py run" in body
@@ -1290,30 +1124,19 @@ def test_external_oidc_workflow_owns_exact_namespaced_lifecycle() -> None:
     teardown = workflow["jobs"]["teardown"]
     steps = certify["steps"]
     names = [step["name"] for step in steps]
-    deploy = next(
-        step
-        for step in steps
-        if step["name"] == "Deploy and bind isolated external-OIDC candidate"
-    )
-    source = next(
-        step
-        for step in steps
-        if step["name"]
-        == "Read provider source secret into an owner-only file"
-    )
+    deploy = next(step for step in steps if step["name"] == "Deploy and bind isolated external-OIDC candidate")
+    source = next(step for step in steps if step["name"] == "Read provider source secret into an owner-only file")
     teardown_run = teardown["steps"][-1]["run"]
     body = WORKFLOW.read_text(encoding="utf-8")
 
     assert workflow["env"]["EXTERNAL_NAMESPACE"] == "external"
-    assert workflow["env"]["EXTERNAL_RUNTIME_STACK"] == (
-        "AxonLLMAgentCoreStack-external"
-    )
-    assert names.index(
-        "Read provider source secret into an owner-only file"
-    ) < names.index("Deploy and bind isolated external-OIDC candidate")
-    assert names.index(
+    assert workflow["env"]["EXTERNAL_RUNTIME_STACK"] == ("AxonLLMAgentCoreStack-external")
+    assert names.index("Read provider source secret into an owner-only file") < names.index(
         "Deploy and bind isolated external-OIDC candidate"
-    ) < names.index("Run live external-OIDC launch certification")
+    )
+    assert names.index("Deploy and bind isolated external-OIDC candidate") < names.index(
+        "Run live external-OIDC launch certification"
+    )
     assert source["env"]["PROVIDER_SOURCE_SECRET_ARN"] == (
         "${{ vars.AXON_AGENTCORE_EXTERNAL_PROVIDER_SOURCE_SECRET_ARN }}"
     )
@@ -1321,17 +1144,13 @@ def test_external_oidc_workflow_owns_exact_namespaced_lifecycle() -> None:
     assert '--deployment-namespace "${EXTERNAL_NAMESPACE}"' in deploy["run"]
     assert '--provider-env-file "${provider_env}"' in deploy["run"]
     assert "certification-bound.json" in deploy["run"]
-    assert body.count(
-        '--runtime-stack-name "${EXTERNAL_RUNTIME_STACK}"'
-    ) == 3
+    assert body.count('--runtime-stack-name "${EXTERNAL_RUNTIME_STACK}"') == 3
     assert teardown["needs"] == ["verify-release", "certify"]
     assert teardown["if"] == "${{ always() }}"
-    assert teardown_run.count(
-        '--stack-name "${EXTERNAL_RUNTIME_STACK}"'
-    ) == 4
+    assert teardown_run.count('--stack-name "${EXTERNAL_RUNTIME_STACK}"') == 4
     assert "delete-stack" in teardown_run
     assert "wait stack-delete-complete" in teardown_run
-    assert "AxonLLMAgentCoreStack\"" not in teardown_run
+    assert 'AxonLLMAgentCoreStack"' not in teardown_run
 
 
 def test_external_oidc_workflow_locks_signs_and_refetches_exact_versions() -> None:
@@ -1340,8 +1159,7 @@ def test_external_oidc_workflow_locks_signs_and_refetches_exact_versions() -> No
     persist = next(
         step
         for step in workflow["jobs"]["certify"]["steps"]
-        if step["name"]
-        == "Persist and reverify locked external-OIDC evidence"
+        if step["name"] == "Persist and reverify locked external-OIDC evidence"
     )["run"]
 
     assert "kms_evidence.py sign" in body
@@ -1365,14 +1183,10 @@ def test_external_oidc_workflow_locks_signs_and_refetches_exact_versions() -> No
     assert ".SSEKMSKeyId == $key" in persist
     assert 'sha256sum "${remote}/signature.json"' in persist
     assert (
-        workflow["on"]["workflow_call"]["outputs"][
-            "signature_sha256"
-        ]["value"]
+        workflow["on"]["workflow_call"]["outputs"]["signature_sha256"]["value"]
         == "${{ jobs.certify.outputs.signature_sha256 }}"
     )
-    assert persist.index(
-        'put_locked "${signature}"'
-    ) < persist.index('put_locked "${report}"')
+    assert persist.index('put_locked "${signature}"') < persist.index('put_locked "${report}"')
     assert "AWS_ACCESS_KEY_ID" not in body
     assert "AWS_SECRET_ACCESS_KEY" not in body
     assert "AXON_EXTERNAL_OIDC_FIXTURE_BROKER_TOKEN" in body
@@ -1381,25 +1195,13 @@ def test_external_oidc_workflow_locks_signs_and_refetches_exact_versions() -> No
 
 def test_external_oidc_workflow_validates_dynamic_aws_values_first() -> None:
     steps = _workflow()["jobs"]["certify"]["steps"]
-    validation = next(
-        step["run"]
-        for step in steps
-        if step["name"] == "Validate immutable workflow inputs"
-    )
-    storage = next(
-        step["run"]
-        for step in steps
-        if step["name"] == "Verify immutable evidence storage"
-    )
+    validation = next(step["run"] for step in steps if step["name"] == "Validate immutable workflow inputs")
+    storage = next(step["run"] for step in steps if step["name"] == "Verify immutable evidence storage")
 
-    assert validation.index(
-        '[[ "${AWS_ACCOUNT_ID}" =~ ^[0-9]{12}$ ]]'
-    ) < validation.index(
+    assert validation.index('[[ "${AWS_ACCOUNT_ID}" =~ ^[0-9]{12}$ ]]') < validation.index(
         '[[ "${AGENTCORE_IMAGE}" =~ ^${AWS_ACCOUNT_ID}'
     )
-    assert validation.index(
-        '[[ "${AWS_REGION}" =~ ^[a-z]{2}'
-    ) < validation.index(
+    assert validation.index('[[ "${AWS_REGION}" =~ ^[a-z]{2}') < validation.index(
         '[[ "${AGENTCORE_IMAGE}" =~ ^${AWS_ACCOUNT_ID}'
     )
     assert '"${SETUP_CONFIG_VERSION_ID}" =~' in validation
@@ -1549,9 +1351,7 @@ def test_signature_tamper_canary_changes_signed_bytes() -> None:
     tampered_parts = tampered.split(".")
 
     def decode(segment: str) -> bytes:
-        return base64.urlsafe_b64decode(
-            segment + ("=" * (-len(segment) % 4))
-        )
+        return base64.urlsafe_b64decode(segment + ("=" * (-len(segment) % 4)))
 
     assert tampered_parts[:2] == original_parts[:2]
     assert tampered_parts[2] != original_parts[2]

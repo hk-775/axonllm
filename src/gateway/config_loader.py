@@ -51,6 +51,14 @@ def load_app_config() -> AppConfig:
     """Build an AppConfig from environment variables, falling back to defaults."""
     return AppConfig(
         deployment_profile=_load_deployment_profile(),
+        experience_owner=os.environ.get(
+            "AXON_EXPERIENCE_OWNER",
+            "axonllm",
+        ),
+        execution_target=os.environ.get(
+            "AXON_EXECUTION_TARGET",
+            "container",
+        ),
         aws_region=os.environ.get("AWS_DEFAULT_REGION", "us-east-1"),
         bedrock_region=os.environ.get("AXON_BEDROCK_REGION", "us-east-1"),
         server_host=os.environ.get("AXON_SERVER_HOST", "0.0.0.0"),
@@ -80,7 +88,9 @@ def load_app_config() -> AppConfig:
         control_plane_endpoint_mode=os.environ.get(
             "AXON_CONTROL_PLANE_ENDPOINT_MODE",
             "custom-domain",
-        ).strip().lower(),
+        )
+        .strip()
+        .lower(),
         control_plane_public_url=(
             os.environ.get("AXON_CONTROL_PLANE_URL")
             or os.environ.get("AXON_CONTROL_PLANE_PUBLIC_URL")
@@ -88,13 +98,14 @@ def load_app_config() -> AppConfig:
             or ""
         ),
         cognito_hosted_ui_url=(
-            os.environ.get("AXON_COGNITO_HOSTED_UI_URL")
-            or os.environ.get("AXON_COGNITO_HOSTED_UI_BASE_URL", "")
+            os.environ.get("AXON_COGNITO_HOSTED_UI_URL") or os.environ.get("AXON_COGNITO_HOSTED_UI_BASE_URL", "")
         ),
         browser_auth_mode=os.environ.get(
             "AXON_BROWSER_AUTH_MODE",
             "",
-        ).strip().lower(),
+        )
+        .strip()
+        .lower(),
         browser_auth_client_id=os.environ.get(
             "AXON_BROWSER_AUTH_CLIENT_ID",
             os.environ.get("AXON_OIDC_AUDIENCE", ""),
@@ -131,79 +142,25 @@ def load_app_config() -> AppConfig:
             600,
         ),
         auth_mode=_load_auth_mode(),
-        canonical_identity_required=os.environ.get(
-            "AXON_REQUIRE_CANONICAL_IDENTITY", "false"
-        ).lower() == "true",
-        durable_persistence_enabled=os.environ.get(
-            "LLM_ROUTER_DYNAMODB_ENABLED", "false"
-        ).lower() == "true",
-        semantic_cache_enabled=os.environ.get(
-            "AXON_SEMANTIC_CACHE", "false"
-        ).lower() == "true",
+        canonical_identity_required=os.environ.get("AXON_REQUIRE_CANONICAL_IDENTITY", "false").lower() == "true",
+        durable_persistence_enabled=os.environ.get("LLM_ROUTER_DYNAMODB_ENABLED", "false").lower() == "true",
+        semantic_cache_enabled=os.environ.get("AXON_SEMANTIC_CACHE", "false").lower() == "true",
         semantic_cache_region=os.environ.get(
             "AXON_SEMANTIC_CACHE_REGION", os.environ.get("AXON_BEDROCK_REGION", "us-east-1")
         ),
         semantic_cache_model=os.environ.get("AXON_SEMANTIC_CACHE_MODEL", ""),
         semantic_cache_threshold=_load_semantic_threshold(),
-        athena_query_enabled=_load_strict_bool(
-            "AXON_ATHENA_QUERY_ENABLED",
-            False,
-        ),
-        athena_query_bindings=os.environ.get(
-            "AXON_ATHENA_QUERY_BINDINGS",
-            "",
-        ),
-        athena_query_timeout_seconds=_load_float(
-            "AXON_ATHENA_QUERY_TIMEOUT_SECONDS",
-            30.0,
-        ),
-        athena_query_max_rows=_load_int(
-            "AXON_ATHENA_QUERY_MAX_ROWS",
-            1000,
-        ),
-        athena_query_max_result_bytes=_load_int(
-            "AXON_ATHENA_QUERY_MAX_RESULT_BYTES",
-            1024 * 1024,
-        ),
-        athena_query_max_bytes_scanned=_load_int(
-            "AXON_ATHENA_QUERY_MAX_BYTES_SCANNED",
-            1024 * 1024 * 1024,
-        ),
-        athena_query_poll_interval_seconds=_load_float(
-            "AXON_ATHENA_QUERY_POLL_INTERVAL_SECONDS",
-            0.25,
-        ),
-        athena_query_project_rpm=_load_int(
-            "AXON_ATHENA_QUERY_PROJECT_RPM",
-            30,
-        ),
-        athena_query_principal_rpm=_load_int(
-            "AXON_ATHENA_QUERY_PRINCIPAL_RPM",
-            10,
-        ),
-        athena_query_project_concurrency=_load_int(
-            "AXON_ATHENA_QUERY_PROJECT_CONCURRENCY",
-            5,
-        ),
-        athena_query_principal_concurrency=_load_int(
-            "AXON_ATHENA_QUERY_PRINCIPAL_CONCURRENCY",
-            2,
-        ),
-        athena_query_project_scan_bytes_per_minute=_load_int(
-            "AXON_ATHENA_QUERY_PROJECT_SCAN_BYTES_PER_MINUTE",
-            5 * 1024 * 1024 * 1024,
-        ),
-        athena_query_principal_scan_bytes_per_minute=_load_int(
-            "AXON_ATHENA_QUERY_PRINCIPAL_SCAN_BYTES_PER_MINUTE",
-            2 * 1024 * 1024 * 1024,
-        ),
-        athena_query_max_datasources_per_tenant=_load_int(
-            "AXON_ATHENA_QUERY_MAX_DATASOURCES_PER_TENANT",
-            500,
-        ),
         control_plane_only=_load_strict_bool(
             "AXON_CONTROL_PLANE_ONLY",
             False,
+        ),
+        agentcore_runtime_arn=os.environ.get(
+            "AXON_AGENTCORE_RUNTIME_ARN",
+            "",
+        ),
+        agentcore_runtime_qualifier=os.environ.get(
+            "AXON_AGENTCORE_RUNTIME_QUALIFIER",
+            "production",
         ),
     )
 
@@ -244,19 +201,12 @@ def _load_enabled_providers() -> frozenset[str] | None:
     raw = os.environ.get("AXON_ENABLED_PROVIDERS")
     if raw is None:
         return None
-    providers = frozenset(
-        provider.strip()
-        for provider in raw.split(",")
-        if provider.strip()
-    )
+    providers = frozenset(provider.strip() for provider in raw.split(",") if provider.strip())
     if not providers:
         raise ValueError("AXON_ENABLED_PROVIDERS must name at least one provider")
     unknown = providers.difference(VALID_PROVIDERS)
     if unknown:
-        raise ValueError(
-            "AXON_ENABLED_PROVIDERS contains unknown providers: "
-            + ", ".join(sorted(unknown))
-        )
+        raise ValueError("AXON_ENABLED_PROVIDERS contains unknown providers: " + ", ".join(sorted(unknown)))
     return providers
 
 
@@ -271,9 +221,7 @@ def _load_deployment_profile() -> str:
         return "production"
     raw = configured.strip().lower()
     if raw not in {"development", "production"}:
-        raise ValueError(
-            "AXON_DEPLOYMENT_PROFILE must be 'development' or 'production'"
-        )
+        raise ValueError("AXON_DEPLOYMENT_PROFILE must be 'development' or 'production'")
     return raw
 
 
@@ -291,9 +239,7 @@ def _load_semantic_threshold() -> float | None:
     try:
         value = float(raw)
     except ValueError:
-        logger.warning(
-            "Unparseable AXON_SEMANTIC_CACHE_THRESHOLD=%r — using the default", raw
-        )
+        logger.warning("Unparseable AXON_SEMANTIC_CACHE_THRESHOLD=%r — using the default", raw)
         return None
     if not 0.0 < value <= 1.0:
         logger.warning(
@@ -315,9 +261,7 @@ def _load_auth_mode() -> str:
     """
     raw = os.environ.get("AXON_AUTH_MODE", "ENFORCE").strip().upper()
     if raw not in ("ENFORCE", "LOG_ONLY"):
-        logger.warning(
-            "Unrecognized AXON_AUTH_MODE=%r — falling back to ENFORCE (fail-closed)", raw
-        )
+        logger.warning("Unrecognized AXON_AUTH_MODE=%r — falling back to ENFORCE (fail-closed)", raw)
         return "ENFORCE"
     if raw == "LOG_ONLY":
         logger.warning(
@@ -373,9 +317,7 @@ def load_pricing_config(path: str) -> dict[str, dict[str, TokenPricing]]:
                 logger.warning("Pricing config: skipping %s/%s (not a dict)", provider, model)
                 continue
             if "prompt_token_cost" not in entry or "completion_token_cost" not in entry:
-                logger.warning(
-                    "Pricing config: skipping %s/%s (missing required fields)", provider, model
-                )
+                logger.warning("Pricing config: skipping %s/%s (missing required fields)", provider, model)
                 continue
             provider_pricing[model] = TokenPricing(
                 prompt_token_cost=float(entry["prompt_token_cost"]),
@@ -465,7 +407,6 @@ def load_ensemble_config(path: str):
     config = EnsembleConfig()
     config.load(path)
     return config
-
 
 
 # ---------------------------------------------------------------------------

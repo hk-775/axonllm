@@ -6,7 +6,6 @@ from aws_cdk import (
     CfnCondition,
     CfnOutput,
     CfnParameter,
-    CfnResource,
     CustomResource,
     CfnRule,
     CfnRuleAssertion,
@@ -15,7 +14,6 @@ from aws_cdk import (
     RemovalPolicy,
     Stack,
     Token,
-    aws_backup as backup,
     aws_certificatemanager as acm,
     aws_cloudfront as cloudfront,
     aws_cloudfront_origins as origins,
@@ -27,7 +25,6 @@ from aws_cdk import (
     aws_ecs as ecs,
     aws_ecs_patterns as ecs_patterns,
     aws_elasticloadbalancingv2 as elbv2,
-    aws_events as events,
     aws_iam as iam,
     aws_kms as kms,
     aws_lambda as lambda_,
@@ -127,8 +124,7 @@ class AxonLLMStack(Stack):
 
         if self.region != "us-east-1":
             raise ValueError(
-                "AxonLLMStack must be deployed in us-east-1 because its "
-                "CloudFront WebACL has global scope"
+                "AxonLLMStack must be deployed in us-east-1 because its CloudFront WebACL has global scope"
             )
 
         deployment_mode = CfnParameter(
@@ -202,9 +198,7 @@ class AxonLLMStack(Stack):
             type="String",
             default="",
             allowed_pattern=r"^$|^Z[A-Z0-9]+$",
-            description=(
-                "Optional Route 53 public hosted-zone ID for ViewerDomainName"
-            ),
+            description=("Optional Route 53 public hosted-zone ID for ViewerDomainName"),
         )
         public_hosted_zone_name = CfnParameter(
             self,
@@ -212,8 +206,7 @@ class AxonLLMStack(Stack):
             type="String",
             default="",
             description=(
-                "Optional Route 53 public hosted-zone name; supply with "
-                "PublicHostedZoneId to create A and AAAA aliases"
+                "Optional Route 53 public hosted-zone name; supply with PublicHostedZoneId to create A and AAAA aliases"
             ),
         )
 
@@ -252,9 +245,7 @@ class AxonLLMStack(Stack):
             ),
             assertions=[
                 CfnRuleAssertion(
-                    assert_=Fn.condition_not(
-                        Fn.condition_equals(parameter.value_as_string, "")
-                    ),
+                    assert_=Fn.condition_not(Fn.condition_equals(parameter.value_as_string, "")),
                     assert_description=f"{parameter.logical_id} is required in production mode",
                 )
                 for parameter in (
@@ -299,10 +290,7 @@ class AxonLLMStack(Stack):
                             ),
                         ),
                     ),
-                    assert_description=(
-                        "PublicHostedZoneId and PublicHostedZoneName must be "
-                        "supplied together"
-                    ),
+                    assert_description=("PublicHostedZoneId and PublicHostedZoneName must be supplied together"),
                 )
             ],
         )
@@ -316,36 +304,28 @@ class AxonLLMStack(Stack):
             "ViewerDomainName",
             type="String",
             min_length=1,
-            description=(
-                "CloudFront alternate domain name covered by ViewerCertificateArn"
-            ),
+            description=("CloudFront alternate domain name covered by ViewerCertificateArn"),
         )
         viewer_certificate_arn = CfnParameter(
             self,
             "ViewerCertificateArn",
             type="String",
             min_length=1,
-            description=(
-                "ACM certificate ARN in us-east-1 covering ViewerDomainName"
-            ),
+            description=("ACM certificate ARN in us-east-1 covering ViewerDomainName"),
         )
         origin_domain_name = CfnParameter(
             self,
             "OriginDomainName",
             type="String",
             min_length=1,
-            description=(
-                "Private ALB origin name covered by OriginCertificateArn"
-            ),
+            description=("Private ALB origin name covered by OriginCertificateArn"),
         )
         origin_certificate_arn = CfnParameter(
             self,
             "OriginCertificateArn",
             type="String",
             min_length=1,
-            description=(
-                "ACM certificate ARN in this stack's region covering OriginDomainName"
-            ),
+            description=("ACM certificate ARN in this stack's region covering OriginDomainName"),
         )
         approved_https_prefix_list_id = CfnParameter(
             self,
@@ -369,13 +349,9 @@ class AxonLLMStack(Stack):
                 r"imported-model)/[A-Za-z0-9][A-Za-z0-9._:/+-]*$"
             ),
             constraint_description=(
-                "each value must be a concrete Bedrock model or inference-profile "
-                "ARN without wildcards"
+                "each value must be a concrete Bedrock model or inference-profile ARN without wildcards"
             ),
-            description=(
-                "Comma-separated Bedrock model or inference-profile ARNs "
-                "that AxonLLM may invoke"
-            ),
+            description=("Comma-separated Bedrock model or inference-profile ARNs that AxonLLM may invoke"),
         )
         verified_image_uri = CfnParameter(
             self,
@@ -387,13 +363,9 @@ class AxonLLMStack(Stack):
                 r"sha256:[0-9a-f]{64}$"
             ),
             constraint_description=(
-                "must be an immutable private ECR URI in us-east-1 ending "
-                "in @sha256:<64 lowercase hex characters>"
+                "must be an immutable private ECR URI in us-east-1 ending in @sha256:<64 lowercase hex characters>"
             ),
-            description=(
-                "Immutable ECR image emitted by the release deployment "
-                "verification gate"
-            ),
+            description=("Immutable ECR image emitted by the release deployment verification gate"),
         )
         scim_tenants_secret_arn = self.node.try_get_context("scim_tenants_secret_arn")
         if scim_tenants_secret_arn is not None and (
@@ -405,23 +377,13 @@ class AxonLLMStack(Stack):
             )
             is None
         ):
-            raise ValueError(
-                "scim_tenants_secret_arn must be a complete Secrets Manager "
-                "ARN in us-east-1"
-            )
-        primary_state_table_name = (
-            self.node.try_get_context("table_name") or "axonllm-state"
-        )
+            raise ValueError("scim_tenants_secret_arn must be a complete Secrets Manager ARN in us-east-1")
+        primary_state_table_name = self.node.try_get_context("table_name") or "axonllm-state"
         restore_table_marker = "-restore-validation-"
-        restore_table_suffix_limit = (
-            255
-            - len(primary_state_table_name)
-            - len(restore_table_marker)
-        )
+        restore_table_suffix_limit = 255 - len(primary_state_table_name) - len(restore_table_marker)
         if restore_table_suffix_limit < 21:
             raise ValueError(
-                "Fargate state table name must be at most 214 characters "
-                "to preserve the PITR validation suffix"
+                "Fargate state table name must be at most 214 characters to preserve the PITR validation suffix"
             )
         restored_state_table_pattern = (
             rf"^$|^{re.escape(primary_state_table_name)}"
@@ -435,8 +397,7 @@ class AxonLLMStack(Stack):
             default="",
             allowed_pattern=restored_state_table_pattern,
             constraint_description=(
-                "must be blank or a PITR validation table derived from the "
-                f"{primary_state_table_name} primary table"
+                f"must be blank or a PITR validation table derived from the {primary_state_table_name} primary table"
             ),
             description=(
                 "Optional restored state table used for a controlled recovery "
@@ -558,16 +519,12 @@ class AxonLLMStack(Stack):
                     "Filters": [
                         {
                             "Name": "prefix-list-name",
-                            "Values": [
-                                "com.amazonaws.global.cloudfront.origin-facing"
-                            ],
+                            "Values": ["com.amazonaws.global.cloudfront.origin-facing"],
                         }
                     ]
                 },
                 output_paths=["PrefixLists.0.PrefixListId"],
-                physical_resource_id=cr.PhysicalResourceId.from_response(
-                    "PrefixLists.0.PrefixListId"
-                ),
+                physical_resource_id=cr.PhysicalResourceId.from_response("PrefixLists.0.PrefixListId"),
             ),
             policy=cr.AwsCustomResourcePolicy.from_statements(
                 [
@@ -581,10 +538,8 @@ class AxonLLMStack(Stack):
             log_group=prefix_lookup_logs,
             timeout=Duration.seconds(30),
         )
-        cloudfront_origin_prefix_list_id = (
-            cloudfront_origin_prefix_list.get_response_field(
-                "PrefixLists.0.PrefixListId"
-            )
+        cloudfront_origin_prefix_list_id = cloudfront_origin_prefix_list.get_response_field(
+            "PrefixLists.0.PrefixListId"
         )
 
         alb_security_group = ec2.SecurityGroup(
@@ -610,9 +565,7 @@ class AxonLLMStack(Stack):
             "DNS fallback to the VPC resolver",
         )
         alb_security_group.add_egress_rule(
-            ec2.Peer.prefix_list(
-                approved_https_prefix_list_id.value_as_string
-            ),
+            ec2.Peer.prefix_list(approved_https_prefix_list_id.value_as_string),
             ec2.Port.tcp(443),
             "HTTPS to the approved OIDC identity provider",
         )
@@ -634,60 +587,19 @@ class AxonLLMStack(Stack):
             internet_facing=False,
             desync_mitigation_mode=elbv2.DesyncMitigationMode.STRICTEST,
             security_group=alb_security_group,
-            vpc_subnets=ec2.SubnetSelection(
-                subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS
-            ),
+            vpc_subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS),
         )
 
         # --- Secrets ---
-        data_key = kms.Key(
+        sns_managed_key = kms.Alias.from_alias_name(
             self,
-            "DataKey",
-            alias="alias/axonllm/data",
-            description="Encrypts AxonLLM DynamoDB state and provider secrets",
-            enable_key_rotation=True,
-            removal_policy=RemovalPolicy.RETAIN,
-            pending_window=Duration.days(30),
-        )
-        data_key.add_to_resource_policy(
-            iam.PolicyStatement(
-                sid="AllowCloudWatchLogsEncryption",
-                principals=[
-                    iam.ServicePrincipal(
-                        f"logs.{self.region}.{self.url_suffix}"
-                    )
-                ],
-                actions=[
-                    "kms:Decrypt",
-                    "kms:DescribeKey",
-                    "kms:Encrypt",
-                    "kms:GenerateDataKey*",
-                    "kms:ReEncrypt*",
-                ],
-                resources=["*"],
-                conditions={
-                    "ArnLike": {
-                        "kms:EncryptionContext:aws:logs:arn": (
-                            f"arn:{self.partition}:logs:{self.region}:"
-                            f"{self.account}:log-group:*"
-                        )
-                    }
-                },
-            )
-        )
-        data_key.add_to_resource_policy(
-            iam.PolicyStatement(
-                sid="AllowCloudWatchAlarmEncryption",
-                principals=[iam.ServicePrincipal("cloudwatch.amazonaws.com")],
-                actions=["kms:Decrypt", "kms:GenerateDataKey*"],
-                resources=["*"],
-            )
+            "SnsManagedKey",
+            "alias/aws/sns",
         )
         api_keys_secret = secretsmanager.Secret(
             self,
             "ApiKeys",
             description="LLM provider API keys for AxonLLM",
-            encryption_key=data_key,
             generate_secret_string=secretsmanager.SecretStringGenerator(
                 secret_string_template='{"ANTHROPIC_API_KEY":"","OPENAI_API_KEY":""}',
                 generate_string_key="placeholder",
@@ -720,8 +632,7 @@ class AxonLLMStack(Stack):
             partition_key=dynamodb.Attribute(name="PK", type=dynamodb.AttributeType.STRING),
             sort_key=dynamodb.Attribute(name="SK", type=dynamodb.AttributeType.STRING),
             billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
-            encryption=dynamodb.TableEncryption.CUSTOMER_MANAGED,
-            encryption_key=data_key,
+            encryption=dynamodb.TableEncryption.AWS_MANAGED,
             deletion_protection=True,
             removal_policy=RemovalPolicy.RETAIN,
             point_in_time_recovery_specification=dynamodb.PointInTimeRecoverySpecification(
@@ -742,8 +653,7 @@ class AxonLLMStack(Stack):
             "SecurityEventDeadLetterQueue",
             fifo=True,
             content_based_deduplication=False,
-            encryption=sqs.QueueEncryption.KMS,
-            encryption_master_key=data_key,
+            encryption=sqs.QueueEncryption.SQS_MANAGED,
             enforce_ssl=True,
             retention_period=Duration.days(14),
             removal_policy=RemovalPolicy.RETAIN,
@@ -753,8 +663,7 @@ class AxonLLMStack(Stack):
             "SecurityEventOutboxQueue",
             fifo=True,
             content_based_deduplication=False,
-            encryption=sqs.QueueEncryption.KMS,
-            encryption_master_key=data_key,
+            encryption=sqs.QueueEncryption.SQS_MANAGED,
             enforce_ssl=True,
             retention_period=Duration.days(14),
             receive_message_wait_time=Duration.seconds(20),
@@ -772,12 +681,11 @@ class AxonLLMStack(Stack):
             fifo=True,
             content_based_deduplication=False,
             enforce_ssl=True,
-            master_key=data_key,
+            master_key=sns_managed_key,
         )
         security_event_log_group = logs.LogGroup(
             self,
             "SecurityEventLogGroup",
-            encryption_key=data_key,
             retention=logs.RetentionDays.ONE_YEAR,
             removal_policy=RemovalPolicy.RETAIN,
         )
@@ -792,9 +700,7 @@ class AxonLLMStack(Stack):
             "AwsServiceEndpointSecurityGroup",
             vpc=vpc,
             allow_all_outbound=False,
-            description=(
-                "Private AWS service endpoints for AxonLLM security events"
-            ),
+            description=("Private AWS service endpoints for AxonLLM security events"),
         )
         aws_endpoint_security_group.add_ingress_rule(
             task_security_group,
@@ -812,9 +718,7 @@ class AxonLLMStack(Stack):
             open=False,
             private_dns_enabled=True,
             security_groups=[aws_endpoint_security_group],
-            subnets=ec2.SubnetSelection(
-                subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS
-            ),
+            subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS),
         )
         sqs_endpoint.add_to_policy(
             iam.PolicyStatement(
@@ -835,9 +739,7 @@ class AxonLLMStack(Stack):
             open=False,
             private_dns_enabled=True,
             security_groups=[aws_endpoint_security_group],
-            subnets=ec2.SubnetSelection(
-                subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS
-            ),
+            subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS),
         )
         sns_endpoint.add_to_policy(
             iam.PolicyStatement(
@@ -852,9 +754,7 @@ class AxonLLMStack(Stack):
             open=False,
             private_dns_enabled=True,
             security_groups=[aws_endpoint_security_group],
-            subnets=ec2.SubnetSelection(
-                subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS
-            ),
+            subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS),
         )
         logs_endpoint.add_to_policy(
             iam.PolicyStatement(
@@ -869,78 +769,6 @@ class AxonLLMStack(Stack):
                 ],
             )
         )
-
-        backup_key = kms.Key(
-            self,
-            "BackupKey",
-            alias="alias/axonllm/backups",
-            description="Encrypts scheduled AxonLLM state backups",
-            enable_key_rotation=True,
-            removal_policy=RemovalPolicy.RETAIN,
-            pending_window=Duration.days(30),
-        )
-        backup_vault = backup.BackupVault(
-            self,
-            "StateBackupVault",
-            backup_vault_name=Fn.join(
-                "-",
-                [
-                    "axon-state",
-                    Fn.select(2, Fn.split("/", self.stack_id)),
-                ],
-            ),
-            encryption_key=backup_key,
-            lock_configuration=backup.LockConfiguration(
-                min_retention=Duration.days(30),
-                max_retention=Duration.days(365),
-            ),
-            removal_policy=RemovalPolicy.RETAIN,
-        )
-        backup_plan = backup.BackupPlan(
-            self,
-            "StateBackupPlan",
-            backup_vault=backup_vault,
-        )
-        backup_plan.add_rule(
-            backup.BackupPlanRule(
-                rule_name="DailyRetainedBackup",
-                schedule_expression=events.Schedule.cron(
-                    minute="0",
-                    hour="5",
-                ),
-                start_window=Duration.hours(1),
-                completion_window=Duration.hours(4),
-                move_to_cold_storage_after=Duration.days(30),
-                delete_after=Duration.days(365),
-                recovery_point_tags={
-                    "Application": "AxonLLM",
-                    "DataClassification": "state",
-                },
-            )
-        )
-        backup_plan.add_selection(
-            "StateTableSelection",
-            resources=[backup.BackupResource.from_dynamo_db_table(state_table)],
-            allow_restores=True,
-        )
-        recovered_backup_selection = backup_plan.add_selection(
-            "RecoveredStateTableSelection",
-            resources=[
-                backup.BackupResource.from_arn(
-                    self.format_arn(
-                        service="dynamodb",
-                        resource="table",
-                        resource_name=(
-                            runtime_state_table_name.value_as_string
-                        ),
-                    )
-                )
-            ],
-            allow_restores=True,
-        )
-        for child in recovered_backup_selection.node.find_all():
-            if isinstance(child, CfnResource):
-                child.cfn_options.condition = use_recovered_state
 
         # --- ECS Cluster ---
         # cluster_name is explicit because every post-deploy instruction in the
@@ -969,25 +797,17 @@ class AxonLLMStack(Stack):
         )
 
         container_secrets = {
-            "ANTHROPIC_API_KEY": ecs.Secret.from_secrets_manager(
-                api_keys_secret, "ANTHROPIC_API_KEY"
-            ),
-            "OPENAI_API_KEY": ecs.Secret.from_secrets_manager(
-                api_keys_secret, "OPENAI_API_KEY"
-            ),
+            "ANTHROPIC_API_KEY": ecs.Secret.from_secrets_manager(api_keys_secret, "ANTHROPIC_API_KEY"),
+            "OPENAI_API_KEY": ecs.Secret.from_secrets_manager(api_keys_secret, "OPENAI_API_KEY"),
         }
         scim_tenants_secret = None
         if scim_tenants_secret_arn is not None:
-            scim_tenants_secret = (
-                secretsmanager.Secret.from_secret_complete_arn(
-                    self,
-                    "ScimTenantsSecret",
-                    scim_tenants_secret_arn,
-                )
+            scim_tenants_secret = secretsmanager.Secret.from_secret_complete_arn(
+                self,
+                "ScimTenantsSecret",
+                scim_tenants_secret_arn,
             )
-            container_secrets["AXON_SCIM_TENANTS"] = (
-                ecs.Secret.from_secrets_manager(scim_tenants_secret)
-            )
+            container_secrets["AXON_SCIM_TENANTS"] = ecs.Secret.from_secrets_manager(scim_tenants_secret)
 
         # --- Fargate service with ALB ---
         fargate_service = ecs_patterns.ApplicationLoadBalancedFargateService(
@@ -1005,9 +825,7 @@ class AxonLLMStack(Stack):
             # steps, and both failed against a real deployment before this.
             service_name="axonllm",
             task_image_options=ecs_patterns.ApplicationLoadBalancedTaskImageOptions(
-                image=ecs.ContainerImage.from_registry(
-                    verified_image_uri.value_as_string
-                ),
+                image=ecs.ContainerImage.from_registry(verified_image_uri.value_as_string),
                 container_port=8000,
                 family="axonllm",
                 log_driver=ecs.LogDrivers.aws_logs(
@@ -1020,15 +838,9 @@ class AxonLLMStack(Stack):
                     "AXON_AWS_ACCOUNT_ID": self.account,
                     "LLM_ROUTER_DYNAMODB_ENABLED": "true",
                     "AXON_DYNAMODB_TABLE": selected_state_table_name,
-                    "AXON_EVENT_OUTBOX_QUEUE_URL": (
-                        event_outbox_queue.queue_url
-                    ),
-                    "AXON_SECURITY_EVENT_SNS_TOPIC_ARN": (
-                        security_event_topic.topic_arn
-                    ),
-                    "AXON_SECURITY_EVENT_LOG_GROUP_ARN": (
-                        security_event_log_group.log_group_arn
-                    ),
+                    "AXON_EVENT_OUTBOX_QUEUE_URL": (event_outbox_queue.queue_url),
+                    "AXON_SECURITY_EVENT_SNS_TOPIC_ARN": (security_event_topic.topic_arn),
+                    "AXON_SECURITY_EVENT_LOG_GROUP_ARN": (security_event_log_group.log_group_arn),
                     "AXON_AUTH_MODE": "ENFORCE",
                     "AXON_DEPLOYMENT_PROFILE": Token.as_string(
                         Fn.condition_if(
@@ -1037,6 +849,8 @@ class AxonLLMStack(Stack):
                             "development",
                         )
                     ),
+                    "AXON_EXPERIENCE_OWNER": "axonllm",
+                    "AXON_EXECUTION_TARGET": "container",
                     "AXON_OIDC_ISSUER": Token.as_string(
                         Fn.condition_if(
                             production_mode.logical_id,
@@ -1068,10 +882,7 @@ class AxonLLMStack(Stack):
                     "AXON_ALB_ISSUER": Token.as_string(
                         Fn.condition_if(
                             production_mode.logical_id,
-                            (
-                                "https://public-keys.auth.elb."
-                                f"{self.region}.amazonaws.com"
-                            ),
+                            (f"https://public-keys.auth.elb.{self.region}.amazonaws.com"),
                             "",
                         )
                     ),
@@ -1096,9 +907,7 @@ class AxonLLMStack(Stack):
             ),
             assign_public_ip=False,
             load_balancer=load_balancer,
-            task_subnets=ec2.SubnetSelection(
-                subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS
-            ),
+            task_subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS),
             security_groups=[task_security_group],
             open_listener=False,
             certificate=origin_certificate,
@@ -1110,16 +919,13 @@ class AxonLLMStack(Stack):
         cutover_guard_handler_logs = logs.LogGroup(
             self,
             "RecoveryCutoverGuardHandlerLogs",
-            encryption_key=data_key,
             retention=logs.RetentionDays.ONE_YEAR,
             removal_policy=RemovalPolicy.RETAIN,
         )
         cutover_guard_handler = lambda_.Function(
             self,
             "RecoveryCutoverGuardHandler",
-            description=(
-                "Blocks DynamoDB state cutover until AxonLLM is quiesced"
-            ),
+            description=("Blocks DynamoDB state cutover until AxonLLM is quiesced"),
             runtime=lambda_.Runtime.PYTHON_3_12,
             handler="index.handler",
             code=lambda_.Code.from_inline(_RECOVERY_CUTOVER_GUARD),
@@ -1140,16 +946,13 @@ class AxonLLMStack(Stack):
         )
         cutover_guard_handler.add_to_role_policy(
             iam.PolicyStatement(
-                actions=[
-                    "application-autoscaling:DescribeScalableTargets"
-                ],
+                actions=["application-autoscaling:DescribeScalableTargets"],
                 resources=["*"],
             )
         )
         cutover_guard_provider_logs = logs.LogGroup(
             self,
             "RecoveryCutoverGuardProviderLogs",
-            encryption_key=data_key,
             retention=logs.RetentionDays.ONE_YEAR,
             removal_policy=RemovalPolicy.RETAIN,
         )
@@ -1167,9 +970,7 @@ class AxonLLMStack(Stack):
                 "ClusterName": "axonllm",
                 "CutoverMode": recovery_cutover_mode.value_as_string,
                 "ServiceName": "axonllm",
-                "TargetTable": (
-                    runtime_state_table_name.value_as_string
-                ),
+                "TargetTable": (runtime_state_table_name.value_as_string),
             },
         )
         cfn_service = fargate_service.service.node.default_child
@@ -1214,9 +1015,7 @@ class AxonLLMStack(Stack):
             "ContainerDefinitions.0.LinuxParameters.InitProcessEnabled",
             True,
         )
-        execution_role = (
-            fargate_service.task_definition.obtain_execution_role()
-        )
+        execution_role = fargate_service.task_definition.obtain_execution_role()
         execution_role.add_to_principal_policy(
             iam.PolicyStatement(
                 actions=[
@@ -1259,16 +1058,12 @@ class AxonLLMStack(Stack):
                     order=1,
                     authenticate_oidc_config=(
                         elbv2.CfnListenerRule.AuthenticateOidcConfigProperty(
-                            authorization_endpoint=(
-                                oidc_authorization_endpoint.value_as_string
-                            ),
+                            authorization_endpoint=(oidc_authorization_endpoint.value_as_string),
                             client_id=oidc_client_id.value_as_string,
                             client_secret=oidc_client_secret.value_as_string,
                             issuer=oidc_issuer.value_as_string,
                             token_endpoint=oidc_token_endpoint.value_as_string,
-                            user_info_endpoint=(
-                                oidc_user_info_endpoint.value_as_string
-                            ),
+                            user_info_endpoint=(oidc_user_info_endpoint.value_as_string),
                             on_unauthenticated_request="authenticate",
                             scope="openid email profile",
                             session_cookie_name="AxonLLMOIDCSession",
@@ -1279,9 +1074,7 @@ class AxonLLMStack(Stack):
                 elbv2.CfnListenerRule.ActionProperty(
                     type="forward",
                     order=2,
-                    target_group_arn=(
-                        fargate_service.target_group.target_group_arn
-                    ),
+                    target_group_arn=(fargate_service.target_group.target_group_arn),
                 ),
             ],
         )
@@ -1373,29 +1166,33 @@ class AxonLLMStack(Stack):
         event_outbox_queue.grant_send_messages(task_role)
         event_outbox_queue.grant_consume_messages(task_role)
         security_event_topic.grant_publish(task_role)
+        task_role.add_to_principal_policy(
+            iam.PolicyStatement(
+                sid="UseAwsManagedSnsKey",
+                actions=["kms:Decrypt", "kms:GenerateDataKey*"],
+                resources=["*"],
+                conditions={
+                    "StringEquals": {
+                        "kms:CallerAccount": self.account,
+                        "kms:ViaService": f"sns.{self.region}.{self.url_suffix}",
+                        "kms:EncryptionContext:aws:sns:topicArn": security_event_topic.topic_arn,
+                    }
+                },
+            )
+        )
         security_event_log_group.grant_write(task_role)
 
         # Secrets Manager (read-only for API keys)
         api_keys_secret.grant_read(task_role)
 
         # --- Sticky sessions for SSE streaming ---
-        fargate_service.target_group.set_attribute(
-            "stickiness.enabled", "true"
-        )
-        fargate_service.target_group.set_attribute(
-            "stickiness.type", "lb_cookie"
-        )
-        fargate_service.target_group.set_attribute(
-            "stickiness.lb_cookie.duration_seconds", "3600"
-        )
+        fargate_service.target_group.set_attribute("stickiness.enabled", "true")
+        fargate_service.target_group.set_attribute("stickiness.type", "lb_cookie")
+        fargate_service.target_group.set_attribute("stickiness.lb_cookie.duration_seconds", "3600")
 
         # --- Idle timeout for long streaming responses ---
-        fargate_service.load_balancer.set_attribute(
-            "idle_timeout.timeout_seconds", "300"
-        )
-        fargate_service.load_balancer.set_attribute(
-            "routing.http.drop_invalid_header_fields.enabled", "true"
-        )
+        fargate_service.load_balancer.set_attribute("idle_timeout.timeout_seconds", "300")
+        fargate_service.load_balancer.set_attribute("routing.http.drop_invalid_header_fields.enabled", "true")
         fargate_service.load_balancer.set_attribute(
             "deletion_protection.enabled",
             Token.as_string(
@@ -1450,9 +1247,7 @@ class AxonLLMStack(Stack):
             self,
             "WebAcl",
             scope="CLOUDFRONT",
-            default_action=wafv2.CfnWebACL.DefaultActionProperty(
-                allow=wafv2.CfnWebACL.AllowActionProperty()
-            ),
+            default_action=wafv2.CfnWebACL.DefaultActionProperty(allow=wafv2.CfnWebACL.AllowActionProperty()),
             visibility_config=wafv2.CfnWebACL.VisibilityConfigProperty(
                 cloud_watch_metrics_enabled=True,
                 metric_name="AxonLLMWebAcl",
@@ -1462,9 +1257,7 @@ class AxonLLMStack(Stack):
                 wafv2.CfnWebACL.RuleProperty(
                     name="AWSManagedRulesAmazonIpReputationList",
                     priority=10,
-                    override_action=wafv2.CfnWebACL.OverrideActionProperty(
-                        none={}
-                    ),
+                    override_action=wafv2.CfnWebACL.OverrideActionProperty(none={}),
                     statement=wafv2.CfnWebACL.StatementProperty(
                         managed_rule_group_statement=wafv2.CfnWebACL.ManagedRuleGroupStatementProperty(
                             name="AWSManagedRulesAmazonIpReputationList",
@@ -1480,9 +1273,7 @@ class AxonLLMStack(Stack):
                 wafv2.CfnWebACL.RuleProperty(
                     name="PerIpRateLimit",
                     priority=20,
-                    action=wafv2.CfnWebACL.RuleActionProperty(
-                        block=wafv2.CfnWebACL.BlockActionProperty()
-                    ),
+                    action=wafv2.CfnWebACL.RuleActionProperty(block=wafv2.CfnWebACL.BlockActionProperty()),
                     statement=wafv2.CfnWebACL.StatementProperty(
                         rate_based_statement=wafv2.CfnWebACL.RateBasedStatementProperty(
                             aggregate_key_type="IP",
@@ -1558,7 +1349,6 @@ class AxonLLMStack(Stack):
             self,
             "AlarmTopic",
             display_name="AxonLLM production alarms",
-            master_key=data_key,
         )
         alarm_topic.add_to_resource_policy(
             iam.PolicyStatement(
@@ -1568,10 +1358,7 @@ class AxonLLMStack(Stack):
                 resources=[alarm_topic.topic_arn],
                 conditions={
                     "ArnLike": {
-                        "aws:SourceArn": (
-                            f"arn:{self.partition}:cloudwatch:{self.region}:"
-                            f"{self.account}:alarm:*"
-                        )
+                        "aws:SourceArn": (f"arn:{self.partition}:cloudwatch:{self.region}:{self.account}:alarm:*")
                     },
                     "StringEquals": {"aws:SourceAccount": self.account},
                 },
@@ -1587,34 +1374,26 @@ class AxonLLMStack(Stack):
             period=Duration.minutes(1),
             statistic="Minimum",
         )
-        unhealthy_hosts = (
-            fargate_service.target_group.metrics.unhealthy_host_count(
-                period=Duration.minutes(1),
-                statistic="Maximum",
-            )
+        unhealthy_hosts = fargate_service.target_group.metrics.unhealthy_host_count(
+            period=Duration.minutes(1),
+            statistic="Maximum",
         )
         target_5xx = fargate_service.target_group.metrics.http_code_target(
             elbv2.HttpCodeTarget.TARGET_5XX_COUNT,
             period=Duration.minutes(5),
             statistic="Sum",
         )
-        alb_auth_errors = (
-            fargate_service.load_balancer.metrics.elb_auth_error(
-                period=Duration.minutes(5),
-                statistic="Sum",
-            )
+        alb_auth_errors = fargate_service.load_balancer.metrics.elb_auth_error(
+            period=Duration.minutes(5),
+            statistic="Sum",
         )
-        cpu_utilization = (
-            fargate_service.service.metric_cpu_utilization(
-                period=Duration.minutes(5),
-                statistic="Average",
-            )
+        cpu_utilization = fargate_service.service.metric_cpu_utilization(
+            period=Duration.minutes(5),
+            statistic="Average",
         )
-        memory_utilization = (
-            fargate_service.service.metric_memory_utilization(
-                period=Duration.minutes(5),
-                statistic="Average",
-            )
+        memory_utilization = fargate_service.service.metric_memory_utilization(
+            period=Duration.minutes(5),
+            statistic="Average",
         )
         state_operations = [
             "GetItem",
@@ -1669,15 +1448,11 @@ class AxonLLMStack(Stack):
                 "InsufficientTasksAlarm",
                 metric=running_tasks,
                 threshold=2,
-                comparison_operator=(
-                    cloudwatch.ComparisonOperator.LESS_THAN_THRESHOLD
-                ),
+                comparison_operator=(cloudwatch.ComparisonOperator.LESS_THAN_THRESHOLD),
                 evaluation_periods=2,
                 datapoints_to_alarm=2,
                 treat_missing_data=cloudwatch.TreatMissingData.BREACHING,
-                alarm_description=(
-                    "AxonLLM is running fewer than its two required tasks"
-                ),
+                alarm_description=("AxonLLM is running fewer than its two required tasks"),
             ),
             cloudwatch.Alarm(
                 self,
@@ -1687,9 +1462,7 @@ class AxonLLMStack(Stack):
                 evaluation_periods=2,
                 datapoints_to_alarm=2,
                 treat_missing_data=cloudwatch.TreatMissingData.BREACHING,
-                alarm_description=(
-                    "The /ready target-group check is failing"
-                ),
+                alarm_description=("The /ready target-group check is failing"),
             ),
             cloudwatch.Alarm(
                 self,
@@ -1707,9 +1480,7 @@ class AxonLLMStack(Stack):
                 threshold=1,
                 evaluation_periods=1,
                 treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
-                alarm_description=(
-                    "The ALB could not complete an OIDC authentication flow"
-                ),
+                alarm_description=("The ALB could not complete an OIDC authentication flow"),
             ),
             cloudwatch.Alarm(
                 self,
@@ -1763,20 +1534,15 @@ class AxonLLMStack(Stack):
                 self,
                 "SecurityEventDeadLettersAlarm",
                 metric=(
-                    event_dead_letter_queue
-                    .metric_approximate_number_of_messages_visible(
+                    event_dead_letter_queue.metric_approximate_number_of_messages_visible(
                         period=Duration.minutes(1),
                         statistic="Maximum",
                     )
                 ),
                 threshold=1,
                 evaluation_periods=1,
-                treat_missing_data=(
-                    cloudwatch.TreatMissingData.NOT_BREACHING
-                ),
-                alarm_description=(
-                    "A security event exhausted delivery retries"
-                ),
+                treat_missing_data=(cloudwatch.TreatMissingData.NOT_BREACHING),
+                alarm_description=("A security event exhausted delivery retries"),
             ),
         ]
         alarm_action = cloudwatch_actions.SnsAction(alarm_topic)
@@ -1866,16 +1632,6 @@ class AxonLLMStack(Stack):
         )
         CfnOutput(
             self,
-            "StateBackupVaultArn",
-            value=backup_vault.backup_vault_arn,
-        )
-        CfnOutput(
-            self,
-            "DataKeyArn",
-            value=data_key.key_arn,
-        )
-        CfnOutput(
-            self,
             "StateTableName",
             value=state_table.table_name,
         )
@@ -1889,9 +1645,7 @@ class AxonLLMStack(Stack):
             "RecoveryCutoverModeOutput",
             value=recovery_cutover_mode.value_as_string,
         )
-        recovery_cutover_mode_output.override_logical_id(
-            "RecoveryCutoverMode"
-        )
+        recovery_cutover_mode_output.override_logical_id("RecoveryCutoverMode")
         CfnOutput(
             self,
             "SecurityEventOutboxQueueUrl",

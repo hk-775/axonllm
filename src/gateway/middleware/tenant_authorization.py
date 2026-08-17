@@ -21,7 +21,6 @@ DATA_PLANE_ACTIONS: dict[tuple[str, str], Action] = {
     ("POST", "/api/chat"): Action.INFERENCE_INVOKE,
     ("POST", "/api/chat/stream"): Action.INFERENCE_INVOKE,
     ("POST", "/v1/chat/completions"): Action.INFERENCE_INVOKE,
-    ("POST", "/v1/query"): Action.QUERY_SELECT,
 }
 
 _CANONICAL_API_PREFIXES = ("/api/", "/v1/")
@@ -59,10 +58,7 @@ class TenantAuthorizationMiddleware(BaseHTTPMiddleware):
                     content={
                         "error": {
                             "type": "authorization_error",
-                            "message": (
-                                "No canonical authorization action is mapped "
-                                "for this endpoint."
-                            ),
+                            "message": ("No canonical authorization action is mapped for this endpoint."),
                             "code": "canonical_action_required",
                         }
                     },
@@ -77,10 +73,7 @@ class TenantAuthorizationMiddleware(BaseHTTPMiddleware):
                 content={
                     "error": {
                         "type": "invalid_request",
-                        "message": (
-                            "An explicit project context is required for "
-                            "canonical data-plane requests."
-                        ),
+                        "message": ("An explicit project context is required for canonical data-plane requests."),
                         "code": "project_context_required",
                     }
                 },
@@ -93,10 +86,7 @@ class TenantAuthorizationMiddleware(BaseHTTPMiddleware):
                     content={
                         "error": {
                             "type": "authorization_error",
-                            "message": (
-                                "Tenant project ownership is temporarily "
-                                "unavailable."
-                            ),
+                            "message": ("Tenant project ownership is temporarily unavailable."),
                             "code": "project_resolver_unavailable",
                         }
                     },
@@ -112,10 +102,7 @@ class TenantAuthorizationMiddleware(BaseHTTPMiddleware):
                     content={
                         "error": {
                             "type": "authorization_error",
-                            "message": (
-                                "Tenant project ownership is temporarily "
-                                "unavailable."
-                            ),
+                            "message": ("Tenant project ownership is temporarily unavailable."),
                             "code": "project_resolver_unavailable",
                         }
                     },
@@ -135,11 +122,7 @@ class TenantAuthorizationMiddleware(BaseHTTPMiddleware):
         resource = ResourceRef(
             resource_type="project",
             resource_id=project_id,
-            tenant_id=(
-                project.tenant_id
-                if project is not None
-                else principal.tenant_id
-            ),
+            tenant_id=(project.tenant_id if project is not None else principal.tenant_id),
             project_id=project_id,
         )
         decision = authorize(principal, action, resource)

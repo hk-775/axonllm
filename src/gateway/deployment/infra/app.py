@@ -17,9 +17,7 @@ import aws_cdk as cdk
 from aws_cdk import aws_iam as iam
 
 
-_NAMESPACE_PATTERN = re.compile(
-    r"^[a-z](?:[a-z0-9-]{0,14}[a-z0-9])?$"
-)
+_NAMESPACE_PATTERN = re.compile(r"^[a-z](?:[a-z0-9-]{0,14}[a-z0-9])?$")
 _CDK_QUALIFIERS = {
     "production": "axprod",
     "qualification": "axqual",
@@ -29,13 +27,7 @@ _CDK_QUALIFIERS = {
 
 def deployment_namespace(app: cdk.App) -> str:
     value = app.node.try_get_context("deployment_namespace") or ""
-    if (
-        not isinstance(value, str)
-        or (
-            value
-            and _NAMESPACE_PATTERN.fullmatch(value) is None
-        )
-    ):
+    if not isinstance(value, str) or (value and _NAMESPACE_PATTERN.fullmatch(value) is None):
         raise ValueError(
             "deployment_namespace must be 1-16 lowercase letters, digits, "
             "or internal hyphens, start with a letter, and end with a letter "
@@ -50,18 +42,12 @@ def stack_name(base: str, namespace: str) -> str:
 
 def cdk_qualifier(app: cdk.App, namespace: str) -> str:
     domain = (
-        "production"
-        if not namespace
-        else "external"
-        if namespace in {"external", "external-oidc"}
-        else "qualification"
+        "production" if not namespace else "external" if namespace in {"external", "external-oidc"} else "qualification"
     )
     expected = _CDK_QUALIFIERS[domain]
     configured = app.node.try_get_context("cdk_qualifier")
     if configured is not None and configured != expected:
-        raise ValueError(
-            f"cdk_qualifier must be {expected!r} for the selected namespace"
-        )
+        raise ValueError(f"cdk_qualifier must be {expected!r} for the selected namespace")
     return expected
 
 
@@ -101,9 +87,7 @@ environment = cdk.Environment(
     region=app.node.try_get_context("region") or "us-east-1",
 )
 region = app.node.try_get_context("region") or "us-east-1"
-deployment_target = (
-    app.node.try_get_context("deployment_target") or ""
-).lower()
+deployment_target = (app.node.try_get_context("deployment_target") or "").lower()
 
 if deployment_target == "agentcore":
     from agentcore_stack import AxonLLMAgentCoreStack
@@ -111,6 +95,7 @@ if deployment_target == "agentcore":
     stack = AxonLLMAgentCoreStack(
         app,
         stack_name("AxonLLMAgentCoreStack", namespace),
+        bootstrap_qualifier=qualifier,
         deployment_namespace=namespace,
         env=environment,
         synthesizer=cdk.DefaultStackSynthesizer(qualifier=qualifier),
@@ -136,10 +121,7 @@ elif deployment_target == "control-plane":
         synthesizer=cdk.DefaultStackSynthesizer(qualifier=qualifier),
     )
 else:
-    raise ValueError(
-        "deployment_target must be 'agentcore', 'identity', or "
-        "'control-plane'"
-    )
+    raise ValueError("deployment_target must be 'agentcore', 'identity', or 'control-plane'")
 
 apply_service_boundary(
     stack,

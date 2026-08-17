@@ -9,6 +9,7 @@ from collections.abc import Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
+import difflib
 import hashlib
 import ipaddress
 from importlib.resources import files
@@ -22,8 +23,9 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from typing import Any, Callable
-from urllib.parse import unquote, urlsplit, urlunsplit
+from urllib.parse import unquote
 
 try:
     import fcntl
@@ -69,6 +71,10 @@ from src.gateway.deployment.provider_secret import (
     load_provider_environment_file,
     rollback_provider_secret,
     synchronize_provider_secret,
+)
+from src.gateway.deployment.topology import (
+    OSTIARI_EXPERIENCE,
+    STANDALONE_AGENTCORE,
 )
 
 
@@ -393,8 +399,54 @@ _REHEARSAL_CONTROL_TABLE_ARN_PATTERN = re.compile(
     r"axonllm-rehearsal-control-ledger$"
 )
 _DNS_LABEL_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
-_MAX_AGENTCORE_ENVIRONMENT_VALUE_CHARACTERS = 2_048
 _CANDIDATE_ENDPOINT_PATTERN = re.compile(r"^candidate_[0-9a-f]{32}$")
+_LEGACY_SHARED_RUNTIME_FIELDS = frozenset(
+    {
+        "AlarmNotificationEmail",
+        "ApprovedHttpsPrefixListId",
+        "AthenaConfigurationFingerprint",
+        "BedrockInvokeResourceArns",
+    }
+)
+_PRE_ADDON_SHARED_RUNTIME_FIELDS = frozenset(
+    {
+        *_LEGACY_SHARED_RUNTIME_FIELDS,
+        "DeploymentExperience",
+        "DeploymentExecution",
+    }
+)
+_PRE_FACADE_SHARED_RUNTIME_FIELDS = frozenset(
+    {
+        "AlarmNotificationEmail",
+        "ApprovedHttpsPrefixListId",
+        "BedrockInvokeResourceArns",
+        "DeploymentExperience",
+        "DeploymentExecution",
+    }
+)
+_SHARED_RUNTIME_FIELDS = frozenset(
+    {
+        *_PRE_FACADE_SHARED_RUNTIME_FIELDS,
+        "RuntimeIngressMode",
+    }
+)
+_FAILED_FIRST_DEPLOYMENT_STATUSES = frozenset(
+    {
+        "CREATE_FAILED",
+        "DELETE_FAILED",
+        "ROLLBACK_COMPLETE",
+        "ROLLBACK_FAILED",
+    }
+)
+_LIVE_AGENTCORE_OUTPUTS = frozenset(
+    {
+        "CandidateRuntimeEndpointArn",
+        "ProductionRuntimeVersion",
+        "RuntimeArn",
+        "RuntimeEndpointArn",
+        "StateTableName",
+    }
+)
 _TRANSITION_REPOSITORY_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _TRANSITION_RUN_PATTERN = re.compile(r"^[1-9][0-9]*$")
 _TRANSITION_COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40}$")
@@ -460,12 +512,28 @@ def _activate_deployment_namespace(
     return previous
 
 
-def _deployment_context_arguments(namespace: str) -> list[str]:
+def _deployment_context_arguments(
+    namespace: str,
+    *,
+    runtime_ingress: str | None = None,
+) -> list[str]:
     qualifier = bootstrap_qualifier_for_namespace(namespace)
     arguments = ["-c", f"cdk_qualifier={qualifier}"]
     if namespace:
         arguments.extend(["-c", f"deployment_namespace={namespace}"])
+    if runtime_ingress is not None:
+        if runtime_ingress not in {"direct-jwt", "facade"}:
+            raise AgentCoreDeploymentError("runtime ingress must be direct-jwt or facade")
+        arguments.extend(["-c", f"runtime_ingress={runtime_ingress}"])
     return arguments
+
+
+def _runtime_ingress_mode(config: AgentCoreSetupConfig) -> str:
+    return (
+        "facade"
+        if config.identity_mode == MANAGED_COGNITO and config.deployment.experience != OSTIARI_EXPERIENCE
+        else "direct-jwt"
+    )
 
 
 def validate_rehearsal_control_table_arn(
@@ -513,36 +581,39 @@ def deployment_control_plane_domain(
     return value
 
 
-def _deployment_oauth_callback_urls(
-    callback_urls: tuple[str, ...],
-    *,
-    domain_name: str,
-    deployment_namespace: str,
-) -> tuple[str, ...]:
-    if not deployment_namespace:
-        return callback_urls
-    rewritten: list[str] = []
-    for value in callback_urls:
-        parsed = urlsplit(value)
-        candidate = urlunsplit(
-            (
-                parsed.scheme,
-                domain_name,
-                parsed.path,
-                parsed.query,
-                "",
-            )
-        )
-        if candidate in rewritten:
-            raise AgentCoreDeploymentError("namespaced OAuth callback URLs must remain unique")
-        rewritten.append(candidate)
-    return tuple(rewritten)
-
-
 @dataclass(frozen=True)
 class AwsIdentity:
     account_id: str
     partition: str
+
+
+@dataclass(frozen=True)
+class ManagedPolicySpec:
+    policy_arn: str
+    policy_name: str
+    description: str
+    document: dict[str, Any]
+    tags: tuple[tuple[str, str], ...]
+    purpose: str
+
+
+@dataclass(frozen=True)
+class ManagedPolicyInspection:
+    spec: ManagedPolicySpec
+    action: str
+    current_version_id: str | None = None
+    current_document: dict[str, Any] | None = None
+    version_ids: tuple[str, ...] = ()
+    prune_version_id: str | None = None
+    prune_document: dict[str, Any] | None = None
+
+
+@dataclass
+class ManagedPolicyMutation:
+    inspection: ManagedPolicyInspection
+    created: bool = False
+    new_version_id: str | None = None
+    pruned_document: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -626,50 +697,60 @@ def _canonical_policy_document(value: Any) -> str:
         try:
             value = json.loads(unquote(value))
         except (UnicodeError, json.JSONDecodeError) as exc:
-            raise AgentCoreDeploymentError("the bootstrap execution policy document is malformed") from exc
+            raise AgentCoreDeploymentError("the bootstrap managed-policy document is malformed") from exc
     if not isinstance(value, dict):
-        raise AgentCoreDeploymentError("the bootstrap execution policy document is malformed")
+        raise AgentCoreDeploymentError("the bootstrap managed-policy document is malformed")
     return json.dumps(value, separators=(",", ":"), sort_keys=True)
 
 
-def _require_exact_managed_policy(
+def _policy_document_mapping(value: Any) -> dict[str, Any]:
+    document = json.loads(_canonical_policy_document(value))
+    if not isinstance(document, dict):  # pragma: no cover - canonicalization owns this
+        raise AgentCoreDeploymentError("the bootstrap managed-policy document is malformed")
+    return document
+
+
+def _policy_document_digest(value: Any) -> str:
+    return hashlib.sha256(_canonical_policy_document(value).encode("utf-8")).hexdigest()
+
+
+def _policy_document_diff(inspection: ManagedPolicyInspection) -> str:
+    expected = json.dumps(
+        inspection.spec.document,
+        indent=2,
+        sort_keys=True,
+    ).splitlines()
+    actual = (
+        []
+        if inspection.current_document is None
+        else json.dumps(
+            inspection.current_document,
+            indent=2,
+            sort_keys=True,
+        ).splitlines()
+    )
+    return "\n".join(
+        difflib.unified_diff(
+            actual,
+            expected,
+            fromfile=(
+                "/dev/null"
+                if inspection.current_version_id is None
+                else f"live/{inspection.spec.policy_name}@{inspection.current_version_id}"
+            ),
+            tofile=f"repository/{inspection.spec.policy_name}",
+            lineterm="",
+        )
+    )
+
+
+def _read_managed_policy_version(
     iam_client: Any,
     *,
     policy_arn: str,
-    policy_name: str,
-    description: str,
-    document: dict[str, Any],
-    tags: list[dict[str, str]],
-    create_if_missing: bool,
+    version_id: str,
     purpose: str,
-) -> None:
-    try:
-        policy = iam_client.get_policy(PolicyArn=policy_arn).get("Policy")
-    except Exception as exc:
-        if _aws_error_code(exc) != "NoSuchEntity":
-            raise AgentCoreDeploymentError(f"could not inspect the repository-defined {purpose}") from exc
-        if not create_if_missing:
-            raise AgentCoreDeploymentError(
-                f"required {purpose} {policy_arn} is absent; run "
-                "--bootstrap-cdk with an IAM bootstrap principal before "
-                "deploying"
-            ) from exc
-        try:
-            created = iam_client.create_policy(
-                PolicyName=policy_name,
-                Description=description,
-                PolicyDocument=_canonical_policy_document(document),
-                Tags=tags,
-            )
-        except Exception as create_exc:
-            raise AgentCoreDeploymentError(f"could not create the repository-defined {purpose}") from create_exc
-        policy = created.get("Policy")
-    if not isinstance(policy, dict):
-        raise AgentCoreDeploymentError(f"IAM returned malformed {purpose} metadata")
-    version_id = policy.get("DefaultVersionId")
-    actual_arn = policy.get("Arn")
-    if not isinstance(version_id, str) or not version_id or actual_arn != policy_arn:
-        raise AgentCoreDeploymentError(f"IAM returned unexpected {purpose} metadata")
+) -> dict[str, Any]:
     try:
         version = iam_client.get_policy_version(
             PolicyArn=policy_arn,
@@ -678,46 +759,483 @@ def _require_exact_managed_policy(
     except Exception as exc:
         raise AgentCoreDeploymentError(f"could not read the {purpose} version") from exc
     actual_document = version.get("Document") if isinstance(version, dict) else None
-    if not secrets.compare_digest(
+    return _policy_document_mapping(actual_document)
+
+
+def _policy_version_number(value: Any) -> int:
+    if not isinstance(value, str):
+        raise AgentCoreDeploymentError("IAM returned malformed managed-policy version metadata")
+    match = re.fullmatch(r"v([1-9][0-9]*)", value)
+    if match is None:
+        raise AgentCoreDeploymentError("IAM returned malformed managed-policy version metadata")
+    return int(match.group(1))
+
+
+def _inspect_managed_policy(
+    iam_client: Any,
+    *,
+    spec: ManagedPolicySpec,
+) -> ManagedPolicyInspection:
+    try:
+        policy = iam_client.get_policy(PolicyArn=spec.policy_arn).get("Policy")
+    except Exception as exc:
+        if _aws_error_code(exc) == "NoSuchEntity":
+            return ManagedPolicyInspection(
+                spec=spec,
+                action="create",
+            )
+        raise AgentCoreDeploymentError(f"could not inspect the repository-defined {spec.purpose}") from exc
+    if not isinstance(policy, dict):
+        raise AgentCoreDeploymentError(f"IAM returned malformed {spec.purpose} metadata")
+    version_id = policy.get("DefaultVersionId")
+    actual_arn = policy.get("Arn")
+    if not isinstance(version_id, str) or not version_id or actual_arn != spec.policy_arn:
+        raise AgentCoreDeploymentError(f"IAM returned unexpected {spec.purpose} metadata")
+    actual_document = _read_managed_policy_version(
+        iam_client,
+        policy_arn=spec.policy_arn,
+        version_id=version_id,
+        purpose=spec.purpose,
+    )
+    if secrets.compare_digest(
         _canonical_policy_document(actual_document),
-        _canonical_policy_document(document),
+        _canonical_policy_document(spec.document),
+    ):
+        return ManagedPolicyInspection(
+            spec=spec,
+            action="current",
+            current_version_id=version_id,
+            current_document=actual_document,
+        )
+    try:
+        response = iam_client.list_policy_versions(PolicyArn=spec.policy_arn)
+    except Exception as exc:
+        raise AgentCoreDeploymentError(f"could not inspect version history for the {spec.purpose}") from exc
+    versions = response.get("Versions")
+    if not isinstance(versions, list) or not versions or len(versions) > 5:
+        raise AgentCoreDeploymentError(f"IAM returned malformed version history for the {spec.purpose}")
+    version_ids = {version.get("VersionId") for version in versions if isinstance(version, dict)}
+    default_version_ids = [
+        version.get("VersionId")
+        for version in versions
+        if isinstance(version, dict) and version.get("IsDefaultVersion") is True
+    ]
+    if (
+        version_id not in version_ids
+        or any(
+            not isinstance(version, dict)
+            or not isinstance(version.get("IsDefaultVersion"), bool)
+            or not isinstance(version.get("VersionId"), str)
+            for version in versions
+        )
+        or default_version_ids != [version_id]
+    ):
+        raise AgentCoreDeploymentError(f"IAM returned malformed version history for the {spec.purpose}")
+    ordered_version_ids = tuple(
+        sorted(
+            version_ids,
+            key=_policy_version_number,
+        )
+    )
+    prune_version_id: str | None = None
+    prune_document: dict[str, Any] | None = None
+    if len(versions) == 5:
+        candidates = [version["VersionId"] for version in versions if not version["IsDefaultVersion"]]
+        if not candidates:
+            raise AgentCoreDeploymentError(f"the {spec.purpose} has no removable non-default policy version")
+        prune_version_id = min(candidates, key=_policy_version_number)
+        prune_document = _read_managed_policy_version(
+            iam_client,
+            policy_arn=spec.policy_arn,
+            version_id=prune_version_id,
+            purpose=spec.purpose,
+        )
+    return ManagedPolicyInspection(
+        spec=spec,
+        action="update",
+        current_version_id=version_id,
+        current_document=actual_document,
+        version_ids=ordered_version_ids,
+        prune_version_id=prune_version_id,
+        prune_document=prune_document,
+    )
+
+
+def _bootstrap_policy_report(
+    inspections: tuple[ManagedPolicyInspection, ...],
+    *,
+    status: str,
+    error: str | None = None,
+    results: tuple[ManagedPolicyInspection, ...] | None = None,
+) -> dict[str, Any]:
+    result_by_arn = {} if results is None else {inspection.spec.policy_arn: inspection for inspection in results}
+    report: dict[str, Any] = {
+        "schemaVersion": 1,
+        "status": status,
+        "policies": [
+            {
+                "action": inspection.action,
+                "currentSha256": (
+                    None
+                    if inspection.current_document is None
+                    else _policy_document_digest(inspection.current_document)
+                ),
+                "currentVersionId": inspection.current_version_id,
+                "diff": ("" if inspection.action == "current" else _policy_document_diff(inspection)),
+                "policyArn": inspection.spec.policy_arn,
+                "purpose": inspection.spec.purpose,
+                "repositorySha256": _policy_document_digest(inspection.spec.document),
+                "resultSha256": (
+                    None
+                    if inspection.spec.policy_arn not in result_by_arn
+                    else _policy_document_digest(result_by_arn[inspection.spec.policy_arn].current_document)
+                ),
+                "resultVersionId": (
+                    None
+                    if inspection.spec.policy_arn not in result_by_arn
+                    else result_by_arn[inspection.spec.policy_arn].current_version_id
+                ),
+                "versionPrunedBeforeUpdate": inspection.prune_version_id,
+            }
+            for inspection in inspections
+        ],
+    }
+    if error is not None:
+        report["error"] = error
+    return report
+
+
+def _print_bootstrap_policy_plan(
+    inspections: tuple[ManagedPolicyInspection, ...],
+) -> None:
+    print("CDK bootstrap managed-policy plan:")
+    symbols = {
+        "create": "+",
+        "current": "=",
+        "update": "~",
+    }
+    for inspection in inspections:
+        current_digest = (
+            "absent" if inspection.current_document is None else _policy_document_digest(inspection.current_document)
+        )
+        expected_digest = _policy_document_digest(inspection.spec.document)
+        print(
+            f"  {symbols[inspection.action]} {inspection.spec.purpose}: "
+            f"{inspection.action} ({current_digest} -> {expected_digest})"
+        )
+        if inspection.prune_version_id is not None:
+            print(
+                "    IAM has five versions; the oldest non-default version "
+                f"{inspection.prune_version_id} will be pruned."
+            )
+        if inspection.action != "current":
+            print(_policy_document_diff(inspection))
+
+
+def _confirm_bootstrap_policy_changes(
+    inspections: tuple[ManagedPolicyInspection, ...],
+    *,
+    assume_yes: bool,
+) -> None:
+    changes = [inspection for inspection in inspections if inspection.action != "current"]
+    if not changes or assume_yes:
+        return
+    if not sys.stdin.isatty():
+        raise AgentCoreDeploymentError(
+            "non-interactive CDK bootstrap policy reconciliation requires --yes after reviewing the managed-policy diff"
+        )
+    answer = input("Apply this CDK bootstrap managed-policy plan with the dedicated bootstrap principal? [y/N] ")
+    if answer.strip().lower() not in {"y", "yes"}:
+        raise AgentCoreDeploymentError("CDK bootstrap managed-policy reconciliation was not approved")
+
+
+def _rollback_managed_policy_mutations(
+    iam_client: Any,
+    mutations: list[ManagedPolicyMutation],
+) -> list[str]:
+    failures: list[str] = []
+    for mutation in reversed(mutations):
+        inspection = mutation.inspection
+        spec = inspection.spec
+        try:
+            if mutation.created:
+                iam_client.delete_policy(PolicyArn=spec.policy_arn)
+                continue
+            if mutation.new_version_id is not None:
+                if inspection.current_version_id is None:  # pragma: no cover - invariant
+                    raise AgentCoreDeploymentError(f"cannot restore the prior {spec.purpose} default version")
+                iam_client.set_default_policy_version(
+                    PolicyArn=spec.policy_arn,
+                    VersionId=inspection.current_version_id,
+                )
+                iam_client.delete_policy_version(
+                    PolicyArn=spec.policy_arn,
+                    VersionId=mutation.new_version_id,
+                )
+            if mutation.pruned_document is not None:
+                iam_client.create_policy_version(
+                    PolicyArn=spec.policy_arn,
+                    PolicyDocument=_canonical_policy_document(mutation.pruned_document),
+                    SetAsDefault=False,
+                )
+            restored = _inspect_managed_policy(
+                iam_client,
+                spec=ManagedPolicySpec(
+                    policy_arn=spec.policy_arn,
+                    policy_name=spec.policy_name,
+                    description=spec.description,
+                    document=(
+                        inspection.current_document if inspection.current_document is not None else spec.document
+                    ),
+                    tags=spec.tags,
+                    purpose=spec.purpose,
+                ),
+            )
+            if restored.action != "current":
+                raise AgentCoreDeploymentError(f"could not verify the restored {spec.purpose}")
+        except Exception:
+            failures.append(spec.purpose)
+    return failures
+
+
+def _assert_managed_policy_plan_is_current(
+    iam_client: Any,
+    inspection: ManagedPolicyInspection,
+) -> None:
+    spec = inspection.spec
+    try:
+        policy = iam_client.get_policy(
+            PolicyArn=spec.policy_arn,
+        ).get("Policy")
+    except Exception as exc:
+        if inspection.action == "create" and _aws_error_code(exc) == "NoSuchEntity":
+            return
+        raise AgentCoreDeploymentError(
+            f"the live {spec.purpose} changed after plan review; rerun bootstrap to generate a fresh plan"
+        ) from exc
+    if inspection.action == "create":
+        raise AgentCoreDeploymentError(
+            f"the live {spec.purpose} changed after plan review; rerun bootstrap to generate a fresh plan"
+        )
+    if not isinstance(policy, dict):
+        raise AgentCoreDeploymentError(f"IAM returned malformed {spec.purpose} metadata")
+    current_version_id = policy.get("DefaultVersionId")
+    if current_version_id != inspection.current_version_id:
+        raise AgentCoreDeploymentError(
+            f"the live {spec.purpose} changed after plan review; rerun bootstrap to generate a fresh plan"
+        )
+    current_document = _read_managed_policy_version(
+        iam_client,
+        policy_arn=spec.policy_arn,
+        version_id=current_version_id,
+        purpose=spec.purpose,
+    )
+    if inspection.current_document is None or not secrets.compare_digest(
+        _canonical_policy_document(current_document),
+        _canonical_policy_document(inspection.current_document),
     ):
         raise AgentCoreDeploymentError(
-            f"{purpose} {policy_arn} differs from this repository; "
-            "replace it through a reviewed IAM change before deployment"
+            f"the live {spec.purpose} changed after plan review; rerun bootstrap to generate a fresh plan"
         )
 
 
-def _require_bootstrap_execution_policy(
-    boto3_session: Any,
+def _recover_created_policy_version(
+    iam_client: Any,
     *,
+    inspection: ManagedPolicyInspection,
+) -> str | None:
+    spec = inspection.spec
+    try:
+        versions = iam_client.list_policy_versions(
+            PolicyArn=spec.policy_arn,
+        ).get("Versions")
+    except Exception:
+        return None
+    if not isinstance(versions, list):
+        return None
+    candidates = [
+        version.get("VersionId")
+        for version in versions
+        if isinstance(version, dict)
+        and isinstance(version.get("VersionId"), str)
+        and version.get("VersionId") not in inspection.version_ids
+    ]
+    matches: list[str] = []
+    for version_id in candidates:
+        try:
+            document = _read_managed_policy_version(
+                iam_client,
+                policy_arn=spec.policy_arn,
+                version_id=version_id,
+                purpose=spec.purpose,
+            )
+        except AgentCoreDeploymentError:
+            continue
+        if secrets.compare_digest(
+            _canonical_policy_document(document),
+            _canonical_policy_document(spec.document),
+        ):
+            matches.append(version_id)
+    return matches[0] if len(matches) == 1 else None
+
+
+def _apply_bootstrap_policy_plan(
+    iam_client: Any,
+    inspections: tuple[ManagedPolicyInspection, ...],
+) -> tuple[ManagedPolicyInspection, ...]:
+    mutations: list[ManagedPolicyMutation] = []
+    verification: tuple[ManagedPolicyInspection, ...] = ()
+    try:
+        for inspection in inspections:
+            if inspection.action == "current":
+                continue
+            spec = inspection.spec
+            _assert_managed_policy_plan_is_current(
+                iam_client,
+                inspection,
+            )
+            if inspection.action == "create":
+                try:
+                    created = iam_client.create_policy(
+                        PolicyName=spec.policy_name,
+                        Description=spec.description,
+                        PolicyDocument=_canonical_policy_document(spec.document),
+                        Tags=[{"Key": key, "Value": value} for key, value in spec.tags],
+                    )
+                except Exception as exc:
+                    raise AgentCoreDeploymentError(f"could not create the repository-defined {spec.purpose}") from exc
+                mutation = ManagedPolicyMutation(
+                    inspection=inspection,
+                    created=True,
+                )
+                mutations.append(mutation)
+                policy = created.get("Policy")
+                if (
+                    not isinstance(policy, dict)
+                    or policy.get("Arn") != spec.policy_arn
+                    or not isinstance(policy.get("DefaultVersionId"), str)
+                ):
+                    raise AgentCoreDeploymentError(f"IAM returned unexpected {spec.purpose} metadata")
+                continue
+
+            mutation = ManagedPolicyMutation(
+                inspection=inspection,
+            )
+            mutations.append(mutation)
+            if inspection.prune_version_id is not None:
+                try:
+                    iam_client.delete_policy_version(
+                        PolicyArn=spec.policy_arn,
+                        VersionId=inspection.prune_version_id,
+                    )
+                except Exception as exc:
+                    raise AgentCoreDeploymentError(
+                        f"could not prune the oldest non-default version of the {spec.purpose}"
+                    ) from exc
+                mutation.pruned_document = inspection.prune_document
+            try:
+                created = iam_client.create_policy_version(
+                    PolicyArn=spec.policy_arn,
+                    PolicyDocument=_canonical_policy_document(spec.document),
+                    SetAsDefault=False,
+                )
+            except Exception as exc:
+                recovered_version_id = _recover_created_policy_version(
+                    iam_client,
+                    inspection=inspection,
+                )
+                if recovered_version_id is None:
+                    raise AgentCoreDeploymentError(f"could not publish the repository-defined {spec.purpose}") from exc
+                new_version_id = recovered_version_id
+            else:
+                version = created.get("PolicyVersion")
+                new_version_id = version.get("VersionId") if isinstance(version, dict) else None
+            if not isinstance(new_version_id, str) or not new_version_id:
+                raise AgentCoreDeploymentError(f"IAM returned malformed {spec.purpose} version metadata")
+            if new_version_id in inspection.version_ids:
+                raise AgentCoreDeploymentError(f"IAM reused an existing {spec.purpose} version identifier")
+            mutation.new_version_id = new_version_id
+            new_document = _read_managed_policy_version(
+                iam_client,
+                policy_arn=spec.policy_arn,
+                version_id=new_version_id,
+                purpose=spec.purpose,
+            )
+            if not secrets.compare_digest(
+                _canonical_policy_document(new_document),
+                _canonical_policy_document(spec.document),
+            ):
+                raise AgentCoreDeploymentError(f"IAM stored an unexpected {spec.purpose} version document")
+            try:
+                iam_client.set_default_policy_version(
+                    PolicyArn=spec.policy_arn,
+                    VersionId=new_version_id,
+                )
+            except Exception as exc:
+                raise AgentCoreDeploymentError(
+                    f"could not select the repository-defined {spec.purpose} as the default version"
+                ) from exc
+
+        verification_error: AgentCoreDeploymentError | None = None
+        for attempt in range(6):
+            try:
+                verification = tuple(
+                    _inspect_managed_policy(
+                        iam_client,
+                        spec=inspection.spec,
+                    )
+                    for inspection in inspections
+                )
+                stale = [inspection.spec.purpose for inspection in verification if inspection.action != "current"]
+                if not stale:
+                    verification_error = None
+                    break
+                verification_error = AgentCoreDeploymentError(
+                    "could not verify the reconciled CDK bootstrap policies: " + ", ".join(stale)
+                )
+            except AgentCoreDeploymentError as exc:
+                verification_error = exc
+            if attempt < 5:
+                time.sleep(min(0.25 * (2**attempt), 2.0))
+        if verification_error is not None:
+            raise verification_error
+    except Exception as exc:
+        rollback_failures = _rollback_managed_policy_mutations(
+            iam_client,
+            mutations,
+        )
+        rollback_status = (
+            "rollback completed"
+            if not rollback_failures
+            else ("rollback incomplete for: " + ", ".join(rollback_failures))
+        )
+        message = (
+            str(exc)
+            if isinstance(exc, AgentCoreDeploymentError)
+            else "could not reconcile the CDK bootstrap managed policies"
+        )
+        raise AgentCoreDeploymentError(f"{message}; {rollback_status}; no CDK bootstrap was started") from exc
+    return verification
+
+
+def _bootstrap_policy_specs(
+    *,
+    identity: AwsIdentity,
     config: AgentCoreSetupConfig,
-    create_if_missing: bool,
-) -> tuple[AwsIdentity, tuple[str, ...]]:
-    identity = _aws_identity(
-        boto3_session,
-        region=config.aws_region,
+    qualifier: str,
+) -> tuple[tuple[ManagedPolicySpec, ...], tuple[str, ...]]:
+    common_tags = (
+        ("Application", "AxonLLM"),
+        ("Qualifier", qualifier),
+        ("Region", config.aws_region),
     )
-    qualifier = bootstrap_qualifier_for_namespace(_ACTIVE_DEPLOYMENT_NAMESPACE)
-    expected_service_boundary_arn = service_boundary_arn(
+    service_arn = service_boundary_arn(
         partition=identity.partition,
         account_id=identity.account_id,
         region=config.aws_region,
         qualifier=qualifier,
     )
-    expected_service_boundary_document = service_boundary_document(
-        partition=identity.partition,
-        account_id=identity.account_id,
-        region=config.aws_region,
-        qualifier=qualifier,
-    )
-    expected_bootstrap_boundary_arn = bootstrap_role_boundary_arn(
-        partition=identity.partition,
-        account_id=identity.account_id,
-        region=config.aws_region,
-        qualifier=qualifier,
-    )
-    expected_bootstrap_boundary_document = bootstrap_role_boundary_document(
+    bootstrap_arn = bootstrap_role_boundary_arn(
         partition=identity.partition,
         account_id=identity.account_id,
         region=config.aws_region,
@@ -739,74 +1257,156 @@ def _require_bootstrap_execution_policy(
         )
         for part in range(1, EXECUTION_POLICY_PART_COUNT + 1)
     )
-    iam_client = boto3_session.client(
-        "iam",
-        region_name=config.aws_region,
-    )
-    common_tags = [
-        {"Key": "Application", "Value": "AxonLLM"},
-        {"Key": "Qualifier", "Value": qualifier},
-        {"Key": "Region", "Value": config.aws_region},
+    specs = [
+        ManagedPolicySpec(
+            policy_arn=service_arn,
+            policy_name=service_boundary_name(
+                config.aws_region,
+                qualifier=qualifier,
+            ),
+            description=("Mandatory anti-escalation boundary for AxonLLM service roles"),
+            document=service_boundary_document(
+                partition=identity.partition,
+                account_id=identity.account_id,
+                region=config.aws_region,
+                qualifier=qualifier,
+            ),
+            tags=(
+                *common_tags,
+                ("Purpose", "ServiceRoleBoundary"),
+            ),
+            purpose="bootstrap service-role boundary",
+        ),
+        ManagedPolicySpec(
+            policy_arn=bootstrap_arn,
+            policy_name=bootstrap_role_boundary_name(
+                config.aws_region,
+                qualifier=qualifier,
+            ),
+            description=("Mandatory anti-escalation boundary for AxonLLM CDK roles"),
+            document=bootstrap_role_boundary_document(
+                partition=identity.partition,
+                account_id=identity.account_id,
+                region=config.aws_region,
+                qualifier=qualifier,
+            ),
+            tags=(
+                *common_tags,
+                ("Purpose", "BootstrapRoleBoundary"),
+            ),
+            purpose="CDK bootstrap-role boundary",
+        ),
     ]
-    _require_exact_managed_policy(
-        iam_client,
-        policy_arn=expected_service_boundary_arn,
-        policy_name=service_boundary_name(
-            config.aws_region,
-            qualifier=qualifier,
-        ),
-        description=("Mandatory anti-escalation boundary for AxonLLM service roles"),
-        document=expected_service_boundary_document,
-        tags=[
-            *common_tags,
-            {"Key": "Purpose", "Value": "ServiceRoleBoundary"},
-        ],
-        create_if_missing=create_if_missing,
-        purpose="bootstrap service-role boundary",
-    )
-    _require_exact_managed_policy(
-        iam_client,
-        policy_arn=expected_bootstrap_boundary_arn,
-        policy_name=bootstrap_role_boundary_name(
-            config.aws_region,
-            qualifier=qualifier,
-        ),
-        description=("Mandatory anti-escalation boundary for AxonLLM CDK roles"),
-        document=expected_bootstrap_boundary_document,
-        tags=[
-            *common_tags,
-            {"Key": "Purpose", "Value": "BootstrapRoleBoundary"},
-        ],
-        create_if_missing=create_if_missing,
-        purpose="CDK bootstrap-role boundary",
-    )
     for part, (expected_arn, expected_document) in enumerate(
         zip(expected_arns, expected_documents, strict=True),
         start=1,
     ):
-        _require_exact_managed_policy(
-            iam_client,
-            policy_arn=expected_arn,
-            policy_name=bootstrap_policy_part_name(
-                config.aws_region,
-                qualifier=qualifier,
-                part=part,
-            ),
-            description=(
-                "Bounded CloudFormation execution for AxonLLM AgentCore "
-                f"(part {part} of {EXECUTION_POLICY_PART_COUNT})"
-            ),
-            document=expected_document,
-            tags=[
-                *common_tags,
-                {
-                    "Key": "Purpose",
-                    "Value": f"CloudFormationExecutionPart{part}",
-                },
-            ],
-            create_if_missing=create_if_missing,
-            purpose=f"bootstrap execution policy part {part}",
+        specs.append(
+            ManagedPolicySpec(
+                policy_arn=expected_arn,
+                policy_name=bootstrap_policy_part_name(
+                    config.aws_region,
+                    qualifier=qualifier,
+                    part=part,
+                ),
+                description=(
+                    "Bounded CloudFormation execution for AxonLLM AgentCore "
+                    f"(part {part} of {EXECUTION_POLICY_PART_COUNT})"
+                ),
+                document=expected_document,
+                tags=(
+                    *common_tags,
+                    (
+                        "Purpose",
+                        f"CloudFormationExecutionPart{part}",
+                    ),
+                ),
+                purpose=f"bootstrap execution policy part {part}",
+            )
         )
+    return tuple(specs), expected_arns
+
+
+def _require_bootstrap_execution_policy(
+    boto3_session: Any,
+    *,
+    config: AgentCoreSetupConfig,
+    create_if_missing: bool,
+    assume_yes: bool = False,
+    report_path: Path | None = None,
+) -> tuple[AwsIdentity, tuple[str, ...]]:
+    identity = _aws_identity(
+        boto3_session,
+        region=config.aws_region,
+    )
+    qualifier = bootstrap_qualifier_for_namespace(_ACTIVE_DEPLOYMENT_NAMESPACE)
+    specs, expected_arns = _bootstrap_policy_specs(
+        identity=identity,
+        config=config,
+        qualifier=qualifier,
+    )
+    iam_client = boto3_session.client(
+        "iam",
+        region_name=config.aws_region,
+    )
+    inspections = tuple(
+        _inspect_managed_policy(
+            iam_client,
+            spec=spec,
+        )
+        for spec in specs
+    )
+    changes = tuple(inspection for inspection in inspections if inspection.action != "current")
+    if changes:
+        _print_bootstrap_policy_plan(inspections)
+    if report_path is not None:
+        _write_private_json(
+            report_path,
+            _bootstrap_policy_report(
+                inspections,
+                status=("planned" if changes else "verified"),
+            ),
+        )
+        if changes:
+            print(f"Full bootstrap policy plan: {report_path}")
+    if changes and not create_if_missing:
+        raise AgentCoreDeploymentError(
+            "CDK bootstrap managed policies are missing or stale; review "
+            "the complete diff above and use the dedicated bootstrap "
+            "principal with --reconcile-bootstrap-policies for an existing "
+            "toolkit or --bootstrap-cdk for a new account/region"
+        )
+    if changes:
+        _confirm_bootstrap_policy_changes(
+            inspections,
+            assume_yes=assume_yes,
+        )
+        try:
+            results = _apply_bootstrap_policy_plan(
+                iam_client,
+                inspections,
+            )
+        except AgentCoreDeploymentError as exc:
+            if report_path is not None:
+                _write_private_json(
+                    report_path,
+                    _bootstrap_policy_report(
+                        inspections,
+                        status="failed",
+                        error=str(exc),
+                    ),
+                )
+            raise
+        if report_path is not None:
+            _write_private_json(
+                report_path,
+                _bootstrap_policy_report(
+                    inspections,
+                    status="applied",
+                    results=results,
+                ),
+            )
+        print("CDK bootstrap managed policies now match the repository.")
     return identity, expected_arns
 
 
@@ -818,7 +1418,11 @@ def _assert_cdk_execution_role_policy(
     expected_policy_arns: tuple[str, ...],
 ) -> None:
     qualifier = bootstrap_qualifier_for_namespace(_ACTIVE_DEPLOYMENT_NAMESPACE)
-    role_name = f"cdk-{qualifier}-cfn-exec-role-{identity.account_id}-{config.aws_region}"
+    role_name = _cdk_execution_role_name(
+        identity=identity,
+        region=config.aws_region,
+        qualifier=qualifier,
+    )
     iam_client = boto3_session.client(
         "iam",
         region_name=config.aws_region,
@@ -878,6 +1482,27 @@ def _assert_cdk_execution_role_policy(
         )
 
 
+def _cdk_execution_role_name(
+    *,
+    identity: AwsIdentity,
+    region: str,
+    qualifier: str,
+) -> str:
+    return f"cdk-{qualifier}-cfn-exec-role-{identity.account_id}-{region}"
+
+
+def _cdk_execution_role_arn(
+    *,
+    identity: AwsIdentity,
+    region: str,
+    qualifier: str,
+) -> str:
+    return (
+        f"arn:{identity.partition}:iam::{identity.account_id}:role/"
+        f"{_cdk_execution_role_name(identity=identity, region=region, qualifier=qualifier)}"
+    )
+
+
 def _prefix_list_requirements(
     config: AgentCoreSetupConfig,
 ) -> tuple[PrefixListRequirement, ...]:
@@ -892,8 +1517,7 @@ def _prefix_list_requirements(
     if config.control_plane is not None:
         if (
             config.control_plane.endpoint_mode == CUSTOM_DOMAIN
-            and config.control_plane.approved_ingress_prefix_list_id
-            is not None
+            and config.control_plane.approved_ingress_prefix_list_id is not None
         ):
             requirements.append(
                 PrefixListRequirement(
@@ -904,12 +1528,12 @@ def _prefix_list_requirements(
                 )
             )
         requirements.append(
-                PrefixListRequirement(
-                    prefix_list_id=(config.control_plane.approved_https_prefix_list_id),
-                    location=("control_plane.approved_https_prefix_list_id"),
-                    minimum_prefix_length=16,
-                    maximum_total_addresses=1_048_576,
-                )
+            PrefixListRequirement(
+                prefix_list_id=(config.control_plane.approved_https_prefix_list_id),
+                location=("control_plane.approved_https_prefix_list_id"),
+                minimum_prefix_length=16,
+                maximum_total_addresses=1_048_576,
+            )
         )
     return tuple(requirements)
 
@@ -1101,13 +1725,13 @@ def _parameter(name: str, value: str, *, stack: str) -> list[str]:
 def managed_ses_sender(
     config: AgentCoreSetupConfig,
 ) -> tuple[str, str]:
-    """Return an explicit SES sender/domain pair for the identity stack."""
+    """Return an explicit SES sender/source-identity pair."""
     managed = config.managed_cognito
     if managed is None:
         raise AgentCoreDeploymentError("managed Cognito settings are missing")
     if managed.ses_from_email is not None:
         if managed.ses_verified_domain is None:
-            raise AgentCoreDeploymentError("managed Cognito SES domain is missing")
+            raise AgentCoreDeploymentError("managed Cognito SES source identity is missing")
         return managed.ses_from_email, managed.ses_verified_domain
     local, separator, domain = config.admin.email.rpartition("@")
     if separator != "@" or not local or not domain:
@@ -1156,41 +1780,28 @@ def _identity_parameters(
         if deployment_namespace is None
         else deployment_names(deployment_namespace).namespace
     )
-    ses_from_email, ses_verified_domain = managed_ses_sender(config)
+    ses_from_email, ses_source_identity = managed_ses_sender(config)
     parameters = {
         "HostedUiDomainPrefix": _managed_hosted_ui_domain_prefix(
             config,
             deployment_namespace=namespace,
         ),
         "SesFromEmail": ses_from_email,
-        "SesVerifiedDomain": ses_verified_domain,
+        "SesVerifiedDomain": ses_source_identity,
     }
     if control_plane.endpoint_mode == CLOUDFRONT:
         parameters["EndpointMode"] = CLOUDFRONT
     if control_plane.endpoint_mode == CUSTOM_DOMAIN:
         if control_plane.domain_name is None:
-            raise AgentCoreDeploymentError(
-                "custom-domain control-plane hostname is missing"
-            )
+            raise AgentCoreDeploymentError("custom-domain control-plane hostname is missing")
         domain_name = deployment_control_plane_domain(
             control_plane.domain_name,
             namespace,
         )
         parameters.update(
             {
-                "OAuthCallbackUrls": ",".join(
-                    _deployment_oauth_callback_urls(
-                        managed.oauth_callback_urls,
-                        domain_name=domain_name,
-                        deployment_namespace=namespace,
-                    )
-                ),
                 "ControlPlaneDomainName": domain_name,
             }
-        )
-    else:
-        parameters["OAuthCallbackUrls"] = ",".join(
-            managed.oauth_callback_urls
         )
     return parameters
 
@@ -1229,88 +1840,39 @@ def identity_deploy_command(
     return command
 
 
-def _athena_contexts(
-    config: AgentCoreSetupConfig,
-) -> dict[str, str]:
-    athena = config.runtime.athena_query
-    if athena is None:
-        return {}
-    bindings = [
-        {
-            "tenant_id": config.tenant.tenant_id,
-            "project_id": config.tenant.project_id,
-            "role_arn": role_arn,
-        }
-        for role_arn in athena.role_arns
-    ]
-    bindings_json = json.dumps(
-        bindings,
-        separators=(",", ":"),
-        sort_keys=True,
-    )
-    if len(bindings_json) > _MAX_AGENTCORE_ENVIRONMENT_VALUE_CHARACTERS:
-        raise AgentCoreDeploymentError(
-            "athena_query_bindings exceeds the AgentCore 2,048-character environment value limit"
-        )
-    return {
-        "athena_query_bindings": bindings_json,
-        "athena_query_timeout_seconds": f"{athena.timeout_seconds:g}",
-        "athena_query_max_rows": str(athena.max_rows),
-        "athena_query_max_result_bytes": str(athena.max_result_bytes),
-        "athena_query_max_bytes_scanned": str(athena.max_bytes_scanned),
-        "athena_query_poll_interval_seconds": (f"{athena.poll_interval_seconds:g}"),
-        "athena_query_project_rpm": str(athena.project_rpm),
-        "athena_query_principal_rpm": str(athena.principal_rpm),
-        "athena_query_project_concurrency": str(athena.project_concurrency),
-        "athena_query_principal_concurrency": str(athena.principal_concurrency),
-        "athena_query_project_scan_bytes_per_minute": str(athena.project_scan_bytes_per_minute),
-        "athena_query_principal_scan_bytes_per_minute": str(athena.principal_scan_bytes_per_minute),
-        "athena_query_max_datasources_per_tenant": str(athena.max_datasources_per_tenant),
-    }
-
-
-def _append_athena_contexts(
-    command: list[str],
-    config: AgentCoreSetupConfig,
-) -> None:
-    for name, value in _athena_contexts(config).items():
-        command.extend(["-c", f"{name}={value}"])
-
-
-def _athena_configuration_fingerprint(
-    config: AgentCoreSetupConfig,
-) -> str:
-    contexts = _athena_contexts(config)
-    values: dict[str, object] = {
-        "enabled": config.runtime.athena_query is not None,
-    }
-    values.update(contexts)
-    encoded = json.dumps(
-        values,
-        separators=(",", ":"),
-        sort_keys=True,
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
-
-
 def _shared_runtime_configuration(
     config: AgentCoreSetupConfig,
 ) -> dict[str, str]:
     return {
         "AlarmNotificationEmail": config.admin.email,
         "ApprovedHttpsPrefixListId": (config.runtime.approved_https_prefix_list_id),
-        "AthenaConfigurationFingerprint": (_athena_configuration_fingerprint(config)),
         "BedrockInvokeResourceArns": ",".join(config.runtime.bedrock_invoke_resource_arns),
+        "DeploymentExperience": config.deployment.experience,
+        "DeploymentExecution": config.deployment.execution,
+        "RuntimeIngressMode": _runtime_ingress_mode(config),
     }
 
 
 def _validate_shared_runtime_configuration(
     config: AgentCoreSetupConfig,
     outputs: Mapping[str, str],
+    *,
+    allow_legacy_topology: bool = False,
 ) -> None:
     expected = _shared_runtime_configuration(config)
     missing = sorted(name for name in expected if name not in outputs)
-    mismatched = sorted(name for name, value in expected.items() if outputs.get(name) != value)
+    mismatched = sorted(name for name, value in expected.items() if name in outputs and outputs[name] != value)
+    legacy_topology_fields = {
+        "DeploymentExperience",
+        "DeploymentExecution",
+    }
+    if (
+        allow_legacy_topology
+        and set(missing) == legacy_topology_fields
+        and not mismatched
+        and config.deployment.profile == STANDALONE_AGENTCORE
+    ):
+        return
     if missing:
         raise AgentCoreDeploymentError(
             "the production stack predates shared-runtime configuration "
@@ -1359,7 +1921,12 @@ def agentcore_deploy_command(
         "-c",
         f"region={config.aws_region}",
     ]
-    command.extend(_deployment_context_arguments(names.namespace))
+    command.extend(
+        _deployment_context_arguments(
+            names.namespace,
+            runtime_ingress=_runtime_ingress_mode(config),
+        )
+    )
     rehearsal_arn = validate_rehearsal_control_table_arn(
         aws_region=config.aws_region,
         deployment_namespace=names.namespace,
@@ -1376,6 +1943,7 @@ def agentcore_deploy_command(
         "ApprovedHttpsPrefixListId": (config.runtime.approved_https_prefix_list_id),
         "BedrockInvokeResourceArns": ",".join(config.runtime.bedrock_invoke_resource_arns),
         "AlarmNotificationEmail": config.admin.email,
+        "DeploymentExperience": config.deployment.experience,
         "CandidateEndpointName": candidate_endpoint_name,
         "EnabledProviders": ",".join(config.runtime.enabled_providers),
         "ProviderSecretVersion": provider_secret_version,
@@ -1387,7 +1955,6 @@ def agentcore_deploy_command(
         parameters["RehearsalControlTableArn"] = rehearsal_arn
     for name, value in parameters.items():
         command.extend(_parameter(name, value, stack=names.agentcore_stack))
-    _append_athena_contexts(command, config)
     command.extend(
         [
             "--require-approval",
@@ -1411,6 +1978,8 @@ def _control_plane_parameters(
 ) -> dict[str, str]:
     if config.identity_mode != MANAGED_COGNITO:
         raise AgentCoreDeploymentError("the web control plane currently requires managed-cognito")
+    if config.deployment.experience == OSTIARI_EXPERIENCE:
+        raise AgentCoreDeploymentError("Ostiari-owned deployments do not create an AxonLLM web control plane")
     control_plane = config.control_plane
     if control_plane is None:
         raise AgentCoreDeploymentError("control-plane settings are missing")
@@ -1436,9 +2005,7 @@ def _control_plane_parameters(
             or control_plane.public_hosted_zone_id is None
             or control_plane.approved_ingress_prefix_list_id is None
         ):
-            raise AgentCoreDeploymentError(
-                "custom-domain control-plane settings are incomplete"
-            )
+            raise AgentCoreDeploymentError("custom-domain control-plane settings are incomplete")
         domain_name = deployment_control_plane_domain(
             control_plane.domain_name,
             names.namespace,
@@ -1447,22 +2014,14 @@ def _control_plane_parameters(
             {
                 "CertificateArn": control_plane.certificate_arn,
                 "ControlPlaneDomainName": domain_name,
-                "PublicHostedZoneId": (
-                    control_plane.public_hosted_zone_id
-                ),
-                "ApprovedIngressPrefixListId": (
-                    control_plane.approved_ingress_prefix_list_id
-                ),
+                "PublicHostedZoneId": (control_plane.public_hosted_zone_id),
+                "ApprovedIngressPrefixListId": (control_plane.approved_ingress_prefix_list_id),
             }
         )
     elif control_plane.endpoint_mode == CLOUDFRONT:
-        parameters["AllowedViewerCidrs"] = ",".join(
-            control_plane.allowed_viewer_cidrs
-        )
+        parameters["AllowedViewerCidrs"] = ",".join(control_plane.allowed_viewer_cidrs)
     else:  # pragma: no cover - setup validation owns the closed set
-        raise AgentCoreDeploymentError(
-            "unsupported control-plane endpoint mode"
-        )
+        raise AgentCoreDeploymentError("unsupported control-plane endpoint mode")
     rehearsal_arn = validate_rehearsal_control_table_arn(
         aws_region=config.aws_region,
         deployment_namespace=names.namespace,
@@ -1523,7 +2082,6 @@ def control_plane_deploy_command(
                 (f"scim_tenants_secret_arn={control_plane.scim_tenants_secret_arn}"),
             ]
         )
-    _append_athena_contexts(command, config)
     command.extend(
         [
             "--require-approval",
@@ -1633,16 +2191,9 @@ def managed_identity_from_outputs(
 ) -> IdentityValues:
     endpoint_mode = outputs.get("EndpointMode", CUSTOM_DOMAIN)
     if endpoint_mode not in {CUSTOM_DOMAIN, CLOUDFRONT}:
-        raise AgentCoreDeploymentError(
-            "managed identity emitted an unexpected endpoint mode"
-        )
-    if (
-        expected_endpoint_mode is not None
-        and endpoint_mode != expected_endpoint_mode
-    ):
-        raise AgentCoreDeploymentError(
-            "managed identity endpoint mode does not match the reviewed setup"
-        )
+        raise AgentCoreDeploymentError("managed identity emitted an unexpected endpoint mode")
+    if expected_endpoint_mode is not None and endpoint_mode != expected_endpoint_mode:
+        raise AgentCoreDeploymentError("managed identity endpoint mode does not match the reviewed setup")
     tenant_claim = _required_output(outputs, "TenantClaimName")
     project_claim = _required_output(outputs, "ProjectClaimName")
     if tenant_claim != DEFAULT_TENANT_CLAIM:
@@ -1807,6 +2358,143 @@ def _existing_agentcore_outputs(
         cloudformation_client,
         AGENTCORE_STACK,
     )
+
+
+def _failed_first_deployment_parameters(
+    config: AgentCoreSetupConfig,
+    *,
+    rehearsal_control_table_arn: str | None,
+) -> dict[str, str]:
+    expected = {
+        "AlarmNotificationEmail": config.admin.email,
+        "ApprovedHttpsPrefixListId": (config.runtime.approved_https_prefix_list_id),
+        "BedrockInvokeResourceArns": ",".join(config.runtime.bedrock_invoke_resource_arns),
+        "DeploymentExperience": config.deployment.experience,
+        "EnabledProviders": ",".join(config.runtime.enabled_providers),
+        "ProviderSecretVersion": "bootstrap",
+        "PublishCandidateEndpoint": "false",
+        "PublishProductionEndpoint": "false",
+        "VerifiedImageUri": config.runtime.verified_image_uri,
+    }
+    if rehearsal_control_table_arn is not None:
+        expected["RehearsalControlTableArn"] = rehearsal_control_table_arn
+    return expected
+
+
+def _confirm_failed_stack_recovery(
+    *,
+    assume_yes: bool,
+) -> None:
+    if assume_yes:
+        return
+    if not sys.stdin.isatty():
+        raise AgentCoreDeploymentError(
+            "non-interactive failed-first-deployment recovery requires --yes after reviewing the stack identity"
+        )
+    answer = input(f"Delete failed first-deployment stack {AGENTCORE_STACK} and retry? [y/N] ")
+    if answer.strip().lower() not in {"y", "yes"}:
+        raise AgentCoreDeploymentError("failed-first-deployment recovery was not approved")
+
+
+def _recover_failed_first_deployment(
+    cloudformation_client: Any,
+    *,
+    config: AgentCoreSetupConfig,
+    identity: AwsIdentity,
+    outputs_dir: Path,
+    assume_yes: bool,
+    rehearsal_control_table_arn: str | None,
+) -> bool:
+    stack = _existing_stack(
+        cloudformation_client,
+        AGENTCORE_STACK,
+        allow_failed_creation=True,
+    )
+    if stack is None:
+        return False
+    status = stack.get("StackStatus")
+    if status not in _FAILED_FIRST_DEPLOYMENT_STATUSES:
+        return False
+    if stack.get("EnableTerminationProtection", False) is not False:
+        raise AgentCoreDeploymentError(
+            f"{AGENTCORE_STACK} has termination protection; it is not eligible for automatic first-deployment recovery"
+        )
+    outputs = _outputs_from_stack(
+        stack,
+        AGENTCORE_STACK,
+    )
+    live_outputs = sorted(_LIVE_AGENTCORE_OUTPUTS.intersection(outputs))
+    if live_outputs:
+        raise AgentCoreDeploymentError(
+            f"{AGENTCORE_STACK} has live deployment outputs and will not be "
+            "deleted automatically: " + ", ".join(live_outputs)
+        )
+    expected_parameters = _failed_first_deployment_parameters(
+        config,
+        rehearsal_control_table_arn=rehearsal_control_table_arn,
+    )
+    _validate_stack_parameters(
+        stack,
+        expected_parameters,
+        stack_name=AGENTCORE_STACK,
+    )
+    qualifier = bootstrap_qualifier_for_namespace(
+        _ACTIVE_DEPLOYMENT_NAMESPACE,
+    )
+    expected_role_arn = _cdk_execution_role_arn(
+        identity=identity,
+        region=config.aws_region,
+        qualifier=qualifier,
+    )
+    if stack.get("RoleARN") != expected_role_arn:
+        raise AgentCoreDeploymentError(f"{AGENTCORE_STACK} was not created by the reviewed isolated CDK execution role")
+    stack_id = _required_stack_id(
+        stack,
+        AGENTCORE_STACK,
+    )
+    print(f"Recovering failed first deployment {AGENTCORE_STACK} ({status}) before retry...")
+    _confirm_failed_stack_recovery(
+        assume_yes=assume_yes,
+    )
+    try:
+        cloudformation_client.delete_stack(
+            StackName=AGENTCORE_STACK,
+            RoleARN=expected_role_arn,
+            ClientRequestToken=("axonllm-install-recovery-" + secrets.token_hex(16)),
+        )
+        cloudformation_client.get_waiter("stack_delete_complete").wait(
+            StackName=AGENTCORE_STACK,
+            WaiterConfig={"Delay": 15, "MaxAttempts": 240},
+        )
+    except Exception as exc:
+        raise AgentCoreDeploymentError(f"could not remove failed first-deployment stack {AGENTCORE_STACK}") from exc
+    if (
+        _existing_stack(
+            cloudformation_client,
+            AGENTCORE_STACK,
+            allow_failed_creation=True,
+        )
+        is not None
+    ):
+        raise AgentCoreDeploymentError(f"{AGENTCORE_STACK} remained after failed-deployment cleanup")
+    _write_private_json(
+        outputs_dir / "failed-stack-recovery.json",
+        {
+            "previousStackId": stack_id,
+            "previousStatus": status,
+            "reviewedParametersSha256": hashlib.sha256(
+                json.dumps(
+                    expected_parameters,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ).encode("utf-8")
+            ).hexdigest(),
+            "schemaVersion": 1,
+            "status": "removed",
+        },
+    )
+    print(f"Removed failed first-deployment stack {AGENTCORE_STACK}; continuing with a clean retry.")
+    return True
 
 
 def _production_runtime_version(
@@ -2256,9 +2944,7 @@ def _managed_identity_for_candidate(
             stack_name=IDENTITY_STACK,
         )
         if config.control_plane is None:
-            raise AgentCoreDeploymentError(
-                "managed Cognito control-plane settings are missing"
-            )
+            raise AgentCoreDeploymentError("managed Cognito control-plane settings are missing")
         _validate_stack_endpoint_mode(
             identity_stack,
             expected_endpoint_mode=config.control_plane.endpoint_mode,
@@ -2275,9 +2961,7 @@ def _managed_identity_for_candidate(
         print("Verified retained managed Cognito identity without updating it.")
 
     if config.control_plane is None:
-        raise AgentCoreDeploymentError(
-            "managed Cognito control-plane settings are missing"
-        )
+        raise AgentCoreDeploymentError("managed Cognito control-plane settings are missing")
     identity = managed_identity_from_outputs(
         identity_outputs,
         expected_endpoint_mode=config.control_plane.endpoint_mode,
@@ -2308,6 +2992,7 @@ def deploy(
     outputs_dir: Path,
     assume_yes: bool,
     bootstrap_cdk: bool,
+    install: bool = False,
     runner: CommandRunner = _run_command,
     boto3_session: Any | None = None,
     provider_environment: Mapping[str, str] | None = None,
@@ -2340,12 +3025,61 @@ def deploy(
         "cloudformation",
         region_name=config.aws_region,
     )
+    _validate_prefix_list_inputs(
+        boto3_session,
+        config=config,
+    )
+    qualifier = bootstrap_qualifier_for_namespace(
+        _ACTIVE_DEPLOYMENT_NAMESPACE,
+    )
+    toolkit_stack_name = bootstrap_toolkit_stack_name(qualifier)
+    toolkit_stack = _existing_stack(
+        cloudformation_client,
+        toolkit_stack_name,
+    )
+    bootstrap_required = bootstrap_cdk or (install and toolkit_stack is None)
+    aws_identity, execution_policy_arns = _require_bootstrap_execution_policy(
+        boto3_session,
+        config=config,
+        create_if_missing=(bootstrap_cdk or install),
+        assume_yes=assume_yes,
+        report_path=outputs_dir / "bootstrap-policy-migration.json",
+    )
+    if bootstrap_required:
+        print(f"Bootstrapping CDK in {config.aws_region}...")
+        runner(
+            cdk_bootstrap_command(
+                config,
+                identity=aws_identity,
+                execution_policy_arns=execution_policy_arns,
+            ),
+            INFRA_ROOT,
+        )
+    elif install:
+        print(f"Reusing existing CDK toolkit {toolkit_stack_name}; repository policies are current.")
+    _assert_cdk_execution_role_policy(
+        boto3_session,
+        config=config,
+        identity=aws_identity,
+        expected_policy_arns=execution_policy_arns,
+    )
+    if install:
+        _recover_failed_first_deployment(
+            cloudformation_client,
+            config=config,
+            identity=aws_identity,
+            outputs_dir=outputs_dir,
+            assume_yes=assume_yes,
+            rehearsal_control_table_arn=(rehearsal_control_table_arn),
+        )
+
     existing_outputs = _existing_agentcore_outputs(cloudformation_client)
     production_runtime_version = "" if existing_outputs is None else _production_runtime_version(existing_outputs)
     if production_runtime_version:
         _validate_shared_runtime_configuration(
             config,
             existing_outputs,
+            allow_legacy_topology=True,
         )
     candidate_endpoint_name = _new_candidate_endpoint_name()
     if provider_secret_rollback_version is not None and existing_outputs is None:
@@ -2355,10 +3089,6 @@ def deploy(
             "AgentCore recovery is active; complete or abort it before running the first-adopter deployment"
         )
 
-    _validate_prefix_list_inputs(
-        boto3_session,
-        config=config,
-    )
     if existing_outputs is None:
         _assert_no_retained_runtime_without_stack(
             boto3_session,
@@ -2380,28 +3110,6 @@ def deploy(
                 boto3_session,
                 config=config,
             )
-
-    aws_identity, execution_policy_arns = _require_bootstrap_execution_policy(
-        boto3_session,
-        config=config,
-        create_if_missing=bootstrap_cdk,
-    )
-    if bootstrap_cdk:
-        print(f"Bootstrapping CDK in {config.aws_region}...")
-        runner(
-            cdk_bootstrap_command(
-                config,
-                identity=aws_identity,
-                execution_policy_arns=execution_policy_arns,
-            ),
-            INFRA_ROOT,
-        )
-    _assert_cdk_execution_role_policy(
-        boto3_session,
-        config=config,
-        identity=aws_identity,
-        expected_policy_arns=execution_policy_arns,
-    )
 
     if config.identity_mode == MANAGED_COGNITO:
         identity, subject = _managed_identity_for_candidate(
@@ -2577,8 +3285,11 @@ def deploy(
     if identity.hosted_ui_domain:
         print(f"Managed login: {identity.hosted_ui_domain}")
         print(f"OIDC client ID: {identity.client_id}")
+    print(f"AxonLLM deployment profile: {config.deployment.profile}")
     if config.identity_mode == MANAGED_COGNITO:
         print("Control-plane deployment is deferred until candidate certification succeeds.")
+    elif config.deployment.experience == OSTIARI_EXPERIENCE:
+        print("Ostiari UI: owned by the Ostiari deployment; no separate AxonLLM web control plane was created.")
     else:
         print(
             "Web control plane: not deployed; external OIDC is currently "
@@ -2588,6 +3299,58 @@ def deploy(
     print(f"Runtime ARN: {_required_output(runtime_outputs, 'RuntimeArn')}")
     print(f"Candidate runtime version: {candidate_version} (awaiting certification)")
     print(f"Deployment outputs: {outputs_dir}")
+
+
+def reconcile_bootstrap_policies(
+    config: AgentCoreSetupConfig,
+    *,
+    outputs_dir: Path,
+    assume_yes: bool,
+    boto3_session: Any | None = None,
+) -> None:
+    """Reconcile repository policies without changing the CDK toolkit."""
+    outputs_dir.mkdir(parents=True, exist_ok=True)
+    outputs_dir.chmod(0o700)
+    if boto3_session is None:
+        import boto3
+
+        boto3_session = boto3.Session(region_name=config.aws_region)
+
+    qualifier = bootstrap_qualifier_for_namespace(
+        _ACTIVE_DEPLOYMENT_NAMESPACE,
+    )
+    toolkit_stack = bootstrap_toolkit_stack_name(qualifier)
+    cloudformation_client = boto3_session.client(
+        "cloudformation",
+        region_name=config.aws_region,
+    )
+    stack = _existing_stack(cloudformation_client, toolkit_stack)
+    if stack is None:
+        raise AgentCoreDeploymentError(
+            f"{toolkit_stack} does not exist; use --bootstrap-cdk for the first bootstrap in this account and region"
+        )
+    outputs = _outputs_from_stack(stack, toolkit_stack)
+    bootstrap_version = outputs.get("BootstrapVersion")
+    if not isinstance(bootstrap_version, str) or not bootstrap_version.isdigit() or bootstrap_version.startswith("0"):
+        raise AgentCoreDeploymentError(
+            f"{toolkit_stack} has no valid BootstrapVersion output; recover "
+            "or re-bootstrap the toolkit before policy reconciliation"
+        )
+
+    identity, execution_policy_arns = _require_bootstrap_execution_policy(
+        boto3_session,
+        config=config,
+        create_if_missing=True,
+        assume_yes=assume_yes,
+        report_path=outputs_dir / "bootstrap-policy-migration.json",
+    )
+    _assert_cdk_execution_role_policy(
+        boto3_session,
+        config=config,
+        identity=identity,
+        expected_policy_arns=execution_policy_arns,
+    )
+    print(f"Verified {toolkit_stack} bootstrap version {bootstrap_version}; repository bootstrap policies are current.")
 
 
 def _existing_identity(
@@ -2603,9 +3366,7 @@ def _existing_identity(
     if outputs is None:
         raise AgentCoreDeploymentError("managed identity stack does not exist")
     if config.control_plane is None:
-        raise AgentCoreDeploymentError(
-            "managed Cognito control-plane settings are missing"
-        )
+        raise AgentCoreDeploymentError("managed Cognito control-plane settings are missing")
     return managed_identity_from_outputs(
         outputs,
         expected_endpoint_mode=config.control_plane.endpoint_mode,
@@ -2646,9 +3407,6 @@ def _validate_control_plane_outputs(
         raise AgentCoreDeploymentError(
             f"control-plane recovery outputs do not match AgentCore: expected {expected}, found {actual}"
         )
-    query_enabled = outputs.get("QueryPlaneEnabled")
-    if query_enabled != "true":
-        raise AgentCoreDeploymentError("production control plane does not expose the reviewed query configuration")
     if expected_image is not None and outputs.get("ControlPlaneImageUri") != expected_image:
         raise AgentCoreDeploymentError("control-plane output is not bound to the verified image")
     _required_output(dict(outputs), "ClusterName")
@@ -2659,40 +3417,19 @@ def _validate_control_plane_outputs(
     endpoint_mode = outputs.get("EndpointMode")
     if endpoint_mode is None:
         if expected_endpoint_mode != CUSTOM_DOMAIN:
-            raise AgentCoreDeploymentError(
-                "control-plane outputs predate the requested endpoint architecture"
-            )
+            raise AgentCoreDeploymentError("control-plane outputs predate the requested endpoint architecture")
         return
     if endpoint_mode not in {CUSTOM_DOMAIN, CLOUDFRONT}:
-        raise AgentCoreDeploymentError(
-            "control-plane output has an invalid endpoint architecture"
-        )
+        raise AgentCoreDeploymentError("control-plane output has an invalid endpoint architecture")
     if endpoint_mode != expected_endpoint_mode:
-        raise AgentCoreDeploymentError(
-            "control-plane endpoint architecture does not match the reviewed setup"
-        )
+        raise AgentCoreDeploymentError("control-plane endpoint architecture does not match the reviewed setup")
 
-    expected_auth_mode = (
-        "application-oidc"
-        if endpoint_mode == CLOUDFRONT
-        else "alb-cognito"
-    )
+    expected_auth_mode = "application-oidc" if endpoint_mode == CLOUDFRONT else "alb-cognito"
     if outputs.get("ControlPlaneAuthMode") != expected_auth_mode:
-        raise AgentCoreDeploymentError(
-            "control-plane browser authentication mode is invalid"
-        )
-    expected_load_balancer_scheme = (
-        "internal"
-        if endpoint_mode == CLOUDFRONT
-        else "internet-facing"
-    )
-    if (
-        outputs.get("LoadBalancerScheme")
-        != expected_load_balancer_scheme
-    ):
-        raise AgentCoreDeploymentError(
-            "control-plane load-balancer exposure does not match its endpoint mode"
-        )
+        raise AgentCoreDeploymentError("control-plane browser authentication mode is invalid")
+    expected_load_balancer_scheme = "internal" if endpoint_mode == CLOUDFRONT else "internet-facing"
+    if outputs.get("LoadBalancerScheme") != expected_load_balancer_scheme:
+        raise AgentCoreDeploymentError("control-plane load-balancer exposure does not match its endpoint mode")
 
     domain_name = _required_output(
         dict(outputs),
@@ -2703,9 +3440,7 @@ def _validate_control_plane_outputs(
         "ControlPlaneUrl",
     )
     if control_plane_url != f"https://{domain_name}":
-        raise AgentCoreDeploymentError(
-            "control-plane URL does not match its canonical hostname"
-        )
+        raise AgentCoreDeploymentError("control-plane URL does not match its canonical hostname")
 
     cloudfront_outputs = (
         "BrowserClientId",
@@ -2716,19 +3451,13 @@ def _validate_control_plane_outputs(
     )
     if endpoint_mode == CLOUDFRONT:
         if not domain_name.endswith(".cloudfront.net"):
-            raise AgentCoreDeploymentError(
-                "CloudFront control-plane hostname is invalid"
-            )
+            raise AgentCoreDeploymentError("CloudFront control-plane hostname is invalid")
         if outputs.get("DistributionDomainName") != domain_name:
-            raise AgentCoreDeploymentError(
-                "CloudFront distribution hostname is not canonical"
-            )
+            raise AgentCoreDeploymentError("CloudFront distribution hostname is not canonical")
         for output_name in cloudfront_outputs:
             _required_output(dict(outputs), output_name)
     elif any(name in outputs for name in cloudfront_outputs):
-        raise AgentCoreDeploymentError(
-            "custom-domain control plane emitted CloudFront-only outputs"
-        )
+        raise AgentCoreDeploymentError("custom-domain control plane emitted CloudFront-only outputs")
 
 
 def _validate_candidate_version(
@@ -2794,19 +3523,13 @@ def _validate_stack_endpoint_mode(
     stack_name: str,
 ) -> None:
     if expected_endpoint_mode not in {CUSTOM_DOMAIN, CLOUDFRONT}:
-        raise AgentCoreDeploymentError(
-            "reviewed control-plane endpoint mode is invalid"
-        )
+        raise AgentCoreDeploymentError("reviewed control-plane endpoint mode is invalid")
     parameters = _stack_parameters(stack, stack_name=stack_name)
     actual_endpoint_mode = parameters.get("EndpointMode", CUSTOM_DOMAIN)
     if actual_endpoint_mode not in {CUSTOM_DOMAIN, CLOUDFRONT}:
-        raise AgentCoreDeploymentError(
-            f"{stack_name} has an invalid endpoint architecture"
-        )
+        raise AgentCoreDeploymentError(f"{stack_name} has an invalid endpoint architecture")
     if actual_endpoint_mode != expected_endpoint_mode:
-        raise AgentCoreDeploymentError(
-            f"{stack_name} endpoint architecture cannot be changed in place"
-        )
+        raise AgentCoreDeploymentError(f"{stack_name} endpoint architecture cannot be changed in place")
 
 
 def _validate_stack_parameters(
@@ -3075,9 +3798,7 @@ def _prepare_candidate_promotion(
     )
     if control_plane_stack is not None:
         if config.control_plane is None:
-            raise AgentCoreDeploymentError(
-                "managed Cognito control-plane settings are missing"
-            )
+            raise AgentCoreDeploymentError("managed Cognito control-plane settings are missing")
         _validate_stack_endpoint_mode(
             control_plane_stack,
             expected_endpoint_mode=config.control_plane.endpoint_mode,
@@ -3354,8 +4075,6 @@ def deploy_control_plane(
     _assert_deployment_prerequisites()
     if config.identity_mode != MANAGED_COGNITO:
         raise AgentCoreDeploymentError("control-plane deployment requires managed-cognito")
-    if config.runtime.athena_query is None:
-        raise AgentCoreDeploymentError("production control-plane deployment requires Athena query configuration")
     rehearsal_control_table_arn = validate_rehearsal_control_table_arn(
         aws_region=config.aws_region,
         deployment_namespace=_ACTIVE_DEPLOYMENT_NAMESPACE,
@@ -3466,9 +4185,7 @@ def deploy_control_plane(
                 current_outputs,
                 runtime_outputs=runtime_outputs,
                 expected_image=control_metadata["targetImage"],
-                expected_endpoint_mode=(
-                    config.control_plane.endpoint_mode
-                ),
+                expected_endpoint_mode=(config.control_plane.endpoint_mode),
             )
             _write_private_json(
                 outputs_dir / "control-plane-outputs.json",
@@ -3495,9 +4212,7 @@ def deploy_control_plane(
                 current_outputs,
                 runtime_outputs=runtime_outputs,
                 expected_image=control_metadata["targetImage"],
-                expected_endpoint_mode=(
-                    config.control_plane.endpoint_mode
-                ),
+                expected_endpoint_mode=(config.control_plane.endpoint_mode),
             )
             _write_private_json(
                 outputs_dir / "control-plane-outputs.json",
@@ -4002,12 +4717,12 @@ def _promotion_metadata(path: Path) -> dict[str, Any]:
         shared = value.get("sharedRuntimeConfiguration")
         if (
             not isinstance(shared, dict)
-            or set(shared)
-            != {
-                "AlarmNotificationEmail",
-                "ApprovedHttpsPrefixListId",
-                "AthenaConfigurationFingerprint",
-                "BedrockInvokeResourceArns",
+            or frozenset(shared)
+            not in {
+                _LEGACY_SHARED_RUNTIME_FIELDS,
+                _PRE_ADDON_SHARED_RUNTIME_FIELDS,
+                _PRE_FACADE_SHARED_RUNTIME_FIELDS,
+                _SHARED_RUNTIME_FIELDS,
             }
             or any(
                 not isinstance(item, str) or item != item.strip() or any(character.isspace() for character in item)
@@ -4296,7 +5011,31 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--yes", action="store_true")
-    parser.add_argument("--bootstrap-cdk", action="store_true")
+    parser.add_argument(
+        "--install",
+        action="store_true",
+        help=(
+            "One-command first install or upgrade: reconcile the bounded "
+            "bootstrap policies, create the CDK toolkit only when absent, "
+            "recover a matching failed first-create stack, and deploy"
+        ),
+    )
+    parser.add_argument(
+        "--bootstrap-cdk",
+        action="store_true",
+        help=(
+            "Create or transactionally reconcile the repository-owned CDK "
+            "bootstrap policies, then bootstrap the account and region"
+        ),
+    )
+    parser.add_argument(
+        "--reconcile-bootstrap-policies",
+        action="store_true",
+        help=(
+            "Transactionally reconcile only the repository-owned managed "
+            "policies for an existing CDK toolkit, then stop"
+        ),
+    )
     parser.add_argument("--validate-only", action="store_true")
     parser.add_argument("--show-config", action="store_true")
     parser.add_argument(
@@ -4375,7 +5114,11 @@ def main(argv: list[str] | None = None) -> int:
             deployment_namespace=(_ACTIVE_DEPLOYMENT_NAMESPACE),
             rehearsal_control_table_arn=(args.rehearsal_control_table_arn),
         )
-        print(f"Validated authenticated AgentCore configuration: {config.identity_mode}, {config.aws_region}.")
+        print(
+            "Validated authenticated AgentCore configuration: "
+            f"{config.deployment.profile}, {config.identity_mode}, "
+            f"{config.aws_region}."
+        )
         if args.show_config:
             print(
                 json.dumps(
@@ -4399,14 +5142,48 @@ def main(argv: list[str] | None = None) -> int:
             if args.transition_context is not None
             else None
         )
+        endpoint_action_requested = any(
+            (
+                args.prepare_candidate_promotion_version,
+                args.promote_candidate_version,
+                args.discard_candidate_version,
+                args.finalize_promotion,
+                args.rollback_promotion,
+                args.deploy_control_plane,
+                args.rollback_control_plane,
+            )
+        )
+        if args.install and args.bootstrap_cdk:
+            raise AgentCoreDeploymentError(
+                "--install already handles first bootstrap and cannot be combined with --bootstrap-cdk"
+            )
+        bootstrap_preparation_requested = args.bootstrap_cdk or args.install
+        if args.reconcile_bootstrap_policies and (
+            bootstrap_preparation_requested
+            or args.provider_env_file
+            or args.rollback_provider_secret_version
+            or args.candidate_endpoint_name
+            or transition is not None
+            or endpoint_action_requested
+        ):
+            raise AgentCoreDeploymentError(
+                "--reconcile-bootstrap-policies cannot be combined with "
+                "deployment, provider-secret, or promotion options"
+            )
         if transition is not None and not (args.prepare_candidate_promotion_version or args.promote_candidate_version):
             raise AgentCoreDeploymentError(
                 "--transition-context is valid only with promotion preparation or candidate promotion"
             )
-        if args.prepare_candidate_promotion_version:
+        if args.reconcile_bootstrap_policies:
+            reconcile_bootstrap_policies(
+                config,
+                outputs_dir=outputs_dir,
+                assume_yes=args.yes,
+            )
+        elif args.prepare_candidate_promotion_version:
             if args.candidate_endpoint_name is None:
                 raise AgentCoreDeploymentError("promotion preparation requires --candidate-endpoint-name")
-            if args.bootstrap_cdk or args.provider_env_file or args.rollback_provider_secret_version:
+            if bootstrap_preparation_requested or args.provider_env_file or args.rollback_provider_secret_version:
                 raise AgentCoreDeploymentError(
                     "promotion preparation does not accept bootstrap or provider-secret mutation options"
                 )
@@ -4420,7 +5197,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.promote_candidate_version:
             if args.candidate_endpoint_name is None:
                 raise AgentCoreDeploymentError("candidate promotion requires --candidate-endpoint-name")
-            if args.bootstrap_cdk or args.provider_env_file or args.rollback_provider_secret_version:
+            if bootstrap_preparation_requested or args.provider_env_file or args.rollback_provider_secret_version:
                 raise AgentCoreDeploymentError(
                     "candidate promotion does not accept bootstrap or provider-secret mutation options"
                 )
@@ -4435,7 +5212,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.discard_candidate_version:
             if args.candidate_endpoint_name is None:
                 raise AgentCoreDeploymentError("candidate discard requires --candidate-endpoint-name")
-            if args.bootstrap_cdk or args.provider_env_file or args.rollback_provider_secret_version:
+            if bootstrap_preparation_requested or args.provider_env_file or args.rollback_provider_secret_version:
                 raise AgentCoreDeploymentError(
                     "candidate discard does not accept bootstrap or provider-secret mutation options"
                 )
@@ -4451,7 +5228,7 @@ def main(argv: list[str] | None = None) -> int:
                 raise AgentCoreDeploymentError(
                     "promotion finalization reads the candidate endpoint from trusted promotion metadata"
                 )
-            if args.bootstrap_cdk or args.provider_env_file or args.rollback_provider_secret_version:
+            if bootstrap_preparation_requested or args.provider_env_file or args.rollback_provider_secret_version:
                 raise AgentCoreDeploymentError(
                     "promotion finalization does not accept bootstrap or provider-secret mutation options"
                 )
@@ -4464,7 +5241,7 @@ def main(argv: list[str] | None = None) -> int:
                 raise AgentCoreDeploymentError(
                     "promotion rollback reads the candidate endpoint from trusted promotion metadata"
                 )
-            if args.bootstrap_cdk or args.provider_env_file or args.rollback_provider_secret_version:
+            if bootstrap_preparation_requested or args.provider_env_file or args.rollback_provider_secret_version:
                 raise AgentCoreDeploymentError(
                     "promotion rollback does not accept bootstrap or provider-secret mutation options"
                 )
@@ -4478,7 +5255,7 @@ def main(argv: list[str] | None = None) -> int:
                 raise AgentCoreDeploymentError(
                     "control-plane deployment reads the transition from trusted promotion metadata"
                 )
-            if args.bootstrap_cdk or args.provider_env_file or args.rollback_provider_secret_version:
+            if bootstrap_preparation_requested or args.provider_env_file or args.rollback_provider_secret_version:
                 raise AgentCoreDeploymentError(
                     "control-plane deployment does not accept bootstrap or provider-secret mutation options"
                 )
@@ -4493,7 +5270,7 @@ def main(argv: list[str] | None = None) -> int:
                 raise AgentCoreDeploymentError(
                     "control-plane rollback reads the transition from trusted promotion metadata"
                 )
-            if args.bootstrap_cdk or args.provider_env_file or args.rollback_provider_secret_version:
+            if bootstrap_preparation_requested or args.provider_env_file or args.rollback_provider_secret_version:
                 raise AgentCoreDeploymentError(
                     "control-plane rollback does not accept bootstrap or provider-secret mutation options"
                 )
@@ -4512,6 +5289,7 @@ def main(argv: list[str] | None = None) -> int:
                 outputs_dir=outputs_dir,
                 assume_yes=args.yes,
                 bootstrap_cdk=args.bootstrap_cdk,
+                install=args.install,
                 provider_environment=_provider_environment(
                     (Path(args.provider_env_file) if args.provider_env_file else None)
                 ),

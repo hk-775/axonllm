@@ -57,12 +57,6 @@ GATE_ACTIONS: Mapping[str, tuple[str, ...]] = {
         "observe-runtime-replacement",
         "verify-replacement-ready",
     ),
-    "queryBoundaryLimitsAndReconciliation": (
-        "reject-query-boundaries",
-        "interrupt-query",
-        "verify-terminal-reconciliation",
-        "verify-deferred-accounting",
-    ),
     "recoveryCutoverAndRollback": (
         "restore-state",
         "cutover-restored-state",
@@ -118,31 +112,6 @@ ACTION_EVIDENCE_FIELDS: Mapping[str, frozenset[str]] = {
     "observe-exit-124": frozenset({"timeoutExitCode"}),
     "observe-runtime-replacement": frozenset({"replacementRuntimeId"}),
     "verify-replacement-ready": frozenset({"replacementReadyStatusCode"}),
-    "reject-query-boundaries": frozenset(
-        {
-            "mutationStatusCode",
-            "multipleStatementsStatusCode",
-            "outOfDatasourceStatusCode",
-            "requestedMaxRows",
-            "returnedRowCount",
-            "scanLimitBytes",
-            "observedBytesScanned",
-        }
-    ),
-    "interrupt-query": frozenset({"interruptedRequestId"}),
-    "verify-terminal-reconciliation": frozenset(
-        {
-            "terminalState",
-            "reservationUnitsAfter",
-            "durableResultAuditCount",
-        }
-    ),
-    "verify-deferred-accounting": frozenset(
-        {
-            "unavailableBindingState",
-            "unavailableBindingReservationReleased",
-        }
-    ),
     "restore-state": frozenset({"primaryTableArn", "restoredTableArn"}),
     "cutover-restored-state": frozenset({"cutoverPhases", "cutoverSelectedTableArn"}),
     "verify-restored-state": frozenset(),
@@ -388,10 +357,7 @@ class WorkerConfig:
             or table.group("account") != activity.group("account")
         ):
             raise ConfigurationError from None
-        if (
-            self.owner_expiry_index_name is not None
-            and DDB_INDEX_NAME.fullmatch(self.owner_expiry_index_name) is None
-        ):
+        if self.owner_expiry_index_name is not None and DDB_INDEX_NAME.fullmatch(self.owner_expiry_index_name) is None:
             raise ConfigurationError from None
         if not 61.0 <= self.poll_timeout_seconds <= 75.0:
             raise ConfigurationError from None
@@ -791,8 +757,7 @@ def _validate_owner_identity(
     authorization_expiry = value["authorizationExpiresAtEpoch"]
     if (
         not isinstance(authorization_expiry, str)
-        or authorization_expiry
-        != str(_epoch(expires_at + OWNER_RETENTION))
+        or authorization_expiry != str(_epoch(expires_at + OWNER_RETENTION))
         or value["repository"] != execution["repository"]
         or value["workflowCommit"] != execution["workflowCommit"]
         or value["runId"] != execution["runId"]
@@ -971,8 +936,7 @@ def _validate_binding(
             or queue_arn is None
             or queue_match.group("region") != config.region
             or queue_match.group("account") != config.account_id
-            or queue_match.group("name")
-            != queue_arn.group("resource")
+            or queue_match.group("name") != queue_arn.group("resource")
         ):
             raise TaskInputError from None
     _arn(
@@ -1064,13 +1028,6 @@ def _validate_parameters(
     parameters = _object(value)
     operation = task["operation"]
     common = {"tenantId", "projectId"}
-    query = {
-        *common,
-        "datasourceId",
-        "selectSql",
-        "maxRows",
-        "scanLimitBytes",
-    }
     state = {
         "primaryTableArn",
         "primaryTableName",
@@ -1104,17 +1061,6 @@ def _validate_parameters(
     }
     startup = {"startupDeadlineSeconds", "faultTtlSeconds"}
     groups: tuple[tuple[frozenset[str], set[str]], ...] = (
-        (
-            frozenset(
-                {
-                    "reject-query-boundaries",
-                    "interrupt-query",
-                    "verify-terminal-reconciliation",
-                    "verify-deferred-accounting",
-                }
-            ),
-            query,
-        ),
         (
             frozenset(
                 {
@@ -1199,19 +1145,6 @@ def _validate_parameters(
 
     for name in common.intersection(parameters):
         _pattern_text(parameters[name], SAFE_ID, maximum=256)
-    if "datasourceId" in parameters:
-        _pattern_text(parameters["datasourceId"], SAFE_ID, maximum=256)
-        _safe_text(
-            parameters["selectSql"],
-            maximum=16 * 1024,
-            allow_newlines=True,
-        )
-        _integer(parameters["maxRows"], minimum=1, maximum=100_000)
-        _integer(
-            parameters["scanLimitBytes"],
-            minimum=1,
-            maximum=10 * 1024 * 1024 * 1024,
-        )
     for name, binding_name in (
         ("primaryTableArn", "stateTableArn"),
         ("restoredTableArn", "restoredStateTableArn"),
@@ -1227,10 +1160,7 @@ def _validate_parameters(
     ):
         if arn_name in parameters:
             match = TABLE_ARN.fullmatch(parameters[arn_name])
-            if (
-                match is None
-                or parameters.get(table_name) != match.group("name")
-            ):
+            if match is None or parameters.get(table_name) != match.group("name"):
                 raise TaskInputError from None
     if "model" in parameters:
         _pattern_text(parameters["model"], MODEL, maximum=256)
@@ -1254,7 +1184,6 @@ def _validate_parameters(
         if primary == fallback or parameters["failureStatusCode"] != 503:
             raise TaskInputError from None
     if "dependency" in parameters and parameters["dependency"] not in {
-        "athena",
         "dynamodb",
         "secrets-manager",
         "security-event-outbox",
@@ -1999,11 +1928,7 @@ class DurableStateStore:
                 {
                     "Update": {
                         "TableName": self.config.lease_table_arn,
-                        "Key": {
-                            "leaseKey": _ddb_s(
-                                _owner_key(previous.owner_id)
-                            )
-                        },
+                        "Key": {"leaseKey": _ddb_s(_owner_key(previous.owner_id))},
                         "ConditionExpression": owner_condition,
                         "UpdateExpression": (
                             "SET recordType = :recordType, "
@@ -2049,9 +1974,7 @@ class DurableStateStore:
                             "REMOVE claimExpiresAtEpoch, failureCode, "
                             "failureRetryable"
                         ),
-                        "ExpressionAttributeNames": {
-                            "#status": "status"
-                        },
+                        "ExpressionAttributeNames": {"#status": "status"},
                         "ExpressionAttributeValues": replay_values,
                     }
                 },
@@ -2063,10 +1986,7 @@ class DurableStateStore:
                 {
                     "TransactItems": transact_items,
                     "ClientRequestToken": hashlib.sha256(
-                        (
-                            f"{task.owner_id}:{task.idempotency_key}:"
-                            f"{output_sha256}:{next_state_sha256}"
-                        ).encode("ascii")
+                        (f"{task.owner_id}:{task.idempotency_key}:{output_sha256}:{next_state_sha256}").encode("ascii")
                     ).hexdigest()[:32],
                 },
             )
@@ -2175,10 +2095,7 @@ class DurableStateStore:
             parameters.update(
                 {
                     "ConsistentRead": True,
-                    "FilterExpression": (
-                        "recordType = :ownerType AND "
-                        "ownerExpiresAtEpoch <= :now"
-                    ),
+                    "FilterExpression": ("recordType = :ownerType AND ownerExpiresAtEpoch <= :now"),
                 }
             )
             operation = "scan"
@@ -2187,10 +2104,7 @@ class DurableStateStore:
                 {
                     "IndexName": self.config.owner_expiry_index_name,
                     "ConsistentRead": False,
-                    "KeyConditionExpression": (
-                        "recordType = :ownerType AND "
-                        "ownerExpiresAtEpoch <= :now"
-                    ),
+                    "KeyConditionExpression": ("recordType = :ownerType AND ownerExpiresAtEpoch <= :now"),
                 }
             )
             operation = "query"
@@ -2214,10 +2128,7 @@ class DurableStateStore:
                 item,
                 "ownerExpiresAtEpoch",
             )
-            if (
-                expires_at_epoch != _epoch(expires_at)
-                or expires_at_epoch > now_epoch
-            ):
+            if expires_at_epoch != _epoch(expires_at) or expires_at_epoch > now_epoch:
                 raise ReplayConflictError from None
             owners.append(self._owner_from_item(item, owner_id, expires_at))
         next_cursor = response.get("LastEvaluatedKey")
@@ -2241,11 +2152,7 @@ class DurableStateStore:
     ) -> dict[str, Any]:
         if type(value) is not dict:
             raise error_type from None
-        expected = (
-            {"leaseKey", "recordType", "ownerExpiresAtEpoch"}
-            if indexed
-            else {"leaseKey"}
-        )
+        expected = {"leaseKey", "recordType", "ownerExpiresAtEpoch"} if indexed else {"leaseKey"}
         if set(value) != expected:
             raise error_type from None
         try:
@@ -2270,15 +2177,11 @@ class DurableStateStore:
         owner_id: str,
         expires_at: datetime,
     ) -> OwnerState:
-        if (
-            _ddb_item_string(item, "recordType") != "OWNER"
-            or _ddb_item_string(
-                item,
-                "leaseKey",
-                maximum=512,
-            )
-            != _owner_key(owner_id)
-        ):
+        if _ddb_item_string(item, "recordType") != "OWNER" or _ddb_item_string(
+            item,
+            "leaseKey",
+            maximum=512,
+        ) != _owner_key(owner_id):
             raise ReplayConflictError from None
         revision = _ddb_item_integer(item, "revision")
         state_json = _ddb_item_string(item, "stateJson", maximum=MAX_OWNER_STATE_BYTES)

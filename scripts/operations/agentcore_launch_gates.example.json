@@ -41,15 +41,11 @@
   "scenario": {
     "tenantId": "tenant-launch",
     "projectId": "project-launch",
-    "datasourceId": "launch-datasource",
-    "selectSql": "SELECT canary_id, status FROM launch_canary WHERE tenant_id = 'tenant-launch' LIMIT 100",
     "model": "claude-opus",
     "primaryProvider": "anthropic",
     "fallbackProvider": "bedrock",
     "controlPlaneFault": "dynamodb",
     "startupDeadlineSeconds": 60,
-    "maxRows": 100,
-    "scanLimitBytes": 1048576,
     "faultTtlSeconds": 300
   }
 }

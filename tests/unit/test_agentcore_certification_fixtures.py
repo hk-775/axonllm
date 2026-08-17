@@ -27,7 +27,6 @@ import prepare_agentcore_certification as fixtures
 
 REGION = "us-east-1"
 RUNTIME_ARN = "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/axonllm-AbCdEf1234"
-ROLE_ARN = "arn:aws:iam::123456789012:role/axon-athena-certification"
 IMAGE_DIGEST = "a" * 64
 AGENTCORE_IMAGE = f"123456789012.dkr.ecr.us-east-1.amazonaws.com/axonllm/agentcore@sha256:{IMAGE_DIGEST}"
 CONTROL_IMAGE = f"123456789012.dkr.ecr.us-east-1.amazonaws.com/axonllm/control-plane@sha256:{IMAGE_DIGEST}"
@@ -57,11 +56,9 @@ def _setup() -> dict[str, Any]:
             "bedrock_invoke_resource_arns": [BEDROCK_ARN],
             "approved_https_prefix_list_id": "pl-123abc",
             "enabled_providers": ["bedrock"],
-            "athena_query": {"role_arns": [ROLE_ARN]},
         },
         "managed_cognito": {
             "hosted_ui_domain_prefix": "axonllm-123456789012",
-            "oauth_callback_urls": ["https://app.example.com/oauth/callback"],
         },
         "control_plane": {
             "domain_name": "axon.example.com",
@@ -93,16 +90,6 @@ def _certification() -> dict[str, Any]:
             "projectId": "project-a",
         },
         "providers": [{"provider": "bedrock", "model": "launch-certification"}],
-        "query": {
-            "catalog": "AwsDataCatalog",
-            "database": "default",
-            "datasourceId": "launch-data",
-            "region": REGION,
-            "roleArn": ROLE_ARN,
-            "sql": "SELECT 1 AS ready",
-            "maxRows": 10,
-            "workgroup": "axon_read_only",
-        },
     }
 
 
@@ -387,11 +374,7 @@ def test_prepare_and_cleanup_managed_cognito_certification_fixtures(
         clock=lambda: 59,
     )
 
-    assert summary == {
-        "datasourceId": "launch-data",
-        "principalCount": 6,
-        "userCount": 6,
-    }
+    assert summary == {"principalCount": 6, "userCount": 6}
     credentials = json.loads(paths["credentials_output"].read_text(encoding="utf-8"))
     assert set(credentials) == {
         "ACTIVE_TOKEN",
@@ -448,9 +431,7 @@ def test_prepare_and_cleanup_managed_cognito_certification_fixtures(
 
     rows = list(factory.dynamodb.rows.values())
     principal_rows = [row for row in rows if row["entity_type"] == "tenant_principal"]
-    datasource_rows = [row for row in rows if row["entity_type"] == "athena_datasource"]
     assert len(principal_rows) == 6
-    assert len(datasource_rows) == 1
     assert all(row[fixtures._FIXTURE_ID_FIELD] == fixture_id for row in rows)
     principals = {
         row["principal_id"].split(":", 2)[1]: DynamoPrincipalRepository.deserialize(row) for row in principal_rows
@@ -462,12 +443,8 @@ def test_prepare_and_cleanup_managed_cognito_certification_fixtures(
     assert principals["ungranted"].roles == frozenset({TenantRole.PLATFORM_ADMIN})
     assert principals["cross"].tenant_id != "tenant-a"
     assert principals["cross"].project_ids == frozenset({"project-a"})
-    assert principals["admin"].roles == frozenset(
-        {TenantRole.TENANT_ADMIN}
-    )
-    assert principals["viewer"].roles == frozenset(
-        {TenantRole.TENANT_MEMBER}
-    )
+    assert principals["admin"].roles == frozenset({TenantRole.TENANT_ADMIN})
+    assert principals["viewer"].roles == frozenset({TenantRole.TENANT_MEMBER})
     project_resource = ResourceRef(
         resource_type="project",
         resource_id="project-a",
@@ -506,20 +483,6 @@ def test_prepare_and_cleanup_managed_cognito_certification_fixtures(
         project_resource,
     ).allowed
 
-    datasource = json.loads(datasource_rows[0]["document"])
-    datetime_string = datasource["created_at"]
-    assert datasource == {
-        "catalog": "AwsDataCatalog",
-        "created_at": datetime_string,
-        "database": "default",
-        "enabled": True,
-        "name": "launch-data",
-        "region": REGION,
-        "role_arn": ROLE_ARN,
-        "updated_at": datetime_string,
-        "workgroup": "axon_read_only",
-    }
-
     result = fixtures.cleanup_fixtures(
         paths["state_output"],
         credentials_output=paths["credentials_output"],
@@ -528,7 +491,7 @@ def test_prepare_and_cleanup_managed_cognito_certification_fixtures(
 
     assert result == {"removed": True}
     assert factory.dynamodb.rows == {}
-    assert len(factory.dynamodb.delete_calls) == 7
+    assert len(factory.dynamodb.delete_calls) == 6
     assert all(
         call["ExpressionAttributeNames"]["#fixture_id"] == fixtures._FIXTURE_ID_FIELD
         and call["ExpressionAttributeValues"][":fixture_id"] == fixture_id
@@ -549,7 +512,7 @@ def test_prepare_rolls_back_every_partial_resource_without_secret_leakage(
 ) -> None:
     paths = _paths(tmp_path)
     factory = _Factory()
-    factory.dynamodb.fail_entity_type = "athena_datasource"
+    factory.dynamodb.fail_entity_type = "tenant_principal"
 
     with pytest.raises(fixtures.FixtureError) as failure:
         fixtures.prepare_fixtures(
@@ -569,16 +532,12 @@ def test_prepare_rolls_back_every_partial_resource_without_secret_leakage(
     assert not paths["state_output"].exists()
 
 
-@pytest.mark.parametrize(
-    "entity_type",
-    ("tenant_principal", "athena_datasource"),
-)
 def test_prepare_collision_never_deletes_preexisting_record(
     tmp_path: Path,
-    entity_type: str,
 ) -> None:
     paths = _paths(tmp_path)
     factory = _Factory()
+    entity_type = "tenant_principal"
     factory.dynamodb.collision_entity_type = entity_type
 
     with pytest.raises(
@@ -654,9 +613,7 @@ def test_cleanup_refuses_replaced_cognito_user_but_continues_other_cleanup(
         random_bytes=_DeterministicRandom(),
         clock=lambda: 59,
     )
-    state = json.loads(
-        paths["state_output"].read_text(encoding="utf-8")
-    )
+    state = json.loads(paths["state_output"].read_text(encoding="utf-8"))
     replaced = state["users"][0]["username"]
     factory.cognito.users[replaced]["subject"] = "replacement-subject"
 
@@ -673,31 +630,6 @@ def test_cleanup_refuses_replaced_cognito_user_but_continues_other_cleanup(
     assert factory.dynamodb.rows == {}
     assert not paths["credentials_output"].exists()
     assert paths["state_output"].exists()
-
-
-def test_prepare_rejects_unreviewed_datasource_role_before_aws_calls(
-    tmp_path: Path,
-) -> None:
-    paths = _paths(tmp_path)
-    certification = _certification()
-    certification["query"]["roleArn"] = "arn:aws:iam::123456789012:role/not-reviewed"
-    _write(paths["certification_config"], certification)
-    factory = _Factory()
-
-    with pytest.raises(
-        fixtures.FixtureError,
-        match="not in the reviewed setup",
-    ):
-        fixtures.prepare_fixtures(
-            **paths,
-            aws_factory=factory,
-            random_bytes=_DeterministicRandom(),
-            clock=lambda: 59,
-        )
-
-    assert factory.calls == []
-    assert not paths["credentials_output"].exists()
-    assert not paths["state_output"].exists()
 
 
 def test_prepare_requires_exact_managed_tenant_config_binding(
@@ -762,18 +694,12 @@ def test_prepare_accepts_optional_ai21_when_setup_and_certification_match(
     setup["runtime"]["enabled_providers"] = providers
     _write(paths["setup_config"], setup)
     certification_raw = _certification()
-    certification_raw["profile"] = (
-        certification.PRODUCTION_LAUNCH_PROFILE
-    )
+    certification_raw["profile"] = certification.PRODUCTION_LAUNCH_PROFILE
     certification_raw["providers"] = [
         {
             "provider": provider,
             "model": f"{provider}-certification",
-            "features": sorted(
-                certification.PRODUCTION_PROVIDER_FEATURES_BY_PROVIDER[
-                    provider
-                ]
-            ),
+            "features": sorted(certification.PRODUCTION_PROVIDER_FEATURES_BY_PROVIDER[provider]),
         }
         for provider in providers
     ]

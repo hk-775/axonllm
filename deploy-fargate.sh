@@ -12,6 +12,7 @@
 #   AXON_VERIFIED_IMAGE_URI
 #
 # Optional:
+#   AXON_TOPOLOGY_PROFILE (must be standalone for this deployer)
 #   AXON_DYNAMODB_TABLE_NAME (defaults to axonllm-state)
 #   AXON_RUNTIME_STATE_TABLE_NAME (blank selects the primary table)
 #   AXON_RECOVERY_CUTOVER_MODE (true only during a quiesced table switch)
@@ -79,6 +80,13 @@ for arg in "$@"; do
     esac
 done
 REGION="${REGION:-us-east-1}"
+
+TOPOLOGY_PROFILE="${AXON_TOPOLOGY_PROFILE:-standalone}"
+if [ "$TOPOLOGY_PROFILE" != "standalone" ]; then
+    echo "deploy-fargate.sh supports AXON_TOPOLOGY_PROFILE=standalone only." >&2
+    echo "Use deploy-agentcore.sh for standalone-agentcore or ostiari-agentcore; Ostiari owns ostiari-embedded deployment." >&2
+    exit 2
+fi
 
 if [ "$REGION" != "us-east-1" ]; then
     echo "The reference stack must be deployed in us-east-1 (CloudFront WAF scope)." >&2
@@ -162,6 +170,7 @@ else
 fi
 
 echo "==> Deploying AxonLLM to ECS Fargate in ${REGION}..."
+echo "    Deployment profile: ${TOPOLOGY_PROFILE}"
 if [ "$APPROVAL" = never ]; then
     echo "    Approval prompts disabled (--yes or CI=true)."
 fi
@@ -221,6 +230,7 @@ npx cdk deploy \
 
 echo ""
 echo "==> Deployment complete!"
+echo "AxonLLM mode: ${TOPOLOGY_PROFILE}"
 echo ""
 
 if [ -f outputs.json ]; then

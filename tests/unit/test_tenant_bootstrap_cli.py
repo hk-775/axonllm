@@ -33,11 +33,7 @@ class _Persistence:
         project_id: str,
         tenant_id: str,
     ) -> Project | None:
-        if (
-            self.project is not None
-            and self.project.project_id == project_id
-            and self.project.tenant_id == tenant_id
-        ):
+        if self.project is not None and self.project.project_id == project_id and self.project.tenant_id == tenant_id:
             return self.project
         return None
 
@@ -55,9 +51,7 @@ class _Persistence:
         *,
         granted: bool,
     ) -> tuple[Project, bool]:
-        self.membership_calls.append(
-            (tenant_id, project_id, user_id, granted)
-        )
+        self.membership_calls.append((tenant_id, project_id, user_id, granted))
         assert self.project is not None
         principal_id = f"scim:{user_id}"
         changed = principal_id not in self.project.members
@@ -98,11 +92,7 @@ class _Store:
         tenant_id: str,
     ) -> ScimUser | None:
         user = self.persistence.user
-        if (
-            user is not None
-            and user.user_name.casefold() == user_name.casefold()
-            and user.tenant_id == tenant_id
-        ):
+        if user is not None and user.user_name.casefold() == user_name.casefold() and user.tenant_id == tenant_id:
             return user
         return None
 
@@ -179,9 +169,7 @@ def test_bootstrap_creates_and_strongly_verifies_authority(monkeypatch) -> None:
     assert persistence.user is not None
     assert persistence.user.roles == ["tenant_admin"]
     assert persistence.user.project_id == ""
-    assert persistence.membership_calls == [
-        ("tenant-a", "project-a", "user-a", True)
-    ]
+    assert persistence.membership_calls == [("tenant-a", "project-a", "user-a", True)]
 
 
 def test_bootstrap_is_restartable_without_replacing_authority(
@@ -247,7 +235,6 @@ def test_issue_key_tenant_uses_canonical_service_defaults(
     assert captured["scopes"] == [
         "model.list",
         "inference.invoke",
-        "query.select",
     ]
     assert "tenant 'tenant-a'" in capsys.readouterr().out
 

@@ -53,8 +53,6 @@ from src.gateway.models import (
     Principal,
     TenantRole,
 )
-from src.gateway.persistence import DynamoPersistence
-from src.gateway.query.models import AthenaDatasource
 
 
 REPORT_SCHEMA = "https://axonllm.dev/schemas/external-oidc-agentcore-certification/v3"
@@ -63,9 +61,7 @@ BROKER_RESPONSE_SCHEMA = "axonllm.external-oidc-fixture-response/v1"
 BROKER_CLEANUP_SCHEMA = "axonllm.external-oidc-fixture-cleanup/v1"
 CLEANUP_STATE_SCHEMA = "axonllm.external-oidc-cleanup-state/v1"
 RUNTIME_STACK = "AxonLLMAgentCoreStack"
-EXTERNAL_OIDC_WORKFLOW = (
-    ".github/workflows/certify-agentcore-external-oidc.yml"
-)
+EXTERNAL_OIDC_WORKFLOW = ".github/workflows/certify-agentcore-external-oidc.yml"
 LAUNCH_WORKFLOW = ".github/workflows/launch-agentcore-production.yml"
 PRODUCER_PATH = "scripts/operations/certify_external_oidc_agentcore.py"
 BROKER_CREDENTIAL_ENV = "AXON_EXTERNAL_OIDC_FIXTURE_BROKER_TOKEN"
@@ -116,9 +112,6 @@ REQUIRED_CHECKS = frozenset(
         "admin_tenant_config_mutation_confirmed",
         "admin_tenant_config_rollback",
         "admin_tenant_config_rollback_confirmed",
-        "admin_query_select",
-        "viewer_query_select",
-        "viewer_query_mutation_denied",
         "viewer_payload_role_escalation_denied",
         "wrong_audience_denied",
         "missing_tenant_claim_denied",
@@ -130,9 +123,6 @@ REQUIRED_CHECKS = frozenset(
         "canonical_admin_config_write_allowed",
         "canonical_viewer_config_read_allowed",
         "canonical_viewer_config_write_denied",
-        "canonical_admin_query_select_allowed",
-        "canonical_viewer_query_select_allowed",
-        "canonical_cross_tenant_query_concealed",
     }
 )
 TENANT_CONFIG_FIELDS = frozenset(
@@ -158,9 +148,7 @@ _CANDIDATE_PATTERN = re.compile(r"^candidate_[0-9a-f]{32}$")
 _SHA_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _RUN_PATTERN = re.compile(r"^[1-9][0-9]*$")
-_REPOSITORY_PATTERN = re.compile(
-    r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
-)
+_REPOSITORY_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _FIXTURE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,255}$")
 _SAFE_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _RUNTIME_STACK_PATTERN = re.compile(
@@ -173,9 +161,7 @@ _IMAGE_PATTERN = re.compile(
     r"(?P<region>[a-z0-9-]+)\.amazonaws\.com/"
     r"[a-z0-9]+(?:[._/-][a-z0-9]+)*@sha256:(?P<digest>[0-9a-f]{64})$"
 )
-_JWT_SHAPE = re.compile(
-    r"^[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}$"
-)
+_JWT_SHAPE = re.compile(r"^[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}$")
 _SENSITIVE_KEY = re.compile(
     r"(?:^|[_-])(?:access[_-]?tokens?|api[_-]?keys?|authorization|"
     r"client[_-]?secrets?|credentials?|passwords?|private[_-]?keys?|"
@@ -194,31 +180,19 @@ def _production_provider_feature_matrix(
     location: str,
 ) -> dict[str, frozenset[str]]:
     if any(not isinstance(provider, str) for provider in providers):
-        raise ExternalOidcCertificationError(
-            f"{location} contains an invalid provider name"
-        )
+        raise ExternalOidcCertificationError(f"{location} contains an invalid provider name")
     provider_names = frozenset(providers)
     missing = PRODUCTION_LAUNCH_PROVIDERS - provider_names
-    unsupported = (
-        provider_names - PRODUCTION_PROVIDER_FEATURES_BY_PROVIDER.keys()
-    )
+    unsupported = provider_names - PRODUCTION_PROVIDER_FEATURES_BY_PROVIDER.keys()
     if missing or unsupported:
-        raise ExternalOidcCertificationError(
-            f"{location} does not match the production provider contract"
-        )
-    return {
-        provider: PRODUCTION_PROVIDER_FEATURES_BY_PROVIDER[provider]
-        for provider in sorted(provider_names)
-    }
+        raise ExternalOidcCertificationError(f"{location} does not match the production provider contract")
+    return {provider: PRODUCTION_PROVIDER_FEATURES_BY_PROVIDER[provider] for provider in sorted(provider_names)}
 
 
 def _certification_provider_feature_matrix(
     certification: CertificationConfig,
 ) -> dict[str, frozenset[str]]:
-    return {
-        case.provider: case.features
-        for case in certification.providers
-    }
+    return {case.provider: case.features for case in certification.providers}
 
 
 @dataclass(frozen=True)
@@ -360,9 +334,7 @@ def _strict_object(
     fields: set[str],
 ) -> dict[str, Any]:
     if type(value) is not dict or set(value) != fields:
-        raise ExternalOidcCertificationError(
-            f"{location} fields do not match the required schema"
-        )
+        raise ExternalOidcCertificationError(f"{location} fields do not match the required schema")
     return value
 
 
@@ -379,9 +351,7 @@ def _safe_string(
         or len(value) > maximum
         or any(ord(character) < 32 for character in value)
     ):
-        raise ExternalOidcCertificationError(
-            f"{location} must be a non-empty safe string"
-        )
+        raise ExternalOidcCertificationError(f"{location} must be a non-empty safe string")
     return value
 
 
@@ -389,17 +359,13 @@ def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for key, value in pairs:
         if key in result:
-            raise ExternalOidcCertificationError(
-                f"duplicate JSON field: {key}"
-            )
+            raise ExternalOidcCertificationError(f"duplicate JSON field: {key}")
         result[key] = value
     return result
 
 
 def _reject_constant(value: str) -> None:
-    raise ExternalOidcCertificationError(
-        f"non-finite JSON value is not allowed: {value}"
-    )
+    raise ExternalOidcCertificationError(f"non-finite JSON value is not allowed: {value}")
 
 
 def _strict_json(raw: bytes, location: str) -> Any:
@@ -412,39 +378,29 @@ def _strict_json(raw: bytes, location: str) -> Any:
     except ExternalOidcCertificationError:
         raise
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise ExternalOidcCertificationError(
-            f"{location} is not strict UTF-8 JSON"
-        ) from exc
+        raise ExternalOidcCertificationError(f"{location} is not strict UTF-8 JSON") from exc
 
 
 def _read_json(path: Path, *, maximum: int = MAX_JSON_BYTES) -> Any:
     try:
         before = path.lstat()
         if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
-            raise ExternalOidcCertificationError(
-                f"input must be a regular file: {path}"
-            )
+            raise ExternalOidcCertificationError(f"input must be a regular file: {path}")
         if before.st_size > maximum:
-            raise ExternalOidcCertificationError(
-                f"input is too large: {path}"
-            )
+            raise ExternalOidcCertificationError(f"input is too large: {path}")
         raw = path.read_bytes()
         after = path.stat()
     except ExternalOidcCertificationError:
         raise
     except OSError as exc:
-        raise ExternalOidcCertificationError(
-            f"cannot read input: {path}"
-        ) from exc
+        raise ExternalOidcCertificationError(f"cannot read input: {path}") from exc
     if (
         before.st_dev != after.st_dev
         or before.st_ino != after.st_ino
         or before.st_size != after.st_size
         or len(raw) != after.st_size
     ):
-        raise ExternalOidcCertificationError(
-            f"input changed while being read: {path}"
-        )
+        raise ExternalOidcCertificationError(f"input changed while being read: {path}")
     return _strict_json(raw, str(path))
 
 
@@ -483,9 +439,7 @@ def _atomic_private_json(
                     pass
                 raise
             return
-        temporary = resolved.with_name(
-            f".{resolved.name}.{os.getpid()}.{secrets.token_hex(8)}.tmp"
-        )
+        temporary = resolved.with_name(f".{resolved.name}.{os.getpid()}.{secrets.token_hex(8)}.tmp")
         descriptor = os.open(
             temporary,
             os.O_WRONLY | os.O_CREAT | os.O_EXCL,
@@ -513,9 +467,7 @@ def _atomic_private_json(
     except ExternalOidcCertificationError:
         raise
     except OSError as exc:
-        raise ExternalOidcCertificationError(
-            f"cannot write owner-only output: {resolved}"
-        ) from exc
+        raise ExternalOidcCertificationError(f"cannot write owner-only output: {resolved}") from exc
 
 
 def _safe_https_url(
@@ -526,17 +478,13 @@ def _safe_https_url(
 ) -> str:
     value = _safe_string(value, location)
     if "\\" in value or any(character.isspace() for character in value):
-        raise ExternalOidcCertificationError(
-            f"{location} must be a canonical HTTPS URL"
-        )
+        raise ExternalOidcCertificationError(f"{location} must be a canonical HTTPS URL")
     try:
         parsed = urlsplit(value)
         hostname = parsed.hostname
         port = parsed.port
     except (UnicodeError, ValueError) as exc:
-        raise ExternalOidcCertificationError(
-            f"{location} must be a canonical HTTPS URL"
-        ) from exc
+        raise ExternalOidcCertificationError(f"{location} must be a canonical HTTPS URL") from exc
     if (
         parsed.scheme != "https"
         or not parsed.netloc
@@ -549,32 +497,18 @@ def _safe_https_url(
         or hostname.casefold().endswith(".localhost")
         or port == 0
     ):
-        raise ExternalOidcCertificationError(
-            f"{location} must be a canonical HTTPS URL"
-        )
+        raise ExternalOidcCertificationError(f"{location} must be a canonical HTTPS URL")
     try:
         hostname.encode("ascii")
         ipaddress.ip_address(hostname)
     except UnicodeEncodeError as exc:
-        raise ExternalOidcCertificationError(
-            f"{location} hostname must be ASCII"
-        ) from exc
+        raise ExternalOidcCertificationError(f"{location} hostname must be ASCII") from exc
     except ValueError:
         pass
     else:
-        raise ExternalOidcCertificationError(
-            f"{location} must not use an IP-literal host"
-        )
-    if issuer and (
-        parsed.query
-        or value.endswith("/")
-        or parsed.path.endswith(
-            "/.well-known/openid-configuration"
-        )
-    ):
-        raise ExternalOidcCertificationError(
-            f"{location} must be an issuer URL without query or trailing slash"
-        )
+        raise ExternalOidcCertificationError(f"{location} must not use an IP-literal host")
+    if issuer and (parsed.query or value.endswith("/") or parsed.path.endswith("/.well-known/openid-configuration")):
+        raise ExternalOidcCertificationError(f"{location} must be an issuer URL without query or trailing slash")
     return value
 
 
@@ -613,9 +547,7 @@ def httpx_json_transport(
                 for chunk in response.iter_bytes():
                     payload.extend(chunk)
                     if len(payload) > maximum_bytes:
-                        raise ExternalOidcCertificationError(
-                            "HTTPS JSON response exceeds the configured limit"
-                        )
+                        raise ExternalOidcCertificationError("HTTPS JSON response exceeds the configured limit")
                 normalized: dict[str, str] = {}
                 for name, value in response.headers.multi_items():
                     lowered = name.casefold()
@@ -625,11 +557,7 @@ def httpx_json_transport(
                         )
                     normalized[lowered] = value
                 encoded = bytes(payload)
-                parsed = (
-                    _strict_json(encoded, "HTTPS response")
-                    if encoded
-                    else None
-                )
+                parsed = _strict_json(encoded, "HTTPS response") if encoded else None
                 return JsonResponse(
                     status_code=response.status_code,
                     headers=normalized,
@@ -639,9 +567,7 @@ def httpx_json_transport(
     except ExternalOidcCertificationError:
         raise
     except Exception as exc:
-        raise ExternalOidcCertificationError(
-            "HTTPS JSON exchange failed"
-        ) from exc
+        raise ExternalOidcCertificationError("HTTPS JSON exchange failed") from exc
 
 
 def _json_exchange(
@@ -668,17 +594,13 @@ def _json_exchange(
         or response.status_code != expected_status
         or type(response.value) is not dict
     ):
-        raise ExternalOidcCertificationError(
-            "HTTPS JSON endpoint returned an unexpected response"
-        )
+        raise ExternalOidcCertificationError("HTTPS JSON endpoint returned an unexpected response")
     content_type = response.headers.get("content-type", "")
     if content_type.partition(";")[0].strip().casefold() not in {
         "application/json",
         "application/jwk-set+json",
     }:
-        raise ExternalOidcCertificationError(
-            "HTTPS JSON endpoint returned an unsupported content type"
-        )
+        raise ExternalOidcCertificationError("HTTPS JSON endpoint returned an unsupported content type")
     return response
 
 
@@ -691,28 +613,20 @@ def _http_freshness(
     raw_date = headers.get("date")
     raw_cache = headers.get("cache-control")
     if not isinstance(raw_date, str) or not isinstance(raw_cache, str):
-        raise ExternalOidcCertificationError(
-            f"{location} lacks verifiable HTTP freshness metadata"
-        )
+        raise ExternalOidcCertificationError(f"{location} lacks verifiable HTTP freshness metadata")
     try:
         date = parsedate_to_datetime(raw_date)
     except (TypeError, ValueError) as exc:
-        raise ExternalOidcCertificationError(
-            f"{location} Date header is invalid"
-        ) from exc
+        raise ExternalOidcCertificationError(f"{location} Date header is invalid") from exc
     if date.tzinfo is None:
-        raise ExternalOidcCertificationError(
-            f"{location} Date header lacks a timezone"
-        )
+        raise ExternalOidcCertificationError(f"{location} Date header lacks a timezone")
     date = date.astimezone(timezone.utc)
     directives: dict[str, str | None] = {}
     for raw_directive in raw_cache.split(","):
         name, separator, raw_value = raw_directive.strip().partition("=")
         name = name.casefold()
         if not name or name in directives:
-            raise ExternalOidcCertificationError(
-                f"{location} Cache-Control is ambiguous"
-            )
+            raise ExternalOidcCertificationError(f"{location} Cache-Control is ambiguous")
         directives[name] = raw_value.strip().strip('"') if separator else None
     max_age_text = directives.get("max-age")
     if (
@@ -722,31 +636,19 @@ def _http_freshness(
         or not max_age_text.isascii()
         or not max_age_text.isdigit()
     ):
-        raise ExternalOidcCertificationError(
-            f"{location} must advertise a bounded reusable max-age"
-        )
+        raise ExternalOidcCertificationError(f"{location} must advertise a bounded reusable max-age")
     max_age = int(max_age_text)
     if not 1 <= max_age <= MAX_JWKS_FRESHNESS_SECONDS:
-        raise ExternalOidcCertificationError(
-            f"{location} max-age is outside the accepted range"
-        )
+        raise ExternalOidcCertificationError(f"{location} max-age is outside the accepted range")
     raw_age = headers.get("age", "0")
-    if (
-        not raw_age.isascii()
-        or not raw_age.isdigit()
-        or int(raw_age) > MAX_JWKS_FRESHNESS_SECONDS
-    ):
-        raise ExternalOidcCertificationError(
-            f"{location} Age header is invalid"
-        )
+    if not raw_age.isascii() or not raw_age.isdigit() or int(raw_age) > MAX_JWKS_FRESHNESS_SECONDS:
+        raise ExternalOidcCertificationError(f"{location} Age header is invalid")
     apparent_age = max(
         float(int(raw_age)),
         now - date.timestamp(),
     )
     if date.timestamp() > now + 300 or apparent_age < 0 or apparent_age >= max_age:
-        raise ExternalOidcCertificationError(
-            f"{location} is stale or has unverifiable clock metadata"
-        )
+        raise ExternalOidcCertificationError(f"{location} is stale or has unverifiable clock metadata")
     return Freshness(
         date=date,
         max_age_seconds=max_age,
@@ -763,9 +665,7 @@ def _valid_jwks(value: Any) -> dict[str, Any]:
         or len(keys) > MAX_JWKS_KEYS
         or any(type(key) is not dict for key in keys)
     ):
-        raise ExternalOidcCertificationError(
-            "OIDC JWKS has no bounded signing-key set"
-        )
+        raise ExternalOidcCertificationError("OIDC JWKS has no bounded signing-key set")
     seen: set[str] = set()
     for key in keys:
         kid = key.get("kid")
@@ -781,18 +681,14 @@ def _valid_jwks(value: Any) -> dict[str, Any]:
             or (algorithm == "ES256" and kty != "EC")
             or key.get("use") not in (None, "sig")
         ):
-            raise ExternalOidcCertificationError(
-                "OIDC JWKS contains an ambiguous or unsupported signing key"
-            )
+            raise ExternalOidcCertificationError("OIDC JWKS contains an ambiguous or unsupported signing key")
         key_ops = key.get("key_ops")
         if key_ops is not None and (
             not isinstance(key_ops, list)
             or "verify" not in key_ops
             or any(not isinstance(operation, str) for operation in key_ops)
         ):
-            raise ExternalOidcCertificationError(
-                "OIDC JWKS key is not authorized for signature verification"
-            )
+            raise ExternalOidcCertificationError("OIDC JWKS key is not authorized for signature verification")
         seen.add(kid)
     return jwks
 
@@ -822,17 +718,13 @@ def fetch_issuer_material(
     )
     discovery = discovery_response.value
     if discovery.get("issuer") != issuer:
-        raise ExternalOidcCertificationError(
-            "OIDC discovery issuer does not exactly match the configured issuer"
-        )
+        raise ExternalOidcCertificationError("OIDC discovery issuer does not exactly match the configured issuer")
     jwks_uri = _safe_https_url(
         discovery.get("jwks_uri"),
         "OIDC JWKS URI",
     )
     if _origin(jwks_uri) != _origin(issuer):
-        raise ExternalOidcCertificationError(
-            "OIDC JWKS URI must have the configured issuer origin"
-        )
+        raise ExternalOidcCertificationError("OIDC JWKS URI must have the configured issuer origin")
     discovery_freshness = _http_freshness(
         discovery_response.headers,
         now=now,
@@ -858,9 +750,7 @@ def fetch_issuer_material(
         issuer=issuer,
         discovery_url=discovery_url,
         jwks_uri=jwks_uri,
-        discovery_sha256=hashlib.sha256(
-            discovery_response.body
-        ).hexdigest(),
+        discovery_sha256=hashlib.sha256(discovery_response.body).hexdigest(),
         jwks_sha256=hashlib.sha256(jwks_response.body).hexdigest(),
         discovery_freshness=discovery_freshness,
         jwks_freshness=jwks_freshness,
@@ -871,20 +761,12 @@ def fetch_issuer_material(
 def _token_audiences(value: Any) -> tuple[str, ...]:
     if isinstance(value, str):
         audiences = (value,)
-    elif (
-        isinstance(value, list)
-        and value
-        and all(isinstance(item, str) and item for item in value)
-    ):
+    elif isinstance(value, list) and value and all(isinstance(item, str) and item for item in value):
         audiences = tuple(value)
     else:
-        raise ExternalOidcCertificationError(
-            "OIDC identity has an invalid audience claim"
-        )
+        raise ExternalOidcCertificationError("OIDC identity has an invalid audience claim")
     if len(audiences) > 8 or len(set(audiences)) != len(audiences):
-        raise ExternalOidcCertificationError(
-            "OIDC identity has an ambiguous audience claim"
-        )
+        raise ExternalOidcCertificationError("OIDC identity has an ambiguous audience claim")
     return audiences
 
 
@@ -898,19 +780,13 @@ def _jwk_for_token(
         or len(token.encode("utf-8")) > MAX_JWT_BYTES
         or any(character.isspace() for character in token)
     ):
-        raise ExternalOidcCertificationError(
-            "fixture broker returned an invalid identity"
-        )
+        raise ExternalOidcCertificationError("fixture broker returned an invalid identity")
     try:
         header = jwt.get_unverified_header(token)
     except JWTError as exc:
-        raise ExternalOidcCertificationError(
-            "fixture broker returned an undecodable identity"
-        ) from exc
+        raise ExternalOidcCertificationError("fixture broker returned an undecodable identity") from exc
     if type(header) is not dict:
-        raise ExternalOidcCertificationError(
-            "fixture identity header is malformed"
-        )
+        raise ExternalOidcCertificationError("fixture identity header is malformed")
     algorithm = header.get("alg")
     kid = header.get("kid")
     if (
@@ -919,19 +795,10 @@ def _jwk_for_token(
         or _SAFE_KID.fullmatch(kid) is None
         or any(name in header for name in ("crit", "jku", "x5u"))
     ):
-        raise ExternalOidcCertificationError(
-            "fixture identity uses unsupported JWT trust metadata"
-        )
-    matches = [
-        key
-        for key in material.jwks["keys"]
-        if key.get("kid") == kid
-        and key.get("alg") == algorithm
-    ]
+        raise ExternalOidcCertificationError("fixture identity uses unsupported JWT trust metadata")
+    matches = [key for key in material.jwks["keys"] if key.get("kid") == kid and key.get("alg") == algorithm]
     if len(matches) != 1:
-        raise ExternalOidcCertificationError(
-            "fixture identity signing key is absent or ambiguous"
-        )
+        raise ExternalOidcCertificationError("fixture identity signing key is absent or ambiguous")
     return matches[0], algorithm
 
 
@@ -941,9 +808,7 @@ def _integer_claim(
 ) -> int:
     value = claims.get(name)
     if isinstance(value, bool) or not isinstance(value, int):
-        raise ExternalOidcCertificationError(
-            f"OIDC identity claim {name} must be an integer"
-        )
+        raise ExternalOidcCertificationError(f"OIDC identity claim {name} must be an integer")
     return value
 
 
@@ -982,23 +847,15 @@ def verify_fixture_identity(
             options=options,
         )
     except JWTError as exc:
-        raise ExternalOidcCertificationError(
-            f"{case} identity signature or registered claims are invalid"
-        ) from exc
+        raise ExternalOidcCertificationError(f"{case} identity signature or registered claims are invalid") from exc
     if type(claims) is not dict:
-        raise ExternalOidcCertificationError(
-            f"{case} identity claims are malformed"
-        )
+        raise ExternalOidcCertificationError(f"{case} identity claims are malformed")
     observed_audiences = _token_audiences(claims.get("aud"))
     if expect_wrong_audience:
         if audience in observed_audiences:
-            raise ExternalOidcCertificationError(
-                "wrong-audience identity includes the accepted audience"
-            )
+            raise ExternalOidcCertificationError("wrong-audience identity includes the accepted audience")
     elif observed_audiences != (audience,):
-        raise ExternalOidcCertificationError(
-            f"{case} identity audience does not exactly match configuration"
-        )
+        raise ExternalOidcCertificationError(f"{case} identity audience does not exactly match configuration")
     now = int(clock())
     issued_at = _integer_claim(claims, "iat")
     expires_at = _integer_claim(claims, "exp")
@@ -1009,9 +866,7 @@ def verify_fixture_identity(
             or expires_at - issued_at > MAX_TOKEN_LIFETIME_SECONDS
             or issued_at < now - (2 * MAX_TOKEN_LIFETIME_SECONDS)
         ):
-            raise ExternalOidcCertificationError(
-                "expired identity is not a bounded stale credential"
-            )
+            raise ExternalOidcCertificationError("expired identity is not a bounded stale credential")
     elif (
         issued_at > now + 60
         or issued_at < now - 300
@@ -1019,18 +874,12 @@ def verify_fixture_identity(
         or expires_at - issued_at > MAX_TOKEN_LIFETIME_SECONDS
         or expires_at <= issued_at
     ):
-        raise ExternalOidcCertificationError(
-            f"{case} identity is not short lived"
-        )
+        raise ExternalOidcCertificationError(f"{case} identity is not short lived")
     not_before = claims.get("nbf")
     if not_before is not None and (
-        isinstance(not_before, bool)
-        or not isinstance(not_before, int)
-        or not_before > now + 60
+        isinstance(not_before, bool) or not isinstance(not_before, int) or not_before > now + 60
     ):
-        raise ExternalOidcCertificationError(
-            f"{case} identity has an invalid not-before claim"
-        )
+        raise ExternalOidcCertificationError(f"{case} identity has an invalid not-before claim")
     subject = _safe_string(
         claims.get("sub"),
         f"{case} identity subject",
@@ -1049,13 +898,9 @@ def verify_fixture_identity(
     ):
         if expected is None:
             if observed is not None:
-                raise ExternalOidcCertificationError(
-                    f"{case} identity unexpectedly contains claim {name}"
-                )
+                raise ExternalOidcCertificationError(f"{case} identity unexpectedly contains claim {name}")
         elif observed != expected:
-            raise ExternalOidcCertificationError(
-                f"{case} identity claim {name} does not match the fixture"
-            )
+            raise ExternalOidcCertificationError(f"{case} identity claim {name} does not match the fixture")
     return VerifiedIdentity(
         case=case,
         token=token,
@@ -1081,14 +926,10 @@ def validate_token_bundle(
 ) -> dict[str, VerifiedIdentity]:
     """Verify all positive and negative broker identities."""
     if set(tokens) != set(TOKEN_CASES):
-        raise ExternalOidcCertificationError(
-            "fixture broker identity cases do not match the certification contract"
-        )
+        raise ExternalOidcCertificationError("fixture broker identity cases do not match the certification contract")
     oidc = setup.external_oidc
     if setup.identity_mode != EXTERNAL_OIDC or oidc is None:
-        raise ExternalOidcCertificationError(
-            "external OIDC setup is required"
-        )
+        raise ExternalOidcCertificationError("external OIDC setup is required")
     common = {
         "audience": oidc.audience,
         "tenant_claim": oidc.tenant_claim,
@@ -1155,18 +996,10 @@ def validate_token_bundle(
         expected_project=setup.tenant.project_id,
         **common,
     )
-    if len({verified[case].subject for case in CANONICAL_CASES}) != len(
-        CANONICAL_CASES
-    ):
-        raise ExternalOidcCertificationError(
-            "canonical fixture identities must have distinct subjects"
-        )
-    if len({identity.jwt_id for identity in verified.values()}) != len(
-        verified
-    ):
-        raise ExternalOidcCertificationError(
-            "fixture identities must have unique JWT IDs"
-        )
+    if len({verified[case].subject for case in CANONICAL_CASES}) != len(CANONICAL_CASES):
+        raise ExternalOidcCertificationError("canonical fixture identities must have distinct subjects")
+    if len({identity.jwt_id for identity in verified.values()}) != len(verified):
+        raise ExternalOidcCertificationError("fixture identities must have unique JWT IDs")
     viewer_subject = verified["viewer"].subject
     for case in (
         "wrongAudience",
@@ -1175,9 +1008,7 @@ def validate_token_bundle(
         "expired",
     ):
         if verified[case].subject != viewer_subject:
-            raise ExternalOidcCertificationError(
-                f"{case} must vary claims for the viewer subject"
-            )
+            raise ExternalOidcCertificationError(f"{case} must vary claims for the viewer subject")
     return verified
 
 
@@ -1189,9 +1020,7 @@ def _credential() -> str:
         or value != value.strip()
         or any(character.isspace() for character in value)
     ):
-        raise ExternalOidcCertificationError(
-            "external OIDC fixture broker credential is unavailable"
-        )
+        raise ExternalOidcCertificationError("external OIDC fixture broker credential is unavailable")
     return value
 
 
@@ -1217,9 +1046,7 @@ def create_broker_fixture(
     )
     oidc = setup.external_oidc
     if oidc is None:
-        raise ExternalOidcCertificationError(
-            "external OIDC setup is missing"
-        )
+        raise ExternalOidcCertificationError("external OIDC setup is missing")
     request = {
         "schema": BROKER_REQUEST_SCHEMA,
         "challenge": challenge,
@@ -1261,9 +1088,7 @@ def create_broker_fixture(
         expected_status=201,
     )
     if "no-store" not in response.headers.get("cache-control", "").casefold():
-        raise ExternalOidcCertificationError(
-            "fixture broker response must prohibit caching"
-        )
+        raise ExternalOidcCertificationError("fixture broker response must prohibit caching")
     value = _strict_object(
         response.value,
         "fixture broker response",
@@ -1299,26 +1124,19 @@ def create_broker_fixture(
         }
         or type(identities) is not dict
         or set(identities) != set(TOKEN_CASES)
-        or any(
-            not isinstance(identity, str) or not identity
-            for identity in identities.values()
-        )
+        or any(not isinstance(identity, str) or not identity for identity in identities.values())
         or not isinstance(value["expiresAt"], int)
         or isinstance(value["expiresAt"], bool)
         or not now + 120 <= value["expiresAt"] <= now + MAX_TOKEN_LIFETIME_SECONDS
     ):
-        raise ExternalOidcCertificationError(
-            "fixture broker response is not bound to this request"
-        )
+        raise ExternalOidcCertificationError("fixture broker response is not bound to this request")
     fixture_id = _safe_string(
         value["fixtureId"],
         "fixture broker fixture ID",
         maximum=256,
     )
     if _FIXTURE_ID_PATTERN.fullmatch(fixture_id) is None:
-        raise ExternalOidcCertificationError(
-            "fixture broker fixture ID is invalid"
-        )
+        raise ExternalOidcCertificationError("fixture broker fixture ID is invalid")
     return BrokerFixture(
         fixture_id=fixture_id,
         challenge=challenge,
@@ -1335,10 +1153,7 @@ def delete_broker_fixture(
     challenge: str,
     transport: JsonTransport = httpx_json_transport,
 ) -> dict[str, Any]:
-    endpoint = (
-        f"{_safe_https_url(broker_url, 'fixture broker URL').rstrip('/')}/"
-        f"{quote(fixture_id, safe='')}"
-    )
+    endpoint = f"{_safe_https_url(broker_url, 'fixture broker URL').rstrip('/')}/{quote(fixture_id, safe='')}"
     encoded = json.dumps(
         {
             "schema": BROKER_CLEANUP_SCHEMA,
@@ -1381,9 +1196,7 @@ def delete_broker_fixture(
         or value["complete"] is not True
         or value["identitiesRevoked"] is not True
     ):
-        raise ExternalOidcCertificationError(
-            "fixture broker did not prove fixture cleanup"
-        )
+        raise ExternalOidcCertificationError("fixture broker did not prove fixture cleanup")
     return {
         "status": "PASS",
         "complete": True,
@@ -1407,54 +1220,29 @@ def _source_binding(
     region: str,
 ) -> SourceBinding:
     if _REPOSITORY_PATTERN.fullmatch(repository) is None:
+        raise ExternalOidcCertificationError("repository must be owner/name")
+    expected_workflow_ref = f"{repository}/{EXTERNAL_OIDC_WORKFLOW}@refs/heads/main"
+    expected_parent_workflow_ref = f"{repository}/{LAUNCH_WORKFLOW}@refs/heads/main"
+    if workflow_ref != expected_workflow_ref or parent_workflow_ref != expected_parent_workflow_ref:
         raise ExternalOidcCertificationError(
-            "repository must be owner/name"
+            "external OIDC certification must be called by the protected production launch workflow"
         )
-    expected_workflow_ref = (
-        f"{repository}/{EXTERNAL_OIDC_WORKFLOW}@refs/heads/main"
-    )
-    expected_parent_workflow_ref = (
-        f"{repository}/{LAUNCH_WORKFLOW}@refs/heads/main"
-    )
-    if (
-        workflow_ref != expected_workflow_ref
-        or parent_workflow_ref != expected_parent_workflow_ref
-    ):
-        raise ExternalOidcCertificationError(
-            "external OIDC certification must be called by the protected "
-            "production launch workflow"
-        )
-    if (
-        _RUN_PATTERN.fullmatch(run_id) is None
-        or _RUN_PATTERN.fullmatch(run_attempt) is None
-    ):
-        raise ExternalOidcCertificationError(
-            "workflow run identity is invalid"
-        )
+    if _RUN_PATTERN.fullmatch(run_id) is None or _RUN_PATTERN.fullmatch(run_attempt) is None:
+        raise ExternalOidcCertificationError("workflow run identity is invalid")
     if (
         _SHA_PATTERN.fullmatch(workflow_commit) is None
         or _SHA_PATTERN.fullmatch(parent_workflow_commit) is None
         or _SHA_PATTERN.fullmatch(release_commit) is None
     ):
-        raise ExternalOidcCertificationError(
-            "workflow and release commits must be full lowercase SHAs"
-        )
-    if (
-        workflow_commit != release_commit
-        or parent_workflow_commit != release_commit
-    ):
-        raise ExternalOidcCertificationError(
-            "workflow, parent, and release commits must match exactly"
-        )
+        raise ExternalOidcCertificationError("workflow and release commits must be full lowercase SHAs")
+    if workflow_commit != release_commit or parent_workflow_commit != release_commit:
+        raise ExternalOidcCertificationError("workflow, parent, and release commits must match exactly")
     image_match = _IMAGE_PATTERN.fullmatch(agentcore_image)
     if image_match is None or image_match.group("region") != region:
-        raise ExternalOidcCertificationError(
-            "AgentCore image must be an immutable ECR digest in the target region"
-        )
+        raise ExternalOidcCertificationError("AgentCore image must be an immutable ECR digest in the target region")
     if _RUNTIME_STACK_PATTERN.fullmatch(runtime_stack_name) is None:
         raise ExternalOidcCertificationError(
-            "runtime stack name must be AxonLLMAgentCoreStack or an exact "
-            "validated deployment namespace"
+            "runtime stack name must be AxonLLMAgentCoreStack or an exact validated deployment namespace"
         )
     return SourceBinding(
         repository=repository,
@@ -1478,9 +1266,7 @@ def _stack_map(
     location: str,
 ) -> dict[str, str]:
     if not isinstance(values, list):
-        raise ExternalOidcCertificationError(
-            f"{location} is malformed"
-        )
+        raise ExternalOidcCertificationError(f"{location} is malformed")
     result: dict[str, str] = {}
     for item in values:
         if (
@@ -1489,9 +1275,7 @@ def _stack_map(
             or not isinstance(item.get(value_name), str)
             or item[key_name] in result
         ):
-            raise ExternalOidcCertificationError(
-                f"{location} is malformed or ambiguous"
-            )
+            raise ExternalOidcCertificationError(f"{location} is malformed or ambiguous")
         result[item[key_name]] = item[value_name]
     return result
 
@@ -1510,22 +1294,16 @@ def resolve_runtime_binding(
         region_name=setup.aws_region,
     )
     if _RUNTIME_STACK_PATTERN.fullmatch(runtime_stack_name) is None:
-        raise ExternalOidcCertificationError(
-            "runtime stack name is invalid"
-        )
+        raise ExternalOidcCertificationError("runtime stack name is invalid")
     try:
         response = cloudformation.describe_stacks(
             StackName=runtime_stack_name,
         )
     except Exception as exc:
-        raise ExternalOidcCertificationError(
-            "cannot resolve the AgentCore CloudFormation stack"
-        ) from exc
+        raise ExternalOidcCertificationError("cannot resolve the AgentCore CloudFormation stack") from exc
     stacks = response.get("Stacks") if type(response) is dict else None
     if not isinstance(stacks, list) or len(stacks) != 1 or type(stacks[0]) is not dict:
-        raise ExternalOidcCertificationError(
-            "AgentCore CloudFormation stack response is ambiguous"
-        )
+        raise ExternalOidcCertificationError("AgentCore CloudFormation stack response is ambiguous")
     stack = stacks[0]
     status = stack.get("StackStatus")
     stack_id = stack.get("StackId")
@@ -1535,9 +1313,7 @@ def resolve_runtime_binding(
         or not stack_id.startswith("arn:")
         or f":stack/{runtime_stack_name}/" not in stack_id
     ):
-        raise ExternalOidcCertificationError(
-            "AgentCore CloudFormation stack is not in a stable state"
-        )
+        raise ExternalOidcCertificationError("AgentCore CloudFormation stack is not in a stable state")
     parameters = _stack_map(
         stack.get("Parameters"),
         key_name="ParameterKey",
@@ -1552,9 +1328,7 @@ def resolve_runtime_binding(
     )
     oidc = setup.external_oidc
     if oidc is None:
-        raise ExternalOidcCertificationError(
-            "external OIDC setup is missing"
-        )
+        raise ExternalOidcCertificationError("external OIDC setup is missing")
     expected_parameters = {
         "OidcIssuer": oidc.issuer,
         "OidcDiscoveryUrl": oidc.discovery_url,
@@ -1564,13 +1338,8 @@ def resolve_runtime_binding(
         "OidcProjectClaim": oidc.project_claim,
         "VerifiedImageUri": expected_image,
     }
-    if any(
-        parameters.get(name) != value
-        for name, value in expected_parameters.items()
-    ):
-        raise ExternalOidcCertificationError(
-            "deployed AgentCore OIDC or image parameters differ from reviewed setup"
-        )
+    if any(parameters.get(name) != value for name, value in expected_parameters.items()):
+        raise ExternalOidcCertificationError("deployed AgentCore OIDC or image parameters differ from reviewed setup")
     required_outputs = {
         "RuntimeArn",
         "RuntimeVersion",
@@ -1582,13 +1351,8 @@ def resolve_runtime_binding(
         "StateTableName",
         "SelectedRuntimeStateTableName",
     }
-    if any(
-        not isinstance(outputs.get(name), str) or not outputs[name]
-        for name in required_outputs
-    ):
-        raise ExternalOidcCertificationError(
-            "AgentCore stack lacks required candidate outputs"
-        )
+    if any(not isinstance(outputs.get(name), str) or not outputs[name] for name in required_outputs):
+        raise ExternalOidcCertificationError("AgentCore stack lacks required candidate outputs")
     runtime_arn = outputs["RuntimeArn"]
     runtime_version = outputs["RuntimeVersion"]
     endpoint_name = outputs["CandidateRuntimeEndpointName"]
@@ -1599,20 +1363,13 @@ def resolve_runtime_binding(
         or _CANDIDATE_PATTERN.fullmatch(endpoint_name) is None
         or not runtime_version.isdigit()
         or outputs["CandidateRuntimeVersion"] != runtime_version
-        or endpoint_arn
-        != f"{runtime_arn}/runtime-endpoint/{endpoint_name}"
+        or endpoint_arn != f"{runtime_arn}/runtime-endpoint/{endpoint_name}"
         or outputs["RuntimeImageUri"] != expected_image
         or outputs["RecoveryCutoverMode"] != "normal"
-        or outputs["StateTableName"]
-        != outputs["SelectedRuntimeStateTableName"]
-        or _SAFE_IDENTIFIER.fullmatch(
-            outputs["SelectedRuntimeStateTableName"]
-        )
-        is None
+        or outputs["StateTableName"] != outputs["SelectedRuntimeStateTableName"]
+        or _SAFE_IDENTIFIER.fullmatch(outputs["SelectedRuntimeStateTableName"]) is None
     ):
-        raise ExternalOidcCertificationError(
-            "AgentCore candidate outputs are not immutable or internally consistent"
-        )
+        raise ExternalOidcCertificationError("AgentCore candidate outputs are not immutable or internally consistent")
     control = session.client(
         "bedrock-agentcore-control",
         region_name=setup.aws_region,
@@ -1623,9 +1380,7 @@ def resolve_runtime_binding(
             endpointName=endpoint_name,
         )
     except Exception as exc:
-        raise ExternalOidcCertificationError(
-            "cannot resolve AgentCore candidate endpoint"
-        ) from exc
+        raise ExternalOidcCertificationError("cannot resolve AgentCore candidate endpoint") from exc
     if (
         type(endpoint) is not dict
         or endpoint.get("agentRuntimeArn") != runtime_arn
@@ -1665,51 +1420,28 @@ def _validate_configs(
         or setup.control_plane is not None
         or setup.managed_cognito is not None
     ):
-        raise ExternalOidcCertificationError(
-            "certification requires a disjoint external-oidc setup"
-        )
+        raise ExternalOidcCertificationError("certification requires a disjoint external-oidc setup")
     if (
         setup.aws_region != certification.region
         or setup.runtime.verified_image_uri != expected_image
         or certification.profile != PRODUCTION_LAUNCH_PROFILE
     ):
-        raise ExternalOidcCertificationError(
-            "setup and certification do not match the production launch contract"
-        )
+        raise ExternalOidcCertificationError("setup and certification do not match the production launch contract")
     setup_providers = set(setup.runtime.enabled_providers)
     expected_features = _production_provider_feature_matrix(
         setup_providers,
         location="reviewed external-OIDC setup",
     )
-    if (
-        _certification_provider_feature_matrix(certification)
-        != expected_features
-    ):
-        raise ExternalOidcCertificationError(
-            "reviewed setup and certification providers must exactly match"
-        )
-    athena = setup.runtime.athena_query
-    if (
-        athena is None
-        or certification.query.role_arn not in athena.role_arns
-    ):
-        raise ExternalOidcCertificationError(
-            "certification query role is outside the reviewed AgentCore setup"
-        )
-    if oidc.discovery_url != (
-        f"{oidc.issuer}/.well-known/openid-configuration"
-    ):
-        raise ExternalOidcCertificationError(
-            "configured external OIDC discovery URL does not match its issuer"
-        )
+    if _certification_provider_feature_matrix(certification) != expected_features:
+        raise ExternalOidcCertificationError("reviewed setup and certification providers must exactly match")
+    if oidc.discovery_url != (f"{oidc.issuer}/.well-known/openid-configuration"):
+        raise ExternalOidcCertificationError("configured external OIDC discovery URL does not match its issuer")
     tenant_config = certification.tenant_config
     if tenant_config is not None and (
-        tenant_config.tenant_id != setup.tenant.tenant_id
-        or tenant_config.project_id != setup.tenant.project_id
+        tenant_config.tenant_id != setup.tenant.tenant_id or tenant_config.project_id != setup.tenant.project_id
     ):
         raise ExternalOidcCertificationError(
-            "certification tenantConfig does not match the external setup "
-            "tenant and project"
+            "certification tenantConfig does not match the external setup tenant and project"
         )
 
 
@@ -1721,18 +1453,12 @@ def _certification_credentials(
         certification.identities.active_env: verified["admin"].token,
         certification.identities.inactive_env: verified["inactive"].token,
         certification.identities.ungranted_env: verified["ungranted"].token,
-        certification.identities.cross_tenant_env: (
-            verified["crossTenant"].token
-        ),
+        certification.identities.cross_tenant_env: (verified["crossTenant"].token),
     }
     if certification.identities.admin_env is not None:
-        credentials[certification.identities.admin_env] = (
-            verified["admin"].token
-        )
+        credentials[certification.identities.admin_env] = verified["admin"].token
     if certification.identities.viewer_env is not None:
-        credentials[certification.identities.viewer_env] = (
-            verified["viewer"].token
-        )
+        credentials[certification.identities.viewer_env] = verified["viewer"].token
     return credentials
 
 
@@ -1744,9 +1470,7 @@ def _fixture_principal(
     role: TenantRole,
     status: MembershipStatus,
 ) -> Principal:
-    subject_digest = hashlib.sha256(
-        f"{identity.issuer}\0{identity.subject}".encode("utf-8")
-    ).hexdigest()[:32]
+    subject_digest = hashlib.sha256(f"{identity.issuer}\0{identity.subject}".encode("utf-8")).hexdigest()[:32]
     return Principal(
         principal_id=f"external-oidc-cert:{identity.case}:{subject_digest}",
         tenant_id=tenant_id,
@@ -1759,53 +1483,6 @@ def _fixture_principal(
         scopes=frozenset(),
         authorization_version=1,
     )
-
-
-def _datasource_item(
-    setup: AgentCoreSetupConfig,
-    certification: CertificationConfig,
-    *,
-    fixture_id: str,
-    expires_at: int,
-    clock: Callable[[], float],
-) -> dict[str, Any]:
-    instant = datetime.fromtimestamp(
-        clock(),
-        tz=timezone.utc,
-    ).isoformat()
-    datasource = AthenaDatasource(
-        datasource_id=certification.query.datasource_id,
-        tenant_id=setup.tenant.tenant_id,
-        project_id=setup.tenant.project_id,
-        name=certification.query.datasource_id,
-        role_arn=certification.query.role_arn,
-        region=certification.query.region,
-        catalog=certification.query.catalog,
-        database=certification.query.database,
-        workgroup=certification.query.workgroup,
-        enabled=True,
-        revision=1,
-        created_at=instant,
-        updated_at=instant,
-    )
-    document = datasource.to_dict()
-    for field in (
-        "tenant_id",
-        "project_id",
-        "datasource_id",
-        "revision",
-    ):
-        document.pop(field)
-    item = DynamoPersistence.serialize_tenant_datasource(
-        setup.tenant.tenant_id,
-        setup.tenant.project_id,
-        certification.query.datasource_id,
-        document,
-        revision=1,
-    )
-    item[FIXTURE_MARKER] = fixture_id
-    item["expires_at"] = expires_at
-    return item
 
 
 def _new_cleanup_state(
@@ -1837,14 +1514,10 @@ def _put_owned_item(
     try:
         table.put_item(
             Item=item,
-            ConditionExpression=(
-                "attribute_not_exists(PK) AND attribute_not_exists(SK)"
-            ),
+            ConditionExpression=("attribute_not_exists(PK) AND attribute_not_exists(SK)"),
         )
     except Exception as exc:
-        raise ExternalOidcCertificationError(
-            f"cannot create {location} without overwriting existing state"
-        ) from exc
+        raise ExternalOidcCertificationError(f"cannot create {location} without overwriting existing state") from exc
 
 
 def install_canonical_fixtures(
@@ -1896,9 +1569,7 @@ def install_canonical_fixtures(
     for case in CANONICAL_CASES:
         tenant_id, project_ids, role, membership = principal_specs[case]
         if not isinstance(tenant_id, str):
-            raise ExternalOidcCertificationError(
-                "cross-tenant fixture lacks a tenant"
-            )
+            raise ExternalOidcCertificationError("cross-tenant fixture lacks a tenant")
         principal = _fixture_principal(
             verified[case],
             tenant_id=tenant_id,
@@ -1927,28 +1598,6 @@ def install_canonical_fixtures(
         state["principals"][-1]["installed"] = True
         _atomic_private_json(state_path, state, replace=True)
         principals[case] = principal
-    datasource = _datasource_item(
-        setup,
-        certification,
-        fixture_id=fixture.fixture_id,
-        expires_at=expiry,
-        clock=clock,
-    )
-    state["datasource"] = {
-        "PK": datasource["PK"],
-        "SK": datasource["SK"],
-        "document": datasource["document"],
-        "revision": datasource["revision"],
-        "installed": False,
-    }
-    _atomic_private_json(state_path, state, replace=True)
-    _put_owned_item(
-        table,
-        datasource,
-        location="external OIDC certification datasource",
-    )
-    state["datasource"]["installed"] = True
-    _atomic_private_json(state_path, state, replace=True)
     return principals
 
 
@@ -1970,10 +1619,7 @@ def _validate_cleanup_state(value: Any) -> dict[str, Any]:
     )
     if (
         state["schema"] != CLEANUP_STATE_SCHEMA
-        or _SAFE_IDENTIFIER.fullmatch(
-            _safe_string(state["region"], "cleanup region", maximum=64)
-        )
-        is None
+        or _SAFE_IDENTIFIER.fullmatch(_safe_string(state["region"], "cleanup region", maximum=64)) is None
         or _SAFE_IDENTIFIER.fullmatch(
             _safe_string(
                 state["tableName"],
@@ -2001,18 +1647,11 @@ def _validate_cleanup_state(value: Any) -> dict[str, Any]:
         or not isinstance(state["expiresAt"], int)
         or isinstance(state["expiresAt"], bool)
     ):
-        raise ExternalOidcCertificationError(
-            "cleanup state metadata is malformed"
-        )
+        raise ExternalOidcCertificationError("cleanup state metadata is malformed")
     _safe_https_url(state["brokerUrl"], "cleanup broker URL")
     principals = state["principals"]
-    if (
-        not isinstance(principals, list)
-        or len(principals) > len(CANONICAL_CASES)
-    ):
-        raise ExternalOidcCertificationError(
-            "cleanup principal state is malformed"
-        )
+    if not isinstance(principals, list) or len(principals) > len(CANONICAL_CASES):
+        raise ExternalOidcCertificationError("cleanup principal state is malformed")
     seen: set[str] = set()
     for principal in principals:
         item = _strict_object(
@@ -2024,17 +1663,11 @@ def _validate_cleanup_state(value: Any) -> dict[str, Any]:
         if (
             case not in CANONICAL_CASES
             or case in seen
-            or not _safe_string(item["PK"], "cleanup principal PK").startswith(
-                "IDENTITY#"
-            )
-            or not _safe_string(item["SK"], "cleanup principal SK").startswith(
-                "TENANT#"
-            )
+            or not _safe_string(item["PK"], "cleanup principal PK").startswith("IDENTITY#")
+            or not _safe_string(item["SK"], "cleanup principal SK").startswith("TENANT#")
             or not isinstance(item["installed"], bool)
         ):
-            raise ExternalOidcCertificationError(
-                "cleanup principal state is malformed"
-            )
+            raise ExternalOidcCertificationError("cleanup principal state is malformed")
         _safe_string(item["principalId"], "cleanup principal ID")
         seen.add(case)
     datasource = state["datasource"]
@@ -2057,9 +1690,7 @@ def _validate_cleanup_state(value: Any) -> dict[str, Any]:
             or item["revision"] != 1
             or not isinstance(item["installed"], bool)
         ):
-            raise ExternalOidcCertificationError(
-                "cleanup datasource state is malformed"
-            )
+            raise ExternalOidcCertificationError("cleanup datasource state is malformed")
     return state
 
 
@@ -2076,22 +1707,16 @@ def _owned_item(
             ConsistentRead=True,
         )
     except Exception as exc:
-        raise ExternalOidcCertificationError(
-            "cannot inspect external OIDC fixture during cleanup"
-        ) from exc
+        raise ExternalOidcCertificationError("cannot inspect external OIDC fixture during cleanup") from exc
     item = response.get("Item") if type(response) is dict else None
     if item is None:
         return None
     if type(item) is not dict:
-        raise ExternalOidcCertificationError(
-            "fixture cleanup encountered malformed state"
-        )
+        raise ExternalOidcCertificationError("fixture cleanup encountered malformed state")
     if item.get(FIXTURE_MARKER) != fixture_id:
         if allow_unowned:
             return None
-        raise ExternalOidcCertificationError(
-            "refusing to delete state not owned by this fixture"
-        )
+        raise ExternalOidcCertificationError("refusing to delete state not owned by this fixture")
     return item
 
 
@@ -2110,19 +1735,11 @@ def _delete_principal(
     )
     if item is None:
         return False
-    if (
-        item.get("entity_type") != "tenant_principal"
-        or item.get("principal_id") != value["principalId"]
-    ):
-        raise ExternalOidcCertificationError(
-            "refusing to delete a changed canonical principal"
-        )
+    if item.get("entity_type") != "tenant_principal" or item.get("principal_id") != value["principalId"]:
+        raise ExternalOidcCertificationError("refusing to delete a changed canonical principal")
     table.delete_item(
         Key=key,
-        ConditionExpression=(
-            "#marker = :marker AND #entity = :entity "
-            "AND principal_id = :principal_id"
-        ),
+        ConditionExpression=("#marker = :marker AND #entity = :entity AND principal_id = :principal_id"),
         ExpressionAttributeNames={
             "#marker": FIXTURE_MARKER,
             "#entity": "entity_type",
@@ -2156,14 +1773,11 @@ def _delete_datasource(
         or item.get("document") != value["document"]
         or item.get("revision") != value["revision"]
     ):
-        raise ExternalOidcCertificationError(
-            "refusing to delete a changed certification datasource"
-        )
+        raise ExternalOidcCertificationError("refusing to delete a changed certification datasource")
     table.delete_item(
         Key=key,
         ConditionExpression=(
-            "#marker = :marker AND #entity = :entity "
-            "AND #document = :document AND #revision = :revision"
+            "#marker = :marker AND #entity = :entity AND #document = :document AND #revision = :revision"
         ),
         ExpressionAttributeNames={
             "#marker": FIXTURE_MARKER,
@@ -2199,17 +1813,9 @@ def cleanup_fixtures(
             "broker": None,
         }
     except OSError as exc:
-        raise ExternalOidcCertificationError(
-            "cannot inspect external OIDC cleanup state"
-        ) from exc
-    if (
-        stat.S_ISLNK(metadata.st_mode)
-        or not stat.S_ISREG(metadata.st_mode)
-        or stat.S_IMODE(metadata.st_mode) & 0o077
-    ):
-        raise ExternalOidcCertificationError(
-            "cleanup state must be an owner-only regular file"
-        )
+        raise ExternalOidcCertificationError("cannot inspect external OIDC cleanup state") from exc
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) & 0o077:
+        raise ExternalOidcCertificationError("cleanup state must be an owner-only regular file")
     state = _validate_cleanup_state(_read_json(path))
     table = session.resource(
         "dynamodb",
@@ -2239,9 +1845,7 @@ def cleanup_fixtures(
     try:
         path.unlink()
     except OSError as exc:
-        raise ExternalOidcCertificationError(
-            "fixtures were removed but cleanup state could not be deleted"
-        ) from exc
+        raise ExternalOidcCertificationError("fixtures were removed but cleanup state could not be deleted") from exc
     return {
         "status": "PASS",
         "complete": True,
@@ -2260,9 +1864,7 @@ def _invocation(
         "Accept": "application/json",
         "Content-Type": "application/json",
         "User-Agent": "axonllm-external-oidc-certification/1",
-        "X-Amzn-Bedrock-AgentCore-Runtime-Session-Id": (
-            f"axonllm-external-oidc-{secrets.token_hex(16)}"
-        ),
+        "X-Amzn-Bedrock-AgentCore-Runtime-Session-Id": (f"axonllm-external-oidc-{secrets.token_hex(16)}"),
     }
     if identity is not None:
         headers["Authorization"] = f"Bearer {identity}"
@@ -2362,11 +1964,7 @@ def _http_check(
     semantic: bool,
     validation: str,
 ) -> dict[str, Any]:
-    passed = (
-        observation.error_type is None
-        and observation.status_code in expected_statuses
-        and semantic
-    )
+    passed = observation.error_type is None and observation.status_code in expected_statuses and semantic
     return {
         "id": check_id,
         "kind": "agentcore_http",
@@ -2374,33 +1972,13 @@ def _http_check(
         "expectedStatuses": sorted(expected_statuses),
         "statusCode": observation.status_code,
         "latencyMs": round(float(observation.latency_ms), 3),
-        "contentType": observation.content_type.partition(";")[0]
-        .strip()
-        .casefold(),
+        "contentType": observation.content_type.partition(";")[0].strip().casefold(),
         "responseBytes": len(observation.body),
         "responseSha256": hashlib.sha256(observation.body).hexdigest(),
         "transportError": observation.error_type,
         "observedErrorCode": _response_error_code(observation),
         "validation": validation,
     }
-
-
-def _query_semantic(
-    body: dict[str, Any] | None,
-    *,
-    request_id: str,
-    datasource_id: str,
-    project_id: str,
-) -> bool:
-    return (
-        body is not None
-        and body.get("request_id") == request_id
-        and body.get("datasource_id") == datasource_id
-        and body.get("project_id") == project_id
-        and isinstance(body.get("rows"), list)
-        and isinstance(body.get("statistics"), dict)
-        and isinstance(body.get("query_execution_id"), str)
-    )
 
 
 def _tenant_config_snapshot(
@@ -2411,8 +1989,7 @@ def _tenant_config_snapshot(
 ) -> tuple[int, str] | None:
     if (
         body is None
-        or set(body)
-        != {"tenant_id", "project_id", "revision", "config"}
+        or set(body) != {"tenant_id", "project_id", "revision", "config"}
         or body.get("tenant_id") != tenant_id
         or body.get("project_id") != project_id
     ):
@@ -2428,12 +2005,7 @@ def _tenant_config_snapshot(
     ):
         return None
     name = config.get("name")
-    if (
-        not isinstance(name, str)
-        or not name
-        or name != name.strip()
-        or len(name) > 256
-    ):
+    if not isinstance(name, str) or not name or name != name.strip() or len(name) > 256:
         return None
     return revision, name
 
@@ -2528,9 +2100,7 @@ def _tenant_config_checks(
     )
     checks.append(admin_check)
     if admin_check["passed"] is not True or original is None:
-        raise ExternalOidcCertificationError(
-            "admin tenant configuration read failed"
-        )
+        raise ExternalOidcCertificationError("admin tenant configuration read failed")
     original_revision, original_name = original
 
     viewer_read = _send(
@@ -2557,9 +2127,7 @@ def _tenant_config_checks(
     )
     checks.append(viewer_check)
     if viewer_check["passed"] is not True:
-        raise ExternalOidcCertificationError(
-            "viewer tenant configuration read failed"
-        )
+        raise ExternalOidcCertificationError("viewer tenant configuration read failed")
 
     canary_name = f"OIDC certification {challenge[:24]}"
     viewer_write = _send(
@@ -2576,17 +2144,12 @@ def _tenant_config_checks(
         "viewer_tenant_config_write_denied",
         viewer_write,
         expected_statuses={403},
-        semantic=(
-            _response_error_code(viewer_write)
-            == "authorization_denied"
-        ),
+        semantic=(_response_error_code(viewer_write) == "authorization_denied"),
         validation="viewer_config_mutation_denied_by_runtime_rbac",
     )
     checks.append(viewer_write_check)
     if viewer_write_check["passed"] is not True:
-        raise ExternalOidcCertificationError(
-            "viewer tenant configuration mutation was not denied"
-        )
+        raise ExternalOidcCertificationError("viewer tenant configuration mutation was not denied")
 
     mutation = _send(
         certification,
@@ -2620,12 +2183,8 @@ def _tenant_config_checks(
             canary_name=canary_name,
             transport=transport,
         ):
-            raise ExternalOidcCertificationError(
-                "tenant configuration mutation failed and rollback is incomplete"
-            )
-        raise ExternalOidcCertificationError(
-            "admin tenant configuration mutation failed"
-        )
+            raise ExternalOidcCertificationError("tenant configuration mutation failed and rollback is incomplete")
+        raise ExternalOidcCertificationError("admin tenant configuration mutation failed")
     mutated_revision = mutated[0]
 
     mutation_read = _send(
@@ -2656,12 +2215,8 @@ def _tenant_config_checks(
             canary_name=canary_name,
             transport=transport,
         ):
-            raise ExternalOidcCertificationError(
-                "tenant configuration confirmation failed and rollback is incomplete"
-            )
-        raise ExternalOidcCertificationError(
-            "tenant configuration mutation was not confirmed"
-        )
+            raise ExternalOidcCertificationError("tenant configuration confirmation failed and rollback is incomplete")
+        raise ExternalOidcCertificationError("tenant configuration mutation was not confirmed")
 
     rollback = _send(
         certification,
@@ -2695,12 +2250,8 @@ def _tenant_config_checks(
             canary_name=canary_name,
             transport=transport,
         ):
-            raise ExternalOidcCertificationError(
-                "tenant configuration rollback is incomplete"
-            )
-        raise ExternalOidcCertificationError(
-            "tenant configuration rollback evidence is invalid"
-        )
+            raise ExternalOidcCertificationError("tenant configuration rollback is incomplete")
+        raise ExternalOidcCertificationError("tenant configuration rollback evidence is invalid")
 
     rollback_read = _send(
         certification,
@@ -2730,28 +2281,20 @@ def _tenant_config_checks(
             canary_name=canary_name,
             transport=transport,
         ):
-            raise ExternalOidcCertificationError(
-                "tenant configuration rollback confirmation is incomplete"
-            )
-        raise ExternalOidcCertificationError(
-            "tenant configuration rollback was not confirmed"
-        )
+            raise ExternalOidcCertificationError("tenant configuration rollback confirmation is incomplete")
+        raise ExternalOidcCertificationError("tenant configuration rollback was not confirmed")
     return checks
 
 
 def _tamper_signature(identity: str) -> str:
     segments = identity.split(".")
     if len(segments) != 3 or not segments[2]:
-        raise ExternalOidcCertificationError(
-            "cannot construct signature-tamper canary"
-        )
+        raise ExternalOidcCertificationError("cannot construct signature-tamper canary")
     first = "A" if segments[2][0] != "A" else "B"
     segments[2] = f"{first}{segments[2][1:]}"
     tampered = ".".join(segments)
     if tampered == identity:
-        raise ExternalOidcCertificationError(
-            "signature-tamper canary did not change the identity"
-        )
+        raise ExternalOidcCertificationError("signature-tamper canary did not change the identity")
     return tampered
 
 
@@ -2769,10 +2312,7 @@ def _policy_check(
     passed = (
         decision.allowed is expected_allowed
         and decision.status_code == expected_status
-        and (
-            expected_reason is None
-            or decision.reason == expected_reason
-        )
+        and (expected_reason is None or decision.reason == expected_reason)
     )
     return {
         "id": check_id,
@@ -2816,11 +2356,7 @@ def run_external_checks(
                 f"{case}_model_list",
                 observation,
                 expected_statuses={200},
-                semantic=(
-                    body is not None
-                    and isinstance(body.get("models"), list)
-                    and bool(body["models"])
-                ),
+                semantic=(body is not None and isinstance(body.get("models"), list) and bool(body["models"])),
                 validation="canonical_membership_resolved_and_models_returned",
             )
         )
@@ -2831,56 +2367,6 @@ def run_external_checks(
             verified=verified,
             challenge=challenge,
             transport=transport,
-        )
-    )
-    for case in ("admin", "viewer"):
-        request_id = (
-            f"external-oidc-{case}-{challenge[:24]}"
-        )
-        observation = _send(
-            certification,
-            payload={
-                "action": "query",
-                "datasource_id": certification.query.datasource_id,
-                "sql": certification.query.sql,
-                "max_rows": certification.query.max_rows,
-                "request_id": request_id,
-            },
-            identity=verified[case].token,
-            transport=transport,
-        )
-        checks.append(
-            _http_check(
-                f"{case}_query_select",
-                observation,
-                expected_statuses={200},
-                semantic=_query_semantic(
-                    _json_body(observation),
-                    request_id=request_id,
-                    datasource_id=certification.query.datasource_id,
-                    project_id=setup.tenant.project_id,
-                ),
-                validation="signed_claims_canonical_role_and_query_backend",
-            )
-        )
-    observation = _send(
-        certification,
-        payload={
-            "action": "query",
-            "datasource_id": certification.query.datasource_id,
-            "sql": "DELETE FROM external_oidc_launch_canary",
-            "max_rows": 1,
-        },
-        identity=verified["viewer"].token,
-        transport=transport,
-    )
-    checks.append(
-        _http_check(
-            "viewer_query_mutation_denied",
-            observation,
-            expected_statuses={400, 403},
-            semantic=True,
-            validation="read_only_query_boundary_rejected_mutation",
         )
     )
     observation = _send(
@@ -3000,31 +2486,6 @@ def run_external_checks(
                 expected_status=403,
                 expected_reason="role_not_allowed",
             ),
-            _policy_check(
-                "canonical_admin_query_select_allowed",
-                principals["admin"],
-                Action.QUERY_SELECT,
-                resource,
-                expected_allowed=True,
-                expected_status=200,
-            ),
-            _policy_check(
-                "canonical_viewer_query_select_allowed",
-                principals["viewer"],
-                Action.QUERY_SELECT,
-                resource,
-                expected_allowed=True,
-                expected_status=200,
-            ),
-            _policy_check(
-                "canonical_cross_tenant_query_concealed",
-                principals["crossTenant"],
-                Action.QUERY_SELECT,
-                resource,
-                expected_allowed=False,
-                expected_status=404,
-                expected_reason="resource_not_found",
-            ),
         ]
     )
     return checks
@@ -3038,9 +2499,7 @@ def _issuer_report(material: IssuerMaterial) -> dict[str, Any]:
         "jwksUri": material.jwks_uri,
         "discoverySha256": material.discovery_sha256,
         "jwksSha256": material.jwks_sha256,
-        "keySetSha256": hashlib.sha256(
-            "\0".join(key_ids).encode("utf-8")
-        ).hexdigest(),
+        "keySetSha256": hashlib.sha256("\0".join(key_ids).encode("utf-8")).hexdigest(),
         "keyCount": len(key_ids),
         "discoveryFreshness": material.discovery_freshness.to_report(),
         "jwksFreshness": material.jwks_freshness.to_report(),
@@ -3051,18 +2510,14 @@ def _producer_sha256() -> str:
     try:
         return hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
     except OSError as exc:
-        raise ExternalOidcCertificationError(
-            "cannot hash the certification producer"
-        ) from exc
+        raise ExternalOidcCertificationError("cannot hash the certification producer") from exc
 
 
 def _assert_no_sensitive_material(value: Any, location: str = "report") -> None:
     if isinstance(value, dict):
         for key, item in value.items():
             if not isinstance(key, str) or _SENSITIVE_KEY.search(key):
-                raise ExternalOidcCertificationError(
-                    f"{location} contains a sensitive field name"
-                )
+                raise ExternalOidcCertificationError(f"{location} contains a sensitive field name")
             _assert_no_sensitive_material(item, f"{location}.{key}")
     elif isinstance(value, list):
         for index, item in enumerate(value):
@@ -3071,9 +2526,7 @@ def _assert_no_sensitive_material(value: Any, location: str = "report") -> None:
                 f"{location}[{index}]",
             )
     elif isinstance(value, str) and _JWT_SHAPE.fullmatch(value):
-        raise ExternalOidcCertificationError(
-            f"{location} contains JWT-shaped material"
-        )
+        raise ExternalOidcCertificationError(f"{location} contains JWT-shaped material")
 
 
 def _endpoint_metadata(binding: RuntimeBinding, region: str) -> dict[str, str]:
@@ -3098,9 +2551,7 @@ def _boto_session(region: str) -> AwsSession:
 
         return boto3.Session(region_name=region)
     except Exception as exc:
-        raise ExternalOidcCertificationError(
-            "cannot initialize AWS clients"
-        ) from exc
+        raise ExternalOidcCertificationError("cannot initialize AWS clients") from exc
 
 
 def run_live_certification(
@@ -3124,13 +2575,9 @@ def run_live_certification(
     output = output_path.expanduser().resolve()
     state_path = cleanup_state_path.expanduser().resolve()
     if output == state_path:
-        raise ExternalOidcCertificationError(
-            "report and cleanup state paths must differ"
-        )
+        raise ExternalOidcCertificationError("report and cleanup state paths must differ")
     if output.exists() or output.is_symlink():
-        raise ExternalOidcCertificationError(
-            "refusing to replace an existing certification report"
-        )
+        raise ExternalOidcCertificationError("refusing to replace an existing certification report")
     setup = load_agentcore_setup(setup_path)
     certification = load_certification_config(certification_path)
     _validate_configs(
@@ -3146,21 +2593,14 @@ def run_live_certification(
         clock=clock,
     )
     if expected_material.discovery_url != oidc.discovery_url:
-        raise ExternalOidcCertificationError(
-            "live discovery endpoint differs from reviewed setup"
-        )
+        raise ExternalOidcCertificationError("live discovery endpoint differs from reviewed setup")
     mixup_issuer = _safe_https_url(
         mixup_issuer,
         "mix-up issuer",
         issuer=True,
     )
-    if (
-        mixup_issuer == oidc.issuer
-        or _origin(mixup_issuer) == _origin(oidc.issuer)
-    ):
-        raise ExternalOidcCertificationError(
-            "mix-up issuer must be a distinct HTTPS origin"
-        )
+    if mixup_issuer == oidc.issuer or _origin(mixup_issuer) == _origin(oidc.issuer):
+        raise ExternalOidcCertificationError("mix-up issuer must be a distinct HTTPS origin")
     mixup_material = fetch_issuer_material(
         mixup_issuer,
         transport=json_transport,
@@ -3205,9 +2645,7 @@ def run_live_certification(
             raise ExternalOidcCertificationError(
                 "cannot persist cleanup state and broker rollback failed"
             ) from cleanup_exc
-        raise ExternalOidcCertificationError(
-            "cannot persist external OIDC cleanup state"
-        ) from state_exc
+        raise ExternalOidcCertificationError("cannot persist external OIDC cleanup state") from state_exc
     cleanup_result: dict[str, Any] | None = None
     full_certification: dict[str, Any] | None = None
     external_checks: list[dict[str, Any]] = []
@@ -3221,13 +2659,9 @@ def run_live_certification(
             clock=clock,
         )
         if any(
-            identity.expires_at > fixture.expires_at
-            for case, identity in verified.items()
-            if case not in {"expired"}
+            identity.expires_at > fixture.expires_at for case, identity in verified.items() if case not in {"expired"}
         ):
-            raise ExternalOidcCertificationError(
-                "fixture identity outlives the broker fixture"
-            )
+            raise ExternalOidcCertificationError("fixture identity outlives the broker fixture")
         table = aws.resource(
             "dynamodb",
             region_name=setup.aws_region,
@@ -3259,9 +2693,7 @@ def run_live_certification(
             full_certification,
             binding=binding,
             region=setup.aws_region,
-            expected_provider_features=(
-                _certification_provider_feature_matrix(certification)
-            ),
+            expected_provider_features=(_certification_provider_feature_matrix(certification)),
         )
         external_checks = run_external_checks(
             certification,
@@ -3273,13 +2705,10 @@ def run_live_certification(
         )
         if (
             full_certification.get("overallStatus") != "PASS"
-            or {check.get("id") for check in external_checks}
-            != REQUIRED_CHECKS
+            or {check.get("id") for check in external_checks} != REQUIRED_CHECKS
             or not all(check.get("passed") is True for check in external_checks)
         ):
-            raise ExternalOidcCertificationError(
-                "external OIDC launch checks did not all pass"
-            )
+            raise ExternalOidcCertificationError("external OIDC launch checks did not all pass")
     finally:
         try:
             cleanup_result = cleanup_fixtures(
@@ -3288,18 +2717,14 @@ def run_live_certification(
                 transport=json_transport,
             )
         except Exception as cleanup_exc:
-            raise ExternalOidcCertificationError(
-                "external OIDC fixture cleanup was incomplete"
-            ) from cleanup_exc
+            raise ExternalOidcCertificationError("external OIDC fixture cleanup was incomplete") from cleanup_exc
     if (
         cleanup_result is None
         or cleanup_result.get("status") != "PASS"
         or cleanup_result.get("complete") is not True
         or full_certification is None
     ):
-        raise ExternalOidcCertificationError(
-            "external OIDC cleanup proof is incomplete"
-        )
+        raise ExternalOidcCertificationError("external OIDC cleanup proof is incomplete")
     report = {
         "schema": REPORT_SCHEMA,
         "generatedAt": datetime.fromtimestamp(
@@ -3324,19 +2749,14 @@ def run_live_certification(
             "mixup": _issuer_report(mixup_material),
         },
         "fixtures": {
-            "fixtureIdSha256": hashlib.sha256(
-                fixture.fixture_id.encode("utf-8")
-            ).hexdigest(),
-            "challengeSha256": hashlib.sha256(
-                challenge.encode("ascii")
-            ).hexdigest(),
+            "fixtureIdSha256": hashlib.sha256(fixture.fixture_id.encode("utf-8")).hexdigest(),
+            "challengeSha256": hashlib.sha256(challenge.encode("ascii")).hexdigest(),
             "brokerResponseSha256": fixture.response_sha256,
             "expiresAt": datetime.fromtimestamp(
                 fixture.expires_at,
                 tz=timezone.utc,
             ).isoformat(),
             "canonicalPrincipalCount": len(CANONICAL_CASES),
-            "datasourceId": certification.query.datasource_id,
             "cleanup": cleanup_result,
         },
         "fullLaunchCertification": full_certification,
@@ -3351,7 +2771,6 @@ def run_live_certification(
             "shortLivedIdentitiesVerified": True,
             "canonicalTenantRbacVerified": True,
             "agentcoreHttpsInvoked": True,
-            "queryBackendExercised": True,
             "allLaunchProvidersExercised": True,
             "agentcoreTenantConfigMutationExercised": True,
             "fixturesCleaned": True,
@@ -3380,13 +2799,8 @@ def _required_report_shape(value: Any) -> dict[str, Any]:
             "summary",
         },
     )
-    if (
-        report["schema"] != REPORT_SCHEMA
-        or report["overallStatus"] != "PASS"
-    ):
-        raise ExternalOidcCertificationError(
-            "external OIDC report is not a PASS report from the supported schema"
-        )
+    if report["schema"] != REPORT_SCHEMA or report["overallStatus"] != "PASS":
+        raise ExternalOidcCertificationError("external OIDC report is not a PASS report from the supported schema")
     return report
 
 
@@ -3429,10 +2843,7 @@ def _verify_issuer_evidence(
         discovery != f"{issuer}/.well-known/openid-configuration"
         or _origin(jwks_uri) != _origin(issuer)
         or (expected_issuer is not None and issuer != expected_issuer)
-        or (
-            expected_discovery is not None
-            and discovery != expected_discovery
-        )
+        or (expected_discovery is not None and discovery != expected_discovery)
         or any(
             _SHA256_PATTERN.fullmatch(material[name]) is None
             for name in (
@@ -3454,9 +2865,7 @@ def _verify_issuer_evidence(
         or not isinstance(material["keyCount"], int)
         or not 1 <= material["keyCount"] <= MAX_JWKS_KEYS
     ):
-        raise ExternalOidcCertificationError(
-            f"{location} is incomplete or inconsistent"
-        )
+        raise ExternalOidcCertificationError(f"{location} is incomplete or inconsistent")
     for freshness_name in (
         "discoveryFreshness",
         "jwksFreshness",
@@ -3469,48 +2878,30 @@ def _verify_issuer_evidence(
         try:
             observed_date = datetime.fromisoformat(freshness["date"])
         except (TypeError, ValueError) as exc:
-            raise ExternalOidcCertificationError(
-                f"{location} freshness date is invalid"
-            ) from exc
+            raise ExternalOidcCertificationError(f"{location} freshness date is invalid") from exc
         if (
             observed_date.tzinfo is None
             or isinstance(freshness["maxAgeSeconds"], bool)
             or not isinstance(freshness["maxAgeSeconds"], int)
-            or not 1
-            <= freshness["maxAgeSeconds"]
-            <= MAX_JWKS_FRESHNESS_SECONDS
+            or not 1 <= freshness["maxAgeSeconds"] <= MAX_JWKS_FRESHNESS_SECONDS
             or isinstance(freshness["currentAgeSeconds"], bool)
             or not isinstance(
                 freshness["currentAgeSeconds"],
                 (int, float),
             )
-            or not math.isfinite(
-                float(freshness["currentAgeSeconds"])
-            )
-            or not 0
-            <= float(freshness["currentAgeSeconds"])
-            < freshness["maxAgeSeconds"]
+            or not math.isfinite(float(freshness["currentAgeSeconds"]))
+            or not 0 <= float(freshness["currentAgeSeconds"]) < freshness["maxAgeSeconds"]
         ):
-            raise ExternalOidcCertificationError(
-                f"{location} contains stale or unverifiable freshness evidence"
-            )
+            raise ExternalOidcCertificationError(f"{location} contains stale or unverifiable freshness evidence")
     return material
 
 
 def _verify_external_checks(value: Any) -> None:
     if not isinstance(value, list) or len(value) != len(REQUIRED_CHECKS):
-        raise ExternalOidcCertificationError(
-            "report checks are incomplete"
-        )
-    checks = {
-        check.get("id"): check
-        for check in value
-        if type(check) is dict
-    }
+        raise ExternalOidcCertificationError("report checks are incomplete")
+    checks = {check.get("id"): check for check in value if type(check) is dict}
     if set(checks) != REQUIRED_CHECKS or len(checks) != len(value):
-        raise ExternalOidcCertificationError(
-            "report checks are missing or ambiguous"
-        )
+        raise ExternalOidcCertificationError("report checks are missing or ambiguous")
     http_expectations: dict[str, tuple[set[int], str]] = {
         "admin_model_list": (
             {200},
@@ -3547,18 +2938,6 @@ def _verify_external_checks(value: Any) -> None:
         "admin_tenant_config_rollback_confirmed": (
             {200},
             "admin_config_rollback_visible_on_strong_read",
-        ),
-        "admin_query_select": (
-            {200},
-            "signed_claims_canonical_role_and_query_backend",
-        ),
-        "viewer_query_select": (
-            {200},
-            "signed_claims_canonical_role_and_query_backend",
-        ),
-        "viewer_query_mutation_denied": (
-            {400, 403},
-            "read_only_query_boundary_rejected_mutation",
         ),
         "viewer_payload_role_escalation_denied": (
             {400},
@@ -3623,20 +3002,11 @@ def _verify_external_checks(value: Any) -> None:
             or isinstance(check["responseBytes"], bool)
             or not isinstance(check["responseBytes"], int)
             or check["responseBytes"] < 0
-            or _SHA256_PATTERN.fullmatch(
-                check["responseSha256"]
-                if isinstance(check["responseSha256"], str)
-                else ""
-            )
+            or _SHA256_PATTERN.fullmatch(check["responseSha256"] if isinstance(check["responseSha256"], str) else "")
             is None
-            or (
-                check["observedErrorCode"] is not None
-                and not isinstance(check["observedErrorCode"], str)
-            )
+            or (check["observedErrorCode"] is not None and not isinstance(check["observedErrorCode"], str))
         ):
-            raise ExternalOidcCertificationError(
-                f"check {check_id} is not valid live HTTP evidence"
-            )
+            raise ExternalOidcCertificationError(f"check {check_id} is not valid live HTTP evidence")
     policy_expectations = {
         "canonical_admin_config_read_allowed": (
             "tenant_admin",
@@ -3665,27 +3035,6 @@ def _verify_external_checks(value: Any) -> None:
             False,
             403,
             "role_not_allowed",
-        ),
-        "canonical_admin_query_select_allowed": (
-            "tenant_admin",
-            "query.select",
-            True,
-            200,
-            "role_allowed",
-        ),
-        "canonical_viewer_query_select_allowed": (
-            "tenant_member",
-            "query.select",
-            True,
-            200,
-            "role_allowed",
-        ),
-        "canonical_cross_tenant_query_concealed": (
-            "tenant_member",
-            "query.select",
-            False,
-            404,
-            "resource_not_found",
         ),
     }
     policy_fields = {
@@ -3720,12 +3069,9 @@ def _verify_external_checks(value: Any) -> None:
             or observed != expected
             or check["expectedAllowed"] is not expected[2]
             or check["expectedStatus"] != expected[3]
-            or check["validation"]
-            != "server_held_role_policy_decision"
+            or check["validation"] != "server_held_role_policy_decision"
         ):
-            raise ExternalOidcCertificationError(
-                f"check {check_id} is not the required RBAC decision"
-            )
+            raise ExternalOidcCertificationError(f"check {check_id} is not the required RBAC decision")
 
 
 def _verify_full_launch_certification(
@@ -3754,61 +3100,41 @@ def _verify_full_launch_certification(
     summary = full["summary"]
     checks = full["checks"]
     if type(summary) is not dict:
-        raise ExternalOidcCertificationError(
-            "embedded production-launch certification is incomplete"
-        )
+        raise ExternalOidcCertificationError("embedded production-launch certification is incomplete")
     raw_provider_features = summary.get("providerFeatures")
     if type(raw_provider_features) is not dict:
-        raise ExternalOidcCertificationError(
-            "embedded production-launch provider features are incomplete"
-        )
+        raise ExternalOidcCertificationError("embedded production-launch provider features are incomplete")
     provider_features = _production_provider_feature_matrix(
         set(raw_provider_features),
         location="embedded production-launch certification",
     )
-    serialized_provider_features = {
-        provider: sorted(features)
-        for provider, features in provider_features.items()
-    }
+    serialized_provider_features = {provider: sorted(features) for provider, features in provider_features.items()}
     if raw_provider_features != serialized_provider_features:
-        raise ExternalOidcCertificationError(
-            "embedded production-launch provider features are incomplete"
-        )
+        raise ExternalOidcCertificationError("embedded production-launch provider features are incomplete")
     if expected_provider_features is not None:
-        reviewed_features = {
-            provider: frozenset(features)
-            for provider, features in expected_provider_features.items()
-        }
+        reviewed_features = {provider: frozenset(features) for provider, features in expected_provider_features.items()}
         reviewed_contract = _production_provider_feature_matrix(
             set(reviewed_features),
             location="reviewed production-launch certification",
         )
-        if (
-            reviewed_features != reviewed_contract
-            or provider_features != reviewed_features
-        ):
+        if reviewed_features != reviewed_contract or provider_features != reviewed_features:
             raise ExternalOidcCertificationError(
-                "embedded production-launch providers differ from the "
-                "reviewed certification"
+                "embedded production-launch providers differ from the reviewed certification"
             )
     if (
         full["schema"] != LAUNCH_CERTIFICATION_SCHEMA
         or full["overallStatus"] != "PASS"
         or full["endpoint"] != _endpoint_metadata(binding, region)
         or summary.get("profile") != PRODUCTION_LAUNCH_PROFILE
-        or summary.get("providerCount")
-        != len(provider_features)
+        or summary.get("providerCount") != len(provider_features)
         or summary.get("agentcoreHttpsInvoked") is not True
-        or summary.get("queryBackendExercised") is not True
         or not isinstance(checks, list)
         or not checks
         or summary.get("checkCount") != len(checks)
         or summary.get("passed") != len(checks)
         or summary.get("failed") != 0
     ):
-        raise ExternalOidcCertificationError(
-            "embedded production-launch certification is incomplete"
-        )
+        raise ExternalOidcCertificationError("embedded production-launch certification is incomplete")
     required_categories = {
         "missing_jwt_denied",
         "invalid_jwt_denied",
@@ -3819,12 +3145,8 @@ def _verify_full_launch_certification(
         "liveness",
         "dependency_readiness",
         "model_listing",
-        "query_select",
-        "query_mutation_denied",
     }
-    provider_matrix: dict[str, set[str]] = {
-        provider: set() for provider in provider_features
-    }
+    provider_matrix: dict[str, set[str]] = {provider: set() for provider in provider_features}
     provider_checks: list[tuple[str, str]] = []
     observed_categories: set[str] = set()
     tool_categories = (
@@ -3843,32 +3165,23 @@ def _verify_full_launch_certification(
         if (
             type(check) is not dict
             or check.get("passed") is not True
-            or _SHA256_PATTERN.fullmatch(
-                check.get("responseSha256", "")
-            )
-            is None
+            or _SHA256_PATTERN.fullmatch(check.get("responseSha256", "")) is None
             or check.get("transportError") is not None
         ):
-            raise ExternalOidcCertificationError(
-                "embedded production-launch check is not valid evidence"
-            )
+            raise ExternalOidcCertificationError("embedded production-launch check is not valid evidence")
         category = check.get("category")
         if isinstance(category, str):
             observed_categories.add(category)
         provider = check.get("provider")
         if provider is None:
             if category in provider_categories:
-                raise ExternalOidcCertificationError(
-                    "embedded production-launch provider check is unbound"
-                )
+                raise ExternalOidcCertificationError("embedded production-launch provider check is unbound")
         else:
             if not isinstance(provider, str) or not isinstance(
                 category,
                 str,
             ):
-                raise ExternalOidcCertificationError(
-                    "embedded production-launch provider check is invalid"
-                )
+                raise ExternalOidcCertificationError("embedded production-launch provider check is invalid")
             provider_checks.append((provider, category))
             if provider in provider_matrix:
                 feature = {
@@ -3884,25 +3197,16 @@ def _verify_full_launch_certification(
         for category in (
             "provider_completion",
             "provider_stream",
-            *(
-                tool_categories
-                if "tool_calling" in features
-                else ()
-            ),
+            *(tool_categories if "tool_calling" in features else ()),
         )
     }
     if (
         not required_categories.issubset(observed_categories)
         or len(provider_checks) != len(set(provider_checks))
         or set(provider_checks) != required_provider_checks
-        or any(
-            provider_matrix[provider] != features
-            for provider, features in provider_features.items()
-        )
+        or any(provider_matrix[provider] != features for provider, features in provider_features.items())
     ):
-        raise ExternalOidcCertificationError(
-            "embedded production-launch feature matrix is incomplete"
-        )
+        raise ExternalOidcCertificationError("embedded production-launch feature matrix is incomplete")
 
 
 def validate_published_report(
@@ -3923,14 +3227,8 @@ def validate_published_report(
     try:
         generated = datetime.fromisoformat(report["generatedAt"])
     except (TypeError, ValueError) as exc:
-        raise ExternalOidcCertificationError(
-            "report generation time is invalid"
-        ) from exc
-    age = (
-        clock() - generated.timestamp()
-        if generated.tzinfo is not None
-        else -1
-    )
+        raise ExternalOidcCertificationError("report generation time is invalid") from exc
+    age = clock() - generated.timestamp() if generated.tzinfo is not None else -1
     if (
         generated.tzinfo is None
         or isinstance(maximum_age_seconds, bool)
@@ -3939,9 +3237,7 @@ def validate_published_report(
         or age < -60
         or age > maximum_age_seconds
     ):
-        raise ExternalOidcCertificationError(
-            "published report is stale, future-dated, or lacks a timezone"
-        )
+        raise ExternalOidcCertificationError("published report is stale, future-dated, or lacks a timezone")
 
     producer = _strict_object(
         report["producer"],
@@ -3951,16 +3247,9 @@ def validate_published_report(
     if (
         producer["path"] != PRODUCER_PATH
         or producer["mode"] != "live-probe-only"
-        or _SHA256_PATTERN.fullmatch(
-            producer["sha256"]
-            if isinstance(producer["sha256"], str)
-            else ""
-        )
-        is None
+        or _SHA256_PATTERN.fullmatch(producer["sha256"] if isinstance(producer["sha256"], str) else "") is None
     ):
-        raise ExternalOidcCertificationError(
-            "published report does not identify the live producer"
-        )
+        raise ExternalOidcCertificationError("published report does not identify the live producer")
 
     source_value = _strict_object(
         report["source"],
@@ -3997,9 +3286,7 @@ def validate_published_report(
         or source.agentcore_image != agentcore_image
         or source.runtime_stack_name != runtime_stack_name
     ):
-        raise ExternalOidcCertificationError(
-            "published report is not bound to the requested release"
-        )
+        raise ExternalOidcCertificationError("published report is not bound to the requested release")
 
     target = _strict_object(
         report["target"],
@@ -4056,23 +3343,15 @@ def validate_published_report(
         or binding.stack_status not in ALLOWED_STACK_STATUSES
         or not binding.stack_id.startswith("arn:")
         or f":stack/{binding.stack_name}/" not in binding.stack_id
-        or not binding.runtime_arn.startswith(
-            f"arn:aws:bedrock-agentcore:{region}:"
-        )
+        or not binding.runtime_arn.startswith(f"arn:aws:bedrock-agentcore:{region}:")
         or not binding.runtime_version.isdigit()
         or _CANDIDATE_PATTERN.fullmatch(binding.endpoint_name) is None
-        or binding.endpoint_arn
-        != (
-            f"{binding.runtime_arn}/runtime-endpoint/"
-            f"{binding.endpoint_name}"
-        )
+        or binding.endpoint_arn != (f"{binding.runtime_arn}/runtime-endpoint/{binding.endpoint_name}")
         or binding.endpoint_status != "READY"
         or binding.image != agentcore_image
         or target != binding.to_report(region)
     ):
-        raise ExternalOidcCertificationError(
-            "published report target is not an immutable READY candidate"
-        )
+        raise ExternalOidcCertificationError("published report target is not an immutable READY candidate")
 
     oidc = _strict_object(
         report["oidc"],
@@ -4104,12 +3383,9 @@ def validate_published_report(
     if (
         oidc["identityMode"] != EXTERNAL_OIDC
         or expected_issuer["issuer"] == mixup_issuer["issuer"]
-        or _origin(expected_issuer["issuer"])
-        == _origin(mixup_issuer["issuer"])
+        or _origin(expected_issuer["issuer"]) == _origin(mixup_issuer["issuer"])
     ):
-        raise ExternalOidcCertificationError(
-            "published report OIDC issuer evidence is incomplete"
-        )
+        raise ExternalOidcCertificationError("published report OIDC issuer evidence is incomplete")
 
     _verify_external_checks(report["checks"])
     _verify_full_launch_certification(
@@ -4127,7 +3403,6 @@ def validate_published_report(
             "brokerResponseSha256",
             "expiresAt",
             "canonicalPrincipalCount",
-            "datasourceId",
             "cleanup",
         },
     )
@@ -4154,25 +3429,12 @@ def validate_published_report(
     try:
         fixture_expiry = datetime.fromisoformat(fixtures["expiresAt"])
     except (TypeError, ValueError) as exc:
-        raise ExternalOidcCertificationError(
-            "report fixture expiry is invalid"
-        ) from exc
+        raise ExternalOidcCertificationError("report fixture expiry is invalid") from exc
     if (
         fixture_expiry.tzinfo is None
         or fixtures["canonicalPrincipalCount"] != len(CANONICAL_CASES)
-        or _SAFE_IDENTIFIER.fullmatch(
-            fixtures["datasourceId"]
-            if isinstance(fixtures["datasourceId"], str)
-            else ""
-        )
-        is None
         or any(
-            _SHA256_PATTERN.fullmatch(
-                fixtures[name]
-                if isinstance(fixtures[name], str)
-                else ""
-            )
-            is None
+            _SHA256_PATTERN.fullmatch(fixtures[name] if isinstance(fixtures[name], str) else "") is None
             for name in (
                 "fixtureIdSha256",
                 "challengeSha256",
@@ -4181,20 +3443,16 @@ def validate_published_report(
         )
         or cleanup["status"] != "PASS"
         or cleanup["complete"] is not True
-        or cleanup["localItemsRemoved"] != len(CANONICAL_CASES) + 1
+        or cleanup["localItemsRemoved"] != len(CANONICAL_CASES)
         or broker_cleanup["status"] != "PASS"
         or broker_cleanup["complete"] is not True
         or broker_cleanup["identitiesRevoked"] is not True
         or _SHA256_PATTERN.fullmatch(
-            broker_cleanup["responseSha256"]
-            if isinstance(broker_cleanup["responseSha256"], str)
-            else ""
+            broker_cleanup["responseSha256"] if isinstance(broker_cleanup["responseSha256"], str) else ""
         )
         is None
     ):
-        raise ExternalOidcCertificationError(
-            "published report does not prove complete fixture cleanup"
-        )
+        raise ExternalOidcCertificationError("published report does not prove complete fixture cleanup")
 
     expected_summary = {
         "checkCount": len(REQUIRED_CHECKS),
@@ -4206,15 +3464,12 @@ def validate_published_report(
         "shortLivedIdentitiesVerified": True,
         "canonicalTenantRbacVerified": True,
         "agentcoreHttpsInvoked": True,
-        "queryBackendExercised": True,
         "allLaunchProvidersExercised": True,
         "agentcoreTenantConfigMutationExercised": True,
         "fixturesCleaned": True,
     }
     if report["summary"] != expected_summary:
-        raise ExternalOidcCertificationError(
-            "published report summary is not derived from required checks"
-        )
+        raise ExternalOidcCertificationError("published report summary is not derived from required checks")
     return report
 
 
@@ -4241,18 +3496,12 @@ def verify_report(
     try:
         generated = datetime.fromisoformat(report["generatedAt"])
     except (TypeError, ValueError) as exc:
-        raise ExternalOidcCertificationError(
-            "report generation time is invalid"
-        ) from exc
+        raise ExternalOidcCertificationError("report generation time is invalid") from exc
     if generated.tzinfo is None:
-        raise ExternalOidcCertificationError(
-            "report generation time lacks a timezone"
-        )
+        raise ExternalOidcCertificationError("report generation time lacks a timezone")
     age = clock() - generated.timestamp()
     if age < -60 or age > 30 * 60:
-        raise ExternalOidcCertificationError(
-            "report is stale or future-dated"
-        )
+        raise ExternalOidcCertificationError("report is stale or future-dated")
     producer = _strict_object(
         report["producer"],
         "report producer",
@@ -4263,13 +3512,9 @@ def verify_report(
         "sha256": _producer_sha256(),
         "mode": "live-probe-only",
     }:
-        raise ExternalOidcCertificationError(
-            "report was not emitted by the checked-out live producer"
-        )
+        raise ExternalOidcCertificationError("report was not emitted by the checked-out live producer")
     if report["source"] != source.to_report():
-        raise ExternalOidcCertificationError(
-            "report source metadata does not match this workflow run"
-        )
+        raise ExternalOidcCertificationError("report source metadata does not match this workflow run")
     binding = resolve_runtime_binding(
         session,
         setup=setup,
@@ -4278,14 +3523,10 @@ def verify_report(
         runtime_stack_name=source.runtime_stack_name,
     )
     if report["target"] != binding.to_report(setup.aws_region):
-        raise ExternalOidcCertificationError(
-            "report target no longer matches the immutable candidate"
-        )
+        raise ExternalOidcCertificationError("report target no longer matches the immutable candidate")
     oidc = setup.external_oidc
     if oidc is None:
-        raise ExternalOidcCertificationError(
-            "reviewed setup no longer contains external OIDC"
-        )
+        raise ExternalOidcCertificationError("reviewed setup no longer contains external OIDC")
     oidc_report = _strict_object(
         report["oidc"],
         "report OIDC metadata",
@@ -4306,9 +3547,7 @@ def verify_report(
         or oidc_report["tenantClaim"] != oidc.tenant_claim
         or oidc_report["projectClaim"] != oidc.project_claim
     ):
-        raise ExternalOidcCertificationError(
-            "report OIDC metadata differs from reviewed setup"
-        )
+        raise ExternalOidcCertificationError("report OIDC metadata differs from reviewed setup")
     _verify_issuer_evidence(
         oidc_report["expected"],
         expected_issuer=oidc.issuer,
@@ -4321,21 +3560,14 @@ def verify_report(
         expected_discovery=None,
         location="mix-up issuer evidence",
     )
-    if (
-        mixup["issuer"] == oidc.issuer
-        or _origin(mixup["issuer"]) == _origin(oidc.issuer)
-    ):
-        raise ExternalOidcCertificationError(
-            "report issuer evidence is missing or mixed up"
-        )
+    if mixup["issuer"] == oidc.issuer or _origin(mixup["issuer"]) == _origin(oidc.issuer):
+        raise ExternalOidcCertificationError("report issuer evidence is missing or mixed up")
     _verify_external_checks(report["checks"])
     _verify_full_launch_certification(
         report["fullLaunchCertification"],
         binding=binding,
         region=setup.aws_region,
-        expected_provider_features=(
-            _certification_provider_feature_matrix(certification)
-        ),
+        expected_provider_features=(_certification_provider_feature_matrix(certification)),
     )
     fixtures = _strict_object(
         report["fixtures"],
@@ -4346,7 +3578,6 @@ def verify_report(
             "brokerResponseSha256",
             "expiresAt",
             "canonicalPrincipalCount",
-            "datasourceId",
             "cleanup",
         },
     )
@@ -4373,22 +3604,12 @@ def verify_report(
     try:
         fixture_expiry = datetime.fromisoformat(fixtures["expiresAt"])
     except (TypeError, ValueError) as exc:
-        raise ExternalOidcCertificationError(
-            "report fixture expiry is invalid"
-        ) from exc
+        raise ExternalOidcCertificationError("report fixture expiry is invalid") from exc
     if (
         fixture_expiry.tzinfo is None
-        or fixtures["canonicalPrincipalCount"]
-        != len(CANONICAL_CASES)
-        or fixtures["datasourceId"]
-        != certification.query.datasource_id
+        or fixtures["canonicalPrincipalCount"] != len(CANONICAL_CASES)
         or any(
-            _SHA256_PATTERN.fullmatch(
-                fixtures[name]
-                if isinstance(fixtures[name], str)
-                else ""
-            )
-            is None
+            _SHA256_PATTERN.fullmatch(fixtures[name] if isinstance(fixtures[name], str) else "") is None
             for name in (
                 "fixtureIdSha256",
                 "challengeSha256",
@@ -4397,7 +3618,7 @@ def verify_report(
         )
         or cleanup["status"] != "PASS"
         or cleanup["complete"] is not True
-        or cleanup["localItemsRemoved"] != len(CANONICAL_CASES) + 1
+        or cleanup["localItemsRemoved"] != len(CANONICAL_CASES)
         or broker_cleanup["status"] != "PASS"
         or broker_cleanup["complete"] is not True
         or broker_cleanup["identitiesRevoked"] is not True
@@ -4411,9 +3632,7 @@ def verify_report(
         )
         is None
     ):
-        raise ExternalOidcCertificationError(
-            "report does not prove complete fixture cleanup"
-        )
+        raise ExternalOidcCertificationError("report does not prove complete fixture cleanup")
     expected_summary = {
         "checkCount": len(REQUIRED_CHECKS),
         "passed": len(REQUIRED_CHECKS),
@@ -4424,24 +3643,17 @@ def verify_report(
         "shortLivedIdentitiesVerified": True,
         "canonicalTenantRbacVerified": True,
         "agentcoreHttpsInvoked": True,
-        "queryBackendExercised": True,
         "allLaunchProvidersExercised": True,
         "agentcoreTenantConfigMutationExercised": True,
         "fixturesCleaned": True,
     }
     if report["summary"] != expected_summary:
-        raise ExternalOidcCertificationError(
-            "report summary is not derived from the required live checks"
-        )
+        raise ExternalOidcCertificationError("report summary is not derived from the required live checks")
     return report
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description=(
-            "Certify an immutable AgentCore candidate with external OIDC"
-        )
-    )
+    parser = argparse.ArgumentParser(description=("Certify an immutable AgentCore candidate with external OIDC"))
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     run = subparsers.add_parser(
@@ -4524,10 +3736,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.state,
                 session=session,
             )
-            print(
-                "External OIDC certification cleanup: "
-                f"{result['status']}"
-            )
+            print(f"External OIDC certification cleanup: {result['status']}")
             return 0
 
         if args.command == "verify-published-report":
@@ -4539,16 +3748,11 @@ def main(argv: list[str] | None = None) -> int:
                 runtime_stack_name=args.runtime_stack_name,
                 region=args.region,
             )
-            print(
-                "Published external OIDC AgentCore certification report: "
-                "VERIFIED"
-            )
+            print("Published external OIDC AgentCore certification report: VERIFIED")
             return 0
 
         setup = load_agentcore_setup(args.setup_config)
-        certification = load_certification_config(
-            args.certification_config
-        )
+        certification = load_certification_config(args.certification_config)
         source = _source_from_args(
             args,
             region=setup.aws_region,

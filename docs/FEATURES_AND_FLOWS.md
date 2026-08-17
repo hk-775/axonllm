@@ -2,9 +2,9 @@
 
 This document inventories the implemented AxonLLM feature set and traces its
 principal request and deployment flows. It describes repository behavior, not
-a certified AWS environment. The query and shared control-plane implementation
-has not yet been covered by a tagged release, deployed Athena canary, or
-control-plane canary.
+a certified AWS environment. Customer database querying is an optional add-on,
+not a core deployment feature. The shared control-plane implementation has not
+yet been covered by a tagged release or deployed control-plane canary.
 
 See also:
 
@@ -12,22 +12,27 @@ See also:
 - [Product requirements](PRD.md)
 - [AgentCore runbook](AGENTCORE_RUNBOOK.md)
 - [Production runbook](PRODUCTION_RUNBOOK.md)
+- [Customer database query add-on](CUSTOMER_DATABASE_QUERY_ADDON.md)
 - [Enterprise hardening status](../ENTERPRISE_HARDENING.md)
 
 ## Runtime Surfaces
 
-| Surface | Purpose | Query behavior |
+| Surface | Purpose | Core behavior |
 |---|---|---|
-| Normal Starlette process | Chat, OpenAI-compatible APIs, admin APIs, managed-SAML handoff, SCIM, and web interfaces | Registers `POST /v1/query` when Athena query configuration is enabled |
-| AgentCore runtime | Authenticated chat/model, viewer-readable and admin-writable project configuration, readiness, and health actions for all enabled providers | Exposes the `query` action when the shared `QueryService` is configured |
-| Shared-state control plane | Managed-Cognito Fargate service for tenant administration through a custom Route 53/ALB endpoint or generated CloudFront/VPC-origin endpoint | Exposes admin and datasource routes; `AXON_CONTROL_PLANE_ONLY=true` suppresses chat, model, and query execution routes |
+| Normal Starlette process | Chat, OpenAI-compatible APIs, admin APIs, managed-SAML handoff, SCIM, and web interfaces | No customer database query routes |
+| AgentCore runtime | Authenticated chat/model, viewer-readable and admin-writable project configuration, readiness, and health actions for all enabled providers | No customer database query action |
+| Shared-state control plane | Managed-Cognito Fargate service for tenant administration through a custom Route 53/ALB endpoint or generated CloudFront/VPC-origin endpoint | `AXON_CONTROL_PLANE_ONLY=true` suppresses execution routes |
 | Local seeded demo | Anonymous fictional-data evaluation | Development only; not a production or AgentCore deployment input |
 
+The runtime surfaces are selected through the four profiles documented in
+[Deployment Profiles](DEPLOYMENT_PROFILES.md): `standalone`,
+`standalone-agentcore`, `ostiari-embedded`, and `ostiari-agentcore`. Ostiari
+profiles are headless from AxonLLM's perspective and never expose its web
+control plane.
+
 The control-plane stack uses AgentCore's verified `StateTableName` output and
-imports the data KMS key, event outbox, SNS topic, and CloudWatch event log. It
-creates no second authority table. Its task role has no Athena or STS
-assume-role permission, so a control plane compromise cannot invoke the query
-executor through that task.
+imports the event outbox, SNS topic, and CloudWatch event log. It creates no
+second authority table or encryption key.
 
 ## Feature Inventory
 
@@ -35,16 +40,16 @@ executor through that task.
 |---|---|
 | Identity | OIDC/JWKS, ALB OIDC, API keys, Cognito-managed SAML federation, SCIM 2.0, managed Cognito first-adopter identity, and CloudFront application PKCE sessions |
 | Tenant RBAC | Canonical DynamoDB principals, project grants, service scopes, viewer/admin roles, audited platform break glass |
-| Query | Bounded Athena `SELECT`, HTTP and AgentCore entry points, deployment-bound IAM roles, datasource metadata administration |
+| Customer database query | Optional add-on only; absent from core images, routes, templates, IAM, networking, and certification |
 | Routing | Thirteen provider adapters; AgentCore defaults to nine with Google AI Studio, while direct `ai21`, Azure OpenAI, Cohere, and Vertex AI are opt-in and AI21 Jamba 1.5 remains available through Bedrock; retry/fallback, round-robin, weighted, least-latency, cost-optimized, smart, and ensemble paths |
 | Chat | Native and OpenAI-compatible APIs, streaming, tool translation, model/project access checks |
 | Governance | Policy hierarchy, Cedar restrictions, project/user budgets, quotas, shared rate and budget admission |
 | Safety | PII redaction and re-injection, optional Comprehend entities, prompt-injection detection, request/response guardrails |
 | Efficiency | Exact and semantic caches, prompt efficiency analytics, model right-sizing recommendations |
-| Administration | Projects, users, keys, policies, quotas, regions, webhooks, audit, usage, datasource metadata, readiness and drift views |
+| Administration | Projects, users, keys, policies, quotas, regions, webhooks, audit, usage, readiness and drift views |
 | Durability | Tenant-qualified DynamoDB state, compare-and-swap updates, audit hash chains, API-key epochs, SCIM convergence |
 | Events | FIFO outbox, bounded retries, DLQ, HTTPS/SNS/CloudWatch destinations, deterministic delivery identities |
-| Operations | Fargate and AgentCore CDK, custom-domain or generated-CloudFront managed control plane, immutable image inputs, backups, alarms, signed release/launch/rehearsal/teardown/deployment evidence |
+| Operations | Fargate and AgentCore CDK, custom-domain or generated-CloudFront managed control plane, immutable image inputs, DynamoDB PITR and restore exercises, alarms, signed release/launch/rehearsal/teardown/deployment evidence |
 
 ## Identity And RBAC Flow
 
@@ -62,15 +67,16 @@ Canonical production requests use server-held authority:
 7. Cross-tenant and ungranted resources are concealed as `404`; authority-store
    failures return `503`.
 
-| Role | Tenant configuration | Datasources | Project data plane |
-|---|---|---|---|
-| `tenant_admin` | Read/write | Read/write | Model list, inference, and query with an explicit project grant |
-| `tenant_member` | Read only | Read only | Model list, inference, and query with an explicit project grant |
-| `tenant_auditor` | Read only | Read only | Model list, inference, and query with an explicit project grant |
-| `service` | Denied | Denied | Explicit project grant plus server-held `model.list`, `inference.invoke`, or `query.select` scope |
+| Role | Tenant control plane | Project data plane |
+|---|---|---|
+| `tenant_admin` | Read/write | Model list and inference with an explicit project grant |
+| `tenant_member` | Read only | Model list and inference with an explicit project grant |
+| `tenant_auditor` | Read only | Model list and inference with an explicit project grant |
+| `service` | Denied | Explicit project grant plus server-held `model.list` or `inference.invoke` scope |
 | `platform_admin` | Platform resources; tenant access requires audited break glass | Break glass only | No ordinary tenant project path |
 
-`query.mutate` remains an unconditional denial. There is no write-query action.
+The customer database query add-on defines its own additional authorization
+surface and cannot be activated by a core deployment flag.
 
 ## Control-Plane Browser Authentication Flow
 
@@ -146,7 +152,14 @@ SCIM applies its own bearer authentication. SCIM provisioning must use the
 Cognito issuer and Cognito `sub` as its immutable issuer/`externalId` pair when
 it creates the canonical principal.
 
-## Datasource Administration Flow
+## Customer Database Query Add-On Design
+
+The following sections document the retained add-on implementation. None of
+these routes, dependencies, endpoints, permissions, or certification gates are
+registered by a core standalone or AgentCore deployment. See
+[Customer Database Query Add-On](CUSTOMER_DATABASE_QUERY_ADDON.md).
+
+### Datasource Administration Flow
 
 Datasource records contain metadata only: datasource id, tenant/project owner,
 display name, exact IAM role ARN, AWS region, Athena catalog, database,
@@ -179,7 +192,7 @@ Members and auditors may read metadata but cannot mutate it. Their response
 omits the role ARN and reports `role_configured: true`. Canonical service
 principals are denied all `/admin/*` access.
 
-## Query Security Contract
+### Query Security Contract
 
 | Control | Enforced behavior |
 |---|---|
@@ -230,7 +243,7 @@ hashes the principal identifier before tagging it, and uses a hashed session
 and source identity. Tags support attribution; canonical DynamoDB authority and
 the deployment binding remain the authorization source.
 
-## HTTP Query Flow
+### HTTP Query Flow
 
 `POST /v1/query` runs only on a normal Starlette data-plane process with query
 configuration enabled. It is not registered by a
@@ -274,7 +287,7 @@ exact deployment binding cannot be proven.
 
 Malformed or unsafe SQL produces `query_rejected` before Athena starts.
 
-## AgentCore Query Flow
+### AgentCore Query Flow
 
 The AgentCore payload selects the `query` action:
 
@@ -328,8 +341,8 @@ A tenant administrator updates only supplied fields with compare-and-swap:
    in one transaction; other instances converge through config sync.
 6. The response returns the committed revision and complete detached config.
 
-This action covers project runtime settings, not membership, datasource,
-API-key, policy, webhook, provider-secret, or event-destination administration.
+This action covers project runtime settings, not membership, API-key, policy,
+webhook, provider-secret, or event-destination administration.
 
 ## Chat And Routing Flow
 
@@ -346,10 +359,10 @@ API-key, policy, webhook, provider-secret, or event-destination administration.
 10. Persist usage/cost and audit state, dispatch threshold/security events, and
     return the normalized response.
 
-Tool calling and the built-in query plane are separate. AxonLLM transports a
-caller-defined `db_query` tool and its model-generated arguments, but does not
-automatically execute that tool. A caller invokes `/v1/query` or the AgentCore
-`query` action explicitly when it wants the governed Athena flow.
+AxonLLM transports a caller-defined `db_query` tool and its model-generated
+arguments, but does not automatically execute that tool. Core deployments have
+no built-in database query plane; an installed customer database query add-on
+may provide a separate governed surface.
 For a multi-round tool loop, the caller returns the complete assistant
 `tool_calls` object and echoes each opaque tool-call ID unchanged; this carries
 provider continuation state without adding provider-specific request fields.
@@ -361,9 +374,9 @@ Audit and event delivery serve different purposes:
 | Mechanism | Contract |
 |---|---|
 | Audit trail | Tenant-qualified append-only records linked by SHA-256 hash chain |
-| Query audit | Durable request/result/rejection records containing query hashes and bounded execution statistics, not SQL literals |
-| Query lifecycle | Durable accepted/running/terminal state plus execution id; fenced periodic reconciliation closes interrupted work and replays pending audit |
-| Datasource audit | Durable redacted mutation request/result records; raw role ARNs are excluded from change data |
+| Query add-on audit | Add-on-only request/result/rejection records containing query hashes and bounded execution statistics, not SQL literals |
+| Query add-on lifecycle | Add-on-only accepted/running/terminal state plus execution id and reconciliation |
+| Datasource add-on audit | Add-on-only redacted mutation records; raw role ARNs are excluded from change data |
 | Security-event outbox | Tenant destination snapshot written to encrypted FIFO SQS before delivery |
 | Delivery worker | Bounded retries to HTTPS, FIFO SNS, or CloudWatch Logs |
 | DLQ | Retains a message after five failed receives for controlled redrive |
@@ -376,8 +389,9 @@ delivery is at least once.
 
 ### Managed Cognito
 
-`axon setup agentcore` writes the strict schema-version-2 setup contract
-(`"schema_version": 2`). Managed Cognito requires its `control_plane` object.
+`axon setup agentcore` writes the strict schema-version-3 setup contract
+(`"schema_version": 3`) with explicit `deployment.experience` and
+`deployment.execution`. Managed Cognito requires its `control_plane` object.
 Required inputs include:
 
 - verified ARM64 AgentCore image digest;
@@ -390,7 +404,6 @@ Required inputs include:
 - either custom-domain DNS, regional ACM certificate, Route 53 public
   hosted-zone id, and ingress prefix list, or CloudFront mode with one or more
   reviewed public IPv4 viewer CIDRs;
-- at least one exact Athena role ARN and query limits for production launch;
 - an optional protected SAML landing path, defaulting to
   `/admin/dashboard`.
 
@@ -419,9 +432,8 @@ deployer.
 Endpoint mode is persisted in both retained stacks. Missing mode on a legacy
 stack means `custom-domain`; the deployer refuses an in-place mode change.
 
-The schema can represent a query-disabled runtime, but the current protected
-production workflow cannot certify one. Launch requires a matching Athena role
-binding, datasource/workgroup fixture, and successful governed `SELECT`.
+The core schema contains no customer database query configuration. Query
+capability must be introduced by a separately versioned add-on contract.
 
 ### Production Promotion
 
@@ -433,7 +445,7 @@ The protected `launch-agentcore-production.yml` orchestrator:
 3. Updates the independently pre-staged and reviewed `managed` qualification
    namespace, certifies its candidate, promotes it within that namespace,
    validates its shared control plane, and starts two launch workers.
-4. Executes initialization, query, recovery, event-delivery, routing,
+4. Executes initialization, recovery, event-delivery, routing,
    provider-recovery, and control-plane-fault gates through the immutable launch
    coordinator and publishes signed detailed rehearsal evidence.
 5. Revokes qualification identities/sessions, stops both workers, deletes all
@@ -444,8 +456,8 @@ The protected `launch-agentcore-production.yml` orchestrator:
 7. Synchronizes only allowlisted credentials, deploys a fresh production
    candidate without changing the certified endpoint, and requires the exact
    alarm-email subscription to be confirmed.
-8. Starts a retained backup, restores state, compares up to 25 restored items,
-   certifies identity/RBAC, governed query, model listing, completion and
+8. Restores state through DynamoDB PITR, compares up to 25 restored items,
+   certifies identity/RBAC, model listing, completion and
    streaming for every launch provider, plus tools for each provider that
    declares `tool_calling`, promotes the exact version, and writes KMS-signed
    schema-v5 deployment evidence under S3 Object Lock.
@@ -492,15 +504,16 @@ table or a reviewed operator path.
 
 - AgentCore Memory and `SessionManager` remain unwired; conversations are not
   durably remembered by AgentCore.
-- The shared control plane has no query execution route or Athena/STS authority.
+- Core deployments have no query execution route, Athena endpoint, or customer
+  datasource-role STS authority.
 - CloudFront mode currently requires `us-east-1` and public IPv4 viewer
   allowlists; it intentionally disables IPv6.
 - The external-OIDC first-adopter path has no automated web control plane.
 - Candidate and production qualifiers share one runtime JWT authorizer; the
   random candidate name is not an independent authorization boundary.
-- The existing `v0.2.4` evidence predates the query/control-plane work and does
-  not certify it.
+- The existing `v0.2.4` evidence predates the control-plane work and does not
+  certify it.
 - Implemented workflows are not deployment evidence until they succeed in the
   target account. A launch claim still requires the retained schema-v5
-  deployment record, confirmed alarm/event delivery, exact datasource-role
-  trust, load evidence, and a full application cutover rehearsal.
+  deployment record, confirmed alarm/event delivery, load evidence, and a full
+  application cutover rehearsal.

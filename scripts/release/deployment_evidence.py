@@ -133,8 +133,6 @@ REQUIRED_CERTIFICATION_CATEGORIES = frozenset(
         "missing_project_grant_denied",
         "model_listing",
         "payload_identity_rejected",
-        "query_mutation_denied",
-        "query_select",
     }
 )
 REQUIRED_CONTROL_PLANE_CATEGORIES = frozenset(
@@ -158,9 +156,6 @@ REQUIRED_EXTERNAL_OIDC_CHECKS = frozenset(
         "admin_tenant_config_mutation_confirmed",
         "admin_tenant_config_rollback",
         "admin_tenant_config_rollback_confirmed",
-        "admin_query_select",
-        "viewer_query_select",
-        "viewer_query_mutation_denied",
         "viewer_payload_role_escalation_denied",
         "wrong_audience_denied",
         "missing_tenant_claim_denied",
@@ -172,9 +167,6 @@ REQUIRED_EXTERNAL_OIDC_CHECKS = frozenset(
         "canonical_admin_config_write_allowed",
         "canonical_viewer_config_read_allowed",
         "canonical_viewer_config_write_denied",
-        "canonical_admin_query_select_allowed",
-        "canonical_viewer_query_select_allowed",
-        "canonical_cross_tenant_query_concealed",
     }
 )
 REDACTED_CERTIFICATION_CHECK_FIELDS = frozenset(
@@ -319,9 +311,7 @@ def _validate_stack_outputs(
     result: dict[str, str] = {}
     for name, value in outputs.items():
         inactive_identity_output = (
-            stack_name == IDENTITY_STACK
-            and name in {"AlbClientId", "ControlPlaneDomainName"}
-            and value == ""
+            stack_name == IDENTITY_STACK and name in {"AlbClientId", "ControlPlaneDomainName"} and value == ""
         )
         if (
             SAFE_OUTPUT_NAME.fullmatch(name) is None
@@ -365,9 +355,7 @@ def _control_plane_endpoint_binding(
     )
     contract = CONTROL_PLANE_ENDPOINT_CONTRACTS.get(endpoint_mode)
     if contract is None:
-        raise DeploymentEvidenceError(
-            "control-plane endpoint mode is unsupported"
-        )
+        raise DeploymentEvidenceError("control-plane endpoint mode is unsupported")
     url = _required_output(
         control,
         "ControlPlaneUrl",
@@ -387,9 +375,7 @@ def _control_plane_endpoint_binding(
         parsed = urlsplit(url)
         port = parsed.port
     except ValueError as exc:
-        raise DeploymentEvidenceError(
-            "control-plane endpoint outputs are inconsistent"
-        ) from exc
+        raise DeploymentEvidenceError("control-plane endpoint outputs are inconsistent") from exc
     if (
         DNS_NAME.fullmatch(domain) is None
         or parsed.scheme != "https"
@@ -402,15 +388,11 @@ def _control_plane_endpoint_binding(
         or url != f"https://{domain}"
         or auth_mode != contract["authMode"]
     ):
-        raise DeploymentEvidenceError(
-            "control-plane endpoint outputs are inconsistent"
-        )
+        raise DeploymentEvidenceError("control-plane endpoint outputs are inconsistent")
 
     identity_mode = identity.get("EndpointMode", CUSTOM_DOMAIN)
     if identity_mode != endpoint_mode:
-        raise DeploymentEvidenceError(
-            "identity and control-plane endpoint modes do not match"
-        )
+        raise DeploymentEvidenceError("identity and control-plane endpoint modes do not match")
     if endpoint_mode == CUSTOM_DOMAIN:
         if (
             _required_output(
@@ -426,24 +408,13 @@ def _control_plane_endpoint_binding(
             )
             or "BrowserClientId" in control
         ):
-            raise DeploymentEvidenceError(
-                "custom-domain endpoint is not bound to the ALB Cognito "
-                "client"
-            )
-    elif (
-        not _required_output(
-            control,
-            "BrowserClientId",
-            CONTROL_PLANE_STACK,
-        )
-        or any(
-            identity.get(name) not in {None, ""}
-            for name in ("AlbClientId", "ControlPlaneDomainName")
-        )
-    ):
-        raise DeploymentEvidenceError(
-            "CloudFront endpoint is not bound to the application OIDC client"
-        )
+            raise DeploymentEvidenceError("custom-domain endpoint is not bound to the ALB Cognito client")
+    elif not _required_output(
+        control,
+        "BrowserClientId",
+        CONTROL_PLANE_STACK,
+    ) or any(identity.get(name) not in {None, ""} for name in ("AlbClientId", "ControlPlaneDomainName")):
+        raise DeploymentEvidenceError("CloudFront endpoint is not bound to the application OIDC client")
     return {
         "endpointMode": endpoint_mode,
         "url": url,
@@ -611,95 +582,36 @@ def _validate_recovery(
     runtime: dict[str, str],
 ) -> dict[str, Any]:
     recovery = _object(recovery_value, "recovery validation")
-    if "deploymentBackup" not in recovery:
-        raise DeploymentEvidenceError("recovery validation is missing its deployment backup")
     _exact_fields(
         recovery,
         {
             "tableArn",
+            "deletionProtection",
+            "serverSideEncryption",
             "pointInTimeRecovery",
             "latestRestorableAgeMinutes",
-            "backupVault",
-            "backupVaultLocked",
-            "backupVaultLockMode",
-            "backupVaultMinRetentionDays",
-            "backupVaultMaxRetentionDays",
-            "latestBackupAgeHours",
-            "deploymentBackup",
             "restoreExercise",
         },
         "recovery validation",
     )
     latest_restorable = recovery.get("latestRestorableAgeMinutes")
-    latest_backup = recovery.get("latestBackupAgeHours")
     if (
         recovery.get("pointInTimeRecovery") != "ENABLED"
-        or recovery.get("backupVaultLocked") is not True
-        or recovery.get("backupVaultLockMode") not in {"GOVERNANCE", "COMPLIANCE"}
-        or recovery.get("backupVaultMinRetentionDays") != 30
-        or recovery.get("backupVaultMaxRetentionDays") != 365
+        or recovery.get("deletionProtection") is not True
+        or recovery.get("serverSideEncryption") != "ENABLED"
         or isinstance(latest_restorable, bool)
         or not isinstance(latest_restorable, (int, float))
         or not math.isfinite(float(latest_restorable))
         or float(latest_restorable) < 0
-        or isinstance(latest_backup, bool)
-        or not isinstance(latest_backup, (int, float))
-        or not math.isfinite(float(latest_backup))
-        or float(latest_backup) < 0
     ):
         raise DeploymentEvidenceError("recovery validation does not prove required production controls")
-    deployment_backup = _object(
-        recovery.get("deploymentBackup"),
-        "deployment backup",
-    )
-    _exact_fields(
-        deployment_backup,
-        {
-            "backupJobId",
-            "status",
-            "backupVault",
-            "resourceArn",
-            "recoveryPointArn",
-            "creationDate",
-            "completionDate",
-        },
-        "deployment backup",
-    )
-    if (
-        deployment_backup.get("status") != "COMPLETED"
-        or deployment_backup.get("backupVault") != recovery.get("backupVault")
-        or deployment_backup.get("resourceArn") != recovery.get("tableArn")
-        or not isinstance(deployment_backup.get("backupJobId"), str)
-        or not deployment_backup["backupJobId"]
-        or not isinstance(
-            deployment_backup.get("recoveryPointArn"),
-            str,
-        )
-        or not deployment_backup["recoveryPointArn"].startswith("arn:")
-        or not isinstance(deployment_backup.get("creationDate"), str)
-        or not isinstance(deployment_backup.get("completionDate"), str)
-    ):
-        raise DeploymentEvidenceError("recovery validation does not prove a completed deployment backup")
-    creation = _timestamp_value(
-        deployment_backup["creationDate"],
-        "deployment backup creation date",
-    )
-    completion = _timestamp_value(
-        deployment_backup["completionDate"],
-        "deployment backup completion date",
-    )
     state_table_name = _required_output(
         runtime,
         "StateTableName",
         AGENTCORE_STACK,
     )
-    if (
-        creation > completion
-        or recovery.get("tableArn") != deployment_backup["resourceArn"]
-        or not isinstance(recovery.get("tableArn"), str)
-        or not recovery["tableArn"].endswith(f":table/{state_table_name}")
-    ):
-        raise DeploymentEvidenceError("deployment backup is not bound to the production state table")
+    if not isinstance(recovery.get("tableArn"), str) or not recovery["tableArn"].endswith(f":table/{state_table_name}"):
+        raise DeploymentEvidenceError("recovery validation is not bound to the production state table")
     restore_exercise = _object(
         recovery.get("restoreExercise"),
         "restore exercise",
@@ -852,7 +764,6 @@ def _validate_certification_report(
         or summary.get("checkCount") != len(checks)
         or summary.get("passed") != summary.get("checkCount")
         or summary.get("agentcoreHttpsInvoked") is not True
-        or summary.get("queryBackendExercised") is not True
         or endpoint.get("runtimeArn") != runtime_arn
         or endpoint_arn
         != _required_output(
@@ -965,7 +876,6 @@ def _redacted_certification(report: dict[str, Any]) -> dict[str, Any]:
                 "providerCount",
                 "profile",
                 "providerFeatures",
-                "queryBackendExercised",
                 "agentcoreHttpsInvoked",
             )
         },
@@ -1214,8 +1124,7 @@ def _validate_production_validation(
             not isinstance(result, dict)
             or result.get("passed") is not True
             or result.get("baseUrl") != expected_base_url
-            or result.get("credentialType")
-            != expected_credential_type
+            or result.get("credentialType") != expected_credential_type
             for result in results
         )
         or gates.get("status") != "PASS"
@@ -1737,7 +1646,6 @@ def _validate_external_oidc_certification(
         or not isinstance(provider_features, dict)
         or provider_features != serialized_provider_features
         or full_summary.get("agentcoreHttpsInvoked") is not True
-        or full_summary.get("queryBackendExercised") is not True
         or not isinstance(full_checks, list)
         or not full_checks
         or full_summary.get("checkCount") != len(full_checks)
@@ -1778,7 +1686,6 @@ def _validate_external_oidc_certification(
             "brokerResponseSha256",
             "expiresAt",
             "canonicalPrincipalCount",
-            "datasourceId",
             "cleanup",
         },
         "external OIDC certification fixtures",
@@ -1811,11 +1718,9 @@ def _validate_external_oidc_certification(
             )
         )
         or fixtures.get("canonicalPrincipalCount") != 5
-        or not isinstance(fixtures.get("datasourceId"), str)
-        or not fixtures["datasourceId"]
         or cleanup.get("status") != "PASS"
         or cleanup.get("complete") is not True
-        or cleanup.get("localItemsRemoved") != 6
+        or cleanup.get("localItemsRemoved") != 5
         or broker.get("status") != "PASS"
         or broker.get("complete") is not True
         or broker.get("identitiesRevoked") is not True
@@ -1837,7 +1742,6 @@ def _validate_external_oidc_certification(
         "shortLivedIdentitiesVerified": True,
         "canonicalTenantRbacVerified": True,
         "agentcoreHttpsInvoked": True,
-        "queryBackendExercised": True,
         "allLaunchProvidersExercised": True,
         "agentcoreTenantConfigMutationExercised": True,
         "fixturesCleaned": True,
@@ -2397,16 +2301,8 @@ def _validate_stack_bindings(
             CONTROL_PLANE_STACK,
         )
         != fargate_image
-        or _required_output(
-            control,
-            "QueryPlaneEnabled",
-            CONTROL_PLANE_STACK,
-        )
-        != "true"
     ):
-        raise DeploymentEvidenceError(
-            "control-plane outputs are not bound to the verified image and query configuration"
-        )
+        raise DeploymentEvidenceError("control-plane outputs are not bound to the verified image")
     _required_output(
         control,
         "TaskDefinitionArn",
@@ -2683,14 +2579,10 @@ def create_evidence(args: argparse.Namespace) -> dict[str, Any]:
                 or control_domain != control_endpoint["domainName"]
             )
         )
-        or (
-            setup_endpoint_mode == CLOUDFRONT
-            and control_domain is not None
-        )
+        or (setup_endpoint_mode == CLOUDFRONT and control_domain is not None)
     ):
         raise DeploymentEvidenceError(
-            "setup configuration is not bound to the verified images and "
-            "control-plane endpoint"
+            "setup configuration is not bound to the verified images and control-plane endpoint"
         )
 
     certification_config = _object(
@@ -2745,9 +2637,7 @@ def create_evidence(args: argparse.Namespace) -> dict[str, Any]:
     production_validation = _production_validation(
         args.production_validation_report,
         expected_base_url=control_endpoint["url"],
-        expected_credential_type=(
-            control_endpoint["credentialType"]
-        ),
+        expected_credential_type=(control_endpoint["credentialType"]),
         expected_target_group_arn=_required_output(
             control,
             "TargetGroupArn",
@@ -3032,9 +2922,7 @@ def verify_evidence(args: argparse.Namespace) -> dict[str, Any]:
             "production validation",
         ),
         expected_base_url=control_endpoint["url"],
-        expected_credential_type=(
-            control_endpoint["credentialType"]
-        ),
+        expected_credential_type=(control_endpoint["credentialType"]),
         expected_target_group_arn=_required_output(
             control_outputs,
             "TargetGroupArn",

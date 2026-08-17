@@ -449,7 +449,7 @@
         </mxCell>
 
         <!-- Persistence -->
-        <mxCell id="pers" value="DynamoPersistence — single-table (PK/SK), authoritative in production&#xa;projects · datasources · query admission/lifecycle · user configs · usage · API keys · audit chain · policy nodes · SCIM" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#3334B9;fontSize=11;align=center;verticalAlign=middle;fontColor=#232F3E;strokeWidth=2" vertex="1" parent="1">
+        <mxCell id="pers" value="DynamoPersistence — single-table (PK/SK), authoritative in production&#xa;projects · user configs · usage · API keys · audit chain · policy nodes · SCIM" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#3334B9;fontSize=11;align=center;verticalAlign=middle;fontColor=#232F3E;strokeWidth=2" vertex="1" parent="1">
           <mxGeometry x="310" y="590" width="980" height="60" as="geometry" />
         </mxCell>
 
@@ -457,13 +457,13 @@
         <mxCell id="http" value="HTTP Surface (Starlette routes)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=none;strokeColor=#232F3E;fontSize=12;fontStyle=1;verticalAlign=top;align=left;spacingLeft=10;spacingTop=4;fontColor=#232F3E;dashed=1" vertex="1" parent="1">
           <mxGeometry x="30" y="690" width="1540" height="240" as="geometry" />
         </mxCell>
-        <mxCell id="h1" value="Data plane&#xa;&#xa;POST /v1/chat/completions&#xa;POST /v1/query (Athena SELECT)&#xa;POST /api/chat&#xa;POST /api/chat/stream&#xa;GET  /api/models&#xa;GET  /health · /ready" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;align=left;verticalAlign=top;spacingLeft=8;spacingTop=6;fontColor=#232F3E" vertex="1" parent="1">
+        <mxCell id="h1" value="Data plane&#xa;&#xa;POST /v1/chat/completions&#xa;POST /api/chat&#xa;POST /api/chat/stream&#xa;GET  /api/models&#xa;GET  /health · /ready" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;align=left;verticalAlign=top;spacingLeft=8;spacingTop=6;fontColor=#232F3E" vertex="1" parent="1">
           <mxGeometry x="50" y="720" width="230" height="190" as="geometry" />
         </mxCell>
         <mxCell id="h2" value="Admin — usage &amp; models&#xa;&#xa;/admin/overview · /admin/dashboard&#xa;/admin/usage (+ /export)&#xa;/admin/models · /admin/catalog&#xa;/admin/projects (members, models,&#xa;  keys, efficiency)&#xa;/admin/users · /admin/health&#xa;/admin/efficiency · /admin/traces&#xa;/admin/pricing-drift&#xa;/admin/production-checklist&#xa;/admin/architecture" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;align=left;verticalAlign=top;spacingLeft=8;spacingTop=6;fontColor=#232F3E" vertex="1" parent="1">
           <mxGeometry x="300" y="720" width="250" height="190" as="geometry" />
         </mxCell>
-        <mxCell id="h3" value="Admin — governance&#xa;&#xa;/admin/datasources&#xa;/admin/keys/{id} (+ /rotate)&#xa;/admin/policies&#xa;  /hierarchy · /effective/{project}&#xa;/admin/quotas/{project}&#xa;  /reset · /simulate&#xa;/admin/webhooks (+ /test, /stats)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;align=left;verticalAlign=top;spacingLeft=8;spacingTop=6;fontColor=#232F3E" vertex="1" parent="1">
+        <mxCell id="h3" value="Admin — governance&#xa;&#xa;/admin/keys/{id} (+ /rotate)&#xa;/admin/policies&#xa;  /hierarchy · /effective/{project}&#xa;/admin/quotas/{project}&#xa;  /reset · /simulate&#xa;/admin/webhooks (+ /test, /stats)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;align=left;verticalAlign=top;spacingLeft=8;spacingTop=6;fontColor=#232F3E" vertex="1" parent="1">
           <mxGeometry x="570" y="720" width="240" height="190" as="geometry" />
         </mxCell>
         <mxCell id="h4" value="Admin — audit &amp; regions&#xa;&#xa;/admin/audit/records&#xa;/admin/audit/security&#xa;/admin/audit/verify (chain integrity)&#xa;/admin/audit/stats · /export&#xa;&#xa;/admin/regions · /config · /health&#xa;/admin/regions/spokes/{region}&#xa;/admin/regions/route · /failover" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=10;align=left;verticalAlign=top;spacingLeft=8;spacingTop=6;fontColor=#232F3E" vertex="1" parent="1">

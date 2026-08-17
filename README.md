@@ -81,36 +81,22 @@ install paths — local or AWS, seeded or clean — and which flag decides.
 - **Budget threshold alerting** — fires events at 80%, 90%, 100% spend via the event dispatcher
 - **Per-user and per-project budgets** with automatic blocking
 
-### Read-Only Query And Shared Control Plane
-- **Governed Athena query** — a normal Starlette data-plane process exposes
-  `POST /v1/query`, and AgentCore exposes a `query` action. Both call the same
-  canonical `QueryService`.
-- **Strict query policy** — exactly one Athena `SELECT` AST, datasource-bound
-  catalog/database references, deployment-bound IAM roles, enforced
-  KMS-encrypted workgroups, bounded time/rows/results/scan, and durable
-  request/result/rejection audit without SQL literals.
-- **Fleet query admission** — tenant/project/principal RPM, expiring
-  concurrency slots, aggregate per-minute scan reservations, duplicate
-  `request_id` rejection, and durable accepted/running/terminal lifecycle
-  state shared across replicas.
-- **Interrupted-query recovery** — a fenced periodic worker closes expired
-  accepted/running records, reconciles reservations and slots atomically, and
-  replays terminal audit writes. It defers when datasource authority cannot be
-  proven.
-- **Datasource administration** — `/admin/datasources` stores tenant/project
-  Athena metadata without credentials. `tenant_admin` can write;
-  `tenant_member` and `tenant_auditor` can read; `service` is denied. Lists are
-  cursor-bounded, tenant cardinality is transactionally capped, and mutations
-  emit durable redacted request/result audit.
+### Shared Control Plane And Optional Add-Ons
+- **Target-independent features** — standalone and AgentCore expose the same
+  AxonLLM product capabilities. The deployment target changes the execution
+  adapter, not the UI, API, governance, or provider feature set.
 - **Shared-state web control plane** — the managed-Cognito first-adopter path
   deploys a dedicated AMD64 Fargate service against AgentCore's canonical
-  table. `AXON_CONTROL_PLANE_ONLY=true` suppresses chat, model, and query
-  execution, and its task has no Athena or STS authority.
+  table. `AXON_CONTROL_PLANE_ONLY=true` suppresses execution routes.
 - **AgentCore tenant configuration** — canonical tenant viewers can read the
   selected project's runtime configuration through `get_tenant_config`;
   `tenant_admin` can apply revision-checked partial updates through
-  `update_tenant_config`. Membership, datasource, key, policy, webhook, and
+  `update_tenant_config`. Membership, key, policy, webhook, and
   event-destination administration remain control-plane operations.
+- **Customer database query add-on** — query code is retained for a future
+  explicit add-on, but core installs expose no query or datasource routes,
+  Athena resources, or customer-role STS authority. See
+  [Customer Database Query Add-On](docs/CUSTOMER_DATABASE_QUERY_ADDON.md).
 
 ### Identity & Access
 - **Multi-strategy auth** — ALB OIDC JWT, Bearer token (OIDC or API key), X-Api-Key header
@@ -122,7 +108,7 @@ install paths — local or AWS, seeded or clean — and which flag decides.
 - **Tenant admin and viewer RBAC** — `tenant_admin` can read and write
   tenant-owned configuration. `tenant_member` and `tenant_auditor` are the
   read-only/viewer roles. All three still need an explicit project grant for
-  model listing, inference, and `query.select`. Canonical
+  model listing and inference. Canonical
   `service` identities have no control-plane access and additionally need
   server-held data-plane action scopes. Legacy `admin` and `admin:*`
   compatibility applies only to noncanonical migration contexts; canonical
@@ -156,13 +142,12 @@ mapping.
 > validation, and alarm/event delivery remain unverified. See the
 > [Production Runbook](docs/PRODUCTION_RUNBOOK.md#release-status) and
 > [AgentCore Runbook](docs/AGENTCORE_RUNBOOK.md#current-status).
-> The query and shared control-plane implementation is newer than `v0.2.4`;
-> that release evidence does not certify these additions, and no deployed
-> Athena or shared-control-plane canary has been retained yet.
+> The shared-control-plane implementation is newer than `v0.2.4`; that release
+> evidence does not certify it, and no deployed shared-control-plane canary has
+> been retained yet. Customer database query is outside the core release.
 
 For a surface inventory and end-to-end sequences, see
-[Features And Flows](docs/FEATURES_AND_FLOWS.md). `query.mutate` remains an
-unconditional denial.
+[Features And Flows](docs/FEATURES_AND_FLOWS.md).
 
 ### Observability
 - **Admin dashboard** — 20 pages in four groups. *Observe:* Overview, Traces, Efficiency, Audit Log. *Configure:* Models, Projects, Users, API Keys. *Govern:* Policies, Hierarchy, Quotas, Regions, Webhooks. *System:* Health, Configuration, Architecture, Pricing, Catalogue, Readiness. Plus Sandbox, a live playground that issues real requests through the gateway.
@@ -408,7 +393,7 @@ which the seeded `proj-alpha` does. On a clean install you set it per project.
 ### 3. AWS Fargate
 
 The checked-in Fargate stack provides CloudFront and WAF, an internal TLS ALB,
-private tasks, DynamoDB persistence and backup, Secrets Manager, alarms,
+private tasks, DynamoDB persistence with PITR, Secrets Manager, alarms,
 `ENFORCE` authentication, and no fabricated data. Production mode additionally
 configures ALB OIDC and canonical identity.
 
@@ -480,8 +465,9 @@ LLM providers; do not put `0.0.0.0/0` in it. After deployment, point the viewer
 name at `CloudFrontDistributionDomain`. The stack also outputs
 `InternalALBDomain` for the private origin DNS record.
 
-The stack creates a KMS-encrypted FIFO security-event outbox and DLQ, a managed
-FIFO SNS event topic, a retained encrypted CloudWatch Logs event group, and
+The stack creates an SQS-managed-encrypted FIFO security-event outbox and DLQ,
+an AWS-managed-encrypted FIFO SNS event topic, a retained CloudWatch Logs event
+group using AWS default encryption, and
 private SQS/SNS/Logs endpoints scoped to those resources. Resolve
 `SecurityEventOutboxQueueUrl`, `SecurityEventDeadLetterQueueUrl`,
 `SecurityEventTopicArn`, and `SecurityEventLogGroupArn` from the stack outputs.
@@ -597,7 +583,17 @@ defines the multi-tenant release gate.
 ### 4. AWS AgentCore
 
 AgentCore is always an authenticated, canonical production profile. There is no
-anonymous AgentCore option. A first adopter chooses either:
+anonymous AgentCore option. Deployment topology is explicit:
+
+| Profile | Experience owner | Execution |
+|---|---|---|
+| `standalone` | AxonLLM | ECS/container |
+| `standalone-agentcore` | AxonLLM | AgentCore |
+| `ostiari-embedded` | Ostiari | Ostiari process/container |
+| `ostiari-agentcore` | Ostiari | AgentCore |
+
+See [Deployment Profiles](docs/DEPLOYMENT_PROFILES.md) for ownership,
+migration, and URL behavior. An AgentCore adopter also chooses either:
 
 - `managed-cognito`: deploy a separate retained Cognito pool, public
   authorization-code client, and hosted UI; or
@@ -611,7 +607,8 @@ uv run axon setup local-demo --start --acknowledge-non-production
 ```
 
 For managed Cognito, supply the common release and network inputs through the
-environment, then create a reviewable schema-v2 setup file. Schema v2 requires
+environment, then create a reviewable schema-v3 setup file. Schema v3 requires
+an explicit `deployment` topology, and managed Cognito requires
 the managed-Cognito `control_plane` inputs shown below:
 
 ```bash
@@ -629,32 +626,38 @@ export AXON_CONTROL_PLANE_SCIM_TENANTS_SECRET_ARN='arn:aws:secretsmanager:us-eas
 export AXON_CONTROL_PLANE_SAML_LOGIN_PATH='/admin/dashboard'
 
 uv run axon setup agentcore \
+  --deployment-profile standalone-agentcore \
   --identity-mode managed-cognito \
   --tenant tenant-a --project project-a --project-name Production \
   --admin-user-name admin@example.com --admin-email admin@example.com \
   --hosted-ui-domain-prefix axonllm-123456789012 \
-  --oauth-callback-url https://app.example.com/oauth/callback \
-  --athena-query-role-arn arn:aws:iam::123456789012:role/AxonAthenaReader \
   --output axonllm-agentcore.json
 
 ./deploy-agentcore.sh --config axonllm-agentcore.json --validate-only
-./deploy-agentcore.sh --config axonllm-agentcore.json --bootstrap-cdk
+./deploy-agentcore.sh --config axonllm-agentcore.json --install
 ```
 
-The current AgentCore production certification path has no query-disabled
-mode. At least one exact Athena query role, a reviewed datasource/workgroup,
-and a runnable `SELECT` certification scenario are mandatory for launch even
-though the reusable setup schema can represent an AgentCore runtime without
-query.
+Core AgentCore certification validates identity, authorization, provider
+listing, completion, streaming, tools, tenant configuration, and readiness. It
+does not require or grant customer database access.
 
 The deployer retains the identity resources, invites the first Cognito
 administrator, deploys the authenticated AgentCore runtime, idempotently
 creates or verifies canonical authority, and then deploys the
 Cognito-authenticated shared-state control plane at the stable domain. The
 control plane uses the AMD64 image and AgentCore's verified `StateTableName`
-output, and has no Athena/STS query authority. It stores no client secret or
-password. Review the CDK diff before adding `--yes` for noninteractive
-deployment.
+  output. It stores no client secret or password. Review the CDK diff before
+  adding `--yes` for noninteractive
+deployment. `--install` is the adopter path for clean accounts, upgrades, and
+failed-first-create retries. It transactionally reconciles the
+repository-owned bootstrap policies, creates the isolated CDK toolkit only
+when absent, safely removes a matching failed first-create stack, and
+continues into deployment. It reuses a healthy toolkit instead of
+bootstrapping it again.
+
+Security operators can still use `--reconcile-bootstrap-policies` to stop
+after the policy transaction or `--bootstrap-cdk` to force a reviewed toolkit
+update. All three modes restore prior policy defaults if reconciliation fails.
 
 The optional SCIM secret is injected whole as `AXON_SCIM_TENANTS`. No SAML
 metadata, certificate, assertion, or IdP credential is injected into AxonLLM.
@@ -787,9 +790,9 @@ The name for each provider is in `provider_loader.py`; a provider whose key is
 absent is dropped from the routing table rather than failing at request time, so
 a missing name looks like "that model has no providers" instead of "no key".
 
-This is a demo convenience, not a production config mechanism. In a real deploy
-secrets come from the platform (ECS task definition, Secrets Manager, App Runner
-env), and a file that shadowed those would be near-impossible to debug. Two rules
+This is a demo convenience, not a production config mechanism. In a real deploy,
+secrets come from the platform (ECS task definitions and Secrets Manager), and a
+file that shadowed those would be near-impossible to debug. Two rules
 keep that from happening:
 
 - Without `AXON_LOAD_DEMO_DATA=true` already in the environment, the file is
@@ -977,8 +980,8 @@ AWS_DEFAULT_REGION=us-east-1 \
     --name production-service
 ```
 
-Its default scopes are `model.list`, `inference.invoke`, and `query.select`.
-Canonical service keys reject all legacy `admin:` scopes.
+Its default scopes are `model.list` and `inference.invoke`. Canonical service
+keys reject all legacy `admin:` scopes.
 
 Keys are stored as SHA-256 hashes; **the raw value is returned once and never
 persisted.** There is no "show key again" — rotate instead (`POST
@@ -1101,10 +1104,7 @@ Canonical tenant roles are the primary `/admin/*` policy:
 Platform resources are architecture, catalogue and drift, health, models,
 pricing drift, production checklist, and region topology. Tenant context is
 propagated to tenant-qualified projects, usage, user configuration, policies,
-quotas, webhooks, audit, API keys, caches, datasource metadata, and SCIM state.
-The same canonical roles may run `query.select` only with an explicit project
-grant; a `service` principal additionally needs the server-held
-`query.select` scope.
+quotas, webhooks, audit, API keys, caches, and SCIM state.
 
 In canonical mode, `POST /admin/projects/{id}/members` accepts a SCIM resource
 id in `user_id`; the POST/DELETE member routes transactionally update
@@ -1517,46 +1517,13 @@ API key, not the request body. Supported: `model`, `messages`, `temperature`,
 `max_tokens`, `stream`, `tools`, `tool_choice`. Ensemble/smart-routing model names
 (e.g. `ensemble:quality`) work here too.
 
-### Read-only Athena query
+### Customer database query add-on
 
-When `AXON_ATHENA_QUERY_ENABLED=true` and exact deployment bindings are present,
-a normal Starlette data-plane process registers `POST /v1/query`:
-
-```bash
-curl -X POST http://localhost:8000/v1/query \
-  -H 'Content-Type: application/json' \
-  -H "Authorization: Bearer ${AXON_API_KEY}" \
-  -d '{
-    "datasource_id": "warehouse",
-    "sql": "SELECT order_id, status FROM orders LIMIT 100",
-    "max_rows": 100
-  }'
-```
-
-The authenticated project context owns the request; a supplied `project_id`
-must match it. The datasource must be tenant/project-owned and use an exact
-deployment-approved role. AxonLLM parses one Athena `SELECT` AST, rejects
-DDL/DML/commands/`SELECT INTO` and references outside the configured
-catalog/database, and enforces timeout, row, compact serialized-result-set, and
-scan bounds. Before Athena starts, fleet-wide principal/project RPM,
-concurrency, and aggregate scan-byte limits reserve capacity in DynamoDB.
-`request_id` is a durable idempotency identity: reusing it in the same project
-returns `409`. The Athena execution id is persisted before polling and terminal
-paths reconcile the worst-case scan reservation. A fenced periodic worker
-recovers interrupted lifecycle records, cancels or observes known Athena
-executions, finalizes accounting atomically, and retries pending audit writes.
-It leaves a running record deferred when its datasource or exact deployment
-binding cannot be re-established safely.
-
-The datasource role must trust the exact AgentCore execution role for
-`sts:AssumeRole`, `sts:TagSession`, and `sts:SetSourceIdentity`. Its Athena
-workgroup must enforce a KMS-encrypted S3 result location, publish CloudWatch
-metrics, and set a scan cutoff no higher than AxonLLM's configured maximum.
-Query audit records contain hashes and execution statistics, not SQL literals.
-The role is deterministically named `axonllm-agentcore-runtime-<region>`; verify
-its full ARN from the `RuntimeExecutionRoleArn` deployment output before
-enabling a datasource.
-See [Features And Flows](docs/FEATURES_AND_FLOWS.md#query-security-contract).
+Customer database querying is not registered or provisioned by the core
+runtime. Core images have no `/v1/query` route, AgentCore `query` action,
+datasource administration, Athena endpoint, or customer datasource-role STS
+authority. The retained implementation is reserved for an explicit add-on; see
+[Customer Database Query Add-On](docs/CUSTOMER_DATABASE_QUERY_ADDON.md).
 
 ### Telling a cache hit from a provider call
 
@@ -1699,9 +1666,8 @@ Bedrock, Bedrock Mantle, Anthropic, Gemini, or Cohere.
 
 The `db_query` function below belongs to the calling application. AxonLLM
 transports its schema and the model's arguments, but does not automatically
-execute model-requested tools. This is separate from AxonLLM's explicit,
-governed `POST /v1/query` and AgentCore `query` surfaces; the caller must invoke
-one of those surfaces itself when it wants the built-in Athena flow.
+execute model-requested tools. A customer database query add-on may expose a
+separate governed query surface, but it is not part of the core runtime.
 
 ```python
 tools = [{
@@ -1813,8 +1779,6 @@ Request → Auth (OIDC/API Key) → Tenant Project Resolution → Tenant RBAC
 | `/admin/projects/{id}/keys` | GET/POST | List a project's API keys, or issue one. The raw key is returned by `POST` only, once |
 | `/admin/keys/{key_id}/rotate` | POST | Canonical tenant rotation atomically revokes the old key, creates the replacement and principal, and advances the epoch. Legacy/in-memory rotation is revoke then issue |
 | `/admin/keys/{key_id}` | DELETE | Atomically revoke a tenant key and principal and advance its tenant revocation epoch |
-| `/admin/datasources` | GET/POST | When `AXON_ATHENA_QUERY_ENABLED=true`, cursor-list tenant Athena datasource metadata (`limit` 1-100, optional `cursor`/`project_id`) or create a deployment-bound datasource. Only `tenant_admin` may create; viewer roles may list |
-| `/admin/datasources/{datasource_id}` | GET/PUT/DELETE | When `AXON_ATHENA_QUERY_ENABLED=true`, read, revision-guarded replace, or revision-guarded delete. Writes require `tenant_admin`; records never contain credentials |
 | `/admin/policies` | GET/POST | List or create **Cedar authorization** policies (see the note below — not the quota hierarchy) |
 | `/admin/policies/hierarchy` | GET/POST | List or create **quota policy** nodes |
 | `/admin/policies/hierarchy/{node_id}` | GET/PUT | Read or replace a quota node. `PUT` replaces `limits` wholesale rather than merging, so send every field you want to keep. No `DELETE` |
@@ -2140,21 +2104,7 @@ Two more caveats worth knowing before you rely on this layer:
 | `AXON_NO_BROWSER` | `false` | Stop `serve_dashboard.py` opening the pricing-coverage page when models are unpriced (already skipped when stdout is not a tty) |
 | `LLM_ROUTER_DYNAMODB_ENABLED` | `false` | Enable DynamoDB persistence |
 | `AXON_DYNAMODB_TABLE` | `axonllm-state` | DynamoDB table name (must match the provisioned table) |
-| `AXON_ATHENA_QUERY_ENABLED` | `false` | Register query services; deployment code derives this from a non-empty exact role-binding list |
-| `AXON_ATHENA_QUERY_BINDINGS` | `[]` | JSON allowlist of exact `tenant_id`, `project_id`, and concrete `role_arn` tuples; AgentCore limits the compact value to 2,048 characters |
-| `AXON_ATHENA_QUERY_TIMEOUT_SECONDS` | `30` | Bounded Athena execution deadline, at most 300 seconds |
-| `AXON_ATHENA_QUERY_MAX_ROWS` | `1000` | Maximum returned rows, at most 10,000 |
-| `AXON_ATHENA_QUERY_MAX_RESULT_BYTES` | `1048576` | Compact serialized columns-and-rows result-set bound, including JSON structure and nulls |
-| `AXON_ATHENA_QUERY_MAX_BYTES_SCANNED` | `1073741824` | Maximum scanned bytes; the enforced workgroup cutoff must be no greater |
-| `AXON_ATHENA_QUERY_POLL_INTERVAL_SECONDS` | `0.25` | Athena status poll interval |
-| `AXON_ATHENA_QUERY_PROJECT_RPM` | `30` | Fleet-wide project query starts per minute |
-| `AXON_ATHENA_QUERY_PRINCIPAL_RPM` | `10` | Fleet-wide principal query starts per minute; cannot exceed project RPM |
-| `AXON_ATHENA_QUERY_PROJECT_CONCURRENCY` | `5` | Expiring project concurrency slots |
-| `AXON_ATHENA_QUERY_PRINCIPAL_CONCURRENCY` | `2` | Expiring principal concurrency slots; cannot exceed the project limit |
-| `AXON_ATHENA_QUERY_PROJECT_SCAN_BYTES_PER_MINUTE` | `5368709120` | Worst-case project scan bytes reserved per minute and reconciled at completion |
-| `AXON_ATHENA_QUERY_PRINCIPAL_SCAN_BYTES_PER_MINUTE` | `2147483648` | Principal aggregate scan reservation; must contain the per-query scan ceiling |
-| `AXON_ATHENA_QUERY_MAX_DATASOURCES_PER_TENANT` | `500` | Transactional tenant datasource cardinality cap, at most 10,000 |
-| `AXON_CONTROL_PLANE_ONLY` | `false` | Suppress chat, model, and query execution routes while retaining tenant administration routes |
+| `AXON_CONTROL_PLANE_ONLY` | `false` | Suppress execution routes while retaining tenant administration routes |
 | `AXON_SERVER_PORT` | `8000` | Server port |
 | `AXON_AUTH_MODE` | `ENFORCE` | Auth enforcement: `ENFORCE` (default, fail-closed) or `LOG_ONLY` (local dev) |
 | `AXON_DEPLOYMENT_PROFILE` | `production`; the demo entrypoint selects `development` | Runtime security profile. `development` is the only profile that permits legacy identity; `production` fails startup without canonical identity, ENFORCE auth, and DynamoDB |
@@ -2406,9 +2356,9 @@ release commit.
 - Production ALB OIDC on `/admin/*` and canonical identity settings
 - An ALB `/ready` gate for enabled DynamoDB and security-event outbox
   reachability
-- KMS-encrypted DynamoDB with deletion protection, PITR, and daily AWS Backup
-- Governance-mode Backup Vault Lock with 30-365 day retention
-- KMS-encrypted FIFO security-event outbox/DLQ, managed SNS/Logs sinks, and
+- AWS-managed-encrypted DynamoDB with deletion protection and PITR
+- SQS-managed-encrypted FIFO security-event outbox/DLQ, an AWS-managed-encrypted
+  SNS sink, a default-encrypted Logs sink, and
   private SQS/SNS/Logs endpoints
 - Secrets Manager, alarms, and an operations dashboard
 - A required private ECR image identified by `@sha256`
@@ -2418,7 +2368,8 @@ release commit.
 `deploy-fargate.sh` requires `AXON_VERIFIED_IMAGE_URI` and
 `AXON_BEDROCK_INVOKE_RESOURCE_ARNS` and defaults to staging. Set
 `AXON_DEPLOYMENT_MODE=production` plus the required `AXON_OIDC_*` inputs for a
-production deployment. The wrapper also accepts a SCIM credential secret ARN,
+production deployment. It deploys only the `standalone` topology and rejects a
+different `AXON_TOPOLOGY_PROFILE`. The wrapper also accepts a SCIM credential secret ARN,
 paired hosted-zone inputs, and the reviewed Fargate recovery-table selection.
 Set `AXON_RECOVERY_CUTOVER_MODE=true` only while a quiesced table switch is
 being deployed, then clear it after validation. See the complete contract in the
@@ -2431,13 +2382,15 @@ release, identity-bootstrap, canary, and recovery gates in that runbook.
 The checked-in AgentCore CDK stack provides a JWT authorizer, `Authorization`
 header forwarding, private VPC networking, DynamoDB and Bedrock endpoints,
 concrete Bedrock resource permissions, an immutable private ECR ARM64 image,
-canonical identity, backups, encrypted one-year logs, alarms, and a dashboard.
+canonical identity, DynamoDB PITR, one-year logs using AWS default encryption,
+alarms, and a dashboard.
 `infra/identity_stack.py` optionally provides retained managed Cognito identity;
-schema-v2 `axon setup agentcore` configuration and `deploy-agentcore.sh` feed
+schema-v3 `axon setup agentcore` configuration and `deploy-agentcore.sh` feed
 either that stack or an existing OIDC provider into the same AgentCore OIDC
-contract.
+contract. Legacy schema-v2 files remain accepted as
+`standalone-agentcore`.
 
-The runtime exposes `chat`, `list_models`, `query`, `get_tenant_config`,
+The runtime exposes `chat`, `list_models`, `get_tenant_config`,
 `update_tenant_config`, authenticated `readiness`, `health`, and `GET /ready`;
 it does not host the Starlette admin console. Canonical tenant viewers can read
 the selected project's complete runtime configuration. Only `tenant_admin` can
@@ -2446,15 +2399,9 @@ revision; a stale writer receives `409` without a write. Tenant/project
 identity, membership, revision, and creation metadata cannot be changed through
 the action.
 
-Query is enabled only when exact tenant/project/IAM-role bindings are deployed.
-Those bindings and a live Athena `SELECT` scenario are mandatory for the
-current AgentCore production-launch certification; query-disabled certification
-is not implemented. The runtime role and private STS endpoint allow
-`sts:AssumeRole`, `sts:TagSession`, and
-`sts:SetSourceIdentity` only for those role ARNs; the private Athena endpoint
-allows only the approved roles and bounded Athena API set. The datasource role
-trust policy must name the exact AgentCore runtime execution role and permit
-all three STS actions.
+Customer database querying is not part of this runtime contract. Core
+deployment creates no query routes, Athena endpoint, or permission to assume
+customer datasource roles.
 
 The stack supports 13 provider adapters but enables the nine-provider launch
 baseline by default. Google uses the AI Studio `google_ai` route and
@@ -2463,7 +2410,8 @@ Cohere, and Vertex AI are opt-ins through `enabled_providers`. Direct AI21
 requires `AI21_API_KEY`; AI21 Jamba 1.5 is available through the default
 `bedrock` provider and runtime IAM. Bedrock and Mantle use the runtime role;
 direct HTTP providers become available only when their credential is present
-in the retained KMS-encrypted secret exported as `ProviderSecretArn`.
+in the retained Secrets Manager secret, using AWS default encryption, exported
+as `ProviderSecretArn`.
 The runtime reads that secret through a resource-scoped private Secrets Manager
 endpoint. The approved HTTPS prefix list must include the current addresses for
 `bedrock-mantle.<region>.api.aws` and every configured direct-provider
@@ -2474,7 +2422,7 @@ out of band against its DynamoDB table before traffic; `axon bootstrap-tenant`
 remains available for manual recovery.
 
 Candidate deployment and promotion reject unknown provider-secret fields,
-freeze production-shared alarm/network/Bedrock/Athena inputs, and require the
+freeze production-shared alarm/network/Bedrock inputs, and require the
 administrator's automatically requested alarm-email subscription to be
 confirmed. Unrelated entries in an owner-only provider env file are ignored and
 never copied into the retained secret.
@@ -2491,8 +2439,8 @@ For `managed-cognito`, that deployer also creates a separate
 `AxonLLMControlPlaneStack`: private AMD64 Fargate tasks behind a
 Cognito-authenticated HTTPS ALB and stable Route 53 name. It binds AgentCore's
 verified canonical table output and imports its KMS/outbox resources, exposes
-tenant admin and datasource routes, suppresses chat/model/query execution with
-`AXON_CONTROL_PLANE_ONLY=true`, and has no Athena/STS authority. The
+tenant administration, and suppresses execution routes with
+`AXON_CONTROL_PLANE_ONLY=true`. The
 `external-oidc` path currently deploys AgentCore only and does not receive this
 Cognito-authenticated web control plane.
 The release workflow records Fargate and AgentCore as distinct targets in its
@@ -2510,8 +2458,8 @@ independently pre-staged and reviewed managed-Cognito qualification namespace,
 runs seven coordinated launch gates, publishes signed rehearsal evidence,
 tears down both qualification namespaces, and records a signed teardown
 receipt. Only then can its `workflow_call`-only production leaf deploy a
-high-entropy candidate, complete backup/restore and authenticated
-provider/query/tool certification, promote the exact runtime version, and
+high-entropy candidate, complete PITR restore and authenticated
+provider/tool certification, promote the exact runtime version, and
 persist KMS-signed schema-v5 deployment evidence under S3 Object Lock. It
 discards pre-promotion failures and compensates post-promotion failures that
 occur before evidence persistence.
@@ -2533,12 +2481,6 @@ retained `alias/axonllm/release-signing-v*` alias. `v0.2.4` completed this flow
 for both targets; see the
 [production release record](docs/PRODUCTION_RUNBOOK.md#release-status).
 See the [AgentCore Runbook](docs/AGENTCORE_RUNBOOK.md).
-
-### AWS App Runner
-
-`deploy.sh` remains a legacy reference path. It does not provide the canonical
-identity, private networking, immutable release gate, backup, or readiness
-controls of the checked-in CDK stacks and is not a production-equivalent option.
 
 ### Docker (self-hosted)
 
@@ -2574,7 +2516,7 @@ state or rebuild the image after configuration changes.
 | TLS | Terminate TLS at ALB/CloudFront, not at the gateway |
 | Budgets | Set org-level budget limits before granting project access |
 | Release image | Deploy only the private ECR `@sha256` URI that passed verification for the selected `fargate` or `agentcore` target |
-| Recovery | Verify PITR and a recent AWS Backup recovery point; complete and retain evidence from a real AWS restore exercise |
+| Recovery | Verify PITR, deletion protection, and AWS-managed encryption; complete and retain evidence from a real PITR restore exercise |
 
 Do not use a green liveness probe as the release gate. Run
 `/admin/production-checklist`, resolve every `FAIL`, investigate every
@@ -2595,6 +2537,11 @@ When AxonLLM runs embedded inside Ostiari, each completed
 request is forwarded as a trace event into Ostiari's Live Traces view. Forwarding
 activates automatically when Ostiari is *detected* — no code change to standalone
 deployments (with neither of the following, it's a no-op).
+
+Use `ostiari-embedded` for an in-process/container integration or
+`ostiari-agentcore` for a headless AgentCore runtime. Ostiari owns login,
+administration, and the public URL in both modes. AxonLLM therefore does not
+expose its Starlette control plane when `AXON_EXPERIENCE_OWNER=ostiari`.
 
 **Two delivery paths (either or both):**
 

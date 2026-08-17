@@ -52,10 +52,7 @@ DLQ_ARN = f"arn:aws:sqs:{REGION}:{ACCOUNT}:{DLQ_NAME}"
 OUTBOX_URL = f"https://sqs.{REGION}.amazonaws.com/{ACCOUNT}/{OUTBOX_NAME}"
 DLQ_URL = f"https://sqs.{REGION}.amazonaws.com/{ACCOUNT}/{DLQ_NAME}"
 ALARM_ARN = f"arn:aws:cloudwatch:{REGION}:{ACCOUNT}:alarm:axonllm-security-event-dlq"
-SECURITY_LOG_GROUP_ARN = (
-    f"arn:aws:logs:{REGION}:{ACCOUNT}:"
-    "log-group:/aws/axonllm/security-events"
-)
+SECURITY_LOG_GROUP_ARN = f"arn:aws:logs:{REGION}:{ACCOUNT}:log-group:/aws/axonllm/security-events"
 STATE_MACHINE_ARN = f"arn:aws:states:{REGION}:{ACCOUNT}:stateMachine:AxonLLMLaunchCoordinator:7"
 EXECUTION_ROLE_ARN = f"arn:aws:iam::{ACCOUNT}:role/AxonLLMLaunchCoordinatorExecutionRole"
 LAUNCH_ROLE_ARN = f"arn:aws:iam::{ACCOUNT}:role/AxonLLMLaunchGatesRole"
@@ -116,15 +113,11 @@ def _config_value(now: datetime = NOW) -> dict[str, Any]:
         "scenario": {
             "tenantId": "tenant-launch",
             "projectId": "project-launch",
-            "datasourceId": "launch-datasource",
-            "selectSql": "SELECT value FROM launch_canary",
             "model": "launch-model",
             "primaryProvider": "openai",
             "fallbackProvider": "anthropic",
             "controlPlaneFault": "dynamodb",
             "startupDeadlineSeconds": 60,
-            "maxRows": 100,
-            "scanLimitBytes": 1024 * 1024,
             "faultTtlSeconds": 300,
         },
     }
@@ -176,21 +169,6 @@ def _all_observations() -> dict[str, dict[str, Any]]:
             "timedOutRuntimeId": "runtime-old",
             "replacementRuntimeId": "runtime-new",
             "replacementReadyStatusCode": 200,
-        },
-        "queryBoundaryLimitsAndReconciliation": {
-            "mutationStatusCode": 400,
-            "multipleStatementsStatusCode": 400,
-            "outOfDatasourceStatusCode": 403,
-            "requestedMaxRows": 100,
-            "returnedRowCount": 25,
-            "scanLimitBytes": 1024 * 1024,
-            "observedBytesScanned": 512 * 1024,
-            "interruptedRequestId": "query-request-1",
-            "terminalState": "CANCELLED",
-            "reservationUnitsAfter": 0,
-            "durableResultAuditCount": 1,
-            "unavailableBindingState": "DEFERRED",
-            "unavailableBindingReservationReleased": False,
         },
         "recoveryCutoverAndRollback": {
             "primaryTableArn": STATE_TABLE_ARN,
@@ -315,9 +293,7 @@ class FakeAws:
                                     "SecurityEventOutboxQueueArn": (resources.outbox_queue_arn),
                                     "SecurityEventOutboxQueueUrl": (resources.outbox_queue_url),
                                     "SecurityEventDeadLetterQueueUrl": (resources.dead_letter_queue_url),
-                                    "SecurityEventLogGroupArn": (
-                                        resources.security_event_log_group_arn
-                                    ),
+                                    "SecurityEventLogGroupArn": (resources.security_event_log_group_arn),
                                     "RuntimeImageUri": (self.binding.release["agentcoreImage"]),
                                 }
                             ),
@@ -676,12 +652,8 @@ class StepFunctionsAws:
             result = {
                 "executionArn": execution["executionArn"],
                 "name": execution["name"],
-                "stateMachineArn": (
-                    self.config.coordinator.state_machine_base_arn
-                ),
-                "stateMachineVersionArn": (
-                    self.config.coordinator.state_machine_version_arn
-                ),
+                "stateMachineArn": (self.config.coordinator.state_machine_base_arn),
+                "stateMachineVersionArn": (self.config.coordinator.state_machine_version_arn),
                 "input": execution["input"],
                 "status": status,
             }
@@ -766,18 +738,11 @@ def test_step_functions_retry_output_converges_across_multiple_polls() -> None:
     )
 
     assert result == {"converged": True}
-    starts = [
-        parameters["name"]
-        for operation, parameters in aws.calls
-        if operation == "start_execution"
-    ]
+    starts = [parameters["name"] for operation, parameters in aws.calls if operation == "start_execution"]
     assert len(starts) == 2
     assert not starts[0].endswith("-r01")
     assert starts[1].endswith("-r01")
-    assert sum(
-        operation == "describe_execution"
-        for operation, _parameters in aws.calls
-    ) >= 8
+    assert sum(operation == "describe_execution" for operation, _parameters in aws.calls) >= 8
 
 
 def test_step_functions_retry_output_stops_at_reviewed_attempt_bound() -> None:
@@ -805,13 +770,7 @@ def test_step_functions_retry_output_stops_at_reviewed_attempt_bound() -> None:
             binding=binding,
         )
 
-    assert (
-        sum(
-            operation == "start_execution"
-            for operation, _parameters in aws.calls
-        )
-        == config.limits.max_attempts
-    )
+    assert sum(operation == "start_execution" for operation, _parameters in aws.calls) == config.limits.max_attempts
 
 
 def test_ambiguous_start_with_absent_describe_is_not_treated_as_drained() -> None:
@@ -839,14 +798,8 @@ def test_ambiguous_start_with_absent_describe_is_not_treated_as_drained() -> Non
             binding=binding,
         )
 
-    assert any(
-        operation == "start_execution"
-        for operation, _parameters in aws.calls
-    )
-    assert not any(
-        operation == "stop_execution"
-        for operation, _parameters in aws.calls
-    )
+    assert any(operation == "start_execution" for operation, _parameters in aws.calls)
+    assert not any(operation == "stop_execution" for operation, _parameters in aws.calls)
 
 
 def test_stop_and_drain_aborts_a_bound_running_execution() -> None:
@@ -854,11 +807,9 @@ def test_stop_and_drain_aborts_a_bound_running_execution() -> None:
     binding = _binding(config)
     payload = _coordinator_payload(config, binding)
     aws = StepFunctionsAws(payload, config)
-    name, execution_arn = (
-        rehearsal.StepFunctionsCoordinator._execution_identity(
-            payload,
-            config.coordinator,
-        )
+    name, execution_arn = rehearsal.StepFunctionsCoordinator._execution_identity(
+        payload,
+        config.coordinator,
     )
     input_text = rehearsal._canonical_bytes(payload).decode().rstrip("\n")
     aws.executions[execution_arn] = {
@@ -881,10 +832,7 @@ def test_stop_and_drain_aborts_a_bound_running_execution() -> None:
         config=config,
         binding=binding,
     )
-    assert any(
-        operation == "stop_execution"
-        for operation, _parameters in aws.calls
-    )
+    assert any(operation == "stop_execution" for operation, _parameters in aws.calls)
     assert aws.executions[execution_arn]["status"] == "ABORTED"
 
 
@@ -892,11 +840,9 @@ def test_stop_and_drain_waits_for_ambiguous_execution_visibility() -> None:
     config = _parse_config()
     binding = _binding(config)
     payload = _coordinator_payload(config, binding)
-    name, execution_arn = (
-        rehearsal.StepFunctionsCoordinator._execution_identity(
-            payload,
-            config.coordinator,
-        )
+    name, execution_arn = rehearsal.StepFunctionsCoordinator._execution_identity(
+        payload,
+        config.coordinator,
     )
     input_text = rehearsal._canonical_bytes(payload).decode().rstrip("\n")
 
@@ -912,10 +858,7 @@ def test_stop_and_drain_waits_for_ambiguous_execution_visibility() -> None:
             parameters: Mapping[str, Any],
             timeout_seconds: float,
         ) -> Mapping[str, Any]:
-            if (
-                operation == "describe_execution"
-                and self.hidden_descriptions > 0
-            ):
+            if operation == "describe_execution" and self.hidden_descriptions > 0:
                 self.hidden_descriptions -= 1
                 self.calls.append((operation, dict(parameters)))
                 raise rehearsal.AwsCallError(
@@ -951,14 +894,8 @@ def test_stop_and_drain_waits_for_ambiguous_execution_visibility() -> None:
         config=config,
         binding=binding,
     )
-    assert sum(
-        operation == "describe_execution"
-        for operation, _parameters in aws.calls
-    ) >= 4
-    assert any(
-        operation == "stop_execution"
-        for operation, _parameters in aws.calls
-    )
+    assert sum(operation == "describe_execution" for operation, _parameters in aws.calls) >= 4
+    assert any(operation == "stop_execution" for operation, _parameters in aws.calls)
     assert aws.executions[execution_arn]["status"] == "ABORTED"
 
 
@@ -1100,10 +1037,9 @@ def test_all_gate_sequences_emit_only_final_valid_observations(
         assert first_payload["binding"]["reviewedConfigS3Uri"] == (REVIEWED_CONFIG_URI)
         assert first_payload["binding"]["reviewedConfigVersionId"] == (REVIEWED_CONFIG_VERSION_ID)
         assert first_payload["binding"]["controlPlaneImage"] == (CONTROL_PLANE_IMAGE)
-        assert {
-            (service, operation)
-            for service, operation, _parameters in aws.calls
-        } == {("sts", "get_caller_identity")}
+        assert {(service, operation) for service, operation, _parameters in aws.calls} == {
+            ("sts", "get_caller_identity")
+        }
 
 
 def test_worker_side_preflight_verifies_live_release_without_launch_identity() -> None:
@@ -1119,10 +1055,7 @@ def test_worker_side_preflight_verifies_live_release_without_launch_identity() -
         require_launch_identity=False,
     )
 
-    operations = {
-        (service, operation)
-        for service, operation, _parameters in aws.calls
-    }
+    operations = {(service, operation) for service, operation, _parameters in aws.calls}
     assert ("sts", "get_caller_identity") not in operations
     assert {
         ("cloudformation", "describe_stacks"),

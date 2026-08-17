@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 
 import pytest
@@ -27,11 +28,7 @@ def _one_resource(template: dict, resource_type: str) -> dict:
 
 def _client(template: dict, client_name: str) -> dict:
     clients = _resources(template, "AWS::Cognito::UserPoolClient")
-    matches = [
-        client
-        for client in clients
-        if client["Properties"]["ClientName"] == client_name
-    ]
+    matches = [client for client in clients if client["Properties"]["ClientName"] == client_name]
     assert len(matches) == 1
     return matches[0]
 
@@ -77,29 +74,21 @@ def test_identity_inputs_are_explicit_https_values(identity_template):
         "Type": "String",
         "Default": "custom-domain",
         "AllowedValues": ["custom-domain", "cloudfront"],
-        "Description": (
-            "Control-plane endpoint architecture. Existing deployments "
-            "default to custom-domain."
-        ),
+        "Description": ("Control-plane endpoint architecture. Existing deployments default to custom-domain."),
     }
     assert "Default" not in parameters["HostedUiDomainPrefix"]
-    assert "Default" not in parameters["OAuthCallbackUrls"]
+    assert "OAuthCallbackUrls" not in parameters
     assert parameters["ControlPlaneDomainName"]["Default"] == ""
     assert "Default" not in parameters["SesFromEmail"]
     assert "Default" not in parameters["SesVerifiedDomain"]
     assert parameters["HostedUiDomainPrefix"]["MinLength"] == 3
     assert parameters["HostedUiDomainPrefix"]["MaxLength"] == 63
-    assert parameters["OAuthCallbackUrls"]["Type"] == "CommaDelimitedList"
-    assert parameters["OAuthCallbackUrls"]["AllowedPattern"].startswith("^https://")
-    assert parameters["ControlPlaneDomainName"]["AllowedPattern"].startswith(
-        r"^(?:|"
-    )
-    assert parameters["SesFromEmail"]["AllowedPattern"].startswith(
-        r"^[^@\s]+@"
-    )
-    assert parameters["SesVerifiedDomain"]["AllowedPattern"].endswith(
-        r"[a-z]{2,63}$"
-    )
+    assert parameters["ControlPlaneDomainName"]["AllowedPattern"].startswith(r"^(?:|")
+    assert parameters["SesFromEmail"]["AllowedPattern"].startswith(r"^[^@\s]+@")
+    source_pattern = parameters["SesVerifiedDomain"]["AllowedPattern"]
+    assert re.fullmatch(source_pattern, "example.com")
+    assert re.fullmatch(source_pattern, "no-reply@example.com")
+    assert re.fullmatch(source_pattern, "other@EXAMPLE.com") is None
 
 
 def test_identity_stack_creates_no_service_roles(identity_template):
@@ -107,14 +96,8 @@ def test_identity_stack_creates_no_service_roles(identity_template):
     assert roles == []
     for role in roles:
         properties = role["Properties"]
-        assert (
-            "AxonLLMAgentCoreServiceBoundary-axprod-us-east-1"
-            in json.dumps(properties["PermissionsBoundary"])
-        )
-        tags = {
-            tag["Key"]: tag["Value"]
-            for tag in properties["Tags"]
-        }
+        assert "AxonLLMAgentCoreServiceBoundary-axprod-us-east-1" in json.dumps(properties["PermissionsBoundary"])
+        tags = {tag["Key"]: tag["Value"] for tag in properties["Tags"]}
         assert tags["Application"] == "AxonLLM"
         assert tags["AxonLLMTrustDomain"] == "axprod"
 
@@ -184,28 +167,28 @@ def test_tenant_and_project_are_operator_controlled_claims(identity_template):
 
     client = _client(
         identity_template,
-        "axonllm-agentcore-pkce",
+        "axonllm-agentcore-audience",
     )["Properties"]
     assert {"custom:tenant_id", "custom:project_id"} <= set(client["ReadAttributes"])
     assert "custom:tenant_id" not in client["WriteAttributes"]
     assert "custom:project_id" not in client["WriteAttributes"]
 
 
-def test_public_client_is_code_pkce_shaped_without_implicit_flow(
+def test_runtime_audience_client_has_no_browser_authentication_flow(
     identity_template,
 ):
     client_resource = _client(
         identity_template,
-        "axonllm-agentcore-pkce",
+        "axonllm-agentcore-audience",
     )
     client = client_resource["Properties"]
     assert client_resource["DeletionPolicy"] == "Retain"
     assert client_resource["UpdateReplacePolicy"] == "Retain"
     assert client["GenerateSecret"] is False
-    assert client["AllowedOAuthFlows"] == ["code"]
+    assert "AllowedOAuthFlows" not in client
     assert "ExplicitAuthFlows" not in client
-    assert client["AllowedOAuthScopes"] == ["openid", "email", "profile"]
-    assert client["CallbackURLs"] == {"Ref": "OAuthCallbackUrls"}
+    assert "AllowedOAuthScopes" not in client
+    assert "CallbackURLs" not in client
     assert client["PreventUserExistenceErrors"] == "ENABLED"
     assert client["EnableTokenRevocation"] is True
     assert client["RefreshTokenRotation"] == {
@@ -278,7 +261,7 @@ def test_production_clients_keep_fifteen_minute_tokens(
     identity_template,
 ) -> None:
     for name in (
-        "axonllm-agentcore-pkce",
+        "axonllm-agentcore-audience",
         "axonllm-agentcore-certification",
         "axonllm-control-plane-alb",
     ):
@@ -315,14 +298,20 @@ def test_hosted_ui_and_standard_oidc_outputs_are_retained(identity_template):
     assert outputs["TenantClaimName"]["Value"] == "custom:tenant_id"
     assert outputs["ProjectClaimName"]["Value"] == "custom:project_id"
     assert outputs["EndpointMode"]["Value"] == {"Ref": "EndpointMode"}
-    assert outputs["AlbClientId"]["Value"]["Fn::If"][0] == (
-        "CustomDomainEndpoint"
+    alb_client_logical_id = next(
+        logical_id
+        for logical_id, resource in identity_template["Resources"].items()
+        if resource["Type"] == "AWS::Cognito::UserPoolClient"
+        and resource["Properties"]["ClientName"] == "axonllm-control-plane-alb"
     )
-    assert outputs["ControlPlaneDomainName"]["Value"]["Fn::If"] == [
-        "CustomDomainEndpoint",
-        {"Ref": "ControlPlaneDomainName"},
-        "",
-    ]
+    assert outputs["AlbClientId"]["Condition"] == "CustomDomainEndpoint"
+    assert outputs["AlbClientId"]["Value"] == {"Ref": alb_client_logical_id}
+    assert outputs["ControlPlaneDomainName"] == {
+        "Condition": "CustomDomainEndpoint",
+        "Description": "Stable hostname configured on the confidential ALB client",
+        "Export": {"Name": "AxonLLMIdentityStack:ControlPlaneDomainName"},
+        "Value": {"Ref": "ControlPlaneDomainName"},
+    }
 
 
 def test_identity_stack_creates_no_iam_or_lambda_resources(identity_template):

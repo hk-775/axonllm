@@ -28,27 +28,20 @@ for import_path in (SCRIPT_DIR, RELEASE_DIR):
     if str(import_path) not in sys.path:
         sys.path.insert(0, str(import_path))
 
-import certify_agentcore  # noqa: E402
 import launch_rehearsal_evidence as launch_evidence  # noqa: E402
 
 
 CONFIG_SCHEMA = "axonllm.agentcore-launch-rehearsal-operation-config/v2"
 STATE_SCHEMA = "axonllm.agentcore-launch-rehearsal-operation-state/v1"
 ACTION_SCHEMA = "axonllm.agentcore-launch-rehearsal-coordinator-action/v1"
-ACTION_RESULT_SCHEMA = (
-    "axonllm.agentcore-launch-rehearsal-coordinator-result/v1"
-)
-ACTION_RETRY_SCHEMA = (
-    "axonllm.agentcore-launch-rehearsal-coordinator-retry/v1"
-)
+ACTION_RESULT_SCHEMA = "axonllm.agentcore-launch-rehearsal-coordinator-result/v1"
+ACTION_RETRY_SCHEMA = "axonllm.agentcore-launch-rehearsal-coordinator-retry/v1"
 COORDINATOR_NOT_DRAINED_EXIT_CODE = 4
 COORDINATOR_DRAIN_TIMEOUT_SECONDS = 120.0
 COMMAND_OUTPUT_SCHEMA = launch_evidence.COMMAND_OUTPUT_SCHEMA
 EXPECTED_COMMANDS = launch_evidence.EXPECTED_COMMANDS
 ALL_GATES = tuple(EXPECTED_COMMANDS)
-ALL_ACTIONS = frozenset(
-    action for commands in EXPECTED_COMMANDS.values() for action in commands
-)
+ALL_ACTIONS = frozenset(action for commands in EXPECTED_COMMANDS.values() for action in commands)
 ROUTING_STRATEGIES = tuple(launch_evidence.ROUTING_STRATEGIES)
 
 MAX_CONFIG_BYTES = 256 * 1024
@@ -136,51 +129,18 @@ SECRET_FIELD = re.compile(
     r"(?i)(?:password|secret|api.?key|access.?token|refresh.?token|"
     r"authorization|private.?key|client.?secret|session.?cookie|bearer.?token)"
 )
-CONTROL_PLANE_DEPENDENCIES = frozenset(
-    {"athena", "dynamodb", "secrets-manager", "security-event-outbox"}
-)
+CONTROL_PLANE_DEPENDENCIES = frozenset({"dynamodb", "secrets-manager", "security-event-outbox"})
 
 
 ACTION_EVIDENCE_FIELDS: Mapping[str, frozenset[str]] = {
-    "induce-initialization-timeout": frozenset(
-        {"startupDeadlineSeconds", "timedOutRuntimeId"}
-    ),
+    "induce-initialization-timeout": frozenset({"startupDeadlineSeconds", "timedOutRuntimeId"}),
     "observe-exit-124": frozenset({"timeoutExitCode"}),
     "observe-runtime-replacement": frozenset({"replacementRuntimeId"}),
     "verify-replacement-ready": frozenset({"replacementReadyStatusCode"}),
-    "reject-query-boundaries": frozenset(
-        {
-            "mutationStatusCode",
-            "multipleStatementsStatusCode",
-            "outOfDatasourceStatusCode",
-            "requestedMaxRows",
-            "returnedRowCount",
-            "scanLimitBytes",
-            "observedBytesScanned",
-        }
-    ),
-    "interrupt-query": frozenset({"interruptedRequestId"}),
-    "verify-terminal-reconciliation": frozenset(
-        {
-            "terminalState",
-            "reservationUnitsAfter",
-            "durableResultAuditCount",
-        }
-    ),
-    "verify-deferred-accounting": frozenset(
-        {
-            "unavailableBindingState",
-            "unavailableBindingReservationReleased",
-        }
-    ),
     "restore-state": frozenset({"primaryTableArn", "restoredTableArn"}),
-    "cutover-restored-state": frozenset(
-        {"cutoverPhases", "cutoverSelectedTableArn"}
-    ),
+    "cutover-restored-state": frozenset({"cutoverPhases", "cutoverSelectedTableArn"}),
     "verify-restored-state": frozenset(),
-    "rollback-primary-state": frozenset(
-        {"rollbackPhases", "rollbackSelectedTableArn"}
-    ),
+    "rollback-primary-state": frozenset({"rollbackPhases", "rollbackSelectedTableArn"}),
     "verify-primary-state": frozenset(
         {
             "finalSelectedTableArn",
@@ -189,22 +149,14 @@ ACTION_EVIDENCE_FIELDS: Mapping[str, frozenset[str]] = {
             "controlPlaneRunningCountAfter",
         }
     ),
-    "deliver-security-events": frozenset(
-        {"configuredDestinationCount", "deliveredDestinationCount"}
-    ),
+    "deliver-security-events": frozenset({"configuredDestinationCount", "deliveredDestinationCount"}),
     "verify-outbox-drained": frozenset({"outboxMessagesAfterDelivery"}),
     "force-dead-letter": frozenset({"dlqMessagesAfterFailure"}),
     "verify-dead-letter-alarm": frozenset({"dlqAlarmState"}),
     "redrive-dead-letter": frozenset({"redrivenMessageCount"}),
-    "verify-redelivery": frozenset(
-        {"dlqMessagesAfterRedrive", "outboxMessagesAfterRedrive"}
-    ),
-    "exercise-routing-strategies": frozenset(
-        {"strategiesExercised", "candidateProviders", "requestCount"}
-    ),
-    "verify-routing-decisions": frozenset(
-        {"observedProviders", "successfulRequestCount"}
-    ),
+    "verify-redelivery": frozenset({"dlqMessagesAfterRedrive", "outboxMessagesAfterRedrive"}),
+    "exercise-routing-strategies": frozenset({"strategiesExercised", "candidateProviders", "requestCount"}),
+    "verify-routing-decisions": frozenset({"observedProviders", "successfulRequestCount"}),
     "inject-primary-provider-fault": frozenset(
         {
             "primaryProvider",
@@ -221,9 +173,7 @@ ACTION_EVIDENCE_FIELDS: Mapping[str, frozenset[str]] = {
         }
     ),
     "clear-primary-provider-fault": frozenset(),
-    "verify-primary-provider-recovery": frozenset(
-        {"postRecoveryStatusCode"}
-    ),
+    "verify-primary-provider-recovery": frozenset({"postRecoveryStatusCode"}),
     "inject-control-plane-fault": frozenset({"faultedDependency"}),
     "verify-control-plane-fail-closed": frozenset(
         {
@@ -233,9 +183,7 @@ ACTION_EVIDENCE_FIELDS: Mapping[str, frozenset[str]] = {
         }
     ),
     "clear-control-plane-fault": frozenset(),
-    "verify-control-plane-recovery": frozenset(
-        {"readyAfterRecoveryStatusCode", "readAfterRecoveryStatusCode"}
-    ),
+    "verify-control-plane-recovery": frozenset({"readyAfterRecoveryStatusCode", "readAfterRecoveryStatusCode"}),
 }
 
 FAULT_ADD_ACTIONS = frozenset(
@@ -255,15 +203,12 @@ FAULT_REMOVE_ACTIONS = frozenset(
 FIXTURE_ADD_ACTIONS = frozenset(
     {
         "restore-state",
-        "interrupt-query",
         "deliver-security-events",
         "exercise-routing-strategies",
     }
 )
 DLQ_ADD_ACTIONS = frozenset({"force-dead-letter"})
-DLQ_REMOVE_ACTIONS = frozenset(
-    {"redrive-dead-letter", "verify-redelivery"}
-)
+DLQ_REMOVE_ACTIONS = frozenset({"redrive-dead-letter", "verify-redelivery"})
 
 
 class LaunchOperationError(RuntimeError):
@@ -366,9 +311,7 @@ class Coordinator:
 
     @property
     def state_machine_name(self) -> str:
-        match = STATE_MACHINE_VERSION_ARN.fullmatch(
-            self.state_machine_version_arn
-        )
+        match = STATE_MACHINE_VERSION_ARN.fullmatch(self.state_machine_version_arn)
         assert match is not None
         return match.group("name")
 
@@ -383,15 +326,11 @@ class Coordinator:
 class Scenario:
     tenant_id: str
     project_id: str
-    datasource_id: str
-    select_sql: str
     model: str
     primary_provider: str
     fallback_provider: str
     control_plane_fault: str
     startup_deadline_seconds: int
-    max_rows: int
-    scan_limit_bytes: int
     fault_ttl_seconds: int
 
 
@@ -478,9 +417,7 @@ class BotoAwsTransport:
                     ),
                 )
             except Exception as exc:
-                raise LaunchOperationError(
-                    "AWS client initialization failed"
-                ) from exc
+                raise LaunchOperationError("AWS client initialization failed") from exc
             self._clients[key] = client
         method = getattr(client, operation, None)
         if not callable(method):
@@ -489,24 +426,14 @@ class BotoAwsTransport:
             response = method(**dict(parameters))
         except Exception as exc:
             raw_response = getattr(exc, "response", None)
-            raw_error = (
-                raw_response.get("Error")
-                if isinstance(raw_response, Mapping)
-                else None
-            )
-            code = (
-                raw_error.get("Code")
-                if isinstance(raw_error, Mapping)
-                else None
-            )
+            raw_error = raw_response.get("Error") if isinstance(raw_response, Mapping) else None
+            code = raw_error.get("Code") if isinstance(raw_error, Mapping) else None
             raise AwsCallError(
                 service,
                 code if isinstance(code, str) and code else "Unknown",
             ) from exc
         if not isinstance(response, Mapping):
-            raise LaunchOperationError(
-                f"AWS {service} returned an invalid response"
-            )
+            raise LaunchOperationError(f"AWS {service} returned an invalid response")
         return response
 
 
@@ -530,9 +457,7 @@ def _exact_fields(
             details.append("missing " + ", ".join(missing))
         if extra:
             details.append("unsupported " + ", ".join(extra))
-        raise LaunchOperationError(
-            f"{location} fields are invalid: {'; '.join(details)}"
-        )
+        raise LaunchOperationError(f"{location} fields are invalid: {'; '.join(details)}")
 
 
 def _safe_string(
@@ -566,14 +491,8 @@ def _integer(
     minimum: int,
     maximum: int,
 ) -> int:
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, int)
-        or not minimum <= value <= maximum
-    ):
-        raise LaunchOperationError(
-            f"{location} must be an integer between {minimum} and {maximum}"
-        )
+    if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
+        raise LaunchOperationError(f"{location} must be an integer between {minimum} and {maximum}")
     return value
 
 
@@ -590,9 +509,7 @@ def _number(
         or not math.isfinite(float(value))
         or not minimum <= float(value) <= maximum
     ):
-        raise LaunchOperationError(
-            f"{location} must be between {minimum} and {maximum}"
-        )
+        raise LaunchOperationError(f"{location} must be between {minimum} and {maximum}")
     return float(value)
 
 
@@ -658,9 +575,7 @@ def _read_regular(path: Path, *, maximum: int) -> bytes:
         or before.st_uid != os.getuid()
         or stat.S_IMODE(before.st_mode) & 0o077
     ):
-        raise LaunchOperationError(
-            f"input must be an owner-only regular non-symlink file: {absolute}"
-        )
+        raise LaunchOperationError(f"input must be an owner-only regular non-symlink file: {absolute}")
     if before.st_size > maximum:
         raise LaunchOperationError(f"input is too large: {absolute}")
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
@@ -698,9 +613,7 @@ def _strict_json(raw: bytes, location: str) -> Any:
     except LaunchOperationError:
         raise
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise LaunchOperationError(
-            f"{location} is not strict UTF-8 JSON"
-        ) from exc
+        raise LaunchOperationError(f"{location} is not strict UTF-8 JSON") from exc
 
 
 def _reject_secret_fields(value: Any, path: tuple[str, ...] = ()) -> None:
@@ -708,9 +621,7 @@ def _reject_secret_fields(value: Any, path: tuple[str, ...] = ()) -> None:
         for key, item in value.items():
             current = (*path, key)
             if SECRET_FIELD.search(key) is not None:
-                raise LaunchOperationError(
-                    "configuration contains a secret-like field"
-                )
+                raise LaunchOperationError("configuration contains a secret-like field")
             _reject_secret_fields(item, current)
     elif isinstance(value, list):
         for item in value:
@@ -734,14 +645,9 @@ def _resource_arn(
         match is None
         or match.group("account") != account_id
         or match.group("region") != region
-        or (
-            partition is not None
-            and match.group("partition") != partition
-        )
+        or (partition is not None and match.group("partition") != partition)
     ):
-        raise LaunchOperationError(
-            f"{location} is outside the exact release account and region"
-        )
+        raise LaunchOperationError(f"{location} is outside the exact release account and region")
     return arn, match
 
 
@@ -769,9 +675,7 @@ def _queue_url(
         or parsed.fragment
         or parsed.path != f"/{account_id}/{queue_name}"
     ):
-        raise LaunchOperationError(
-            f"{location} is not the exact queue URL for its ARN"
-        )
+        raise LaunchOperationError(f"{location} is not the exact queue URL for its ARN")
     return url
 
 
@@ -793,17 +697,9 @@ def _parse_review(
         reviewed_at > now + MAX_CLOCK_SKEW
         or expires_at <= reviewed_at
         or expires_at - reviewed_at > MAX_REVIEW_LIFETIME
-        or (
-            expires_at <= now
-            and (
-                not allow_expired
-                or now - expires_at > MAX_CLEANUP_AFTER_EXPIRY
-            )
-        )
+        or (expires_at <= now and (not allow_expired or now - expires_at > MAX_CLEANUP_AFTER_EXPIRY))
     ):
-        raise LaunchOperationError(
-            "configuration review is stale or outside its approval window"
-        )
+        raise LaunchOperationError("configuration review is stale or outside its approval window")
     return Review(
         review_id=_safe_id(review["reviewId"], "review.reviewId"),
         reviewer=_safe_id(review["reviewer"], "review.reviewer"),
@@ -858,13 +754,8 @@ def _parse_resources(
         raw["runtimeEndpointName"],
         "resources.runtimeEndpointName",
     )
-    if (
-        endpoint_match.group("runtime") != runtime_match.group("runtime")
-        or endpoint_name != "production"
-    ):
-        raise LaunchOperationError(
-            "runtime endpoint is not the exact production endpoint"
-        )
+    if endpoint_match.group("runtime") != runtime_match.group("runtime") or endpoint_name != "production":
+        raise LaunchOperationError("runtime endpoint is not the exact production endpoint")
     agentcore_stack_arn, _ = _resource_arn(
         raw["agentcoreStackArn"],
         STACK_ARN,
@@ -897,12 +788,8 @@ def _parse_resources(
         region=region,
         partition=partition,
     )
-    if not restored_match.group("name").startswith(
-        f"{state_match.group('name')}-restore-validation-"
-    ):
-        raise LaunchOperationError(
-            "restored state table is outside the reviewed restore namespace"
-        )
+    if not restored_match.group("name").startswith(f"{state_match.group('name')}-restore-validation-"):
+        raise LaunchOperationError("restored state table is outside the reviewed restore namespace")
     outbox_arn, outbox_match = _resource_arn(
         raw["outboxQueueArn"],
         QUEUE_ARN,
@@ -1008,8 +895,7 @@ def _parse_coordinator(
         or state_match.group("account") != account_id
     ):
         raise LaunchOperationError(
-            "coordinator state machine must be an exact version ARN in the "
-            "release account and region"
+            "coordinator state machine must be an exact version ARN in the release account and region"
         )
 
     roles: list[str] = []
@@ -1026,14 +912,10 @@ def _parse_coordinator(
             or match.group("account") != account_id
             or role.endswith("/")
         ):
-            raise LaunchOperationError(
-                f"coordinator.{field} must be an exact release-account role ARN"
-            )
+            raise LaunchOperationError(f"coordinator.{field} must be an exact release-account role ARN")
         roles.append(role)
     if roles[0] == roles[1]:
-        raise LaunchOperationError(
-            "coordinator execution and launch roles must be distinct"
-        )
+        raise LaunchOperationError("coordinator execution and launch roles must be distinct")
 
     lease_table, _ = _resource_arn(
         raw["leaseTableArn"],
@@ -1047,9 +929,7 @@ def _parse_coordinator(
         resources.state_table_arn,
         resources.restored_state_table_arn,
     }:
-        raise LaunchOperationError(
-            "coordinator lease table must be separate from runtime state"
-        )
+        raise LaunchOperationError("coordinator lease table must be separate from runtime state")
     watchdog_alarm, _ = _resource_arn(
         raw["watchdogAlarmArn"],
         ALARM_ARN,
@@ -1059,9 +939,7 @@ def _parse_coordinator(
         partition=partition,
     )
     if watchdog_alarm == resources.dead_letter_alarm_arn:
-        raise LaunchOperationError(
-            "coordinator watchdog and event DLQ alarms must be distinct"
-        )
+        raise LaunchOperationError("coordinator watchdog and event DLQ alarms must be distinct")
     kms_key = _safe_string(
         raw["kmsKeyArn"],
         "coordinator.kmsKeyArn",
@@ -1074,10 +952,7 @@ def _parse_coordinator(
         or kms_match.group("region") != region
         or kms_match.group("account") != account_id
     ):
-        raise LaunchOperationError(
-            "coordinator KMS key must be an exact key ARN in the release "
-            "account and region"
-        )
+        raise LaunchOperationError("coordinator KMS key must be an exact key ARN in the release account and region")
     return Coordinator(
         state_machine_version_arn=state_machine,
         execution_role_arn=roles[0],
@@ -1101,15 +976,11 @@ def _parse_scenario(value: Any) -> Scenario:
         {
             "tenantId",
             "projectId",
-            "datasourceId",
-            "selectSql",
             "model",
             "primaryProvider",
             "fallbackProvider",
             "controlPlaneFault",
             "startupDeadlineSeconds",
-            "maxRows",
-            "scanLimitBytes",
             "faultTtlSeconds",
         },
         "configuration.scenario",
@@ -1124,36 +995,17 @@ def _parse_scenario(value: Any) -> Scenario:
         "scenario.fallbackProvider",
         maximum=64,
     )
-    if (
-        PROVIDER.fullmatch(primary) is None
-        or PROVIDER.fullmatch(fallback) is None
-        or primary == fallback
-    ):
-        raise LaunchOperationError(
-            "scenario providers must be distinct provider identifiers"
-        )
+    if PROVIDER.fullmatch(primary) is None or PROVIDER.fullmatch(fallback) is None or primary == fallback:
+        raise LaunchOperationError("scenario providers must be distinct provider identifiers")
     model = _safe_string(raw["model"], "scenario.model", maximum=256)
     if MODEL.fullmatch(model) is None:
         raise LaunchOperationError("scenario.model is invalid")
-    try:
-        select_sql = certify_agentcore._select_sql(raw["selectSql"])
-    except certify_agentcore.CertificationError as exc:
-        raise LaunchOperationError(
-            "scenario.selectSql must be one read-only Athena query"
-        ) from exc
     dependency = raw["controlPlaneFault"]
     if dependency not in CONTROL_PLANE_DEPENDENCIES:
-        raise LaunchOperationError(
-            "scenario.controlPlaneFault is not an approved dependency"
-        )
+        raise LaunchOperationError("scenario.controlPlaneFault is not an approved dependency")
     return Scenario(
         tenant_id=_safe_id(raw["tenantId"], "scenario.tenantId"),
         project_id=_safe_id(raw["projectId"], "scenario.projectId"),
-        datasource_id=_safe_id(
-            raw["datasourceId"],
-            "scenario.datasourceId",
-        ),
-        select_sql=select_sql,
         model=model,
         primary_provider=primary,
         fallback_provider=fallback,
@@ -1163,18 +1015,6 @@ def _parse_scenario(value: Any) -> Scenario:
             "scenario.startupDeadlineSeconds",
             minimum=1,
             maximum=300,
-        ),
-        max_rows=_integer(
-            raw["maxRows"],
-            "scenario.maxRows",
-            minimum=1,
-            maximum=10_000,
-        ),
-        scan_limit_bytes=_integer(
-            raw["scanLimitBytes"],
-            "scenario.scanLimitBytes",
-            minimum=1,
-            maximum=1024 * 1024 * 1024,
         ),
         fault_ttl_seconds=_integer(
             raw["faultTtlSeconds"],
@@ -1268,9 +1108,7 @@ def parse_config(
         ),
     )
     if limits.request_timeout_seconds > limits.operation_timeout_seconds:
-        raise LaunchOperationError(
-            "request timeout exceeds the operation timeout"
-        )
+        raise LaunchOperationError("request timeout exceeds the operation timeout")
     resources = _parse_resources(
         raw["resources"],
         account_id=account_id,
@@ -1286,14 +1124,8 @@ def parse_config(
         resources=resources,
     )
     scenario = _parse_scenario(raw["scenario"])
-    if (
-        not allow_expired
-        and now + timedelta(seconds=scenario.fault_ttl_seconds)
-        > review.expires_at
-    ):
-        raise LaunchOperationError(
-            "fault TTL extends beyond the reviewed configuration window"
-        )
+    if not allow_expired and now + timedelta(seconds=scenario.fault_ttl_seconds) > review.expires_at:
+        raise LaunchOperationError("fault TTL extends beyond the reviewed configuration window")
     return OperationConfig(
         account_id=account_id,
         review=review,
@@ -1347,10 +1179,7 @@ def _reviewed_config_reference(
         or SHA256.fullmatch(sha256) is None
         or sha256 != expected_sha256
     ):
-        raise LaunchOperationError(
-            "reviewed configuration reference is not an exact immutable S3 "
-            "version"
-        )
+        raise LaunchOperationError("reviewed configuration reference is not an exact immutable S3 version")
     return {
         "reviewedConfigS3Uri": uri,
         "reviewedConfigVersionId": version_id,
@@ -1378,43 +1207,27 @@ def build_release_binding(
     if SHA.fullmatch(release_commit) is None:
         raise LaunchOperationError("release commit must be a full lowercase SHA")
     if SHA.fullmatch(workflow_commit) is None:
-        raise LaunchOperationError(
-            "workflow commit must be a full lowercase SHA"
-        )
+        raise LaunchOperationError("workflow commit must be a full lowercase SHA")
     if REGION.fullmatch(region) is None:
         raise LaunchOperationError("region is invalid")
     if REPOSITORY.fullmatch(repository) is None:
         raise LaunchOperationError("repository is invalid")
-    if RUN_NUMBER.fullmatch(run_id) is None or RUN_NUMBER.fullmatch(
-        run_attempt
-    ) is None:
+    if RUN_NUMBER.fullmatch(run_id) is None or RUN_NUMBER.fullmatch(run_attempt) is None:
         raise LaunchOperationError("workflow run identity is invalid")
-    expected_ref = (
-        f"{repository}/{launch_evidence.GATE_WORKFLOW}@refs/heads/main"
-    )
+    expected_ref = f"{repository}/{launch_evidence.GATE_WORKFLOW}@refs/heads/main"
     if workflow_ref != expected_ref:
-        raise LaunchOperationError(
-            "workflow ref is not the protected launch-gates workflow"
-        )
+        raise LaunchOperationError("workflow ref is not the protected launch-gates workflow")
     image_matches: list[re.Match[str]] = []
     for image, location in (
         (agentcore_image, "AgentCore image"),
         (control_plane_image, "control-plane image"),
     ):
         match = ECR_IMAGE.fullmatch(image)
-        if (
-            match is None
-            or match.group("account") != account_id
-            or match.group("region") != region
-        ):
-            raise LaunchOperationError(
-                f"{location} must be an exact release-account ECR digest URI"
-            )
+        if match is None or match.group("account") != account_id or match.group("region") != region:
+            raise LaunchOperationError(f"{location} must be an exact release-account ECR digest URI")
         image_matches.append(match)
     if agentcore_image == control_plane_image:
-        raise LaunchOperationError(
-            "AgentCore and Fargate images must be distinct digest URIs"
-        )
+        raise LaunchOperationError("AgentCore and Fargate images must be distinct digest URIs")
     config_reference = _reviewed_config_reference(
         uri=reviewed_config_uri,
         version_id=reviewed_config_version_id,
@@ -1464,22 +1277,16 @@ def _assert_no_symlink_components(
         except FileNotFoundError:
             continue
         except OSError as exc:
-            raise LaunchOperationError(
-                f"cannot inspect {location} path component: {current}"
-            ) from exc
+            raise LaunchOperationError(f"cannot inspect {location} path component: {current}") from exc
         if stat.S_ISLNK(metadata.st_mode):
-            raise LaunchOperationError(
-                f"{location} path contains a symlink: {current}"
-            )
+            raise LaunchOperationError(f"{location} path contains a symlink: {current}")
 
 
 class StateDirectory:
     """Owner-only state directory with atomic files and a process lock."""
 
     def __init__(self, path: Path) -> None:
-        self.path = Path(
-            os.path.abspath(os.path.expanduser(os.fspath(path)))
-        )
+        self.path = Path(os.path.abspath(os.path.expanduser(os.fspath(path))))
         self._directory_fd: int | None = None
         self._lock_fd: int | None = None
 
@@ -1489,18 +1296,14 @@ class StateDirectory:
             self.path.mkdir(mode=0o700, parents=False, exist_ok=True)
             metadata = self.path.lstat()
         except OSError as exc:
-            raise LaunchOperationError(
-                "cannot create or inspect the state directory"
-            ) from exc
+            raise LaunchOperationError("cannot create or inspect the state directory") from exc
         if (
             stat.S_ISLNK(metadata.st_mode)
             or not stat.S_ISDIR(metadata.st_mode)
             or metadata.st_uid != os.getuid()
             or stat.S_IMODE(metadata.st_mode) != 0o700
         ):
-            raise LaunchOperationError(
-                "state directory must be an owner-only non-symlink directory"
-            )
+            raise LaunchOperationError("state directory must be an owner-only non-symlink directory")
         flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
         flags |= getattr(os, "O_CLOEXEC", 0)
         flags |= getattr(os, "O_NOFOLLOW", 0)
@@ -1521,26 +1324,20 @@ class StateDirectory:
                 or lock_metadata.st_uid != os.getuid()
                 or stat.S_IMODE(lock_metadata.st_mode) != 0o600
             ):
-                raise LaunchOperationError(
-                    "state lock must be an owner-only regular file"
-                )
+                raise LaunchOperationError("state lock must be an owner-only regular file")
             try:
                 fcntl.flock(
                     self._lock_fd,
                     fcntl.LOCK_EX | fcntl.LOCK_NB,
                 )
             except BlockingIOError as exc:
-                raise LaunchOperationError(
-                    "state directory is owned by a concurrent rehearsal"
-                ) from exc
+                raise LaunchOperationError("state directory is owned by a concurrent rehearsal") from exc
         except LaunchOperationError:
             self.__exit__(None, None, None)
             raise
         except OSError as exc:
             self.__exit__(None, None, None)
-            raise LaunchOperationError(
-                "cannot lock the state directory"
-            ) from exc
+            raise LaunchOperationError("cannot lock the state directory") from exc
         return self
 
     def __exit__(self, *_args: Any) -> None:
@@ -1582,9 +1379,7 @@ class StateDirectory:
                 or stat.S_IMODE(metadata.st_mode) != 0o600
                 or metadata.st_size > MAX_STATE_BYTES
             ):
-                raise LaunchOperationError(
-                    "rehearsal state must be an owner-only bounded regular file"
-                )
+                raise LaunchOperationError("rehearsal state must be an owner-only bounded regular file")
             with os.fdopen(descriptor, "rb") as stream:
                 descriptor = -1
                 raw = stream.read(MAX_STATE_BYTES + 1)
@@ -1627,9 +1422,7 @@ class StateDirectory:
             )
             os.fsync(self.directory_fd)
         except OSError as exc:
-            raise LaunchOperationError(
-                "cannot atomically persist rehearsal state"
-            ) from exc
+            raise LaunchOperationError("cannot atomically persist rehearsal state") from exc
         finally:
             if descriptor >= 0:
                 os.close(descriptor)
@@ -1745,29 +1538,14 @@ def _validate_ownership(
         },
         "action ownership",
     )
-    if (
-        ownership["ownerId"] != owner_id
-        or ownership["expiresAt"] != expected_expiry
-    ):
-        raise LaunchOperationError(
-            "action ownership is foreign or has an unexpected lease"
-        )
+    if ownership["ownerId"] != owner_id or ownership["expiresAt"] != expected_expiry:
+        raise LaunchOperationError("action ownership is foreign or has an unexpected lease")
 
     def owned_list(name: str) -> list[str]:
         raw = ownership[name]
-        if (
-            type(raw) is not list
-            or len(raw) > 256
-            or len(set(raw)) != len(raw)
-            or raw != sorted(raw)
-        ):
-            raise LaunchOperationError(
-                f"action ownership {name} must be sorted and unique"
-            )
-        return [
-            _validate_owned_id(item, owner_id, f"ownership {name}")
-            for item in raw
-        ]
+        if type(raw) is not list or len(raw) > 256 or len(set(raw)) != len(raw) or raw != sorted(raw):
+            raise LaunchOperationError(f"action ownership {name} must be sorted and unique")
+        return [_validate_owned_id(item, owner_id, f"ownership {name}") for item in raw]
 
     snapshots = _object(ownership["snapshots"], "action snapshots")
     _exact_fields(
@@ -1842,9 +1620,7 @@ def _validate_state(
         or state_value["configSha256"] != config.sha256
         or state_value["reviewExpiresAt"] != expected_expiry
     ):
-        raise LaunchOperationError(
-            "rehearsal state does not match this reviewed release execution"
-        )
+        raise LaunchOperationError("rehearsal state does not match this reviewed release execution")
     created = _timestamp(state_value["createdAt"], "state.createdAt")
     updated = _timestamp(state_value["updatedAt"], "state.updatedAt")
     expires = _timestamp(
@@ -1852,13 +1628,7 @@ def _validate_state(
         "state.reviewExpiresAt",
     )
     if (
-        (
-            expires <= now
-            and (
-                not allow_expired
-                or now - expires > MAX_CLEANUP_AFTER_EXPIRY
-            )
-        )
+        (expires <= now and (not allow_expired or now - expires > MAX_CLEANUP_AFTER_EXPIRY))
         or created > now + MAX_CLOCK_SKEW
         or updated > now + MAX_CLOCK_SKEW
         or updated < created
@@ -1895,9 +1665,7 @@ def _validate_state(
         )
         expected_names = EXPECTED_COMMANDS[gate]
         if any(name not in expected_names for name in actions):
-            raise LaunchOperationError(
-                f"state gate {gate} contains an unknown action"
-            )
+            raise LaunchOperationError(f"state gate {gate} contains an unknown action")
         complete_count = 0
         in_progress_count = 0
         for index, name in enumerate(expected_names):
@@ -1925,9 +1693,7 @@ def _validate_state(
             )
             _exact_fields(record, expected_record_fields, f"state action {name}")
             if status_value not in {"in_progress", "complete"}:
-                raise LaunchOperationError(
-                    f"state action {name} status is invalid"
-                )
+                raise LaunchOperationError(f"state action {name} status is invalid")
             correlation_id = _safe_id(
                 record["correlationId"],
                 f"state action {name} correlation",
@@ -1942,63 +1708,39 @@ def _validate_state(
                 or correlation_id != _correlation_id(binding, gate, name)
                 or digest != _idempotency_key(binding, gate, name)
             ):
-                raise LaunchOperationError(
-                    f"state action {name} identity is invalid"
-                )
+                raise LaunchOperationError(f"state action {name} identity is invalid")
             started_at = _timestamp(
                 record["startedAt"],
                 f"state action {name} startedAt",
             )
             if started_at > now + MAX_CLOCK_SKEW:
-                raise LaunchOperationError(
-                    f"state action {name} starts in the future"
-                )
+                raise LaunchOperationError(f"state action {name} starts in the future")
             if status_value == "complete":
                 complete_count += 1
                 completed_at = _timestamp(
                     record["completedAt"],
                     f"state action {name} completedAt",
                 )
-                if (
-                    completed_at < started_at
-                    or completed_at > now + MAX_CLOCK_SKEW
-                ):
-                    raise LaunchOperationError(
-                        f"state action {name} completion time is invalid"
-                    )
+                if completed_at < started_at or completed_at > now + MAX_CLOCK_SKEW:
+                    raise LaunchOperationError(f"state action {name} completion time is invalid")
                 result_digest = _safe_string(
                     record["resultSha256"],
                     f"state action {name} result digest",
                     maximum=64,
                 )
                 if SHA256.fullmatch(result_digest) is None:
-                    raise LaunchOperationError(
-                        f"state action {name} result digest is invalid"
-                    )
+                    raise LaunchOperationError(f"state action {name} result digest is invalid")
                 if index >= next_index:
-                    raise LaunchOperationError(
-                        f"state action {name} completion is out of order"
-                    )
+                    raise LaunchOperationError(f"state action {name} completion is out of order")
             else:
                 in_progress_count += 1
                 if index != next_index:
-                    raise LaunchOperationError(
-                        f"state action {name} progress is out of order"
-                    )
+                    raise LaunchOperationError(f"state action {name} progress is out of order")
         if complete_count != next_index or in_progress_count > 1:
-            raise LaunchOperationError(
-                f"state gate {gate} command journal is inconsistent"
-            )
-        allowed_evidence = set().union(
-            *(
-                ACTION_EVIDENCE_FIELDS[name]
-                for name in expected_names[:next_index]
-            )
-        )
+            raise LaunchOperationError(f"state gate {gate} command journal is inconsistent")
+        allowed_evidence = set().union(*(ACTION_EVIDENCE_FIELDS[name] for name in expected_names[:next_index]))
         if set(evidence) != allowed_evidence:
-            raise LaunchOperationError(
-                f"state gate {gate} evidence is inconsistent"
-            )
+            raise LaunchOperationError(f"state gate {gate} evidence is inconsistent")
         if next_index == len(expected_names):
             try:
                 normalized = launch_evidence._validate_observations(
@@ -2007,30 +1749,24 @@ def _validate_state(
                     release=binding.release,
                 )
             except launch_evidence.LaunchRehearsalError as exc:
-                raise LaunchOperationError(
-                    f"state gate {gate} observations are invalid"
-                ) from exc
+                raise LaunchOperationError(f"state gate {gate} observations are invalid") from exc
             if normalized != evidence:
-                raise LaunchOperationError(
-                    f"state gate {gate} observations are not normalized"
-                )
+                raise LaunchOperationError(f"state gate {gate} observations are not normalized")
         else:
             incomplete_gates.append(gate)
     cleanup = state_value["cleanup"]
-    if len(incomplete_gates) > 1 or (
-        cleanup is None
-        and (
-            (incomplete_gates and active_gate != incomplete_gates[0])
-            or (not incomplete_gates and active_gate is not None)
+    if (
+        len(incomplete_gates) > 1
+        or (
+            cleanup is None
+            and (
+                (incomplete_gates and active_gate != incomplete_gates[0])
+                or (not incomplete_gates and active_gate is not None)
+            )
         )
-    ) or (
-        cleanup is not None
-        and active_gate is not None
-        and active_gate not in incomplete_gates
+        or (cleanup is not None and active_gate is not None and active_gate not in incomplete_gates)
     ):
-        raise LaunchOperationError(
-            "rehearsal state gate ownership is inconsistent"
-        )
+        raise LaunchOperationError("rehearsal state gate ownership is inconsistent")
     normalized_ownership = _validate_ownership(
         state_value["ownership"],
         owner_id=binding.owner_id,
@@ -2076,15 +1812,10 @@ def _validate_state(
             "state cleanup idempotency key",
             maximum=64,
         )
-        if (
-            correlation_id
-            != _correlation_id(binding, "cleanup", "cleanup")
-            or idempotency_key
-            != _idempotency_key(binding, "cleanup", "cleanup")
+        if correlation_id != _correlation_id(binding, "cleanup", "cleanup") or idempotency_key != _idempotency_key(
+            binding, "cleanup", "cleanup"
         ):
-            raise LaunchOperationError(
-                "state cleanup identity does not match this execution"
-            )
+            raise LaunchOperationError("state cleanup identity does not match this execution")
         _timestamp(cleanup_value["startedAt"], "state cleanup startedAt")
         prior_ownership = _validate_ownership(
             cleanup_value["priorOwnership"],
@@ -2093,9 +1824,7 @@ def _validate_state(
         )
         if cleanup_status == "in_progress":
             if prior_ownership != normalized_ownership:
-                raise LaunchOperationError(
-                    "in-progress cleanup ownership changed locally"
-                )
+                raise LaunchOperationError("in-progress cleanup ownership changed locally")
         else:
             _timestamp(
                 cleanup_value["completedAt"],
@@ -2108,25 +1837,17 @@ def _validate_state(
                     maximum=64,
                 )
                 if SHA256.fullmatch(digest) is None:
-                    raise LaunchOperationError(
-                        f"state cleanup {name} is invalid"
-                    )
+                    raise LaunchOperationError(f"state cleanup {name} is invalid")
             cleanup_evidence = _cleanup_evidence(
                 cleanup_value["evidence"],
                 prior_ownership=prior_ownership,
             )
             if (
-                hashlib.sha256(
-                    _canonical_bytes(cleanup_evidence)
-                ).hexdigest()
-                != cleanup_value["evidenceSha256"]
-                or normalized_ownership
-                != _empty_ownership(binding.owner_id, expected_expiry)
+                hashlib.sha256(_canonical_bytes(cleanup_evidence)).hexdigest() != cleanup_value["evidenceSha256"]
+                or normalized_ownership != _empty_ownership(binding.owner_id, expected_expiry)
                 or active_gate is not None
             ):
-                raise LaunchOperationError(
-                    "completed cleanup state is inconsistent"
-                )
+                raise LaunchOperationError("completed cleanup state is inconsistent")
     return state_value
 
 
@@ -2156,9 +1877,7 @@ def _aws_call(
                 ),
             )
             if not isinstance(response, Mapping):
-                raise LaunchOperationError(
-                    f"AWS {service} returned an invalid response"
-                )
+                raise LaunchOperationError(f"AWS {service} returned an invalid response")
             return response
         except Exception as exc:
             last_error = exc
@@ -2170,9 +1889,7 @@ def _aws_call(
                     max(0.0, deadline - time.monotonic()),
                 )
             )
-    raise LaunchOperationError(
-        f"AWS {service} operation did not complete within retry bounds"
-    ) from last_error
+    raise LaunchOperationError(f"AWS {service} operation did not complete within retry bounds") from last_error
 
 
 class StepFunctionsCoordinator:
@@ -2216,9 +1933,7 @@ class StepFunctionsCoordinator:
                     ),
                 )
                 if not isinstance(response, Mapping):
-                    raise LaunchOperationError(
-                        "Step Functions returned an invalid response"
-                    )
+                    raise LaunchOperationError("Step Functions returned an invalid response")
                 return response
             except AwsCallError as exc:
                 if exc.code in allowed_errors:
@@ -2233,9 +1948,7 @@ class StepFunctionsCoordinator:
                         max(0.0, deadline - self._monotonic()),
                     )
                 )
-        raise LaunchOperationError(
-            "launch coordinator AWS operation did not complete"
-        ) from last_error
+        raise LaunchOperationError("launch coordinator AWS operation did not complete") from last_error
 
     @staticmethod
     def _execution_identity(
@@ -2245,9 +1958,7 @@ class StepFunctionsCoordinator:
         retry_number: int = 0,
     ) -> tuple[str, str]:
         if type(retry_number) is not int or not 0 <= retry_number <= 99:
-            raise LaunchOperationError(
-                "coordinator retry number is outside policy"
-            )
+            raise LaunchOperationError("coordinator retry number is outside policy")
         owner = _object(payload.get("owner"), "coordinator owner")
         owner_id = _safe_string(
             owner.get("id"),
@@ -2259,20 +1970,11 @@ class StepFunctionsCoordinator:
             "coordinator correlation id",
             maximum=64,
         )
-        if (
-            SHA256.fullmatch(owner_id) is None
-            or re.fullmatch(r"[0-9a-f]{32}", correlation_id) is None
-        ):
-            raise LaunchOperationError(
-                "coordinator execution identity is malformed"
-            )
+        if SHA256.fullmatch(owner_id) is None or re.fullmatch(r"[0-9a-f]{32}", correlation_id) is None:
+            raise LaunchOperationError("coordinator execution identity is malformed")
         suffix = "" if retry_number == 0 else f"-r{retry_number:02d}"
-        execution_name = (
-            f"axon-{owner_id[:16]}-{correlation_id[:32]}{suffix}"
-        )
-        match = STATE_MACHINE_VERSION_ARN.fullmatch(
-            coordinator.state_machine_version_arn
-        )
+        execution_name = f"axon-{owner_id[:16]}-{correlation_id[:32]}{suffix}"
+        match = STATE_MACHINE_VERSION_ARN.fullmatch(coordinator.state_machine_version_arn)
         assert match is not None
         execution_arn = (
             f"arn:{match.group('partition')}:states:"
@@ -2293,15 +1995,11 @@ class StepFunctionsCoordinator:
         if (
             description.get("executionArn") != execution_arn
             or description.get("name") != execution_name
-            or description.get("stateMachineArn")
-            != coordinator.state_machine_base_arn
-            or description.get("stateMachineVersionArn")
-            != coordinator.state_machine_version_arn
+            or description.get("stateMachineArn") != coordinator.state_machine_base_arn
+            or description.get("stateMachineVersionArn") != coordinator.state_machine_version_arn
             or description.get("input") != input_text
         ):
-            raise CoordinatorNotDrainedError(
-                "launch coordinator execution binding is invalid"
-            )
+            raise CoordinatorNotDrainedError("launch coordinator execution binding is invalid")
         status = description.get("status")
         if status not in {
             "RUNNING",
@@ -2310,9 +2008,7 @@ class StepFunctionsCoordinator:
             "TIMED_OUT",
             "ABORTED",
         }:
-            raise CoordinatorNotDrainedError(
-                "launch coordinator execution status is invalid"
-            )
+            raise CoordinatorNotDrainedError("launch coordinator execution status is invalid")
         return status
 
     @staticmethod
@@ -2323,19 +2019,13 @@ class StepFunctionsCoordinator:
     ) -> dict[str, Any]:
         output = description.get("output")
         if not isinstance(output, str):
-            raise LaunchOperationError(
-                "launch coordinator output is missing"
-            )
+            raise LaunchOperationError("launch coordinator output is missing")
         try:
             raw = output.encode("utf-8")
         except UnicodeError as exc:
-            raise LaunchOperationError(
-                "launch coordinator output is not UTF-8"
-            ) from exc
+            raise LaunchOperationError("launch coordinator output is not UTF-8") from exc
         if len(raw) > config.limits.max_response_bytes:
-            raise LaunchOperationError(
-                "launch coordinator output exceeds its reviewed limit"
-            )
+            raise LaunchOperationError("launch coordinator output exceeds its reviewed limit")
         return _object(
             _strict_json(raw, "launch coordinator output"),
             "launch coordinator output",
@@ -2371,16 +2061,12 @@ class StepFunctionsCoordinator:
             or output.get("gate") != payload.get("gate")
             or output.get("operation") != payload.get("operation")
             or output.get("ownerId") != owner.get("id")
-            or output.get("correlationId")
-            != payload.get("correlationId")
-            or output.get("idempotencyKey")
-            != payload.get("idempotencyKey")
+            or output.get("correlationId") != payload.get("correlationId")
+            or output.get("idempotencyKey") != payload.get("idempotencyKey")
             or not isinstance(code, str)
             or RETRY_CODE.fullmatch(code) is None
         ):
-            raise LaunchOperationError(
-                "launch coordinator retry output is not bound to this action"
-            )
+            raise LaunchOperationError("launch coordinator retry output is not bound to this action")
         return True
 
     def _stop_and_drain(
@@ -2396,8 +2082,7 @@ class StepFunctionsCoordinator:
             COORDINATOR_DRAIN_TIMEOUT_SECONDS,
             max(
                 10.0,
-                config.limits.request_timeout_seconds
-                * config.limits.max_attempts
+                config.limits.request_timeout_seconds * config.limits.max_attempts
                 + 2 * config.limits.poll_interval_seconds,
             ),
         )
@@ -2406,10 +2091,7 @@ class StepFunctionsCoordinator:
             256,
             max(
                 config.limits.max_attempts,
-                math.ceil(
-                    drain_timeout / config.limits.poll_interval_seconds
-                )
-                + 1,
+                math.ceil(drain_timeout / config.limits.poll_interval_seconds) + 1,
             ),
         )
         try:
@@ -2424,16 +2106,11 @@ class StepFunctionsCoordinator:
                     config=config,
                     binding=binding,
                     deadline=deadline,
-                    allowed_errors=frozenset(
-                        {"ExecutionDoesNotExist"}
-                    ),
+                    allowed_errors=frozenset({"ExecutionDoesNotExist"}),
                 )
                 if description is not None:
                     break
-                if (
-                    attempt + 1 >= poll_budget
-                    or self._monotonic() >= deadline
-                ):
+                if attempt + 1 >= poll_budget or self._monotonic() >= deadline:
                     return False
                 self._sleep(
                     min(
@@ -2457,16 +2134,12 @@ class StepFunctionsCoordinator:
                 {
                     "executionArn": execution_arn,
                     "error": "LaunchCoordinatorDeadlineExceeded",
-                    "cause": (
-                        "The reviewed launch operation deadline expired"
-                    ),
+                    "cause": ("The reviewed launch operation deadline expired"),
                 },
                 config=config,
                 binding=binding,
                 deadline=deadline,
-                allowed_errors=frozenset(
-                    {"ExecutionDoesNotExist", "ExecutionNotRunning"}
-                ),
+                allowed_errors=frozenset({"ExecutionDoesNotExist", "ExecutionNotRunning"}),
             )
             for _ in range(poll_budget):
                 if self._monotonic() >= deadline:
@@ -2480,9 +2153,7 @@ class StepFunctionsCoordinator:
                     config=config,
                     binding=binding,
                     deadline=deadline,
-                    allowed_errors=frozenset(
-                        {"ExecutionDoesNotExist"}
-                    ),
+                    allowed_errors=frozenset({"ExecutionDoesNotExist"}),
                 )
                 if description is None:
                     return False
@@ -2512,13 +2183,8 @@ class StepFunctionsCoordinator:
         config: OperationConfig,
         binding: ReleaseBinding,
     ) -> Mapping[str, Any]:
-        input_text = _canonical_bytes(payload).decode("utf-8").removesuffix(
-            "\n"
-        )
-        deadline = (
-            self._monotonic()
-            + config.limits.operation_timeout_seconds
-        )
+        input_text = _canonical_bytes(payload).decode("utf-8").removesuffix("\n")
+        deadline = self._monotonic() + config.limits.operation_timeout_seconds
         for retry_number in range(config.limits.max_attempts):
             execution_name, execution_arn = self._execution_identity(
                 payload,
@@ -2535,36 +2201,23 @@ class StepFunctionsCoordinator:
                     config=config,
                     binding=binding,
                     deadline=deadline,
-                    allowed_errors=frozenset(
-                        {"ExecutionDoesNotExist"}
-                    ),
+                    allowed_errors=frozenset({"ExecutionDoesNotExist"}),
                 )
                 if description is None:
                     started = self._call(
                         "start_execution",
                         {
-                            "stateMachineArn": (
-                                config.coordinator
-                                .state_machine_version_arn
-                            ),
+                            "stateMachineArn": (config.coordinator.state_machine_version_arn),
                             "name": execution_name,
                             "input": input_text,
                         },
                         config=config,
                         binding=binding,
                         deadline=deadline,
-                        allowed_errors=frozenset(
-                            {"ExecutionAlreadyExists"}
-                        ),
+                        allowed_errors=frozenset({"ExecutionAlreadyExists"}),
                     )
-                    if (
-                        started is not None
-                        and started.get("executionArn")
-                        != execution_arn
-                    ):
-                        raise CoordinatorNotDrainedError(
-                            "launch coordinator started a foreign execution"
-                        )
+                    if started is not None and started.get("executionArn") != execution_arn:
+                        raise CoordinatorNotDrainedError("launch coordinator started a foreign execution")
             except CoordinatorNotDrainedError:
                 raise
             except LaunchOperationError as exc:
@@ -2575,9 +2228,7 @@ class StepFunctionsCoordinator:
                     config=config,
                     binding=binding,
                 ):
-                    raise CoordinatorNotDrainedError(
-                        "launch coordinator execution could not be drained"
-                    ) from exc
+                    raise CoordinatorNotDrainedError("launch coordinator execution could not be drained") from exc
                 raise
 
             retry_requested = False
@@ -2601,9 +2252,7 @@ class StepFunctionsCoordinator:
                         config=config,
                         binding=binding,
                     ):
-                        raise CoordinatorNotDrainedError(
-                            "launch coordinator execution could not be drained"
-                        ) from exc
+                        raise CoordinatorNotDrainedError("launch coordinator execution could not be drained") from exc
                     raise
                 assert description is not None
                 status_value = self._validate_description(
@@ -2623,9 +2272,7 @@ class StepFunctionsCoordinator:
                         break
                     return output
                 if status_value != "RUNNING":
-                    raise LaunchOperationError(
-                        "launch coordinator execution did not succeed"
-                    )
+                    raise LaunchOperationError("launch coordinator execution did not succeed")
                 self._sleep(
                     min(
                         config.limits.poll_interval_seconds,
@@ -2634,9 +2281,7 @@ class StepFunctionsCoordinator:
                 )
             if retry_requested:
                 if retry_number + 1 >= config.limits.max_attempts:
-                    raise LaunchOperationError(
-                        "launch coordinator retry budget is exhausted"
-                    )
+                    raise LaunchOperationError("launch coordinator retry budget is exhausted")
                 self._sleep(
                     min(
                         config.limits.poll_interval_seconds,
@@ -2651,15 +2296,9 @@ class StepFunctionsCoordinator:
                 config=config,
                 binding=binding,
             ):
-                raise CoordinatorNotDrainedError(
-                    "launch coordinator execution could not be drained"
-                )
-            raise LaunchOperationError(
-                "launch coordinator execution exceeded its reviewed deadline"
-            )
-        raise LaunchOperationError(
-            "launch coordinator retry budget is exhausted"
-        )
+                raise CoordinatorNotDrainedError("launch coordinator execution could not be drained")
+            raise LaunchOperationError("launch coordinator execution exceeded its reviewed deadline")
+        raise LaunchOperationError("launch coordinator retry budget is exhausted")
 
 
 def _stack(
@@ -2693,9 +2332,7 @@ def _stack(
         value = output.get("OutputValue")
         if isinstance(key, str) and isinstance(value, str):
             if key in outputs:
-                raise LaunchOperationError(
-                    "CloudFormation stack has duplicate outputs"
-                )
+                raise LaunchOperationError("CloudFormation stack has duplicate outputs")
             outputs[key] = value
     return stack, outputs
 
@@ -2714,14 +2351,9 @@ def verify_launch_role_identity(
         "get_caller_identity",
         {},
     )
-    launch_role_match = IAM_ROLE_ARN.fullmatch(
-        config.coordinator.launch_role_arn
-    )
+    launch_role_match = IAM_ROLE_ARN.fullmatch(config.coordinator.launch_role_arn)
     assert launch_role_match is not None
-    session_name = (
-        f"AxonLLMLaunchGates-{binding.execution['runId']}-"
-        f"{binding.execution['runAttempt']}"
-    )
+    session_name = f"AxonLLMLaunchGates-{binding.execution['runId']}-{binding.execution['runAttempt']}"
     expected_caller_arn = (
         f"arn:{launch_role_match.group('partition')}:sts::"
         f"{binding.account_id}:assumed-role/"
@@ -2734,9 +2366,7 @@ def verify_launch_role_identity(
         or not isinstance(identity.get("UserId"), str)
         or not identity["UserId"].endswith(f":{session_name}")
     ):
-        raise LaunchOperationError(
-            "AWS caller is not the reviewed launch-gates role session"
-        )
+        raise LaunchOperationError("AWS caller is not the reviewed launch-gates role session")
 
 
 def verify_deployment_binding(
@@ -2763,21 +2393,12 @@ def verify_deployment_binding(
         "StateTableName": config.resources.state_table_name,
         "SecurityEventOutboxQueueArn": config.resources.outbox_queue_arn,
         "SecurityEventOutboxQueueUrl": config.resources.outbox_queue_url,
-        "SecurityEventDeadLetterQueueUrl": (
-            config.resources.dead_letter_queue_url
-        ),
-        "SecurityEventLogGroupArn": (
-            config.resources.security_event_log_group_arn
-        ),
+        "SecurityEventDeadLetterQueueUrl": (config.resources.dead_letter_queue_url),
+        "SecurityEventLogGroupArn": (config.resources.security_event_log_group_arn),
         "RuntimeImageUri": binding.release["agentcoreImage"],
     }
-    if any(
-        agent_outputs.get(name) != expected
-        for name, expected in expected_agent_outputs.items()
-    ):
-        raise LaunchOperationError(
-            "AgentCore stack outputs do not match the reviewed resources"
-        )
+    if any(agent_outputs.get(name) != expected for name, expected in expected_agent_outputs.items()):
+        raise LaunchOperationError("AgentCore stack outputs do not match the reviewed resources")
 
     _, control_outputs = _stack(
         aws,
@@ -2790,34 +2411,20 @@ def verify_deployment_binding(
         "PrimaryStateTableName": config.resources.state_table_name,
         "ControlPlaneImageUri": binding.release["controlPlaneImage"],
     }
-    if any(
-        control_outputs.get(name) != expected
-        for name, expected in expected_control_outputs.items()
-    ):
-        raise LaunchOperationError(
-            "control-plane stack outputs do not match the reviewed resources"
-        )
+    if any(control_outputs.get(name) != expected for name, expected in expected_control_outputs.items()):
+        raise LaunchOperationError("control-plane stack outputs do not match the reviewed resources")
     cluster_name = control_outputs.get("ClusterName")
     service_name = control_outputs.get("ServiceName")
     task_definition_arn = control_outputs.get("TaskDefinitionArn")
-    if any(
-        not isinstance(item, str) or not item
-        for item in (cluster_name, service_name, task_definition_arn)
-    ):
-        raise LaunchOperationError(
-            "control-plane stack is missing live service bindings"
-        )
+    if any(not isinstance(item, str) or not item for item in (cluster_name, service_name, task_definition_arn)):
+        raise LaunchOperationError("control-plane stack is missing live service bindings")
     if require_primary and (
         agent_outputs.get("RecoveryCutoverMode") != "normal"
-        or agent_outputs.get("SelectedRuntimeStateTableName")
-        != config.resources.state_table_name
+        or agent_outputs.get("SelectedRuntimeStateTableName") != config.resources.state_table_name
         or control_outputs.get("RecoveryCutoverMode") != "normal"
-        or control_outputs.get("SelectedRuntimeStateTableName")
-        != config.resources.state_table_name
+        or control_outputs.get("SelectedRuntimeStateTableName") != config.resources.state_table_name
     ):
-        raise LaunchOperationError(
-            "AgentCore and control plane are not on healthy primary state"
-        )
+        raise LaunchOperationError("AgentCore and control plane are not on healthy primary state")
 
     table_response = _aws_call(
         aws,
@@ -2834,9 +2441,7 @@ def verify_deployment_binding(
         or table.get("TableStatus") != "ACTIVE"
         or table.get("DeletionProtectionEnabled") is not True
     ):
-        raise LaunchOperationError(
-            "primary state table is not the reviewed protected table"
-        )
+        raise LaunchOperationError("primary state table is not the reviewed protected table")
 
     coordinator_table = _aws_call(
         aws,
@@ -2846,27 +2451,18 @@ def verify_deployment_binding(
         "describe_table",
         {"TableName": config.coordinator.lease_table_name},
     ).get("Table")
-    coordinator_sse = (
-        coordinator_table.get("SSEDescription")
-        if isinstance(coordinator_table, Mapping)
-        else None
-    )
+    coordinator_sse = coordinator_table.get("SSEDescription") if isinstance(coordinator_table, Mapping) else None
     if (
         not isinstance(coordinator_table, Mapping)
-        or coordinator_table.get("TableArn")
-        != config.coordinator.lease_table_arn
+        or coordinator_table.get("TableArn") != config.coordinator.lease_table_arn
         or coordinator_table.get("TableStatus") != "ACTIVE"
         or coordinator_table.get("DeletionProtectionEnabled") is not True
         or not isinstance(coordinator_sse, Mapping)
         or coordinator_sse.get("Status") != "ENABLED"
         or coordinator_sse.get("SSEType") != "KMS"
-        or coordinator_sse.get("KMSMasterKeyArn")
-        != config.coordinator.kms_key_arn
+        or coordinator_sse.get("KMSMasterKeyArn") != config.coordinator.kms_key_arn
     ):
-        raise LaunchOperationError(
-            "launch coordinator lease table is not the reviewed protected "
-            "KMS table"
-        )
+        raise LaunchOperationError("launch coordinator lease table is not the reviewed protected KMS table")
     ttl = _aws_call(
         aws,
         config,
@@ -2880,9 +2476,7 @@ def verify_deployment_binding(
         or ttl.get("TimeToLiveStatus") != "ENABLED"
         or ttl.get("AttributeName") != "expiresAtEpoch"
     ):
-        raise LaunchOperationError(
-            "launch coordinator lease expiry is not enabled"
-        )
+        raise LaunchOperationError("launch coordinator lease expiry is not enabled")
 
     state_machine = _aws_call(
         aws,
@@ -2891,24 +2485,18 @@ def verify_deployment_binding(
         "stepfunctions",
         "describe_state_machine",
         {
-            "stateMachineArn": (
-                config.coordinator.state_machine_version_arn
-            ),
+            "stateMachineArn": (config.coordinator.state_machine_version_arn),
             "includedData": "ALL_DATA",
         },
     )
     logging_configuration = state_machine.get("loggingConfiguration")
     tracing_configuration = state_machine.get("tracingConfiguration")
-    encryption_configuration = state_machine.get(
-        "encryptionConfiguration"
-    )
+    encryption_configuration = state_machine.get("encryptionConfiguration")
     if (
-        state_machine.get("stateMachineArn")
-        != config.coordinator.state_machine_version_arn
+        state_machine.get("stateMachineArn") != config.coordinator.state_machine_version_arn
         or state_machine.get("status") != "ACTIVE"
         or state_machine.get("type") != "STANDARD"
-        or state_machine.get("roleArn")
-        != config.coordinator.execution_role_arn
+        or state_machine.get("roleArn") != config.coordinator.execution_role_arn
         or not isinstance(state_machine.get("revisionId"), str)
         or not state_machine["revisionId"]
         or not isinstance(logging_configuration, Mapping)
@@ -2918,15 +2506,10 @@ def verify_deployment_binding(
         or not isinstance(tracing_configuration, Mapping)
         or tracing_configuration.get("enabled") is not True
         or not isinstance(encryption_configuration, Mapping)
-        or encryption_configuration.get("type")
-        != "CUSTOMER_MANAGED_KMS_KEY"
-        or encryption_configuration.get("kmsKeyId")
-        != config.coordinator.kms_key_arn
+        or encryption_configuration.get("type") != "CUSTOMER_MANAGED_KMS_KEY"
+        or encryption_configuration.get("kmsKeyId") != config.coordinator.kms_key_arn
     ):
-        raise LaunchOperationError(
-            "launch coordinator state-machine version is not production "
-            "hardened"
-        )
+        raise LaunchOperationError("launch coordinator state-machine version is not production hardened")
     raw_tags = _aws_call(
         aws,
         config,
@@ -2936,15 +2519,11 @@ def verify_deployment_binding(
         {"resourceArn": config.coordinator.state_machine_base_arn},
     ).get("tags")
     if not isinstance(raw_tags, list):
-        raise LaunchOperationError(
-            "launch coordinator tags are unavailable"
-        )
+        raise LaunchOperationError("launch coordinator tags are unavailable")
     tags = {
         item.get("key"): item.get("value")
         for item in raw_tags
-        if isinstance(item, Mapping)
-        and isinstance(item.get("key"), str)
-        and isinstance(item.get("value"), str)
+        if isinstance(item, Mapping) and isinstance(item.get("key"), str) and isinstance(item.get("value"), str)
     }
     if any(
         tags.get(name) != expected
@@ -2954,9 +2533,7 @@ def verify_deployment_binding(
             "Purpose": "agentcore-launch-rehearsal",
         }.items()
     ):
-        raise LaunchOperationError(
-            "launch coordinator is missing required ownership tags"
-        )
+        raise LaunchOperationError("launch coordinator is missing required ownership tags")
 
     for queue_url, queue_arn in (
         (
@@ -2979,14 +2556,10 @@ def verify_deployment_binding(
                 "AttributeNames": ["QueueArn"],
             },
         ).get("Attributes")
-        if not isinstance(attributes, Mapping) or attributes.get(
-            "QueueArn"
-        ) != queue_arn:
+        if not isinstance(attributes, Mapping) or attributes.get("QueueArn") != queue_arn:
             raise LaunchOperationError("SQS queue binding is foreign")
 
-    alarm_match = ALARM_ARN.fullmatch(
-        config.resources.dead_letter_alarm_arn
-    )
+    alarm_match = ALARM_ARN.fullmatch(config.resources.dead_letter_alarm_arn)
     assert alarm_match is not None
     alarms = _aws_call(
         aws,
@@ -3000,16 +2573,11 @@ def verify_deployment_binding(
         type(alarms) is not list
         or len(alarms) != 1
         or not isinstance(alarms[0], Mapping)
-        or alarms[0].get("AlarmArn")
-        != config.resources.dead_letter_alarm_arn
+        or alarms[0].get("AlarmArn") != config.resources.dead_letter_alarm_arn
     ):
-        raise LaunchOperationError(
-            "dead-letter alarm does not match the reviewed ARN"
-        )
+        raise LaunchOperationError("dead-letter alarm does not match the reviewed ARN")
 
-    watchdog_match = ALARM_ARN.fullmatch(
-        config.coordinator.watchdog_alarm_arn
-    )
+    watchdog_match = ALARM_ARN.fullmatch(config.coordinator.watchdog_alarm_arn)
     assert watchdog_match is not None
     watchdogs = _aws_call(
         aws,
@@ -3023,16 +2591,13 @@ def verify_deployment_binding(
         type(watchdogs) is not list
         or len(watchdogs) != 1
         or not isinstance(watchdogs[0], Mapping)
-        or watchdogs[0].get("AlarmArn")
-        != config.coordinator.watchdog_alarm_arn
+        or watchdogs[0].get("AlarmArn") != config.coordinator.watchdog_alarm_arn
         or watchdogs[0].get("ActionsEnabled") is not True
         or not watchdogs[0].get("AlarmActions")
         or watchdogs[0].get("TreatMissingData") != "breaching"
         or watchdogs[0].get("StateValue") != "OK"
     ):
-        raise LaunchOperationError(
-            "launch coordinator watchdog alarm is not healthy"
-        )
+        raise LaunchOperationError("launch coordinator watchdog alarm is not healthy")
 
     runtime_id = config.resources.runtime_arn.rsplit("/", 1)[-1]
     endpoint = _aws_call(
@@ -3048,16 +2613,13 @@ def verify_deployment_binding(
     )
     if (
         endpoint.get("agentRuntimeArn") != config.resources.runtime_arn
-        or endpoint.get("agentRuntimeEndpointArn")
-        != config.resources.runtime_endpoint_arn
+        or endpoint.get("agentRuntimeEndpointArn") != config.resources.runtime_endpoint_arn
         or endpoint.get("name") != config.resources.runtime_endpoint_name
         or endpoint.get("status") != "READY"
         or not isinstance(endpoint.get("liveVersion"), str)
         or endpoint.get("liveVersion") != endpoint.get("targetVersion")
     ):
-        raise LaunchOperationError(
-            "AgentCore endpoint is not the reviewed stable endpoint"
-        )
+        raise LaunchOperationError("AgentCore endpoint is not the reviewed stable endpoint")
     live_version = endpoint["liveVersion"]
     runtime = _aws_call(
         aws,
@@ -3071,22 +2633,15 @@ def verify_deployment_binding(
         },
     )
     artifact = runtime.get("agentRuntimeArtifact")
-    container = (
-        artifact.get("containerConfiguration")
-        if isinstance(artifact, Mapping)
-        else None
-    )
+    container = artifact.get("containerConfiguration") if isinstance(artifact, Mapping) else None
     if (
         runtime.get("agentRuntimeArn") != config.resources.runtime_arn
         or runtime.get("agentRuntimeVersion") != live_version
         or runtime.get("status") != "READY"
         or not isinstance(container, Mapping)
-        or container.get("containerUri")
-        != binding.release["agentcoreImage"]
+        or container.get("containerUri") != binding.release["agentcoreImage"]
     ):
-        raise LaunchOperationError(
-            "live AgentCore version does not run the reviewed image"
-        )
+        raise LaunchOperationError("live AgentCore version does not run the reviewed image")
 
     service_response = _aws_call(
         aws,
@@ -3106,9 +2661,7 @@ def verify_deployment_binding(
         or len(services) != 1
         or not isinstance(services[0], Mapping)
     ):
-        raise LaunchOperationError(
-            "control-plane service binding is unavailable"
-        )
+        raise LaunchOperationError("control-plane service binding is unavailable")
     service = services[0]
     desired_count = service.get("desiredCount")
     running_count = service.get("runningCount")
@@ -3119,9 +2672,7 @@ def verify_deployment_binding(
         or desired_count < 1
         or running_count != desired_count
     ):
-        raise LaunchOperationError(
-            "control-plane service is not stably running its reviewed task"
-        )
+        raise LaunchOperationError("control-plane service is not stably running its reviewed task")
     task_definition = _aws_call(
         aws,
         config,
@@ -3130,23 +2681,16 @@ def verify_deployment_binding(
         "describe_task_definition",
         {"taskDefinition": task_definition_arn},
     ).get("taskDefinition")
-    containers = (
-        task_definition.get("containerDefinitions")
-        if isinstance(task_definition, Mapping)
-        else None
-    )
+    containers = task_definition.get("containerDefinitions") if isinstance(task_definition, Mapping) else None
     if (
         not isinstance(task_definition, Mapping)
         or task_definition.get("taskDefinitionArn") != task_definition_arn
         or type(containers) is not list
         or len(containers) != 1
         or not isinstance(containers[0], Mapping)
-        or containers[0].get("image")
-        != binding.release["controlPlaneImage"]
+        or containers[0].get("image") != binding.release["controlPlaneImage"]
     ):
-        raise LaunchOperationError(
-            "control-plane task definition does not use the reviewed image"
-        )
+        raise LaunchOperationError("control-plane task definition does not use the reviewed image")
     listed_tasks = _aws_call(
         aws,
         config,
@@ -3167,9 +2711,7 @@ def verify_deployment_binding(
         or len(task_arns) != running_count
         or any(not isinstance(arn, str) or not arn for arn in task_arns)
     ):
-        raise LaunchOperationError(
-            "control-plane running task inventory is incomplete"
-        )
+        raise LaunchOperationError("control-plane running task inventory is incomplete")
     running_tasks = _aws_call(
         aws,
         config,
@@ -3190,9 +2732,7 @@ def verify_deployment_binding(
             for task in tasks
         )
     ):
-        raise LaunchOperationError(
-            "control-plane running tasks do not match the reviewed image"
-        )
+        raise LaunchOperationError("control-plane running tasks do not match the reviewed image")
 
 
 def _binding_payload(
@@ -3204,25 +2744,13 @@ def _binding_payload(
         "region": binding.release["region"],
         "reviewId": config.review.review_id,
         "reviewExpiresAt": _time_text(config.review.expires_at),
-        "reviewedConfigS3Uri": binding.execution[
-            "reviewedConfigS3Uri"
-        ],
-        "reviewedConfigVersionId": binding.execution[
-            "reviewedConfigVersionId"
-        ],
-        "reviewedConfigSha256": binding.execution[
-            "reviewedConfigSha256"
-        ],
-        "coordinatorStateMachineVersionArn": (
-            config.coordinator.state_machine_version_arn
-        ),
+        "reviewedConfigS3Uri": binding.execution["reviewedConfigS3Uri"],
+        "reviewedConfigVersionId": binding.execution["reviewedConfigVersionId"],
+        "reviewedConfigSha256": binding.execution["reviewedConfigSha256"],
+        "coordinatorStateMachineVersionArn": (config.coordinator.state_machine_version_arn),
         "coordinatorLeaseTableArn": config.coordinator.lease_table_arn,
-        "coordinatorWatchdogAlarmArn": (
-            config.coordinator.watchdog_alarm_arn
-        ),
-        "coordinatorCleanupDeadlineSeconds": (
-            config.coordinator.cleanup_deadline_seconds
-        ),
+        "coordinatorWatchdogAlarmArn": (config.coordinator.watchdog_alarm_arn),
+        "coordinatorCleanupDeadlineSeconds": (config.coordinator.cleanup_deadline_seconds),
         "tenantId": config.scenario.tenant_id,
         "projectId": config.scenario.project_id,
         "runtimeArn": config.resources.runtime_arn,
@@ -3236,9 +2764,7 @@ def _binding_payload(
         "deadLetterQueueArn": config.resources.dead_letter_queue_arn,
         "deadLetterQueueUrl": config.resources.dead_letter_queue_url,
         "deadLetterAlarmArn": config.resources.dead_letter_alarm_arn,
-        "securityEventLogGroupArn": (
-            config.resources.security_event_log_group_arn
-        ),
+        "securityEventLogGroupArn": (config.resources.security_event_log_group_arn),
         "agentcoreImage": binding.release["agentcoreImage"],
         "controlPlaneImage": binding.release["controlPlaneImage"],
     }
@@ -3256,19 +2782,6 @@ def _action_parameters(
         "projectId": scenario.project_id,
     }
     if action in {
-        "reject-query-boundaries",
-        "interrupt-query",
-        "verify-terminal-reconciliation",
-        "verify-deferred-accounting",
-    }:
-        return {
-            **common,
-            "datasourceId": scenario.datasource_id,
-            "selectSql": scenario.select_sql,
-            "maxRows": scenario.max_rows,
-            "scanLimitBytes": scenario.scan_limit_bytes,
-        }
-    if action in {
         "restore-state",
         "cutover-restored-state",
         "verify-restored-state",
@@ -3279,9 +2792,7 @@ def _action_parameters(
             "primaryTableArn": config.resources.state_table_arn,
             "primaryTableName": config.resources.state_table_arn.rsplit("/", 1)[-1],
             "restoredTableArn": config.resources.restored_state_table_arn,
-            "restoredTableName": (
-                config.resources.restored_state_table_arn.rsplit("/", 1)[-1]
-            ),
+            "restoredTableName": (config.resources.restored_state_table_arn.rsplit("/", 1)[-1]),
         }
     if action in {
         "deliver-security-events",
@@ -3305,9 +2816,7 @@ def _action_parameters(
             **common,
             "model": scenario.model,
             "strategies": list(ROUTING_STRATEGIES),
-            "candidateProviders": sorted(
-                {scenario.primary_provider, scenario.fallback_provider}
-            ),
+            "candidateProviders": sorted({scenario.primary_provider, scenario.fallback_provider}),
         }
     if action in {
         "inject-primary-provider-fault",
@@ -3350,9 +2859,7 @@ def _action_parameters(
             "primaryTableArn": config.resources.state_table_arn,
             "primaryTableName": config.resources.state_table_arn.rsplit("/", 1)[-1],
             "restoredTableArn": config.resources.restored_state_table_arn,
-            "restoredTableName": (
-                config.resources.restored_state_table_arn.rsplit("/", 1)[-1]
-            ),
+            "restoredTableName": (config.resources.restored_state_table_arn.rsplit("/", 1)[-1]),
             "outboxQueueArn": config.resources.outbox_queue_arn,
             "deadLetterQueueArn": config.resources.dead_letter_queue_arn,
         }
@@ -3380,9 +2887,7 @@ def _request_payload(
             "runId": binding.execution["runId"],
             "runAttempt": binding.execution["runAttempt"],
             "expiresAt": _time_text(config.review.expires_at),
-            "authorizationExpiresAtEpoch": str(
-                int((config.review.expires_at + timedelta(days=7)).timestamp())
-            ),
+            "authorizationExpiresAtEpoch": str(int((config.review.expires_at + timedelta(days=7)).timestamp())),
         },
         "release": dict(binding.release),
         "execution": dict(binding.execution),
@@ -3437,9 +2942,7 @@ def _validate_binding_result(
     expected = _binding_payload(config, binding)
     _exact_fields(result, set(expected), "action result binding")
     if result != expected:
-        raise LaunchOperationError(
-            "action result is not bound to the reviewed release resources"
-        )
+        raise LaunchOperationError("action result is not bound to the reviewed release resources")
     return expected
 
 
@@ -3473,23 +2976,14 @@ def _validate_ownership_transition(
     if previous_fixtures - current_fixtures:
         raise LaunchOperationError("non-cleanup action removed a fixture")
     if current_dlq - previous_dlq and action not in DLQ_ADD_ACTIONS:
-        raise LaunchOperationError(
-            "action acquired an unexpected DLQ correlation"
-        )
+        raise LaunchOperationError("action acquired an unexpected DLQ correlation")
     if previous_dlq - current_dlq and action not in DLQ_REMOVE_ACTIONS:
-        raise LaunchOperationError(
-            "action removed an unapproved DLQ correlation"
-        )
+        raise LaunchOperationError("action removed an unapproved DLQ correlation")
     previous_snapshots = previous["snapshots"]
     current_snapshots = current["snapshots"]
     for name in ("model", "tenantConfig"):
-        if (
-            previous_snapshots[name] is not None
-            and current_snapshots[name] != previous_snapshots[name]
-        ):
-            raise LaunchOperationError(
-                "action replaced or discarded a cleanup snapshot"
-            )
+        if previous_snapshots[name] is not None and current_snapshots[name] != previous_snapshots[name]:
+            raise LaunchOperationError("action replaced or discarded a cleanup snapshot")
 
 
 def _validate_action_result(
@@ -3529,9 +3023,7 @@ def _validate_action_result(
         or result["idempotencyKey"] != idempotency_key
         or result["status"] != "SUCCEEDED"
     ):
-        raise LaunchOperationError(
-            "action result does not prove this exact operation succeeded"
-        )
+        raise LaunchOperationError("action result does not prove this exact operation succeeded")
     _validate_binding_result(
         result["binding"],
         config=config,
@@ -3579,36 +3071,27 @@ def _cleanup_evidence(
             or raw != sorted(raw)
             or any(not isinstance(item, str) for item in raw)
         ):
-            raise LaunchOperationError(
-                f"cleanup {name} must be a sorted unique array"
-            )
+            raise LaunchOperationError(f"cleanup {name} must be a sorted unique array")
         return raw
 
     snapshot_refs = sorted(
-        snapshot["ref"]
-        for snapshot in prior_ownership["snapshots"].values()
-        if snapshot is not None
+        snapshot["ref"] for snapshot in prior_ownership["snapshots"].values() if snapshot is not None
     )
     redriven = sorted_list("redrivenDlqCorrelationIds")
     removed = sorted_list("removedDlqCorrelationIds")
     if (
         sorted_list("restoredSnapshotRefs") != snapshot_refs
-        or sorted_list("clearedFaultIds")
-        != list(prior_ownership["faultIds"])
-        or sorted_list("clearedFixtureIds")
-        != list(prior_ownership["fixtureIds"])
+        or sorted_list("clearedFaultIds") != list(prior_ownership["faultIds"])
+        or sorted_list("clearedFixtureIds") != list(prior_ownership["fixtureIds"])
         or set(redriven).intersection(removed)
-        or sorted(redriven + removed)
-        != list(prior_ownership["dlqCorrelationIds"])
+        or sorted(redriven + removed) != list(prior_ownership["dlqCorrelationIds"])
         or evidence["primaryStateSelected"] is not True
         or evidence["productionEndpointStatus"] != "READY"
         or evidence["faultsRemaining"] != 0
         or evidence["fixturesRemaining"] != 0
         or evidence["correlatedDlqMessagesRemaining"] != 0
     ):
-        raise LaunchOperationError(
-            "cleanup did not restore every owned rehearsal effect"
-        )
+        raise LaunchOperationError("cleanup did not restore every owned rehearsal effect")
     return evidence
 
 
@@ -3647,9 +3130,7 @@ def _validate_cleanup_result(
         or result["idempotencyKey"] != idempotency_key
         or result["status"] != "SUCCEEDED"
     ):
-        raise LaunchOperationError(
-            "cleanup result does not prove this exact cleanup succeeded"
-        )
+        raise LaunchOperationError("cleanup result does not prove this exact cleanup succeeded")
     _validate_binding_result(
         result["binding"],
         config=config,
@@ -3738,9 +3219,7 @@ class LaunchRehearsal:
         state_value = self.state_directory.read()
         if state_value is None:
             if not allow_create:
-                raise LaunchOperationError(
-                    "cleanup requires an existing owned rehearsal state"
-                )
+                raise LaunchOperationError("cleanup requires an existing owned rehearsal state")
             state_value = _new_state(
                 self.config,
                 self.binding,
@@ -3760,28 +3239,20 @@ class LaunchRehearsal:
             raise LaunchOperationError("unsupported rehearsal gate")
         expected = EXPECTED_COMMANDS[gate]
         if action not in expected:
-            raise LaunchOperationError(
-                "action does not belong to the selected rehearsal gate"
-            )
+            raise LaunchOperationError("action does not belong to the selected rehearsal gate")
         state_value = self._load_or_create(
             allow_create=action == expected[0],
         )
         if state_value["cleanup"] is not None:
-            raise LaunchOperationError(
-                "rehearsal state is already in cleanup"
-            )
+            raise LaunchOperationError("rehearsal state is already in cleanup")
         active_gate = state_value["activeGate"]
         if active_gate not in {None, gate}:
-            raise LaunchOperationError(
-                "another gate owns the rehearsal state"
-            )
+            raise LaunchOperationError("another gate owns the rehearsal state")
         gates = state_value["gates"]
         gate_state = gates.get(gate)
         if gate_state is None:
             if action != expected[0]:
-                raise LaunchOperationError(
-                    "gate must start with its first required command"
-                )
+                raise LaunchOperationError("gate must start with its first required command")
             gate_state = {
                 "nextIndex": 0,
                 "evidence": {},
@@ -3796,9 +3267,7 @@ class LaunchRehearsal:
 
         if index < next_index:
             if index != next_index - 1 or record is None:
-                raise LaunchOperationError(
-                    "completed rehearsal commands cannot be replayed out of order"
-                )
+                raise LaunchOperationError("completed rehearsal commands cannot be replayed out of order")
             verify_launch_role_identity(
                 self.aws,
                 self.config,
@@ -3824,25 +3293,15 @@ class LaunchRehearsal:
                 binding=self.binding,
                 previous_ownership=state_value["ownership"],
             )
-            recorded_evidence = {
-                name: gate_state["evidence"][name]
-                for name in ACTION_EVIDENCE_FIELDS[action]
-            }
+            recorded_evidence = {name: gate_state["evidence"][name] for name in ACTION_EVIDENCE_FIELDS[action]}
             if (
                 record["status"] != "complete"
                 or action_evidence != recorded_evidence
                 or ownership != state_value["ownership"]
-                or hashlib.sha256(_canonical_bytes(result)).hexdigest()
-                != record["resultSha256"]
+                or hashlib.sha256(_canonical_bytes(result)).hexdigest() != record["resultSha256"]
             ):
-                raise LaunchOperationError(
-                    "resumed action does not match its completed result"
-                )
-            observations = (
-                dict(gate_state["evidence"])
-                if index == len(expected) - 1
-                else None
-            )
+                raise LaunchOperationError("resumed action does not match its completed result")
+            observations = dict(gate_state["evidence"]) if index == len(expected) - 1 else None
             return _command_output(
                 gate,
                 action,
@@ -3850,22 +3309,15 @@ class LaunchRehearsal:
                 observations,
             )
         if index != next_index:
-            raise LaunchOperationError(
-                "rehearsal action is outside the exact command order"
-            )
+            raise LaunchOperationError("rehearsal action is outside the exact command order")
 
         if record is None:
             if (
                 action in FAULT_ADD_ACTIONS
-                and self.now()
-                + timedelta(
-                    seconds=self.config.scenario.fault_ttl_seconds
-                )
+                and self.now() + timedelta(seconds=self.config.scenario.fault_ttl_seconds)
                 > self.config.review.expires_at
             ):
-                raise LaunchOperationError(
-                    "fault lease would outlive the reviewed operation window"
-                )
+                raise LaunchOperationError("fault lease would outlive the reviewed operation window")
             record = {
                 "status": "in_progress",
                 "correlationId": correlation_id,
@@ -3881,9 +3333,7 @@ class LaunchRehearsal:
             or record["correlationId"] != correlation_id
             or record["idempotencyKey"] != idempotency_key
         ):
-            raise LaunchOperationError(
-                "in-progress action ownership does not match this invocation"
-            )
+            raise LaunchOperationError("in-progress action ownership does not match this invocation")
 
         verify_launch_role_identity(
             self.aws,
@@ -3913,9 +3363,7 @@ class LaunchRehearsal:
         merged = dict(gate_state["evidence"])
         for name, value in evidence.items():
             if name in merged and merged[name] != value:
-                raise LaunchOperationError(
-                    "action contradicted previously recorded evidence"
-                )
+                raise LaunchOperationError("action contradicted previously recorded evidence")
             merged[name] = value
         observations: dict[str, Any] | None = None
         final = index == len(expected) - 1
@@ -3927,9 +3375,7 @@ class LaunchRehearsal:
                     release=self.binding.release,
                 )
             except launch_evidence.LaunchRehearsalError as exc:
-                raise LaunchOperationError(
-                    "final action did not produce complete passing observations"
-                ) from exc
+                raise LaunchOperationError("final action did not produce complete passing observations") from exc
             if observations != merged:
                 merged = observations
 
@@ -3940,9 +3386,7 @@ class LaunchRehearsal:
             **record,
             "status": "complete",
             "completedAt": _time_text(completed),
-            "resultSha256": hashlib.sha256(
-                _canonical_bytes(result)
-            ).hexdigest(),
+            "resultSha256": hashlib.sha256(_canonical_bytes(result)).hexdigest(),
         }
         state_value["ownership"] = ownership
         state_value["activeGate"] = None if final else gate
@@ -3993,12 +3437,9 @@ class LaunchRehearsal:
             )
             if (
                 cleanup_evidence != cleanup["evidence"]
-                or hashlib.sha256(_canonical_bytes(result)).hexdigest()
-                != cleanup["resultSha256"]
+                or hashlib.sha256(_canonical_bytes(result)).hexdigest() != cleanup["resultSha256"]
             ):
-                raise LaunchOperationError(
-                    "resumed cleanup does not match its completed result"
-                )
+                raise LaunchOperationError("resumed cleanup does not match its completed result")
             verify_launch_role_identity(
                 self.aws,
                 self.config,
@@ -4039,14 +3480,10 @@ class LaunchRehearsal:
                 or cleanup["correlationId"] != correlation_id
                 or cleanup["idempotencyKey"] != idempotency_key
             ):
-                raise LaunchOperationError(
-                    "cleanup ownership does not match this invocation"
-                )
+                raise LaunchOperationError("cleanup ownership does not match this invocation")
             prior_ownership = cleanup["priorOwnership"]
             if prior_ownership != state_value["ownership"]:
-                raise LaunchOperationError(
-                    "cleanup ownership changed after cleanup started"
-                )
+                raise LaunchOperationError("cleanup ownership changed after cleanup started")
         result = _invoke_action(
             self.coordinator,
             gate="cleanup",
@@ -4080,12 +3517,8 @@ class LaunchRehearsal:
             **cleanup,
             "status": "complete",
             "completedAt": _time_text(completed),
-            "resultSha256": hashlib.sha256(
-                _canonical_bytes(result)
-            ).hexdigest(),
-            "evidenceSha256": hashlib.sha256(
-                _canonical_bytes(cleanup_evidence)
-            ).hexdigest(),
+            "resultSha256": hashlib.sha256(_canonical_bytes(result)).hexdigest(),
+            "evidenceSha256": hashlib.sha256(_canonical_bytes(cleanup_evidence)).hexdigest(),
             "evidence": cleanup_evidence,
         }
         state_value["updatedAt"] = _time_text(completed)
@@ -4163,16 +3596,12 @@ def _run_cli(
         )
         if args.action == "cleanup":
             if args.gate is not None:
-                raise LaunchOperationError(
-                    "cleanup must not specify a gate"
-                )
+                raise LaunchOperationError("cleanup must not specify a gate")
             return runner.cleanup()
         if args.action not in ALL_ACTIONS:
             raise LaunchOperationError("unsupported rehearsal action")
         if args.gate is None:
-            raise LaunchOperationError(
-                "non-cleanup actions require a gate"
-            )
+            raise LaunchOperationError("non-cleanup actions require a gate")
         return runner.run(args.gate, args.action)
 
 

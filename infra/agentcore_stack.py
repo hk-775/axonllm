@@ -10,10 +10,6 @@ if str(_REPO_ROOT) not in sys.path:
 
 from src.gateway.deployment.infra.agentcore_stack import (  # noqa: E402
     AxonLLMAgentCoreStack,
-    load_athena_infrastructure_config,
 )
 
-__all__ = [
-    "AxonLLMAgentCoreStack",
-    "load_athena_infrastructure_config",
-]
+__all__ = ["AxonLLMAgentCoreStack"]

@@ -49,18 +49,12 @@ def stack_name(base: str, namespace: str) -> str:
 
 def cdk_qualifier(app: cdk.App, namespace: str) -> str:
     domain = (
-        "production"
-        if not namespace
-        else "external"
-        if namespace in {"external", "external-oidc"}
-        else "qualification"
+        "production" if not namespace else "external" if namespace in {"external", "external-oidc"} else "qualification"
     )
     expected = _CDK_QUALIFIERS[domain]
     configured = app.node.try_get_context("cdk_qualifier")
     if configured is not None and configured != expected:
-        raise ValueError(
-            f"cdk_qualifier must be {expected!r} for the selected namespace"
-        )
+        raise ValueError(f"cdk_qualifier must be {expected!r} for the selected namespace")
     return expected
 
 
@@ -117,6 +111,7 @@ elif deployment_target == "agentcore":
     deployment_stack = AxonLLMAgentCoreStack(
         app,
         stack_name("AxonLLMAgentCoreStack", namespace),
+        bootstrap_qualifier=qualifier,
         deployment_namespace=namespace,
         env=environment,
         synthesizer=cdk.DefaultStackSynthesizer(qualifier=qualifier),

@@ -25,26 +25,15 @@ _REGIONAL_ACTIONS = (
     "application-autoscaling:DescribeScalingPolicies",
     "application-autoscaling:PutScalingPolicy",
     "application-autoscaling:RegisterScalableTarget",
-    "backup:CreateBackupPlan",
-    "backup:CreateBackupSelection",
-    "backup:CreateBackupVault",
-    "backup:DeleteBackupPlan",
-    "backup:DeleteBackupSelection",
-    "backup:DeleteBackupVault",
-    "backup:DescribeBackupVault",
-    "backup:GetBackupPlan",
-    "backup:GetBackupSelection",
-    "backup:ListTags",
-    "backup:PutBackupVaultLockConfiguration",
-    "backup:TagResource",
-    "backup:UntagResource",
-    "backup:UpdateBackupPlan",
     "bedrock-agentcore:CreateAgentRuntime",
     "bedrock-agentcore:CreateAgentRuntimeEndpoint",
+    "bedrock-agentcore:CreateWorkloadIdentity",
     "bedrock-agentcore:DeleteAgentRuntime",
     "bedrock-agentcore:DeleteAgentRuntimeEndpoint",
+    "bedrock-agentcore:DeleteWorkloadIdentity",
     "bedrock-agentcore:GetAgentRuntime",
     "bedrock-agentcore:GetAgentRuntimeEndpoint",
+    "bedrock-agentcore:AllowVendedLogDeliveryForResource",
     "bedrock-agentcore:ListAgentRuntimeEndpoints",
     "bedrock-agentcore:ListAgentRuntimeVersions",
     "bedrock-agentcore:ListAgentRuntimes",
@@ -82,8 +71,11 @@ _REGIONAL_ACTIONS = (
     "dynamodb:CreateTable",
     "dynamodb:DeleteTable",
     "dynamodb:DescribeContinuousBackups",
+    "dynamodb:DescribeContributorInsights",
+    "dynamodb:DescribeKinesisStreamingDestination",
     "dynamodb:DescribeTable",
     "dynamodb:DescribeTimeToLive",
+    "dynamodb:GetResourcePolicy",
     "dynamodb:ListTagsOfResource",
     "dynamodb:TagResource",
     "dynamodb:UntagResource",
@@ -120,8 +112,10 @@ _REGIONAL_ACTIONS = (
     "ec2:DescribeInternetGateways",
     "ec2:DescribeManagedPrefixLists",
     "ec2:DescribeNatGateways",
+    "ec2:DescribeNetworkAcls",
     "ec2:DescribeNetworkInterfaces",
     "ec2:DescribeRouteTables",
+    "ec2:DescribeSecurityGroupRules",
     "ec2:DescribeSecurityGroups",
     "ec2:DescribeSubnets",
     "ec2:DescribeTags",
@@ -180,49 +174,59 @@ _REGIONAL_ACTIONS = (
     "elasticloadbalancing:RemoveTags",
     "elasticloadbalancing:SetSecurityGroups",
     "elasticloadbalancing:SetSubnets",
-    "kms:CancelKeyDeletion",
-    "kms:CreateAlias",
-    "kms:CreateKey",
-    "kms:DeleteAlias",
-    "kms:DescribeKey",
-    "kms:DisableKey",
-    "kms:EnableKey",
-    "kms:EnableKeyRotation",
-    "kms:GetKeyPolicy",
-    "kms:GetKeyRotationStatus",
-    "kms:ListAliases",
-    "kms:ListResourceTags",
-    "kms:PutKeyPolicy",
-    "kms:ScheduleKeyDeletion",
-    "kms:TagResource",
-    "kms:UntagResource",
-    "kms:UpdateAlias",
-    "kms:UpdateKeyDescription",
     "lambda:AddPermission",
     "lambda:CreateFunction",
     "lambda:DeleteFunction",
+    "lambda:GetCodeSigningConfig",
     "lambda:GetFunction",
+    "lambda:GetFunctionCodeSigningConfig",
     "lambda:GetFunctionConfiguration",
+    "lambda:GetFunctionRecursionConfig",
+    "lambda:GetFunctionScalingConfig",
     "lambda:GetPolicy",
+    "lambda:GetRuntimeManagementConfig",
     "lambda:ListTags",
     "lambda:RemovePermission",
     "lambda:TagResource",
     "lambda:UntagResource",
     "lambda:UpdateFunctionCode",
     "lambda:UpdateFunctionConfiguration",
-    "logs:AssociateKmsKey",
+    "logs:CreateDelivery",
     "logs:CreateLogGroup",
+    "logs:CreateLogStream",
+    "logs:DeleteDelivery",
+    "logs:DeleteDeliveryDestination",
+    "logs:DeleteDeliveryDestinationPolicy",
+    "logs:DeleteDeliverySource",
     "logs:DeleteLogGroup",
+    "logs:DeleteLogStream",
+    "logs:DeleteResourcePolicy",
     "logs:DeleteRetentionPolicy",
+    "logs:DescribeDeliveries",
+    "logs:DescribeDeliveryDestinations",
+    "logs:DescribeDeliverySources",
+    "logs:DescribeIndexPolicies",
     "logs:DescribeLogGroups",
-    "logs:DisassociateKmsKey",
+    "logs:DescribeLogStreams",
+    "logs:DescribeResourcePolicies",
+    "logs:GetDelivery",
+    "logs:GetDeliveryDestination",
+    "logs:GetDeliveryDestinationPolicy",
+    "logs:GetDeliverySource",
+    "logs:GetDataProtectionPolicy",
     "logs:ListTagsForResource",
+    "logs:PutDeliveryDestination",
+    "logs:PutDeliveryDestinationPolicy",
+    "logs:PutDeliverySource",
+    "logs:PutResourcePolicy",
     "logs:PutRetentionPolicy",
     "logs:TagResource",
     "logs:UntagResource",
+    "logs:UpdateDeliveryConfiguration",
     "secretsmanager:CreateSecret",
     "secretsmanager:DeleteSecret",
     "secretsmanager:DescribeSecret",
+    "secretsmanager:GetRandomPassword",
     "secretsmanager:GetResourcePolicy",
     "secretsmanager:PutResourcePolicy",
     "secretsmanager:RemoveRegionsFromReplication",
@@ -232,6 +236,7 @@ _REGIONAL_ACTIONS = (
     "secretsmanager:UpdateSecret",
     "sns:CreateTopic",
     "sns:DeleteTopic",
+    "sns:GetDataProtectionPolicy",
     "sns:GetSubscriptionAttributes",
     "sns:GetTopicAttributes",
     "sns:ListSubscriptionsByTopic",
@@ -245,10 +250,16 @@ _REGIONAL_ACTIONS = (
     "sqs:CreateQueue",
     "sqs:DeleteQueue",
     "sqs:GetQueueAttributes",
+    "sqs:GetQueueUrl",
     "sqs:ListQueueTags",
     "sqs:SetQueueAttributes",
     "sqs:TagQueue",
     "sqs:UntagQueue",
+    "vpc-lattice:AssociateViaAWSService",
+    "vpc-lattice:CreateServiceNetworkResourceAssociation",
+    "vpc-lattice:GetResourceConfiguration",
+    "vpc-lattice:GetServiceNetworkResourceAssociation",
+    "vpc-lattice:ListServiceNetworkResourceAssociations",
     "wafv2:CreateIPSet",
     "wafv2:CreateWebACL",
     "wafv2:DeleteIPSet",
@@ -263,11 +274,13 @@ _REGIONAL_ACTIONS = (
     "wafv2:UntagResource",
     "wafv2:UpdateIPSet",
     "wafv2:UpdateWebACL",
+    "xray:DeleteResourcePolicy",
+    "xray:ListResourcePolicies",
+    "xray:PutResourcePolicy",
 )
 
 _GLOBAL_ACTIONS = (
     "cloudfront:CreateDistribution",
-    "cloudfront:CreateDistributionWithTags",
     "cloudfront:CreateFunction",
     "cloudfront:CreateVpcOrigin",
     "cloudfront:DeleteDistribution",
@@ -314,13 +327,20 @@ _GLOBAL_ACTIONS = (
     "s3:PutLifecycleConfiguration",
 )
 
-_IAM_ROLE_MANAGEMENT_ACTIONS = (
-    "iam:DeleteRole",
-    "iam:DeleteRolePolicy",
+_IAM_ROLE_READ_ACTIONS = (
     "iam:GetRole",
     "iam:GetRolePolicy",
     "iam:ListAttachedRolePolicies",
     "iam:ListRolePolicies",
+)
+
+_IAM_ROLE_CLEANUP_ACTIONS = (
+    "iam:DeleteRole",
+    "iam:DeleteRolePermissionsBoundary",
+    "iam:DeleteRolePolicy",
+)
+
+_IAM_ROLE_MANAGEMENT_ACTIONS = (
     "iam:PutRolePolicy",
     "iam:TagRole",
     "iam:UntagRole",
@@ -328,8 +348,8 @@ _IAM_ROLE_MANAGEMENT_ACTIONS = (
     "iam:UpdateRoleDescription",
 )
 
+_APPROVED_MANAGED_ROLE_POLICY = "policy/service-role/AWSLambdaBasicExecutionRole"
 _IAM_PASS_SERVICES = (
-    "backup.amazonaws.com",
     "bedrock-agentcore.amazonaws.com",
     "ecs-tasks.amazonaws.com",
     "lambda.amazonaws.com",
@@ -365,13 +385,8 @@ def policy_part_name(
     qualifier: str = PRODUCTION_QUALIFIER,
 ) -> str:
     """Return one deterministic execution-policy part name."""
-    if not isinstance(part, int) or isinstance(part, bool) or not (
-        1 <= part <= EXECUTION_POLICY_PART_COUNT
-    ):
-        raise ValueError(
-            "execution policy part must be between 1 and "
-            f"{EXECUTION_POLICY_PART_COUNT}"
-        )
+    if not isinstance(part, int) or isinstance(part, bool) or not (1 <= part <= EXECUTION_POLICY_PART_COUNT):
+        raise ValueError(f"execution policy part must be between 1 and {EXECUTION_POLICY_PART_COUNT}")
     return f"{policy_name(region, qualifier=qualifier)}-part{part}"
 
 
@@ -384,10 +399,7 @@ def policy_part_arn(
     qualifier: str = PRODUCTION_QUALIFIER,
 ) -> str:
     """Return one deterministic execution-policy part ARN."""
-    return (
-        f"arn:{partition}:iam::{account_id}:policy/"
-        f"{policy_part_name(region, part=part, qualifier=qualifier)}"
-    )
+    return f"arn:{partition}:iam::{account_id}:policy/{policy_part_name(region, part=part, qualifier=qualifier)}"
 
 
 def boundary_name(
@@ -407,10 +419,7 @@ def boundary_arn(
     qualifier: str = PRODUCTION_QUALIFIER,
 ) -> str:
     """Return the exact service-role permissions-boundary ARN."""
-    return (
-        f"arn:{partition}:iam::{account_id}:policy/"
-        f"{boundary_name(region, qualifier=qualifier)}"
-    )
+    return f"arn:{partition}:iam::{account_id}:policy/{boundary_name(region, qualifier=qualifier)}"
 
 
 def _role_resources(
@@ -421,32 +430,37 @@ def _role_resources(
     qualifier: str,
 ) -> list[str]:
     if qualifier == PRODUCTION_QUALIFIER:
-        names = (
-            "AxonLLMAgentCoreStack-*",
-            "AxonLLMControlPlaneStack-*",
-            "AxonLLMIdentityStack-*",
-            f"axonllm-agentcore-runtime-{region}",
+        stack_names = (
+            "AxonLLMAgentCoreStack",
+            "AxonLLMControlPlaneStack",
+            "AxonLLMIdentityStack",
         )
+        explicit_names = (f"axonllm-agentcore-runtime-{region}",)
     elif qualifier == EXTERNAL_QUALIFIER:
-        names = (
-            "AxonLLMAgentCoreStack-external-*",
-            "AxonLLMAgentCoreStack-external-oidc-*",
+        stack_names = (
+            "AxonLLMAgentCoreStack-external",
+            "AxonLLMAgentCoreStack-external-oidc",
+        )
+        explicit_names = (
             f"axonllm-agentcore-runtime-external-{region}",
             f"axonllm-agentcore-runtime-external-oidc-{region}",
         )
     else:
-        names = (
-            "AxonLLMAgentCoreStack-managed-*",
-            "AxonLLMControlPlaneStack-managed-*",
-            "AxonLLMIdentityStack-managed-*",
-            "AxonLLMLaunchWorkersStack-managed-*",
+        stack_names = (
+            "AxonLLMAgentCoreStack-managed",
+            "AxonLLMControlPlaneStack-managed",
+            "AxonLLMIdentityStack-managed",
+            "AxonLLMLaunchWorkersStack-managed",
+        )
+        explicit_names = (
             "AxonLLMLaunchWorkerExecutionRole-managed",
             f"axonllm-agentcore-runtime-managed-{region}",
         )
-    return [
-        f"arn:{partition}:iam::{account_id}:role/{name}"
-        for name in names
-    ]
+    names = {
+        *(f"{stack_name[:25]}-*" for stack_name in stack_names),
+        *explicit_names,
+    }
+    return [f"arn:{partition}:iam::{account_id}:role/{name}" for name in sorted(names)]
 
 
 def _untagged_cdk_provider_role_resources(
@@ -470,18 +484,7 @@ def _untagged_cdk_provider_role_resources(
             "AxonLLMAgentCoreStack-managed",
             "AxonLLMControlPlaneStack-managed",
         )
-    provider_ids = (
-        "CustomS3AutoDeleteObjectsCustomResourceProviderRole",
-        "CustomVpcRestrictDefaultSGCustomResourceProviderRole",
-    )
-    return [
-        (
-            f"arn:{partition}:iam::{account_id}:role/"
-            f"{stack_name}-{provider_id}-*"
-        )
-        for stack_name in stack_names
-        for provider_id in provider_ids
-    ]
+    return sorted({(f"arn:{partition}:iam::{account_id}:role/{stack_name[:25]}-Custom*") for stack_name in stack_names})
 
 
 def boundary_document(
@@ -544,14 +547,8 @@ def boundary_document(
                 "Effect": "Deny",
                 "Action": "s3:*",
                 "Resource": [
-                    (
-                        f"arn:{partition}:s3:::"
-                        "axonllm-deployment-evidence-*"
-                    ),
-                    (
-                        f"arn:{partition}:s3:::"
-                        "axonllm-deployment-evidence-*/*"
-                    ),
+                    (f"arn:{partition}:s3:::axonllm-deployment-evidence-*"),
+                    (f"arn:{partition}:s3:::axonllm-deployment-evidence-*/*"),
                 ],
             },
             {
@@ -565,7 +562,7 @@ def boundary_document(
                     },
                     "StringNotEquals": {
                         "aws:RequestedRegion": region,
-                    }
+                    },
                 },
             },
         ],
@@ -589,10 +586,7 @@ def bootstrap_boundary_arn(
     qualifier: str = PRODUCTION_QUALIFIER,
 ) -> str:
     """Return the exact CDK bootstrap-role permissions-boundary ARN."""
-    return (
-        f"arn:{partition}:iam::{account_id}:policy/"
-        f"{bootstrap_boundary_name(region, qualifier=qualifier)}"
-    )
+    return f"arn:{partition}:iam::{account_id}:policy/{bootstrap_boundary_name(region, qualifier=qualifier)}"
 
 
 def bootstrap_boundary_document(
@@ -604,6 +598,7 @@ def bootstrap_boundary_document(
 ) -> dict[str, Any]:
     """Build defense-in-depth limits for the CDK toolkit roles."""
     del account_id, region, qualifier
+    approved_managed_policy = f"arn:{partition}:iam::aws:{_APPROVED_MANAGED_ROLE_POLICY}"
     return {
         "Version": "2012-10-17",
         "Statement": [
@@ -620,7 +615,6 @@ def bootstrap_boundary_document(
                     "account:*",
                     "iam:AddUserToGroup",
                     "iam:AttachGroupPolicy",
-                    "iam:AttachRolePolicy",
                     "iam:AttachUserPolicy",
                     "iam:CreateAccessKey",
                     "iam:CreateGroup",
@@ -639,6 +633,17 @@ def bootstrap_boundary_document(
                 "Resource": "*",
             },
             {
+                "Sid": "DenyUnapprovedRolePolicyAttachments",
+                "Effect": "Deny",
+                "Action": "iam:AttachRolePolicy",
+                "Resource": "*",
+                "Condition": {
+                    "ArnNotEquals": {
+                        "iam:PolicyARN": approved_managed_policy,
+                    }
+                },
+            },
+            {
                 "Sid": "DenyReleaseSigningAndEvidence",
                 "Effect": "Deny",
                 "Action": [
@@ -650,10 +655,7 @@ def bootstrap_boundary_document(
                     "s3:PutObject",
                 ],
                 "Resource": [
-                    (
-                        f"arn:{partition}:s3:::"
-                        "axonllm-deployment-evidence-*/*"
-                    ),
+                    (f"arn:{partition}:s3:::axonllm-deployment-evidence-*/*"),
                     f"arn:{partition}:kms:*:*:alias/axonllm/*signing*",
                 ],
             },
@@ -686,6 +688,8 @@ def policy_document(
         account_id=account_id,
         qualifier=qualifier,
     )
+    role_lifecycle_resources = role_resources
+    approved_managed_policy = f"arn:{partition}:iam::aws:{_APPROVED_MANAGED_ROLE_POLICY}"
     return {
         "Version": "2012-10-17",
         "Statement": [
@@ -694,15 +698,30 @@ def policy_document(
                 "Effect": "Allow",
                 "Action": list(_REGIONAL_ACTIONS),
                 "Resource": "*",
-                "Condition": {
-                    "StringEquals": {"aws:RequestedRegion": region}
-                },
+                "Condition": {"StringEquals": {"aws:RequestedRegion": region}},
             },
             {
                 "Sid": "GlobalAxonLLMInfrastructure",
                 "Effect": "Allow",
                 "Action": list(_GLOBAL_ACTIONS),
                 "Resource": "*",
+            },
+            {
+                "Sid": "ReadCdkDeploymentAssets",
+                "Effect": "Allow",
+                "Action": "s3:GetObject",
+                "Resource": (f"arn:{partition}:s3:::cdk-{qualifier}-assets-{account_id}-{region}/*"),
+            },
+            {
+                "Sid": "ReadCdkBootstrapVersion",
+                "Effect": "Allow",
+                "Action": "ssm:GetParameters",
+                "Resource": (f"arn:{partition}:ssm:{region}:{account_id}:parameter/cdk-bootstrap/{qualifier}/version"),
+                "Condition": {
+                    "StringEquals": {
+                        "aws:RequestedRegion": region,
+                    }
+                },
             },
             {
                 "Sid": "CreateBoundedAxonLLMServiceRoles",
@@ -731,20 +750,12 @@ def policy_document(
                 },
             },
             {
-                "Sid": "CreateBoundedCdkProviderRoles",
+                "Sid": "CreateOrBoundCdkProviderRoles",
                 "Effect": "Allow",
-                "Action": "iam:CreateRole",
-                "Resource": untagged_provider_roles,
-                "Condition": {
-                    "StringEquals": {
-                        "iam:PermissionsBoundary": required_boundary,
-                    }
-                },
-            },
-            {
-                "Sid": "SetCdkProviderRoleBoundary",
-                "Effect": "Allow",
-                "Action": "iam:PutRolePermissionsBoundary",
+                "Action": [
+                    "iam:CreateRole",
+                    "iam:PutRolePermissionsBoundary",
+                ],
                 "Resource": untagged_provider_roles,
                 "Condition": {
                     "StringEquals": {
@@ -761,6 +772,29 @@ def policy_document(
                     "StringEquals": {
                         f"aws:ResourceTag/{_APPLICATION_TAG}": "AxonLLM",
                         f"aws:ResourceTag/{_TRUST_DOMAIN_TAG}": qualifier,
+                    }
+                },
+            },
+            {
+                "Sid": "ReadAndCleanUpAxonLLMServiceRoles",
+                "Effect": "Allow",
+                "Action": [
+                    *_IAM_ROLE_READ_ACTIONS,
+                    *_IAM_ROLE_CLEANUP_ACTIONS,
+                ],
+                "Resource": role_lifecycle_resources,
+            },
+            {
+                "Sid": "ManageApprovedRolePolicyAttachment",
+                "Effect": "Allow",
+                "Action": [
+                    "iam:AttachRolePolicy",
+                    "iam:DetachRolePolicy",
+                ],
+                "Resource": role_lifecycle_resources,
+                "Condition": {
+                    "ArnEquals": {
+                        "iam:PolicyARN": approved_managed_policy,
                     }
                 },
             },
@@ -817,13 +851,7 @@ def policy_document(
                 "Effect": "Allow",
                 "Action": "iam:PassRole",
                 "Resource": role_resources,
-                "Condition": {
-                    "StringEquals": {
-                        "iam:PassedToService": list(
-                            _IAM_PASS_SERVICES
-                        )
-                    }
-                },
+                "Condition": {"StringEquals": {"iam:PassedToService": list(_IAM_PASS_SERVICES)}},
             },
             {
                 "Sid": "DenyCrossNamespaceRoleManagement",
@@ -878,9 +906,7 @@ def _split_oversized_statement(
     actions = statement.get("Action")
     sid = statement.get("Sid")
     if not isinstance(actions, list) or not actions or not isinstance(sid, str):
-        raise ValueError(
-            "an oversized bootstrap-policy statement cannot be partitioned"
-        )
+        raise ValueError("an oversized bootstrap-policy statement cannot be partitioned")
 
     chunks: list[list[str]] = []
     current: list[str] = []
@@ -890,11 +916,7 @@ def _split_oversized_statement(
             "Sid": f"{sid}Part{len(chunks) + 1}",
             "Action": [*current, action],
         }
-        if (
-            current
-            and _policy_document_size([candidate])
-            > _EXECUTION_POLICY_TARGET_SIZE
-        ):
+        if current and _policy_document_size([candidate]) > _EXECUTION_POLICY_TARGET_SIZE:
             chunks.append(current)
             current = [action]
         else:
@@ -931,11 +953,7 @@ def policy_documents(
     documents: list[dict[str, Any]] = []
     current: list[dict[str, Any]] = []
     for statement in statements:
-        if (
-            current
-            and _policy_document_size([*current, statement])
-            > _EXECUTION_POLICY_TARGET_SIZE
-        ):
+        if current and _policy_document_size([*current, statement]) > _EXECUTION_POLICY_TARGET_SIZE:
             documents.append(
                 {
                     "Version": "2012-10-17",
@@ -954,12 +972,9 @@ def policy_documents(
         )
 
     if len(documents) != EXECUTION_POLICY_PART_COUNT or any(
-        _policy_document_size(document["Statement"])
-        > IAM_MANAGED_POLICY_SIZE_LIMIT
-        for document in documents
+        _policy_document_size(document["Statement"]) > IAM_MANAGED_POLICY_SIZE_LIMIT for document in documents
     ):
         raise ValueError(
-            "bootstrap execution policy no longer fits its reviewed "
-            f"{EXECUTION_POLICY_PART_COUNT}-part IAM contract"
+            f"bootstrap execution policy no longer fits its reviewed {EXECUTION_POLICY_PART_COUNT}-part IAM contract"
         )
     return tuple(documents)

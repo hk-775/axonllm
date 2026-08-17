@@ -7,7 +7,6 @@ included in the JSON report. The load request is restricted to GET or HEAD so a
 validation run cannot intentionally generate mutation traffic.
 
 This tool validates HTTP behavior and the checked-out authorization contract.
-AgentCore HTTP and generic targets also validate a bounded read-only SQL query.
 Fargate additionally requires hash-bound pre-load and post-load ELB target
 health observations and a reversible tenant-admin project mutation. It does not
 validate AgentCore cutover.
@@ -42,8 +41,6 @@ from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import urlsplit
 
-import sqlglot
-from sqlglot import exp
 import production_validation_rollback as rollback_journal
 
 
@@ -73,17 +70,12 @@ CORE_REQUIRED_CANARY_CATEGORIES = frozenset(
 TENANT_ADMIN_ROUND_TRIP_CATEGORY = "tenant_admin_mutation_round_trip"
 SUPPORTED_TARGETS = frozenset({"fargate", "agentcore-http", "generic"})
 REQUIRED_CANARY_CATEGORIES_BY_TARGET = {
-    "fargate": CORE_REQUIRED_CANARY_CATEGORIES
-    | {TENANT_ADMIN_ROUND_TRIP_CATEGORY},
-    "agentcore-http": CORE_REQUIRED_CANARY_CATEGORIES
-    | {"authenticated_query_allowed"},
-    "generic": CORE_REQUIRED_CANARY_CATEGORIES
-    | {"authenticated_query_allowed"},
+    "fargate": CORE_REQUIRED_CANARY_CATEGORIES | {TENANT_ADMIN_ROUND_TRIP_CATEGORY},
+    "agentcore-http": CORE_REQUIRED_CANARY_CATEGORIES,
+    "generic": CORE_REQUIRED_CANARY_CATEGORIES,
 }
 SUPPORTED_CANARY_CATEGORIES = frozenset(
-    category
-    for categories in REQUIRED_CANARY_CATEGORIES_BY_TARGET.values()
-    for category in categories
+    category for categories in REQUIRED_CANARY_CATEGORIES_BY_TARGET.values() for category in categories
 )
 WRITE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 READ_METHODS = frozenset({"GET", "HEAD"})
@@ -347,12 +339,7 @@ def _parse_headers(
                 "invalid_configuration",
                 f"{location} values must be strings",
             )
-        if (
-            not header_value
-            or len(header_value) > 4096
-            or "\r" in header_value
-            or "\n" in header_value
-        ):
+        if not header_value or len(header_value) > 4096 or "\r" in header_value or "\n" in header_value:
             raise ConfigurationError(
                 "invalid_configuration",
                 f"{location} contains an invalid header value",
@@ -387,22 +374,14 @@ def _parse_request(
             f"{location}.path must be an absolute HTTP path",
         )
     parsed_path = urlsplit(path)
-    if (
-        parsed_path.scheme
-        or parsed_path.netloc
-        or parsed_path.query
-        or parsed_path.fragment
-    ):
+    if parsed_path.scheme or parsed_path.netloc or parsed_path.query or parsed_path.fragment:
         raise ConfigurationError(
             "invalid_configuration",
             f"{location}.path must not contain a host, query, or fragment",
         )
 
     credential_env = request.get("credentialEnv")
-    if (
-        not isinstance(credential_env, str)
-        or ENV_PATTERN.fullmatch(credential_env) is None
-    ):
+    if not isinstance(credential_env, str) or ENV_PATTERN.fullmatch(credential_env) is None:
         raise ConfigurationError(
             "invalid_configuration",
             f"{location}.credentialEnv must be an uppercase environment name",
@@ -415,23 +394,18 @@ def _parse_request(
     }:
         raise ConfigurationError(
             "invalid_configuration",
-            f"{location}.credentialType must be alb-session-cookie, "
-            "browser-session-cookie, bearer, or x-api-key",
+            f"{location}.credentialType must be alb-session-cookie, browser-session-cookie, bearer, or x-api-key",
         )
 
     csrf_token_env = request.get("csrfTokenEnv")
     if csrf_token_env is not None and (
-        not isinstance(csrf_token_env, str)
-        or ENV_PATTERN.fullmatch(csrf_token_env) is None
+        not isinstance(csrf_token_env, str) or ENV_PATTERN.fullmatch(csrf_token_env) is None
     ):
         raise ConfigurationError(
             "invalid_configuration",
             f"{location}.csrfTokenEnv must be an uppercase environment name",
         )
-    cookie_backed_write = (
-        credential_type in COOKIE_CREDENTIAL_TYPES
-        and method in WRITE_METHODS
-    )
+    cookie_backed_write = credential_type in COOKIE_CREDENTIAL_TYPES and method in WRITE_METHODS
     if cookie_backed_write and csrf_token_env is None:
         raise ConfigurationError(
             "invalid_canary_contract",
@@ -502,80 +476,6 @@ def _request_json(
     return _mapping(value, f"{location} JSON body")
 
 
-def _validate_query_canary(request: RequestSpec, location: str) -> None:
-    body = _request_json(request, location)
-    if (
-        request.method != "POST"
-        or not all(
-            200 <= status < 300 for status in request.expected_statuses
-        )
-        or (
-            request.path != "/v1/query"
-            and body.get("action") != "query"
-        )
-        or (
-            "action" in body
-            and body.get("action") != "query"
-        )
-    ):
-        raise ConfigurationError(
-            "invalid_canary_contract",
-            f"{location} must POST a query expecting only 2xx statuses",
-        )
-    datasource_id = body.get("datasource_id")
-    max_rows = body.get("max_rows")
-    request_id = body.get("request_id")
-    if (
-        not isinstance(datasource_id, str)
-        or not datasource_id
-        or datasource_id != datasource_id.strip()
-        or len(datasource_id) > 128
-        or isinstance(max_rows, bool)
-        or not isinstance(max_rows, int)
-        or not 1 <= max_rows <= 10_000
-        or not isinstance(request_id, str)
-        or not request_id
-        or request_id != request_id.strip()
-        or len(request_id) > 128
-        or any(ord(character) < 32 for character in request_id)
-    ):
-        raise ConfigurationError(
-            "invalid_canary_contract",
-            f"{location} must identify a datasource, request_id, and "
-            "bounded max_rows",
-        )
-    sql = body.get("sql")
-    if not isinstance(sql, str) or not sql or len(sql) > 64 * 1024:
-        raise ConfigurationError(
-            "invalid_canary_contract",
-            f"{location} must include a read-only SQL query",
-        )
-    try:
-        statements = sqlglot.parse(
-            sql,
-            read="athena",
-            error_level=sqlglot.ErrorLevel.RAISE,
-            error_message_context=0,
-        )
-    except Exception as exc:
-        raise ConfigurationError(
-            "invalid_canary_contract",
-            f"{location} must include a valid read-only SQL query",
-        ) from exc
-    if (
-        len(statements) != 1
-        or not isinstance(statements[0], exp.Query)
-        or any(
-            isinstance(node, (exp.DDL, exp.DML, exp.Command, exp.Into))
-            for node in statements[0].walk()
-        )
-    ):
-        raise ConfigurationError(
-            "invalid_canary_contract",
-            f"{location} must include exactly one read-only SQL query",
-        )
-
-
 def _validate_project_mutation(
     request: RequestSpec,
     location: str,
@@ -591,8 +491,7 @@ def _validate_project_mutation(
     ):
         raise ConfigurationError(
             "invalid_canary_contract",
-            f"{location} must PUT one reversible project field and expect "
-            f"exactly {expected_statuses[0]}",
+            f"{location} must PUT one reversible project field and expect exactly {expected_statuses[0]}",
         )
     field, value = next(iter(body.items()))
     if field not in REVERSIBLE_PROJECT_FIELDS:
@@ -607,11 +506,7 @@ def _validate_project_mutation(
     }:
         valid = type(value) is bool
     elif field == "cache_ttl_seconds":
-        valid = (
-            not isinstance(value, bool)
-            and isinstance(value, int)
-            and 1 <= value <= 86_400
-        )
+        valid = not isinstance(value, bool) and isinstance(value, int) and 1 <= value <= 86_400
     elif field == "semantic_cache_threshold":
         valid = (
             not isinstance(value, bool)
@@ -639,15 +534,11 @@ def _validate_canary_semantics(canary: CanarySpec) -> None:
     request = canary.request
     location = f"canary {canary.name}"
     if canary.category == "authenticated_read_allowed":
-        if request.method not in READ_METHODS or not all(
-            200 <= status < 300 for status in request.expected_statuses
-        ):
+        if request.method not in READ_METHODS or not all(200 <= status < 300 for status in request.expected_statuses):
             raise ConfigurationError(
                 "invalid_canary_contract",
                 f"{location} must be a read expecting only 2xx statuses",
             )
-    elif canary.category == "authenticated_query_allowed":
-        _validate_query_canary(request, location)
     elif canary.category == "viewer_mutation_denied":
         _validate_project_mutation(
             request,
@@ -665,17 +556,12 @@ def _validate_canary_semantics(canary: CanarySpec) -> None:
             location,
             expected_statuses=(200,),
         )
-    elif request.method not in READ_METHODS or not set(
-        request.expected_statuses
-    ).issubset({403, 404}):
+    elif request.method not in READ_METHODS or not set(request.expected_statuses).issubset({403, 404}):
         raise ConfigurationError(
             "invalid_canary_contract",
             f"{location} must be a read expecting only 403 or 404",
         )
-    if (
-        canary.category != "viewer_mutation_denied"
-        and canary.expected_error_code is not None
-    ):
+    if canary.category != "viewer_mutation_denied" and canary.expected_error_code is not None:
         raise ConfigurationError(
             "invalid_canary_contract",
             f"{location} must not configure an RBAC error code",
@@ -735,8 +621,7 @@ def parse_config(value: Any) -> ValidationConfig:
             )
         expected_error_code = raw_canary.get("expectedErrorCode")
         if expected_error_code is not None and (
-            not isinstance(expected_error_code, str)
-            or ERROR_CODE_PATTERN.fullmatch(expected_error_code) is None
+            not isinstance(expected_error_code, str) or ERROR_CODE_PATTERN.fullmatch(expected_error_code) is None
         ):
             raise ConfigurationError(
                 "invalid_configuration",
@@ -761,55 +646,39 @@ def parse_config(value: Any) -> ValidationConfig:
     if missing_categories:
         raise ConfigurationError(
             "missing_required_canaries",
-            f"configuration does not cover every required {target} "
-            "canary category",
+            f"configuration does not cover every required {target} canary category",
         )
     if target == "fargate" and any(
-        canary.request.credential_type not in COOKIE_CREDENTIAL_TYPES
-        for canary in canaries
+        canary.request.credential_type not in COOKIE_CREDENTIAL_TYPES for canary in canaries
     ):
         raise ConfigurationError(
             "invalid_canary_contract",
             "Fargate canaries must use short-lived browser session cookies",
         )
-    round_trip_canaries = [
-        canary
-        for canary in canaries
-        if canary.category == TENANT_ADMIN_ROUND_TRIP_CATEGORY
-    ]
+    round_trip_canaries = [canary for canary in canaries if canary.category == TENANT_ADMIN_ROUND_TRIP_CATEGORY]
     if target != "fargate" and round_trip_canaries:
         raise ConfigurationError(
             "invalid_canary_contract",
             "tenant-admin project mutation round trips are Fargate-only",
         )
     if target == "fargate":
-        viewer_canaries = [
-            canary
-            for canary in canaries
-            if canary.category == "viewer_mutation_denied"
-        ]
+        viewer_canaries = [canary for canary in canaries if canary.category == "viewer_mutation_denied"]
         if len(viewer_canaries) != 1 or len(round_trip_canaries) != 1:
             raise ConfigurationError(
                 "invalid_canary_contract",
-                "Fargate requires exactly one paired viewer denial and "
-                "tenant-admin mutation round trip",
+                "Fargate requires exactly one paired viewer denial and tenant-admin mutation round trip",
             )
         viewer = viewer_canaries[0].request
         admin = round_trip_canaries[0].request
         if viewer.path != admin.path or viewer.body != admin.body:
             raise ConfigurationError(
                 "invalid_canary_contract",
-                "Fargate viewer and tenant-admin mutations must use the same "
-                "project path and JSON body",
+                "Fargate viewer and tenant-admin mutations must use the same project path and JSON body",
             )
-        if (
-            viewer.credential_env == admin.credential_env
-            or viewer.csrf_token_env == admin.csrf_token_env
-        ):
+        if viewer.credential_env == admin.credential_env or viewer.csrf_token_env == admin.csrf_token_env:
             raise ConfigurationError(
                 "invalid_canary_contract",
-                "Fargate viewer and tenant-admin mutations must use distinct "
-                "cookie and CSRF identities",
+                "Fargate viewer and tenant-admin mutations must use distinct cookie and CSRF identities",
             )
 
     raw_load = _mapping(raw.get("load"), "configuration.load")
@@ -827,24 +696,17 @@ def parse_config(value: Any) -> ValidationConfig:
             "invalid_configuration",
             "configuration.load.request must expect only 2xx statuses",
         )
-    if (
-        target == "fargate"
-        and load_request.credential_type not in COOKIE_CREDENTIAL_TYPES
-    ):
+    if target == "fargate" and load_request.credential_type not in COOKIE_CREDENTIAL_TYPES:
         raise ConfigurationError(
             "invalid_canary_contract",
             "Fargate load must use a short-lived browser session cookie",
         )
-    if (
-        target == "fargate"
-        and {
-            load_request.credential_type,
-            *(canary.request.credential_type for canary in canaries),
-        }
-        not in (
-            {"alb-session-cookie"},
-            {"browser-session-cookie"},
-        )
+    if target == "fargate" and {
+        load_request.credential_type,
+        *(canary.request.credential_type for canary in canaries),
+    } not in (
+        {"alb-session-cookie"},
+        {"browser-session-cookie"},
     ):
         raise ConfigurationError(
             "invalid_canary_contract",
@@ -891,11 +753,7 @@ def parse_config(value: Any) -> ValidationConfig:
         ),
     )
     credential_envs = {
-        category: {
-            canary.request.credential_env
-            for canary in canaries
-            if canary.category == category
-        }
+        category: {canary.request.credential_env for canary in canaries if canary.category == category}
         for category in categories
     }
     if any(len(values) != 1 for values in credential_envs.values()):
@@ -912,25 +770,15 @@ def parse_config(value: Any) -> ValidationConfig:
         )
     }
     authenticated_envs = set().union(
-        *(
-            credential_envs[category]
-            for category in (
-                "authenticated_read_allowed",
-                "authenticated_query_allowed",
-            )
-            if category in credential_envs
-        )
+        *(credential_envs[category] for category in ("authenticated_read_allowed",) if category in credential_envs)
     )
     if len(denial_envs) != 3 or denial_envs & authenticated_envs:
         raise ConfigurationError(
             "invalid_canary_contract",
-            "viewer, cross-tenant, ungranted-project, and authenticated "
-            "canaries must use distinct identity classes",
+            "viewer, cross-tenant, ungranted-project, and authenticated canaries must use distinct identity classes",
         )
     if target == "fargate":
-        admin_env = next(
-            iter(credential_envs[TENANT_ADMIN_ROUND_TRIP_CATEGORY])
-        )
+        admin_env = next(iter(credential_envs[TENANT_ADMIN_ROUND_TRIP_CATEGORY]))
         if admin_env in denial_envs or admin_env in authenticated_envs:
             raise ConfigurationError(
                 "invalid_canary_contract",
@@ -939,8 +787,7 @@ def parse_config(value: Any) -> ValidationConfig:
     if load.request.credential_env not in authenticated_envs:
         raise ConfigurationError(
             "invalid_canary_contract",
-            "configuration.load.request must use an authenticated canary "
-            "credential",
+            "configuration.load.request must use an authenticated canary credential",
         )
     return ValidationConfig(
         target=target,
@@ -956,10 +803,7 @@ def parse_target_health_snapshot(
     target_group_arn: str,
     source_sha256: str,
 ) -> TargetHealthSnapshot:
-    if (
-        not isinstance(target_group_arn, str)
-        or TARGET_GROUP_ARN_PATTERN.fullmatch(target_group_arn) is None
-    ):
+    if not isinstance(target_group_arn, str) or TARGET_GROUP_ARN_PATTERN.fullmatch(target_group_arn) is None:
         raise ConfigurationError(
             "invalid_target_health_evidence",
             "target-health observation targetGroupArn is invalid",
@@ -1004,14 +848,11 @@ def parse_target_health_snapshot(
     if len(set(healthy_ids)) < 2:
         raise ConfigurationError(
             "insufficient_healthy_targets",
-            "target-health observation must contain at least two distinct "
-            "healthy target IDs",
+            "target-health observation must contain at least two distinct healthy target IDs",
         )
     target_hashes = tuple(
         sorted(
-            hashlib.sha256(
-                f"{target_group_arn}\0{target_id}".encode("utf-8")
-            ).hexdigest()
+            hashlib.sha256(f"{target_group_arn}\0{target_id}".encode("utf-8")).hexdigest()
             for target_id in set(healthy_ids)
         )
     )
@@ -1040,7 +881,7 @@ class AwsCliTargetHealthCollector:
             raise ConfigurationError(
                 "invalid_target_health_evidence",
                 "target-group ARN is invalid",
-        )
+            )
         self._target_group_arn = target_group_arn
         self._runner = subprocess.run if runner is None else runner
 
@@ -1079,11 +920,7 @@ class AwsCliTargetHealthCollector:
         payload = completed.stdout
         if isinstance(payload, str):
             payload = payload.encode("utf-8")
-        if (
-            not isinstance(payload, bytes)
-            or not payload
-            or len(payload) > MAX_TARGET_HEALTH_OBSERVATION_BYTES
-        ):
+        if not isinstance(payload, bytes) or not payload or len(payload) > MAX_TARGET_HEALTH_OBSERVATION_BYTES:
             raise ConfigurationError(
                 "invalid_target_health_evidence",
                 "ELB target-health response size is invalid",
@@ -1155,9 +992,7 @@ def _bound_target_health_observation(
         "sourceSha256": observation.source_sha256,
         "healthyTargetCount": len(observation.healthy_target_hashes),
         "targetIdSha256": list(observation.healthy_target_hashes),
-        "targetGroupArnSha256": hashlib.sha256(
-            observation.target_group_arn.encode("utf-8")
-        ).hexdigest(),
+        "targetGroupArnSha256": hashlib.sha256(observation.target_group_arn.encode("utf-8")).hexdigest(),
     }
     canonical = json.dumps(
         redacted,
@@ -1186,14 +1021,9 @@ def _target_health_report(
     ):
         raise ConfigurationError(
             "target_health_identity_changed",
-            "Fargate target-health collections must contain the same target "
-            "group and healthy target set",
+            "Fargate target-health collections must contain the same target group and healthy target set",
         )
-    if not (
-        pre_collected_at <= load_started_at
-        <= load_finished_at
-        <= post_collected_at
-    ):
+    if not (pre_collected_at <= load_started_at <= load_finished_at <= post_collected_at):
         raise ConfigurationError(
             "invalid_target_health_chronology",
             "target-health collections do not bracket the HTTP load interval",
@@ -1232,9 +1062,7 @@ def _target_health_report(
         "sameTargetSetAcrossLoad": True,
         "chronologyValidated": True,
         "backingInstanceIdentityValidated": True,
-        "targetGroupArnSha256": hashlib.sha256(
-            pre_load.target_group_arn.encode("utf-8")
-        ).hexdigest(),
+        "targetGroupArnSha256": hashlib.sha256(pre_load.target_group_arn.encode("utf-8")).hexdigest(),
         "evidenceSha256": hashlib.sha256(canonical_evidence).hexdigest(),
         "loadInterval": load_interval,
         "preLoad": pre_observation,
@@ -1298,8 +1126,7 @@ def validate_endpoint_count(
     if len(endpoints) < config.load.minimum_endpoints:
         raise ConfigurationError(
             "insufficient_endpoints",
-            "configuration.load.minimumEndpoints exceeds the number of "
-            "distinct base URLs",
+            "configuration.load.minimumEndpoints exceeds the number of distinct base URLs",
         )
 
 
@@ -1327,16 +1154,11 @@ def _credential_headers(
         headers["X-Api-Key"] = credential
     elif request.credential_type in COOKIE_CREDENTIAL_TYPES:
         cookie_parts = [
-            part.strip()
-            for part in credential.split(";")
-            if part.strip().partition("=")[0] != CSRF_COOKIE_NAME
+            part.strip() for part in credential.split(";") if part.strip().partition("=")[0] != CSRF_COOKIE_NAME
         ]
         if request.csrf_token_env is not None:
             csrf_token = environ.get(request.csrf_token_env)
-            if (
-                not isinstance(csrf_token, str)
-                or CSRF_TOKEN_PATTERN.fullmatch(csrf_token) is None
-            ):
+            if not isinstance(csrf_token, str) or CSRF_TOKEN_PATTERN.fullmatch(csrf_token) is None:
                 raise CredentialUnavailable("csrf_token_unavailable")
             cookie_parts.append(f"{CSRF_COOKIE_NAME}={csrf_token}")
             headers[CSRF_HEADER_NAME] = csrf_token
@@ -1366,11 +1188,7 @@ def urllib_transport(
     opener = urllib.request.build_opener(_NoRedirectHandler())
     try:
         with opener.open(url_request, timeout=timeout_seconds) as response:
-            body = response.read(
-                MAX_RESPONSE_BYTES + 1
-                if request.capture_response
-                else 65536
-            )
+            body = response.read(MAX_RESPONSE_BYTES + 1 if request.capture_response else 65536)
             status_code = response.getcode()
         if request.capture_response and len(body) > MAX_RESPONSE_BYTES:
             return HttpObservation(
@@ -1385,11 +1203,7 @@ def urllib_transport(
         )
     except urllib.error.HTTPError as exc:
         try:
-            body = exc.read(
-                MAX_RESPONSE_BYTES + 1
-                if request.capture_response
-                else 65536
-            )
+            body = exc.read(MAX_RESPONSE_BYTES + 1 if request.capture_response else 65536)
         finally:
             exc.close()
         if request.capture_response and len(body) > MAX_RESPONSE_BYTES:
@@ -1458,7 +1272,7 @@ def _request_for_endpoint(
 
 
 def evaluate_authorization_contract() -> dict[str, Any]:
-    """Evaluate the local default-deny policy without claiming remote SQL."""
+    """Evaluate the local default-deny policy used by every core target."""
 
     def principal(
         role: TenantRole,
@@ -1474,7 +1288,7 @@ def evaluate_authorization_contract() -> dict[str, Any]:
             auth_method=AuthMethod.OIDC_JWT,
             membership_status=MembershipStatus.ACTIVE,
             project_ids=projects,
-            scopes=frozenset({Action.QUERY_SELECT.value}),
+            scopes=frozenset({Action.MODEL_LIST.value}),
         )
 
     resource = ResourceRef(
@@ -1498,10 +1312,7 @@ def evaluate_authorization_contract() -> dict[str, Any]:
         passed = (
             decision.allowed is expected_allowed
             and decision.status_code == expected_status
-            and (
-                expected_reason is None
-                or decision.reason == expected_reason
-            )
+            and (expected_reason is None or decision.reason == expected_reason)
         )
         checks.append(
             {
@@ -1522,40 +1333,28 @@ def evaluate_authorization_contract() -> dict[str, Any]:
         TenantRole.TENANT_AUDITOR,
     )
     for role in tenant_roles:
-        decision = authorize(principal(role), Action.QUERY_SELECT, resource)
+        decision = authorize(principal(role), Action.MODEL_LIST, resource)
         record(
-            f"{role.value}_query_select_allowed",
+            f"{role.value}_model_list_allowed",
             role,
-            Action.QUERY_SELECT,
+            Action.MODEL_LIST,
             decision,
             expected_allowed=True,
             expected_status=200,
         )
     service_decision = authorize(
         principal(TenantRole.SERVICE),
-        Action.QUERY_SELECT,
+        Action.MODEL_LIST,
         resource,
     )
     record(
-        "service_query_select_allowed",
+        "service_model_list_allowed",
         TenantRole.SERVICE,
-        Action.QUERY_SELECT,
+        Action.MODEL_LIST,
         service_decision,
         expected_allowed=True,
         expected_status=200,
     )
-
-    for role in TenantRole:
-        decision = authorize(principal(role), Action.QUERY_MUTATE, resource)
-        record(
-            f"{role.value}_query_mutate_denied",
-            role,
-            Action.QUERY_MUTATE,
-            decision,
-            expected_allowed=False,
-            expected_status=403,
-            expected_reason="query_mutation_not_supported",
-        )
 
     for role, expected_allowed in (
         (TenantRole.TENANT_ADMIN, True),
@@ -1578,7 +1377,7 @@ def evaluate_authorization_contract() -> dict[str, Any]:
 
     cross_tenant = authorize(
         principal(TenantRole.TENANT_MEMBER),
-        Action.QUERY_SELECT,
+        Action.MODEL_LIST,
         ResourceRef(
             resource_type="project",
             resource_id="project-b",
@@ -1587,9 +1386,9 @@ def evaluate_authorization_contract() -> dict[str, Any]:
         ),
     )
     record(
-        "cross_tenant_query_select_concealed",
+        "cross_tenant_model_list_concealed",
         TenantRole.TENANT_MEMBER,
-        Action.QUERY_SELECT,
+        Action.MODEL_LIST,
         cross_tenant,
         expected_allowed=False,
         expected_status=404,
@@ -1598,13 +1397,13 @@ def evaluate_authorization_contract() -> dict[str, Any]:
 
     ungranted = authorize(
         principal(TenantRole.TENANT_MEMBER, projects=frozenset()),
-        Action.QUERY_SELECT,
+        Action.MODEL_LIST,
         resource,
     )
     record(
-        "ungranted_project_query_select_concealed",
+        "ungranted_project_model_list_concealed",
         TenantRole.TENANT_MEMBER,
-        Action.QUERY_SELECT,
+        Action.MODEL_LIST,
         ungranted,
         expected_allowed=False,
         expected_status=404,
@@ -1615,30 +1414,8 @@ def evaluate_authorization_contract() -> dict[str, Any]:
         "status": "PASS" if passed else "FAIL",
         "policyModule": "src.gateway.auth.authorization",
         "sourcePolicyContractExercised": True,
-        "queryBackendExercised": False,
         "checks": checks,
     }
-
-
-def _query_response_matches(
-    request: RequestSpec,
-    observation: HttpObservation,
-) -> bool:
-    try:
-        request_body = json.loads(request.body or b"")
-        response_body = json.loads(observation.body)
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        return False
-    if type(request_body) is not dict or type(response_body) is not dict:
-        return False
-    return (
-        response_body.get("datasource_id")
-        == request_body.get("datasource_id")
-        and isinstance(response_body.get("rows"), list)
-        and isinstance(response_body.get("statistics"), dict)
-        and response_body.get("request_id")
-        == request_body.get("request_id")
-    )
 
 
 def _response_object(observation: HttpObservation) -> dict[str, Any] | None:
@@ -1677,12 +1454,7 @@ def _project_snapshot(
     if value is None:
         return None
     revision = value.get("revision")
-    if (
-        isinstance(revision, bool)
-        or not isinstance(revision, int)
-        or revision < 0
-        or not fields.issubset(value)
-    ):
+    if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0 or not fields.issubset(value):
         return None
     return revision, {field: value[field] for field in fields}
 
@@ -1747,8 +1519,7 @@ def _reconcile_rollback_entry(
     read_headers = {
         key: value
         for key, value in write_headers.items()
-        if key.lower()
-        not in {"content-type", "if-match", CSRF_HEADER_NAME.lower()}
+        if key.lower() not in {"content-type", "if-match", CSRF_HEADER_NAME.lower()}
     }
 
     current_observation = _send(
@@ -1768,10 +1539,7 @@ def _reconcile_rollback_entry(
         return {
             "entryId": entry_id,
             "status": "PENDING",
-            "reason": (
-                current_observation.error_type
-                or "rollback_state_validation_failed"
-            ),
+            "reason": (current_observation.error_type or "rollback_state_validation_failed"),
             "rollbackAttempted": False,
             "rollbackSucceeded": False,
             "restorationVerified": False,
@@ -1801,15 +1569,8 @@ def _reconcile_rollback_entry(
         }
 
     mutation_revision = entry["mutationRevision"]
-    expected_revision = (
-        mutation_revision
-        if mutation_revision is not None
-        else entry["priorRevision"] + 1
-    )
-    if (
-        current[1] != entry["mutationValues"]
-        or current[0] != expected_revision
-    ):
+    expected_revision = mutation_revision if mutation_revision is not None else entry["priorRevision"] + 1
+    if current[1] != entry["mutationValues"] or current[0] != expected_revision:
         return {
             "entryId": entry_id,
             "status": "PENDING",
@@ -2011,15 +1772,12 @@ def _tenant_admin_round_trip(
         write_headers = None
 
     if write_headers is not None:
-        mutation_body = dict(
-            _request_json(canary.request, f"canary {canary.name}")
-        )
+        mutation_body = dict(_request_json(canary.request, f"canary {canary.name}"))
         fields = frozenset(mutation_body)
         read_headers = {
             key: value
             for key, value in write_headers.items()
-            if key.lower()
-            not in {"content-type", "if-match", CSRF_HEADER_NAME.lower()}
+            if key.lower() not in {"content-type", "if-match", CSRF_HEADER_NAME.lower()}
         }
         prior_observation = record(
             _send(
@@ -2036,9 +1794,7 @@ def _tenant_admin_round_trip(
         )
         prior = _project_snapshot(prior_observation, fields)
         if prior is None:
-            fail(
-                prior_observation.error_type or "prior_state_validation_failed"
-            )
+            fail(prior_observation.error_type or "prior_state_validation_failed")
         elif prior[1] == mutation_body:
             fail("mutation_would_not_change_state")
         else:
@@ -2076,9 +1832,7 @@ def _tenant_admin_round_trip(
                         )
                     )
                     mutation_status = mutation_observation.status_code
-                    mutation_revision = _response_revision(
-                        mutation_observation
-                    )
+                    mutation_revision = _response_revision(mutation_observation)
                     if mutation_observation.error_type is not None:
                         fail(mutation_observation.error_type)
                     elif mutation_status not in canary.request.expected_statuses:
@@ -2118,20 +1872,12 @@ def _tenant_admin_round_trip(
                             mutation_revision,
                             mutation_body,
                         ):
-                            fail(
-                                changed_observation.error_type
-                                or "changed_state_verification_failed"
-                            )
+                            fail(changed_observation.error_type or "changed_state_verification_failed")
                         else:
                             phases["changedStateVerified"] = True
                 finally:
                     pending = next(
-                        (
-                            entry
-                            for entry in journal.entries(pending_only=True)
-                            if entry["id"] == entry_id
-                        )
-                        ,
+                        (entry for entry in journal.entries(pending_only=True) if entry["id"] == entry_id),
                         None,
                     )
                     if pending is None:
@@ -2143,25 +1889,14 @@ def _tenant_admin_round_trip(
                             environ=environ,
                             transport=transport,
                         )
-                        observations.extend(
-                            reconciliation["observations"]
-                        )
-                        phases["rollbackAttempted"] = reconciliation[
-                            "rollbackAttempted"
-                        ]
-                        phases["rollbackSucceeded"] = reconciliation[
-                            "rollbackSucceeded"
-                        ]
-                        phases["restorationVerified"] = reconciliation[
-                            "restorationVerified"
-                        ]
+                        observations.extend(reconciliation["observations"])
+                        phases["rollbackAttempted"] = reconciliation["rollbackAttempted"]
+                        phases["rollbackSucceeded"] = reconciliation["rollbackSucceeded"]
+                        phases["restorationVerified"] = reconciliation["restorationVerified"]
                         if reconciliation["status"] != "COMPLETE":
                             fail(reconciliation["reason"], cleanup=True)
 
-    passed = (
-        failure_reason is None
-        and all(phases.values())
-    )
+    passed = failure_reason is None and all(phases.values())
     response_bytes = sum(len(observation.body) for observation in observations)
     response_digest = hashlib.sha256()
     for observation in observations:
@@ -2183,7 +1918,6 @@ def _tenant_admin_round_trip(
         ),
         "responseBytes": response_bytes,
         "responseSha256": response_digest.hexdigest(),
-        "queryResponseValidated": None,
         "errorCodeValidated": None,
         "roundTrip": phases,
         "passed": passed,
@@ -2240,50 +1974,27 @@ def run_canaries(
                         endpoint,
                         canary.request,
                         headers,
-                        capture_response=(
-                            canary.category
-                            in {
-                                "authenticated_query_allowed",
-                                "viewer_mutation_denied",
-                            }
-                        ),
+                        capture_response=(canary.category == "viewer_mutation_denied"),
                     ),
                     config.timeout_seconds,
                 )
-            query_response_valid = (
-                canary.category != "authenticated_query_allowed"
-                or _query_response_matches(canary.request, observation)
-            )
             observed_error_code = (
-                _response_error_code(observation)
-                if canary.category == "viewer_mutation_denied"
-                else None
+                _response_error_code(observation) if canary.category == "viewer_mutation_denied" else None
             )
-            error_code_valid = (
-                canary.category != "viewer_mutation_denied"
-                or (
-                    observed_error_code != "csrf_validation_failed"
-                    and observed_error_code == canary.expected_error_code
-                )
+            error_code_valid = canary.category != "viewer_mutation_denied" or (
+                observed_error_code != "csrf_validation_failed" and observed_error_code == canary.expected_error_code
             )
             passed = (
                 observation.error_type is None
-                and observation.status_code
-                in canary.request.expected_statuses
-                and query_response_valid
+                and observation.status_code in canary.request.expected_statuses
                 and error_code_valid
             )
             failure_reason = None
             if not passed:
                 if observation.error_type is not None:
                     failure_reason = observation.error_type
-                elif (
-                    observation.status_code
-                    not in canary.request.expected_statuses
-                ):
+                elif observation.status_code not in canary.request.expected_statuses:
                     failure_reason = "unexpected_status"
-                elif not query_response_valid:
-                    failure_reason = "invalid_query_response"
                 elif observed_error_code == "csrf_validation_failed":
                     failure_reason = "csrf_validation_failed"
                 else:
@@ -2297,28 +2008,12 @@ def run_canaries(
                     "path": canary.request.path,
                     "credentialEnv": canary.request.credential_env,
                     "credentialType": canary.request.credential_type,
-                    "expectedStatuses": list(
-                        canary.request.expected_statuses
-                    ),
+                    "expectedStatuses": list(canary.request.expected_statuses),
                     "statusCode": observation.status_code,
                     "latencyMs": round(observation.latency_ms, 3),
                     "responseBytes": len(observation.body),
-                    "responseSha256": hashlib.sha256(
-                        observation.body
-                    ).hexdigest(),
-                    "queryResponseValidated": (
-                        query_response_valid
-                        if (
-                            canary.category
-                            == "authenticated_query_allowed"
-                        )
-                        else None
-                    ),
-                    "errorCodeValidated": (
-                        error_code_valid
-                        if canary.category == "viewer_mutation_denied"
-                        else None
-                    ),
+                    "responseSha256": hashlib.sha256(observation.body).hexdigest(),
+                    "errorCodeValidated": (error_code_valid if canary.category == "viewer_mutation_denied" else None),
                     "roundTrip": None,
                     "passed": passed,
                     "failureReason": failure_reason,
@@ -2328,18 +2023,12 @@ def run_canaries(
     expected_result_count = len(config.canaries) * len(endpoints)
     return {
         "status": "PASS" if passed else "FAIL",
-        "requiredCategories": sorted(
-            REQUIRED_CANARY_CATEGORIES_BY_TARGET[config.target]
-        ),
-        "configuredCategories": sorted(
-            {canary.category for canary in config.canaries}
-        ),
+        "requiredCategories": sorted(REQUIRED_CANARY_CATEGORIES_BY_TARGET[config.target]),
+        "configuredCategories": sorted({canary.category for canary in config.canaries}),
         "scenarioCount": len(config.canaries),
         "requestCount": len(results),
         "allEndpointsCovered": (
-            len(results) == expected_result_count
-            and {result["baseUrl"] for result in results}
-            == set(endpoints)
+            len(results) == expected_result_count and {result["baseUrl"] for result in results} == set(endpoints)
         ),
         "allRequiredCanariesPassedOnAllEndpoints": passed,
         "results": results,
@@ -2381,11 +2070,7 @@ def _status_counts(
         (
             observation.error_type
             if observation.error_type is not None
-            else (
-                str(observation.status_code)
-                if observation.status_code is not None
-                else "transport_error"
-            )
+            else (str(observation.status_code) if observation.status_code is not None else "transport_error")
         )
         for observation in observations
     )
@@ -2397,8 +2082,7 @@ def _load_error_count(
     expected_statuses: tuple[int, ...],
 ) -> int:
     return sum(
-        observation.error_type is not None
-        or observation.status_code not in expected_statuses
+        observation.error_type is not None or observation.status_code not in expected_statuses
         for observation in observations
     )
 
@@ -2478,9 +2162,7 @@ def run_load(
         max_workers=config.load.concurrency,
         thread_name_prefix="axon-validation",
     ) as executor:
-        attempts = list(
-            executor.map(invoke, range(config.load.request_count))
-        )
+        attempts = list(executor.map(invoke, range(config.load.request_count)))
     duration_seconds = max(monotonic() - started, 0.000001)
 
     observations = [observation for _, observation in attempts]
@@ -2496,9 +2178,7 @@ def run_load(
     endpoint_reports: list[dict[str, Any]] = []
     for endpoint in endpoints:
         endpoint_observations = [
-            observation
-            for attempted_endpoint, observation in attempts
-            if attempted_endpoint == endpoint
+            observation for attempted_endpoint, observation in attempts if attempted_endpoint == endpoint
         ]
         endpoint_errors = _load_error_count(
             endpoint_observations,
@@ -2515,12 +2195,7 @@ def run_load(
                 )
                 if endpoint_observations
                 else None,
-                "latencyMs": _latency_summary(
-                    [
-                        observation.latency_ms
-                        for observation in endpoint_observations
-                    ]
-                ),
+                "latencyMs": _latency_summary([observation.latency_ms for observation in endpoint_observations]),
             }
         )
 
@@ -2555,10 +2230,7 @@ def run_load(
             "name": "p95_latency_ms",
             "actual": latency["p95"],
             "maximum": config.load.max_p95_latency_ms,
-            "passed": (
-                latency["p95"] is not None
-                and latency["p95"] <= config.load.max_p95_latency_ms
-            ),
+            "passed": (latency["p95"] is not None and latency["p95"] <= config.load.max_p95_latency_ms),
         },
     ]
     passed = all(gate["passed"] for gate in gates)
@@ -2569,9 +2241,7 @@ def run_load(
         "method": config.load.request.method,
         "path": config.load.request.path,
         "credentialType": config.load.request.credential_type,
-        "expectedStatuses": list(
-            config.load.request.expected_statuses
-        ),
+        "expectedStatuses": list(config.load.request.expected_statuses),
         "requestCountConfigured": config.load.request_count,
         "requestCountCompleted": len(attempts),
         "concurrency": config.load.concurrency,
@@ -2608,14 +2278,8 @@ def _launch_gate_report(
     results = canaries["results"]
     required_categories = REQUIRED_CANARY_CATEGORIES_BY_TARGET[config.target]
     for category in sorted(required_categories):
-        category_results = [
-            result
-            for result in results
-            if result["category"] == category
-        ]
-        covered_endpoints = {
-            result["baseUrl"] for result in category_results
-        }
+        category_results = [result for result in results if result["category"] == category]
+        covered_endpoints = {result["baseUrl"] for result in category_results}
         passed = (
             len(category_results) == len(endpoints)
             and covered_endpoints == set(endpoints)
@@ -2634,10 +2298,7 @@ def _launch_gate_report(
         "maxErrorRate": load["thresholds"]["maxErrorRate"],
         "maxP95LatencyMs": load["thresholds"]["maxP95LatencyMs"],
     }
-    passed = (
-        all(gate["passed"] for gate in scenario_gates.values())
-        and load_gate["passed"]
-    )
+    passed = all(gate["passed"] for gate in scenario_gates.values()) and load_gate["passed"]
     return {
         "status": "PASS" if passed else "FAIL",
         "requiredScenarios": sorted(required_categories),
@@ -2665,8 +2326,7 @@ def run_validation(
     if config.target == "fargate" and target_health_collector is None:
         raise ConfigurationError(
             "missing_target_health_collector",
-            "Fargate validation requires an in-process ELB target-health "
-            "collector",
+            "Fargate validation requires an in-process ELB target-health collector",
         )
     if config.target == "fargate" and rollback is None:
         raise ConfigurationError(
@@ -2693,9 +2353,7 @@ def run_validation(
         transport=transport,
     )
     prerequisites_passed = (
-        authorization["status"] == "PASS"
-        and canaries["status"] == "PASS"
-        and canaries["allEndpointsCovered"]
+        authorization["status"] == "PASS" and canaries["status"] == "PASS" and canaries["allEndpointsCovered"]
     )
     target_health: dict[str, Any] | None = None
     if prerequisites_passed:
@@ -2741,53 +2399,22 @@ def run_validation(
             "authorization_or_canary_prerequisite_failed",
         )
     backing_identity_validated = (
-        target_health is not None
-        and target_health["status"] == "PASS"
-        and load["status"] == "PASS"
+        target_health is not None and target_health["status"] == "PASS" and load["status"] == "PASS"
     )
-    load["backingInstanceIdentityValidated"] = (
-        backing_identity_validated
-    )
+    load["backingInstanceIdentityValidated"] = backing_identity_validated
     launch_gates = _launch_gate_report(config, canaries, load, endpoints)
-    passed = (
-        authorization["status"] == "PASS"
-        and launch_gates["status"] == "PASS"
-    )
-    query_results = [
-        result
-        for result in canaries["results"]
-        if result["category"] == "authenticated_query_allowed"
-    ]
-    query_backend_exercised = (
-        bool(query_results)
-        and {result["baseUrl"] for result in query_results} == set(endpoints)
-        and all(
-            result["passed"] and result["queryResponseValidated"]
-            for result in query_results
-        )
-    )
-    query_canary_configured = any(
-        canary.category == "authenticated_query_allowed"
-        for canary in config.canaries
-    )
+    passed = authorization["status"] == "PASS" and launch_gates["status"] == "PASS"
     finished_at = _trusted_time(now, "validation finish")
     return {
         "schemaVersion": REPORT_SCHEMA,
         "target": config.target,
-        "validationScope": (
-            "source-policy-http-query-canary-and-load"
-            if query_canary_configured
-            else "source-policy-http-canary-and-load"
-        ),
+        "validationScope": "source-policy-http-canary-and-load",
         "startedAt": started_at.isoformat(),
         "finishedAt": finished_at.isoformat(),
         "overallStatus": "PASS" if passed else "FAIL",
         "claims": {
             "agentcoreCutoverValidated": False,
-            "queryBackendExercised": query_backend_exercised,
-            "backingInstanceIdentityValidated": (
-                backing_identity_validated
-            ),
+            "backingInstanceIdentityValidated": (backing_identity_validated),
         },
         "httpEndpoints": list(endpoints),
         "authorizationContract": authorization,
@@ -2809,7 +2436,6 @@ def _failure_report(code: str, message: str) -> dict[str, Any]:
         "overallStatus": "FAIL",
         "claims": {
             "agentcoreCutoverValidated": False,
-            "queryBackendExercised": False,
             "backingInstanceIdentityValidated": False,
         },
         "error": {
@@ -2843,10 +2469,7 @@ def main(
     transport: Transport = urllib_transport,
 ) -> int:
     parser = argparse.ArgumentParser(
-        description=(
-            "Run fail-closed AxonLLM RBAC canaries and read-only load "
-            "against one or more HTTPS endpoints."
-        )
+        description=("Run fail-closed AxonLLM RBAC canaries and read-only load against one or more HTTPS endpoints.")
     )
     parser.add_argument("--config")
     parser.add_argument(
@@ -2860,25 +2483,17 @@ def main(
     )
     parser.add_argument(
         "--target-group-arn",
-        help=(
-            "Fargate target group collected from ELB immediately before and "
-            "after this validation's HTTP load."
-        ),
+        help=("Fargate target group collected from ELB immediately before and after this validation's HTTP load."),
     )
     parser.add_argument(
         "--rollback-journal",
         type=Path,
-        help=(
-            "New durable journal for Fargate tenant-admin configuration "
-            "rollback."
-        ),
+        help=("New durable journal for Fargate tenant-admin configuration rollback."),
     )
     parser.add_argument(
         "--reconcile-rollback-journal",
         type=Path,
-        help=(
-            "Independently reconcile an existing rollback journal and exit."
-        ),
+        help=("Independently reconcile an existing rollback journal and exit."),
     )
     args = parser.parse_args(argv)
 
@@ -2894,10 +2509,7 @@ def main(
                 args.rollback_journal,
             )
         ):
-            parser.error(
-                "--reconcile-rollback-journal cannot be combined with a "
-                "validation run"
-            )
+            parser.error("--reconcile-rollback-journal cannot be combined with a validation run")
         try:
             journal = rollback_journal.RollbackJournal.open(
                 args.reconcile_rollback_journal,
@@ -2927,9 +2539,7 @@ def main(
                 "validation requires --config and at least one --base-url",
             )
         try:
-            raw_config = json.loads(
-                Path(args.config).read_text(encoding="utf-8")
-            )
+            raw_config = json.loads(Path(args.config).read_text(encoding="utf-8"))
         except json.JSONDecodeError as exc:
             raise ConfigurationError(
                 "invalid_json",
@@ -2944,9 +2554,7 @@ def main(
         endpoints = normalize_base_urls(args.base_url)
         validate_endpoint_count(config, endpoints)
         target_health_collector = (
-            AwsCliTargetHealthCollector(args.target_group_arn)
-            if args.target_group_arn is not None
-            else None
+            AwsCliTargetHealthCollector(args.target_group_arn) if args.target_group_arn is not None else None
         )
         if config.target == "fargate":
             if args.rollback_journal is None:

@@ -25,7 +25,6 @@ from src.gateway.auth.project_repository import (
 from src.gateway.config_sync import RegionTopologyUnavailable
 from src.gateway.models import GuardrailRule, Project, TenantRole
 from src.gateway.persistence import validate_project_storage_size
-from src.gateway.query.service import QueryServiceError
 from src.gateway.rehearsal_control import (
     RehearsalBinding,
     RehearsalControlLedger,
@@ -37,8 +36,6 @@ from .identity import InvocationIdentity, resolve_invocation_identity
 from .runtime import RuntimeReadiness, RuntimeServices
 from .schemas import (
     InvocationAction,
-    QueryInvocationResponse,
-    QueryResponseValidationError,
     RehearsalInvocation,
     parse_invocation_payload,
 )
@@ -62,6 +59,7 @@ def _gateway_context(
     project: Project,
     *,
     preferred_provider: str | None = None,
+    smart_routing: bool = False,
     rehearsal: RehearsalInvocation | None = None,
     rehearsal_binding: RehearsalBinding | None = None,
     rehearsal_ledger: RehearsalControlLedger | None = None,
@@ -80,11 +78,9 @@ def _gateway_context(
     }
     if preferred_provider is not None:
         gateway_context["provider"] = preferred_provider
-    if (
-        rehearsal is not None
-        and rehearsal_binding is not None
-        and rehearsal_ledger is not None
-    ):
+    if smart_routing:
+        gateway_context["smart_routing"] = True
+    if rehearsal is not None and rehearsal_binding is not None and rehearsal_ledger is not None:
         gateway_context["rehearsal"] = rehearsal
         gateway_context["rehearsal_binding"] = rehearsal_binding
         gateway_context["rehearsal_ledger"] = rehearsal_ledger
@@ -115,10 +111,7 @@ def _require_rehearsal_authority(
     if rehearsal is None:
         return
     principal = identity.principal
-    if (
-        TenantRole.SERVICE not in principal.roles
-        or "launch.rehearsal" not in principal.scopes
-    ):
+    if TenantRole.SERVICE not in principal.roles or "launch.rehearsal" not in principal.scopes:
         raise AgentCoreAdapterError(
             403,
             "authorization_denied",
@@ -135,10 +128,7 @@ async def _record_tenant_config_audit(
     data: dict[str, Any],
 ) -> None:
     audit_trail = runtime.audit_trail
-    if (
-        audit_trail is None
-        or getattr(audit_trail, "durable_enabled", False) is not True
-    ):
+    if audit_trail is None or getattr(audit_trail, "durable_enabled", False) is not True:
         raise AgentCoreAdapterError(
             503,
             "tenant_config_audit_unavailable",
@@ -209,10 +199,7 @@ async def _apply_rehearsal_control(
             "rehearsal_dependency_unavailable",
             "A required dependency is temporarily unavailable.",
         )
-    if (
-        rehearsal.operation == "verify-control-plane-recovery"
-        and dependency is not None
-    ):
+    if rehearsal.operation == "verify-control-plane-recovery" and dependency is not None:
         await asyncio.to_thread(
             ledger.append_observation,
             binding,
@@ -326,10 +313,7 @@ def _stage_project_configuration(
 ) -> Project:
     staged = deepcopy(updates)
     if "guardrail_rules" in staged:
-        staged["guardrail_rules"] = [
-            GuardrailRule(**rule)
-            for rule in staged["guardrail_rules"]
-        ]
+        staged["guardrail_rules"] = [GuardrailRule(**rule) for rule in staged["guardrail_rules"]]
     detached = {
         "allowed_models": deepcopy(project.allowed_models),
         "guardrail_rules": deepcopy(project.guardrail_rules),
@@ -357,8 +341,14 @@ async def _forward_stream(
 class AgentCoreAdapter:
     """Authorize trusted runtime identity before invoking gateway operations."""
 
-    def __init__(self, runtime_provider: RuntimeProviderProtocol) -> None:
+    def __init__(
+        self,
+        runtime_provider: RuntimeProviderProtocol,
+        *,
+        allow_facade_identity: bool = False,
+    ) -> None:
         self._runtime_provider = runtime_provider
+        self._allow_facade_identity = allow_facade_identity
 
     async def initialize(self) -> None:
         """Initialize and verify runtime dependencies before serving."""
@@ -396,6 +386,7 @@ class AgentCoreAdapter:
             context,
             runtime.token_verifier,
             runtime.principal_resolver,
+            allow_facade_identity=self._allow_facade_identity,
         )
         _require_rehearsal_authority(parsed.rehearsal, identity)
         rehearsal_ledger = runtime.rehearsal_ledger
@@ -440,8 +431,6 @@ class AgentCoreAdapter:
             InvocationAction.READINESS,
         }:
             action = Action.MODEL_LIST
-        elif parsed.action is InvocationAction.QUERY:
-            action = Action.QUERY_SELECT
         elif parsed.action is InvocationAction.GET_TENANT_CONFIG:
             action = Action.TENANT_CONFIG_READ
         elif parsed.action is InvocationAction.UPDATE_TENANT_CONFIG:
@@ -479,8 +468,6 @@ class AgentCoreAdapter:
                 policy_action, policy_resource = ("get", "/v1/models")
             elif parsed.action is InvocationAction.READINESS:
                 policy_action, policy_resource = ("get", "/ready")
-            elif parsed.action is InvocationAction.QUERY:
-                policy_action, policy_resource = ("post", "/v1/query")
             elif parsed.action is InvocationAction.GET_TENANT_CONFIG:
                 policy_action, policy_resource = (
                     "get",
@@ -529,9 +516,7 @@ class AgentCoreAdapter:
         )
 
         if parsed.action is InvocationAction.READINESS:
-            return (
-                await self._runtime_provider.readiness(force=True)
-            ).as_dict()
+            return (await self._runtime_provider.readiness(force=True)).as_dict()
 
         if parsed.action is InvocationAction.LIST_MODELS:
             return await runtime.gateway.handle_list_models(
@@ -574,9 +559,7 @@ class AgentCoreAdapter:
             changed_fields = sorted(request.updates)
             await _record_tenant_config_audit(
                 runtime,
-                event_type=(
-                    AuditEventType.TENANT_CONFIG_MUTATION_REQUEST
-                ),
+                event_type=(AuditEventType.TENANT_CONFIG_MUTATION_REQUEST),
                 identity=identity,
                 request_id=mutation_request_id,
                 data={
@@ -603,9 +586,7 @@ class AgentCoreAdapter:
                     data["failure_code"] = failure_code
                 await _record_tenant_config_audit(
                     runtime,
-                    event_type=(
-                        AuditEventType.TENANT_CONFIG_MUTATION_RESULT
-                    ),
+                    event_type=(AuditEventType.TENANT_CONFIG_MUTATION_RESULT),
                     identity=identity,
                     request_id=mutation_request_id,
                     data=data,
@@ -672,58 +653,6 @@ class AgentCoreAdapter:
             )
             return _project_configuration(committed)
 
-        if parsed.action is InvocationAction.QUERY:
-            request = parsed.query_request
-            if request is None:
-                raise AgentCoreAdapterError(
-                    400,
-                    "invalid_payload",
-                    "Query payload is required.",
-                )
-            if runtime.query_service is None:
-                raise AgentCoreAdapterError(
-                    503,
-                    "query_service_unavailable",
-                    "Query service is temporarily unavailable.",
-                )
-            try:
-                result = await runtime.query_service.execute(
-                    principal=identity.principal,
-                    tenant_id=identity.tenant_id,
-                    project_id=identity.project_id,
-                    datasource_id=request.datasource_id,
-                    sql=request.sql,
-                    max_rows=request.max_rows,
-                    request_id=request.request_id,
-                    rehearsal=parsed.rehearsal,
-                    rehearsal_binding=rehearsal_binding,
-                    rehearsal_ledger=rehearsal_ledger,
-                )
-            except QueryServiceError as exc:
-                raise AgentCoreAdapterError(
-                    exc.status_code,
-                    exc.code,
-                    exc.message,
-                ) from exc
-            try:
-                response = QueryInvocationResponse.from_mapping(
-                    result,
-                    expected_datasource_id=request.datasource_id,
-                    expected_project_id=identity.project_id,
-                    expected_request_id=request.request_id,
-                )
-            except QueryResponseValidationError as exc:
-                logger.error(
-                    "AgentCore query service returned an invalid response",
-                    exc_info=True,
-                )
-                raise AgentCoreAdapterError(
-                    502,
-                    "invalid_query_response",
-                    "Query service returned an invalid response.",
-                ) from exc
-            return response.to_dict()
-
         if parsed.request_data is None:
             raise AgentCoreAdapterError(
                 400,
@@ -736,6 +665,7 @@ class AgentCoreAdapter:
                 identity,
                 project,
                 preferred_provider=parsed.preferred_provider,
+                smart_routing=parsed.smart_routing,
                 rehearsal=parsed.rehearsal,
                 rehearsal_binding=rehearsal_binding,
                 rehearsal_ledger=rehearsal_ledger,

@@ -57,10 +57,7 @@ def _execution() -> dict[str, str]:
         "repository": "owner/repo",
         "workflowRef": ("owner/repo/.github/workflows/agentcore-launch-gates.yml@refs/heads/main"),
         "workflowCommit": WORKFLOW_COMMIT,
-        "parentWorkflowRef": (
-            "owner/repo/.github/workflows/"
-            "launch-agentcore-production.yml@refs/heads/main"
-        ),
+        "parentWorkflowRef": ("owner/repo/.github/workflows/launch-agentcore-production.yml@refs/heads/main"),
         "parentWorkflowCommit": WORKFLOW_COMMIT,
         "checkedOutCommit": RELEASE_COMMIT,
         "runId": "41",
@@ -81,21 +78,6 @@ def _observations(gate: str) -> dict[str, Any]:
             "timedOutRuntimeId": "runtime-old",
             "replacementRuntimeId": "runtime-new",
             "replacementReadyStatusCode": 200,
-        },
-        "queryBoundaryLimitsAndReconciliation": {
-            "mutationStatusCode": 400,
-            "multipleStatementsStatusCode": 400,
-            "outOfDatasourceStatusCode": 403,
-            "requestedMaxRows": 100,
-            "returnedRowCount": 25,
-            "scanLimitBytes": 1024 * 1024,
-            "observedBytesScanned": 512 * 1024,
-            "interruptedRequestId": "query-request-1",
-            "terminalState": "CANCELLED",
-            "reservationUnitsAfter": 0,
-            "durableResultAuditCount": 1,
-            "unavailableBindingState": "DEFERRED",
-            "unavailableBindingReservationReleased": False,
         },
         "recoveryCutoverAndRollback": {
             "primaryTableArn": primary,
@@ -634,9 +616,9 @@ def test_publishes_exact_signed_receipts_and_source_manifest(
 
     assert _actual_calls(runner) == _expected_calls()
     assert runner.calls == calls_after_execute
-    assert sum(len(actions) for actions in evidence.EXPECTED_COMMANDS.values()) == 29
-    assert len(s3.puts) == 76
-    assert len(kms.signed) == 9
+    assert sum(len(actions) for actions in evidence.EXPECTED_COMMANDS.values()) == 25
+    assert len(s3.puts) == 66
+    assert len(kms.signed) == 8
     assert s3.puts[-2]["Key"] == (f"{PREFIX}/gate-set-kms-signature.json")
     assert s3.puts[-1]["Key"] == f"{PREFIX}/gate-set.json"
     assert "IfNoneMatch" not in s3.puts[-2]
@@ -804,10 +786,7 @@ def test_undrained_coordinator_suppresses_unsafe_cleanup(
     assert execute_outputs["execution_status"] == "FAILED"
     assert runner.calls == calls_after_execute
     assert (None, publisher.CLEANUP_ACTION) not in _actual_calls(runner)
-    assert (
-        SESSION_SECRET.encode("ascii")
-        not in execute_arguments["execution_bundle"].read_bytes()
-    )
+    assert SESSION_SECRET.encode("ascii") not in execute_arguments["execution_bundle"].read_bytes()
     _assert_failed_terminal(
         s3,
         failure_stage="operation-and-cleanup",

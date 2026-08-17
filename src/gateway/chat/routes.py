@@ -30,6 +30,7 @@ from src.gateway.chat.request_body import (
     JSONBodyError,
     read_json_object,
 )
+from src.gateway.models import RequestContext
 from src.gateway.request_validator import RequestValidator
 
 if TYPE_CHECKING:
@@ -95,10 +96,20 @@ def _authorized_project(request: Request):
 
 def _allow_legacy_project_lookup(request: Request) -> bool:
     """Allow the global project map only outside canonical principal mode."""
-    return (
-        getattr(request.state, "principal", None) is None
-        and _authorized_project(request) is None
-    )
+    return getattr(request.state, "principal", None) is None and _authorized_project(request) is None
+
+
+def _request_context_options(
+    request: Request,
+    client_agent: Any,
+) -> dict[str, RequestContext]:
+    if not getattr(client_agent, "requires_request_context", False):
+        return {}
+    context = getattr(request.state, "context", None)
+    principal = getattr(request.state, "principal", None)
+    if not isinstance(context, RequestContext) or principal is None:
+        raise RuntimeError("canonical request context is required")
+    return {"request_context": context}
 
 
 class ChatAPI:
@@ -114,9 +125,7 @@ class ChatAPI:
         self.client_agent = client_agent
         self.max_request_bytes = max_request_bytes
         self.request_validator = (
-            request_validator
-            if request_validator is not None
-            else _resolve_request_validator(client_agent)
+            request_validator if request_validator is not None else _resolve_request_validator(client_agent)
         )
 
     # ------------------------------------------------------------------
@@ -137,6 +146,12 @@ class ChatAPI:
                 kwargs["authorized_project"] = project
             elif _allow_legacy_project_lookup(request):
                 kwargs["allow_legacy_project_lookup"] = True
+            kwargs.update(
+                _request_context_options(
+                    request,
+                    self.client_agent,
+                )
+            )
             models = await self.client_agent.list_models(**kwargs)
             return JSONResponse(models)
         except Exception:
@@ -204,10 +219,24 @@ class ChatAPI:
         try:
             if (project := _authorized_project(request)) is not None:
                 tool_options["authorized_project"] = project
+            tool_options.update(
+                _request_context_options(
+                    request,
+                    self.client_agent,
+                )
+            )
             response = await self.client_agent.chat(
-                model, messages, temperature=temperature, max_tokens=max_tokens,
-                top_p=top_p, stop=stop, system=system,
-                user_id=user_id, project_id=project_id, provider=provider, smart_routing=smart_routing,
+                model,
+                messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                top_p=top_p,
+                stop=stop,
+                system=system,
+                user_id=user_id,
+                project_id=project_id,
+                provider=provider,
+                smart_routing=smart_routing,
                 **tool_options,
             )
         except Exception:
@@ -284,10 +313,23 @@ class ChatAPI:
         try:
             if (project := _authorized_project(request)) is not None:
                 tool_options["authorized_project"] = project
+            tool_options.update(
+                _request_context_options(
+                    request,
+                    self.client_agent,
+                )
+            )
             result = self.client_agent.chat_stream(
-                model, messages, temperature=temperature, max_tokens=max_tokens,
-                top_p=top_p, stop=stop, system=system,
-                user_id=user_id, project_id=project_id, provider=provider,
+                model,
+                messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                top_p=top_p,
+                stop=stop,
+                system=system,
+                user_id=user_id,
+                project_id=project_id,
+                provider=provider,
                 smart_routing=smart_routing,
                 **tool_options,
             )
@@ -305,7 +347,12 @@ class ChatAPI:
                     if "_rate_limit_headers" in chunk:
                         rate_limit_headers.update(chunk["_rate_limit_headers"])
                         # If this chunk ONLY has rate limit headers, skip it
-                        if "error" not in chunk and "done" not in chunk and "content" not in chunk and "id" not in chunk:
+                        if (
+                            "error" not in chunk
+                            and "done" not in chunk
+                            and "content" not in chunk
+                            and "id" not in chunk
+                        ):
                             continue
 
                     # Error chunk
@@ -394,9 +441,7 @@ async def _parse_chat_body(
 
     # Allow empty model when smart_routing context is present (auto-select mode)
     context = body.get("context", {})
-    smart_routing = (
-        isinstance(context, dict) and context.get("smart_routing") is True
-    )
+    smart_routing = isinstance(context, dict) and context.get("smart_routing") is True
     validator = request_validator or RequestValidator()
     errors = validator.validate_payload(
         body,

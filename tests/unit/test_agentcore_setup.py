@@ -24,6 +24,7 @@ from src.gateway.deployment.agentcore_deploy import (
 )
 from src.gateway.agentcore_setup import (
     DEFAULT_AGENTCORE_PROVIDERS,
+    SCHEMA_VERSION,
     SUPPORTED_AGENTCORE_PROVIDERS,
     AgentCoreSetupConfig,
     AgentCoreSetupError,
@@ -34,6 +35,11 @@ from src.gateway.agentcore_setup import (
     redact_sensitive,
     write_agentcore_setup,
 )
+from src.gateway.deployment.topology import (
+    OSTIARI_AGENTCORE,
+    STANDALONE_AGENTCORE,
+    DeploymentTopology,
+)
 
 
 _REPO = Path(__file__).resolve().parents[2]
@@ -41,15 +47,8 @@ _DIGEST = "e368b7b4522f4838f3ebb4dcc04967682c73cb73e7e40ce16421a6a1ffda6147"
 _IMAGE = f"123456789012.dkr.ecr.us-east-1.amazonaws.com/axonllm/agentcore@sha256:{_DIGEST}"
 _CONTROL_IMAGE = f"123456789012.dkr.ecr.us-east-1.amazonaws.com/axonllm/control-plane@sha256:{_DIGEST}"
 _BEDROCK_ARN = "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-5-sonnet-20241022-v2:0"
-_BEDROCK_PROFILE_ARN = (
-    "arn:aws:bedrock:us-east-1:123456789012:"
-    "inference-profile/us.anthropic.claude-sonnet-4-6"
-)
-_BEDROCK_PROFILE_DESTINATION_ARN = (
-    "arn:aws:bedrock:us-west-2::"
-    "foundation-model/anthropic.claude-sonnet-4-6"
-)
-_ATHENA_ROLE_ARN = "arn:aws:iam::123456789012:role/axon-athena-project-a"
+_BEDROCK_PROFILE_ARN = "arn:aws:bedrock:us-east-1:123456789012:inference-profile/us.anthropic.claude-sonnet-4-6"
+_BEDROCK_PROFILE_DESTINATION_ARN = "arn:aws:bedrock:us-west-2::foundation-model/anthropic.claude-sonnet-4-6"
 _CERTIFICATE_ARN = "arn:aws:acm:us-east-1:123456789012:certificate/11111111-2222-3333-4444-555555555555"
 _SCIM_SECRET_ARN = "arn:aws:secretsmanager:us-east-1:123456789012:secret:axonllm/scim-AbCd12"
 _CANDIDATE_ENDPOINT_NAME = "candidate_" + "a" * 32
@@ -81,7 +80,6 @@ def _base() -> dict:
         },
         "managed_cognito": {
             "hosted_ui_domain_prefix": "axonllm-123456789012",
-            "oauth_callback_urls": ["https://app.example.com/oauth/callback"],
         },
         "control_plane": {
             "domain_name": "axon.example.com",
@@ -111,6 +109,16 @@ def _external() -> dict:
     return value
 
 
+def _schema_v3(
+    value: dict,
+    profile: str = STANDALONE_AGENTCORE,
+) -> dict:
+    current = deepcopy(value)
+    current["schema_version"] = SCHEMA_VERSION
+    current["deployment"] = DeploymentTopology.from_profile(profile).to_dict()
+    return current
+
+
 def _cloudfront() -> dict:
     value = _base()
     value["control_plane"] = {
@@ -125,34 +133,6 @@ def _cloudfront() -> dict:
     return value
 
 
-def _athena_roles_for_bindings_length(target_length: int) -> list[str]:
-    roles = [f"arn:aws:iam::{123456789012 + index}:role/r{index}" for index in range(4)]
-
-    def serialize() -> str:
-        return json.dumps(
-            [
-                {
-                    "tenant_id": "tenant-a",
-                    "project_id": "project-a",
-                    "role_arn": role,
-                }
-                for role in roles
-            ],
-            separators=(",", ":"),
-            sort_keys=True,
-        )
-
-    remaining = target_length - len(serialize())
-    for index, role in enumerate(roles):
-        role_path_length = len(role.split("role/", maxsplit=1)[1])
-        added = min(remaining, 512 - role_path_length)
-        roles[index] += "x" * added
-        remaining -= added
-    assert remaining == 0
-    assert len(serialize()) == target_length
-    return roles
-
-
 def test_managed_setup_round_trips_without_a_secret_or_subject(tmp_path):
     config = AgentCoreSetupConfig.from_mapping(_base())
     output = write_agentcore_setup(config, tmp_path / "agentcore.json")
@@ -161,6 +141,9 @@ def test_managed_setup_round_trips_without_a_secret_or_subject(tmp_path):
     payload = json.loads(output.read_text(encoding="utf-8"))
 
     assert loaded == config
+    assert loaded.deployment.profile == STANDALONE_AGENTCORE
+    assert payload["schema_version"] == 2
+    assert "deployment" not in payload
     assert payload["identity_mode"] == "managed-cognito"
     assert payload["control_plane"]["domain_name"] == "axon.example.com"
     assert payload["control_plane"]["saml_login_path"] == "/admin/dashboard"
@@ -184,12 +167,8 @@ def test_agentcore_defaults_to_the_required_google_ai_launch_profile():
         "xai",
     }
     assert config.runtime.enabled_providers == DEFAULT_AGENTCORE_PROVIDERS
-    assert config.runtime.enabled_providers == tuple(
-        sorted(config.runtime.enabled_providers)
-    )
-    assert SUPPORTED_AGENTCORE_PROVIDERS - set(
-        DEFAULT_AGENTCORE_PROVIDERS
-    ) == {
+    assert config.runtime.enabled_providers == tuple(sorted(config.runtime.enabled_providers))
+    assert SUPPORTED_AGENTCORE_PROVIDERS - set(DEFAULT_AGENTCORE_PROVIDERS) == {
         "ai21",
         "azure_openai",
         "cohere",
@@ -213,9 +192,7 @@ def test_cloudfront_setup_round_trips_without_dns_or_certificate(tmp_path):
     assert "domain_name" not in payload["control_plane"]
     assert "certificate_arn" not in payload["control_plane"]
     assert "public_hosted_zone_id" not in payload["control_plane"]
-    assert "approved_ingress_prefix_list_id" not in (
-        payload["control_plane"]
-    )
+    assert "approved_ingress_prefix_list_id" not in (payload["control_plane"])
 
 
 @pytest.mark.parametrize(
@@ -259,12 +236,8 @@ def test_cloudfront_setup_rejects_custom_domain_inputs_and_other_regions():
         "us-east-1",
         "us-west-2",
     )
-    value["control_plane"]["verified_image_uri"] = (
-        _CONTROL_IMAGE.replace("us-east-1", "us-west-2")
-    )
-    value["runtime"]["bedrock_invoke_resource_arns"] = [
-        _BEDROCK_ARN.replace("us-east-1", "us-west-2")
-    ]
+    value["control_plane"]["verified_image_uri"] = _CONTROL_IMAGE.replace("us-east-1", "us-west-2")
+    value["runtime"]["bedrock_invoke_resource_arns"] = [_BEDROCK_ARN.replace("us-east-1", "us-west-2")]
     with pytest.raises(
         AgentCoreSetupError,
         match="currently requires aws_region 'us-east-1'",
@@ -272,7 +245,7 @@ def test_cloudfront_setup_rejects_custom_domain_inputs_and_other_regions():
         AgentCoreSetupConfig.from_mapping(value)
 
 
-def test_managed_setup_validates_optional_ses_sender_domain():
+def test_managed_setup_validates_optional_ses_sender_identity():
     value = _base()
     value["managed_cognito"].update(
         {
@@ -287,13 +260,28 @@ def test_managed_setup_validates_optional_ses_sender_domain():
     assert config.managed_cognito.ses_from_email == "no-reply@example.com"
     assert config.to_dict()["managed_cognito"]["ses_verified_domain"] == ("example.com")
 
+    email_identity = deepcopy(value)
+    email_identity["managed_cognito"]["ses_verified_domain"] = "no-reply@example.com"
+    config = AgentCoreSetupConfig.from_mapping(email_identity)
+    assert config.to_dict()["managed_cognito"]["ses_verified_domain"] == (
+        "no-reply@example.com"
+    )
+
     mismatched = deepcopy(value)
     mismatched["managed_cognito"]["ses_verified_domain"] = "other.example"
     with pytest.raises(
         AgentCoreSetupError,
-        match="must be the lowercase domain",
+        match="must be either the exact sender email",
     ):
         AgentCoreSetupConfig.from_mapping(mismatched)
+
+    mismatched_email = deepcopy(value)
+    mismatched_email["managed_cognito"]["ses_verified_domain"] = "other@example.com"
+    with pytest.raises(
+        AgentCoreSetupError,
+        match="must be either the exact sender email",
+    ):
+        AgentCoreSetupConfig.from_mapping(mismatched_email)
 
     incomplete = deepcopy(value)
     incomplete["managed_cognito"].pop("ses_verified_domain")
@@ -441,12 +429,18 @@ def test_control_plane_is_managed_cognito_only_and_region_bound():
 def test_setup_rejects_boolean_schema_versions_and_local_identity_urls():
     boolean_schema = _base()
     boolean_schema["schema_version"] = True
-    with pytest.raises(AgentCoreSetupError, match="schema_version must be 2"):
+    with pytest.raises(
+        AgentCoreSetupError,
+        match="schema_version must be 2 or 3",
+    ):
         AgentCoreSetupConfig.from_mapping(boolean_schema)
 
     previous_schema = _base()
     previous_schema["schema_version"] = 1
-    with pytest.raises(AgentCoreSetupError, match="schema_version must be 2"):
+    with pytest.raises(
+        AgentCoreSetupError,
+        match="schema_version must be 2 or 3",
+    ):
         AgentCoreSetupConfig.from_mapping(previous_schema)
 
     local_issuer = _external()
@@ -454,6 +448,57 @@ def test_setup_rejects_boolean_schema_versions_and_local_identity_urls():
     local_issuer["external_oidc"]["discovery_url"] = "https://127.0.0.1/.well-known/openid-configuration"
     with pytest.raises(AgentCoreSetupError, match="must be an HTTPS URL"):
         AgentCoreSetupConfig.from_mapping(local_issuer)
+
+
+def test_schema_v3_binds_agentcore_experience_owner():
+    standalone = AgentCoreSetupConfig.from_mapping(
+        _schema_v3(_base()),
+    )
+    assert standalone.schema_version == 3
+    assert standalone.deployment.profile == STANDALONE_AGENTCORE
+    assert standalone.to_dict()["deployment"] == {
+        "experience": "axonllm",
+        "execution": "agentcore",
+    }
+
+    ostiari = AgentCoreSetupConfig.from_mapping(
+        _schema_v3(_external(), OSTIARI_AGENTCORE),
+    )
+    assert ostiari.deployment.profile == OSTIARI_AGENTCORE
+
+    missing = _schema_v3(_external())
+    missing.pop("deployment")
+    with pytest.raises(
+        AgentCoreSetupError,
+        match="schema_version 3 requires deployment",
+    ):
+        AgentCoreSetupConfig.from_mapping(missing)
+
+    container = _schema_v3(_external())
+    container["deployment"]["execution"] = "container"
+    with pytest.raises(
+        AgentCoreSetupError,
+        match="requires deployment.execution 'agentcore'",
+    ):
+        AgentCoreSetupConfig.from_mapping(container)
+
+    managed_ostiari = _schema_v3(_base(), OSTIARI_AGENTCORE)
+    with pytest.raises(
+        AgentCoreSetupError,
+        match="ostiari-agentcore requires external-oidc",
+    ):
+        AgentCoreSetupConfig.from_mapping(managed_ostiari)
+
+    legacy_with_topology = _base()
+    legacy_with_topology["deployment"] = {
+        "experience": "axonllm",
+        "execution": "agentcore",
+    }
+    with pytest.raises(
+        AgentCoreSetupError,
+        match="schema_version 2 forbids deployment",
+    ):
+        AgentCoreSetupConfig.from_mapping(legacy_with_topology)
 
 
 def test_setup_rejects_mutable_images_wildcards_and_client_secrets():
@@ -496,10 +541,7 @@ def test_setup_accepts_cross_region_foundation_model_destinations():
 def test_setup_rejects_cross_region_inference_profiles():
     value = _base()
     value["runtime"]["bedrock_invoke_resource_arns"] = [
-        (
-            "arn:aws:bedrock:us-west-2:123456789012:"
-            "inference-profile/us.anthropic.claude-sonnet-4-6"
-        )
+        ("arn:aws:bedrock:us-west-2:123456789012:inference-profile/us.anthropic.claude-sonnet-4-6")
     ]
 
     with pytest.raises(
@@ -509,55 +551,16 @@ def test_setup_rejects_cross_region_inference_profiles():
         AgentCoreSetupConfig.from_mapping(value)
 
 
-def test_optional_athena_query_setup_is_exact_and_bounded():
+def test_customer_database_query_is_not_a_core_setup_field():
     value = _base()
     value["runtime"]["athena_query"] = {
-        "role_arns": [_ATHENA_ROLE_ARN],
-        "timeout_seconds": 12.5,
-        "max_rows": 250,
-        "max_result_bytes": 524288,
-        "max_bytes_scanned": 104857600,
-        "poll_interval_seconds": 0.5,
-        "project_rpm": 30,
-        "principal_rpm": 10,
-        "project_concurrency": 5,
-        "principal_concurrency": 2,
-        "project_scan_bytes_per_minute": 5 * 1024 * 1024 * 1024,
-        "principal_scan_bytes_per_minute": 2 * 1024 * 1024 * 1024,
-        "max_datasources_per_tenant": 500,
+        "role_arns": ["arn:aws:iam::123456789012:role/axon-athena-project-a"],
     }
 
-    config = AgentCoreSetupConfig.from_mapping(value)
-
-    assert config.runtime.athena_query is not None
-    assert config.runtime.athena_query.role_arns == (_ATHENA_ROLE_ARN,)
-    assert config.to_dict()["runtime"]["athena_query"] == (value["runtime"]["athena_query"])
-
-
-@pytest.mark.parametrize(
-    "athena_query",
-    [
-        {"role_arns": []},
-        {"role_arns": ["arn:aws:iam::123456789012:role/*"]},
-        {"role_arns": [_ATHENA_ROLE_ARN, _ATHENA_ROLE_ARN]},
-        {"role_arns": [_ATHENA_ROLE_ARN], "max_rows": 0},
-        {
-            "role_arns": [_ATHENA_ROLE_ARN],
-            "max_result_bytes": 1023,
-        },
-        {
-            "role_arns": [_ATHENA_ROLE_ARN],
-            "timeout_seconds": float("inf"),
-        },
-    ],
-)
-def test_athena_query_setup_rejects_unsafe_values(
-    athena_query: dict,
-):
-    value = _base()
-    value["runtime"]["athena_query"] = athena_query
-
-    with pytest.raises(AgentCoreSetupError):
+    with pytest.raises(
+        AgentCoreSetupError,
+        match="runtime contains unsupported fields: athena_query",
+    ):
         AgentCoreSetupConfig.from_mapping(value)
 
 
@@ -595,7 +598,7 @@ def test_local_demo_environment_is_explicitly_non_production():
     assert environment["AXON_LOAD_DEMO_DATA"] == "true"
     assert environment["AXON_REQUIRE_CANONICAL_IDENTITY"] == "false"
     assert environment["LLM_ROUTER_DYNAMODB_ENABLED"] == "false"
-    assert environment["AXON_ATHENA_QUERY_ENABLED"] == "false"
+    assert not any(name.startswith("AXON_ATHENA_") for name in environment)
     assert environment["AXON_CONTROL_PLANE_ONLY"] == "false"
 
 
@@ -642,6 +645,49 @@ def test_setup_agentcore_deploys_through_installed_python_module(
         "providers.env",
     ]
     assert kwargs == {"check": True}
+
+
+def test_setup_agentcore_uses_one_command_install_path(
+    monkeypatch,
+    tmp_path,
+):
+    config_path = write_agentcore_setup(
+        AgentCoreSetupConfig.from_mapping(_base()),
+        tmp_path / "agentcore.json",
+    )
+    calls: list[list[str]] = []
+
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda command, **_kwargs: calls.append(command),
+    )
+
+    cmd_setup_agentcore(
+        SimpleNamespace(
+            bootstrap_cdk=False,
+            config=str(config_path),
+            deploy=True,
+            install=True,
+            output=None,
+            provider_env_file=None,
+            rollback_provider_secret_version=None,
+            show_config=False,
+            yes=True,
+        )
+    )
+
+    assert calls == [
+        [
+            sys.executable,
+            "-m",
+            "src.gateway.deployment.agentcore_deploy",
+            "--config",
+            str(config_path),
+            "--yes",
+            "--install",
+        ]
+    ]
 
 
 def test_setup_local_demo_starts_installed_python_module_without_chdir(
@@ -709,8 +755,6 @@ def test_cli_parses_and_writes_managed_setup(monkeypatch, tmp_path, capsys):
             "pl-123abc",
             "--hosted-ui-domain-prefix",
             "axonllm-123456789012",
-            "--oauth-callback-url",
-            "https://app.example.com/oauth/callback",
             "--control-plane-domain-name",
             "axon.example.com",
             "--control-plane-verified-image-uri",
@@ -736,10 +780,73 @@ def test_cli_parses_and_writes_managed_setup(monkeypatch, tmp_path, capsys):
 
     loaded = load_agentcore_setup(output)
     assert loaded.identity_mode == "managed-cognito"
+    assert loaded.schema_version == 3
+    assert loaded.deployment.profile == STANDALONE_AGENTCORE
     assert loaded.control_plane is not None
     assert loaded.control_plane.scim_tenants_secret_arn == _SCIM_SECRET_ARN
     assert loaded.control_plane.saml_login_path == "/chat"
     assert "Wrote authenticated AgentCore setup" in capsys.readouterr().out
+
+
+def test_cli_writes_ostiari_agentcore_setup(monkeypatch, tmp_path):
+    from src.gateway import cli
+
+    output = tmp_path / "ostiari-agentcore.json"
+    monkeypatch.setattr(
+        os.sys,
+        "argv",
+        [
+            "axon",
+            "setup",
+            "agentcore",
+            "--deployment-profile",
+            "ostiari-agentcore",
+            "--identity-mode",
+            "external-oidc",
+            "--tenant",
+            "tenant-a",
+            "--project",
+            "project-a",
+            "--admin-user-name",
+            "admin@example.com",
+            "--admin-email",
+            "admin@example.com",
+            "--admin-subject",
+            "00u-admin-subject",
+            "--verified-image-uri",
+            _IMAGE,
+            "--bedrock-invoke-resource-arns",
+            _BEDROCK_ARN,
+            "--approved-https-prefix-list-id",
+            "pl-123abc",
+            "--oidc-issuer",
+            "https://idp.example.com/oauth2/default",
+            "--oidc-discovery-url",
+            ("https://idp.example.com/oauth2/default/.well-known/openid-configuration"),
+            "--oidc-client-id",
+            "ostiari-client",
+            "--oidc-audience",
+            "api://ostiari",
+            "--oidc-tenant-claim",
+            "https://ostiari.example/tenant",
+            "--oidc-project-claim",
+            "https://ostiari.example/project",
+            "--output",
+            str(output),
+        ],
+    )
+
+    cli.main()
+
+    loaded = load_agentcore_setup(output)
+    assert loaded.schema_version == 3
+    assert loaded.identity_mode == "external-oidc"
+    assert loaded.deployment.profile == OSTIARI_AGENTCORE
+    assert loaded.control_plane is None
+    assert loaded.to_dict()["deployment"] == {
+        "experience": "ostiari",
+        "execution": "agentcore",
+    }
 
 
 def test_deploy_commands_pass_only_validated_standard_oidc_inputs(tmp_path):
@@ -750,7 +857,7 @@ def test_deploy_commands_pass_only_validated_standard_oidc_inputs(tmp_path):
         assume_yes=True,
     )
     assert "deployment_target=identity" in identity_command
-    assert any(value.startswith("AxonLLMIdentityStack:OAuthCallbackUrls=https://") for value in identity_command)
+    assert not any("OAuthCallbackUrls" in value for value in identity_command)
     assert "AxonLLMIdentityStack:ControlPlaneDomainName=axon.example.com" in identity_command
     assert "AxonLLMIdentityStack:SesFromEmail=admin@example.com" in identity_command
     assert "AxonLLMIdentityStack:SesVerifiedDomain=example.com" in identity_command
@@ -778,6 +885,7 @@ def test_deploy_commands_pass_only_validated_standard_oidc_inputs(tmp_path):
     assert "AxonLLMAgentCoreStack:OidcTenantClaim=" in joined
     assert "AxonLLMAgentCoreStack:OidcProjectClaim=" in joined
     assert "AxonLLMAgentCoreStack:BedrockInvokeResourceArns=" in joined
+    assert ("AxonLLMAgentCoreStack:DeploymentExperience=axonllm") in runtime_command
     assert ("AxonLLMAgentCoreStack:AlarmNotificationEmail=admin@example.com") in runtime_command
     assert "broadening" in runtime_command
     assert "client_secret" not in joined.casefold()
@@ -848,10 +956,7 @@ def test_control_plane_deploy_command_is_bound_to_managed_identity(
     assert ("AxonLLMControlPlaneStack:PrimaryStateTableName=axonllm-agentcore-state") in command
     assert (f"AxonLLMControlPlaneStack:ControlPlaneVerifiedImageUri={_CONTROL_IMAGE}") in command
     assert (f"AxonLLMControlPlaneStack:CertificateArn={_CERTIFICATE_ARN}") in command
-    assert (
-        "AxonLLMControlPlaneStack:ControlPlaneDomainName="
-        "axon.example.com"
-    ) in command
+    assert ("AxonLLMControlPlaneStack:ControlPlaneDomainName=axon.example.com") in command
     assert "client_secret" not in joined.casefold()
 
     with pytest.raises(
@@ -882,17 +987,10 @@ def test_cloudfront_deploy_commands_select_generated_endpoint(tmp_path):
     identity_arguments = "\n".join(identity_command)
     control_arguments = "\n".join(control_command)
 
-    assert (
-        "AxonLLMIdentityStack:EndpointMode=cloudfront"
-    ) in identity_command
+    assert ("AxonLLMIdentityStack:EndpointMode=cloudfront") in identity_command
     assert "ControlPlaneDomainName=" not in identity_arguments
-    assert (
-        "AxonLLMControlPlaneStack:EndpointMode=cloudfront"
-    ) in control_command
-    assert (
-        "AxonLLMControlPlaneStack:AllowedViewerCidrs="
-        "1.1.1.0/24,8.8.8.8/32"
-    ) in control_command
+    assert ("AxonLLMControlPlaneStack:EndpointMode=cloudfront") in control_command
+    assert ("AxonLLMControlPlaneStack:AllowedViewerCidrs=1.1.1.0/24,8.8.8.8/32") in control_command
     assert "CertificateArn=" not in control_arguments
     assert "PublicHostedZoneId=" not in control_arguments
     assert "ApprovedIngressPrefixListId=" not in control_arguments
@@ -928,12 +1026,8 @@ def test_control_plane_deploy_command_passes_recovery_and_identity_inputs(
     assert ("AxonLLMControlPlaneStack:RecoveryApprovalId=CHG-2026-015") in command
 
 
-def test_agentcore_deploy_command_binds_exact_athena_roles(tmp_path):
+def test_agentcore_deploy_commands_have_no_customer_query_context(tmp_path):
     value = _external()
-    value["runtime"]["athena_query"] = {
-        "role_arns": [_ATHENA_ROLE_ARN],
-        "max_rows": 250,
-    }
     config = AgentCoreSetupConfig.from_mapping(value)
     oidc = config.external_oidc
     assert oidc is not None
@@ -954,42 +1048,18 @@ def test_agentcore_deploy_command_binds_exact_athena_roles(tmp_path):
     )
     joined = "\n".join(command)
 
-    assert "athena_query_bindings=" in joined
-    assert '"tenant_id":"tenant-a"' in joined
-    assert '"project_id":"project-a"' in joined
-    assert f'"role_arn":"{_ATHENA_ROLE_ARN}"' in joined
-    assert "athena_query_max_rows=250" in joined
+    assert "athena" not in joined.lower()
+    assert "sts" not in joined.lower()
 
     control_command = control_plane_deploy_command(
-        AgentCoreSetupConfig.from_mapping(
-            {
-                **_base(),
-                "runtime": value["runtime"],
-            }
-        ),
+        AgentCoreSetupConfig.from_mapping(_base()),
         primary_state_table_name="axonllm-agentcore-state",
         outputs_file=tmp_path / "control.json",
         assume_yes=True,
     )
     control_joined = "\n".join(control_command)
-    assert "athena_query_bindings=" in control_joined
-    assert "athena_query_max_rows=250" in control_joined
-
-
-def test_deployer_enforces_agentcore_binding_character_boundary():
-    value = _external()
-    value["runtime"]["athena_query"] = {
-        "role_arns": _athena_roles_for_bindings_length(2_048),
-    }
-    contexts = deployment._athena_contexts(AgentCoreSetupConfig.from_mapping(value))
-    assert len(contexts["athena_query_bindings"]) == 2_048
-
-    value["runtime"]["athena_query"]["role_arns"] = _athena_roles_for_bindings_length(2_049)
-    with pytest.raises(
-        AgentCoreDeploymentError,
-        match="2,048-character",
-    ):
-        deployment._athena_contexts(AgentCoreSetupConfig.from_mapping(value))
+    assert "athena" not in control_joined.lower()
+    assert "sts" not in control_joined.lower()
 
 
 def test_production_shared_runtime_configuration_is_locked():
@@ -997,6 +1067,8 @@ def test_production_shared_runtime_configuration_is_locked():
     expected = deployment._shared_runtime_configuration(config)
 
     deployment._validate_shared_runtime_configuration(config, expected)
+    assert expected["DeploymentExperience"] == "axonllm"
+    assert expected["DeploymentExecution"] == "agentcore"
     for name in expected:
         changed = {**expected, name: "changed"}
         with pytest.raises(
@@ -1009,12 +1081,46 @@ def test_production_shared_runtime_configuration_is_locked():
             )
 
     missing = dict(expected)
-    missing.pop("AthenaConfigurationFingerprint")
+    missing.pop("BedrockInvokeResourceArns")
     with pytest.raises(
         AgentCoreDeploymentError,
         match="maintenance change",
     ):
         deployment._validate_shared_runtime_configuration(config, missing)
+
+
+def test_legacy_runtime_topology_migrates_only_to_standalone_agentcore():
+    standalone = AgentCoreSetupConfig.from_mapping(_external())
+    legacy = deployment._shared_runtime_configuration(standalone)
+    legacy.pop("DeploymentExperience")
+    legacy.pop("DeploymentExecution")
+
+    deployment._validate_shared_runtime_configuration(
+        standalone,
+        legacy,
+        allow_legacy_topology=True,
+    )
+    with pytest.raises(
+        AgentCoreDeploymentError,
+        match="maintenance change",
+    ):
+        deployment._validate_shared_runtime_configuration(
+            standalone,
+            legacy,
+        )
+
+    ostiari = AgentCoreSetupConfig.from_mapping(
+        _schema_v3(_external(), OSTIARI_AGENTCORE),
+    )
+    with pytest.raises(
+        AgentCoreDeploymentError,
+        match="maintenance change",
+    ):
+        deployment._validate_shared_runtime_configuration(
+            ostiari,
+            legacy,
+            allow_legacy_topology=True,
+        )
 
 
 def test_alarm_subscription_must_be_confirmed():
@@ -1103,8 +1209,7 @@ def deployment_preflights(monkeypatch):
         partition="aws",
     )
     policy_arns = tuple(
-        "arn:aws:iam::123456789012:policy/"
-        f"AxonLLMAgentCoreCloudFormationExecution-axprod-us-east-1-part{part}"
+        f"arn:aws:iam::123456789012:policy/AxonLLMAgentCoreCloudFormationExecution-axprod-us-east-1-part{part}"
         for part in range(1, 4)
     )
     monkeypatch.setattr(
@@ -1143,25 +1248,70 @@ class _Sts:
 
 
 class _BootstrapIam:
-    def __init__(self, *, existing_document=None) -> None:
+    def __init__(
+        self,
+        *,
+        existing_document=None,
+        existing_documents=None,
+        version_counts=None,
+        fail_on_create_policy_call=None,
+        fail_on_create_version_call=None,
+        raise_after_create_version_call=None,
+    ) -> None:
         self.existing_document = existing_document
-        self.documents: dict[str, dict] = {}
+        self.existing_documents = existing_documents or {}
+        self.version_counts = version_counts or {}
+        self.fail_on_create_policy_call = fail_on_create_policy_call
+        self.fail_on_create_version_call = fail_on_create_version_call
+        self.raise_after_create_version_call = raise_after_create_version_call
+        self.policies: dict[str, dict] = {}
         self.create_calls: list[dict] = []
+        self.create_version_calls: list[dict] = []
+        self.delete_policy_calls: list[str] = []
+        self.delete_version_calls: list[tuple[str, str]] = []
+        self.set_default_calls: list[tuple[str, str]] = []
+
+    def _seed(self, policy_arn):
+        if policy_arn in self.policies:
+            return
+        document = self.existing_documents.get(
+            policy_arn,
+            self.existing_document,
+        )
+        if document is None:
+            return
+        version_count = self.version_counts.get(policy_arn, 1)
+        versions = {f"v{number}": deepcopy(document) for number in range(1, version_count + 1)}
+        self.policies[policy_arn] = {
+            "default": f"v{version_count}",
+            "next": version_count + 1,
+            "versions": versions,
+        }
 
     def get_policy(self, *, PolicyArn):
-        if PolicyArn not in self.documents and self.existing_document is None:
+        self._seed(PolicyArn)
+        if PolicyArn not in self.policies:
             raise _AwsError("NoSuchEntity")
+        policy = self.policies[PolicyArn]
         return {
             "Policy": {
                 "Arn": PolicyArn,
-                "DefaultVersionId": "v1",
+                "DefaultVersionId": policy["default"],
             }
         }
 
     def create_policy(self, **kwargs):
         self.create_calls.append(deepcopy(kwargs))
+        if len(self.create_calls) == self.fail_on_create_policy_call:
+            raise _AwsError("AccessDenied")
         arn = f"arn:aws:iam::123456789012:policy/{kwargs['PolicyName']}"
-        self.documents[arn] = json.loads(kwargs["PolicyDocument"])
+        self.policies[arn] = {
+            "default": "v1",
+            "next": 2,
+            "versions": {
+                "v1": json.loads(kwargs["PolicyDocument"]),
+            },
+        }
         return {
             "Policy": {
                 "Arn": arn,
@@ -1170,15 +1320,75 @@ class _BootstrapIam:
         }
 
     def get_policy_version(self, *, PolicyArn, VersionId):
-        assert VersionId == "v1"
+        self._seed(PolicyArn)
+        if PolicyArn not in self.policies or VersionId not in self.policies[PolicyArn]["versions"]:
+            raise _AwsError("NoSuchEntity")
+        return {"PolicyVersion": {"Document": deepcopy(self.policies[PolicyArn]["versions"][VersionId])}}
+
+    def list_policy_versions(self, *, PolicyArn):
+        self._seed(PolicyArn)
+        policy = self.policies[PolicyArn]
+        return {
+            "Versions": [
+                {
+                    "IsDefaultVersion": version_id == policy["default"],
+                    "VersionId": version_id,
+                }
+                for version_id in policy["versions"]
+            ]
+        }
+
+    def create_policy_version(
+        self,
+        *,
+        PolicyArn,
+        PolicyDocument,
+        SetAsDefault,
+    ):
+        self.create_version_calls.append(
+            {
+                "PolicyArn": PolicyArn,
+                "PolicyDocument": PolicyDocument,
+                "SetAsDefault": SetAsDefault,
+            }
+        )
+        if len(self.create_version_calls) == self.fail_on_create_version_call:
+            raise _AwsError("AccessDenied")
+        policy = self.policies[PolicyArn]
+        if len(policy["versions"]) >= 5:
+            raise _AwsError("LimitExceeded")
+        version_id = f"v{policy['next']}"
+        policy["next"] += 1
+        policy["versions"][version_id] = json.loads(PolicyDocument)
+        if SetAsDefault:
+            policy["default"] = version_id
+        if len(self.create_version_calls) == self.raise_after_create_version_call:
+            raise _AwsError("RequestTimeout")
         return {
             "PolicyVersion": {
-                "Document": self.documents.get(
-                    PolicyArn,
-                    self.existing_document,
-                )
+                "IsDefaultVersion": SetAsDefault,
+                "VersionId": version_id,
             }
         }
+
+    def set_default_policy_version(self, *, PolicyArn, VersionId):
+        self.set_default_calls.append((PolicyArn, VersionId))
+        if VersionId not in self.policies[PolicyArn]["versions"]:
+            raise _AwsError("NoSuchEntity")
+        self.policies[PolicyArn]["default"] = VersionId
+
+    def delete_policy_version(self, *, PolicyArn, VersionId):
+        self.delete_version_calls.append((PolicyArn, VersionId))
+        policy = self.policies[PolicyArn]
+        if VersionId == policy["default"]:
+            raise _AwsError("DeleteConflict")
+        del policy["versions"][VersionId]
+
+    def delete_policy(self, *, PolicyArn):
+        self.delete_policy_calls.append(PolicyArn)
+        if PolicyArn not in self.policies:
+            raise _AwsError("NoSuchEntity")
+        del self.policies[PolicyArn]
 
 
 class _PreflightSession:
@@ -1197,6 +1407,7 @@ def test_bootstrap_requires_repository_execution_policy_without_admin():
         _PreflightSession(iam=iam),
         config=config,
         create_if_missing=True,
+        assume_yes=True,
     )
 
     assert identity.account_id == "123456789012"
@@ -1210,23 +1421,12 @@ def test_bootstrap_requires_repository_execution_policy_without_admin():
         "AxonLLMAgentCoreServiceBoundary-axprod-us-east-1",
     }
     for part in range(1, 4):
-        execution_call = calls[
-            "AxonLLMAgentCoreCloudFormationExecution-"
-            f"axprod-us-east-1-part{part}"
-        ]
+        execution_call = calls[f"AxonLLMAgentCoreCloudFormationExecution-axprod-us-east-1-part{part}"]
         document = json.loads(execution_call["PolicyDocument"])
-        assert len(execution_call["PolicyDocument"]) <= (
-            bootstrap_policy.IAM_MANAGED_POLICY_SIZE_LIMIT
-        )
-        assert all(
-            statement["Action"] != "*"
-            for statement in document["Statement"]
-        )
+        assert len(execution_call["PolicyDocument"]) <= (bootstrap_policy.IAM_MANAGED_POLICY_SIZE_LIMIT)
+        assert all(statement["Action"] != "*" for statement in document["Statement"])
     assert all(
-        policy_arn.endswith(
-            "AxonLLMAgentCoreCloudFormationExecution-"
-            f"axprod-us-east-1-part{part}"
-        )
+        policy_arn.endswith(f"AxonLLMAgentCoreCloudFormationExecution-axprod-us-east-1-part{part}")
         for part, policy_arn in enumerate(policy_arns, start=1)
     )
     command = deployment.cdk_bootstrap_command(
@@ -1283,10 +1483,59 @@ def test_bootstrap_policy_uses_valid_bounded_lifecycle_and_pass_role_actions():
         "s3:GetLifecycleConfiguration",
     } <= global_actions
     assert not any(action in global_actions for action in {"s3:GetObject", "s3:GetObjectVersion"})
-    regional_actions = set(
-        statements["RegionalAxonLLMInfrastructure"]["Action"]
-    )
+    assert statements["ReadCdkDeploymentAssets"] == {
+        "Sid": "ReadCdkDeploymentAssets",
+        "Effect": "Allow",
+        "Action": "s3:GetObject",
+        "Resource": ("arn:aws:s3:::cdk-axprod-assets-123456789012-us-east-1/*"),
+    }
+    regional_actions = set(statements["RegionalAxonLLMInfrastructure"]["Action"])
     assert {
+        "bedrock-agentcore:AllowVendedLogDeliveryForResource",
+        "bedrock-agentcore:CreateWorkloadIdentity",
+        "bedrock-agentcore:DeleteWorkloadIdentity",
+        "dynamodb:DescribeContributorInsights",
+        "dynamodb:DescribeKinesisStreamingDestination",
+        "dynamodb:GetResourcePolicy",
+        "ec2:DescribeNetworkAcls",
+        "ec2:DescribeSecurityGroupRules",
+        "lambda:GetCodeSigningConfig",
+        "lambda:GetFunctionCodeSigningConfig",
+        "lambda:GetFunctionRecursionConfig",
+        "lambda:GetFunctionScalingConfig",
+        "lambda:GetRuntimeManagementConfig",
+        "logs:CreateDelivery",
+        "logs:CreateLogStream",
+        "logs:DeleteDelivery",
+        "logs:DeleteDeliveryDestination",
+        "logs:DeleteDeliveryDestinationPolicy",
+        "logs:DeleteDeliverySource",
+        "logs:DeleteLogStream",
+        "logs:DeleteResourcePolicy",
+        "logs:DescribeDeliveries",
+        "logs:DescribeDeliveryDestinations",
+        "logs:DescribeDeliverySources",
+        "logs:DescribeIndexPolicies",
+        "logs:DescribeLogStreams",
+        "logs:DescribeResourcePolicies",
+        "logs:GetDelivery",
+        "logs:GetDeliveryDestination",
+        "logs:GetDeliveryDestinationPolicy",
+        "logs:GetDeliverySource",
+        "logs:GetDataProtectionPolicy",
+        "logs:PutDeliveryDestination",
+        "logs:PutDeliveryDestinationPolicy",
+        "logs:PutDeliverySource",
+        "logs:PutResourcePolicy",
+        "logs:UpdateDeliveryConfiguration",
+        "secretsmanager:GetRandomPassword",
+        "sns:GetDataProtectionPolicy",
+        "sqs:GetQueueUrl",
+        "vpc-lattice:AssociateViaAWSService",
+        "vpc-lattice:CreateServiceNetworkResourceAssociation",
+        "vpc-lattice:GetResourceConfiguration",
+        "vpc-lattice:GetServiceNetworkResourceAssociation",
+        "vpc-lattice:ListServiceNetworkResourceAssociations",
         "wafv2:CreateIPSet",
         "wafv2:CreateWebACL",
         "wafv2:DeleteIPSet",
@@ -1295,7 +1544,47 @@ def test_bootstrap_policy_uses_valid_bounded_lifecycle_and_pass_role_actions():
         "wafv2:GetWebACL",
         "wafv2:UpdateIPSet",
         "wafv2:UpdateWebACL",
+        "xray:DeleteResourcePolicy",
+        "xray:ListResourcePolicies",
+        "xray:PutResourcePolicy",
     } <= regional_actions
+    assert not any(action.startswith("backup:") for action in regional_actions)
+    assert not any(
+        action
+        in {
+            "kms:CreateAlias",
+            "kms:CreateGrant",
+            "kms:CreateKey",
+            "kms:EnableKeyRotation",
+            "kms:PutKeyPolicy",
+            "logs:AssociateKmsKey",
+        }
+        for action in regional_actions
+    )
+    assert "CreateAwsResourceKmsGrants" not in statements
+    assert "UseKmsThroughSecretsManager" not in statements
+    external_document = bootstrap_policy.policy_document(
+        partition="aws",
+        account_id="123456789012",
+        region="us-east-1",
+        qualifier=bootstrap_policy.EXTERNAL_QUALIFIER,
+    )
+    external_statements = {statement["Sid"]: statement for statement in external_document["Statement"]}
+    external_actions = set(external_statements["RegionalAxonLLMInfrastructure"]["Action"])
+    assert "secretsmanager:GetRandomPassword" in external_actions
+    assert not any(action.startswith("backup:") for action in external_actions)
+    assert "CreateAwsResourceKmsGrants" not in external_statements
+    assert statements["ReadCdkBootstrapVersion"] == {
+        "Sid": "ReadCdkBootstrapVersion",
+        "Effect": "Allow",
+        "Action": "ssm:GetParameters",
+        "Resource": ("arn:aws:ssm:us-east-1:123456789012:parameter/cdk-bootstrap/axprod/version"),
+        "Condition": {
+            "StringEquals": {
+                "aws:RequestedRegion": "us-east-1",
+            }
+        },
+    }
     assert statements["CreateBoundedAxonLLMServiceRoles"]["Action"] == ("iam:CreateRole")
     create_conditions = statements["CreateBoundedAxonLLMServiceRoles"]["Condition"]["StringEquals"]
     assert create_conditions == {
@@ -1320,24 +1609,46 @@ def test_bootstrap_policy_uses_valid_bounded_lifecycle_and_pass_role_actions():
             "aws:ResourceTag/AxonLLMTrustDomain": "axprod",
         }
     }
-    provider_roles = statements["CreateBoundedCdkProviderRoles"]["Resource"]
+    provider_statement = statements["CreateOrBoundCdkProviderRoles"]
+    provider_roles = provider_statement["Resource"]
     assert provider_roles
     assert all(
-        resource.startswith("arn:aws:iam::123456789012:role/AxonLLM") and "CustomResourceProviderRole-*" in resource
+        resource.startswith("arn:aws:iam::123456789012:role/AxonLLM") and resource.endswith("-Custom*")
         for resource in provider_roles
     )
-    assert statements["CreateBoundedCdkProviderRoles"]["Condition"] == {
+    assert set(provider_statement["Action"]) == {
+        "iam:CreateRole",
+        "iam:PutRolePermissionsBoundary",
+    }
+    assert provider_statement["Condition"] == {
         "StringEquals": {
             "iam:PermissionsBoundary": (
                 "arn:aws:iam::123456789012:policy/AxonLLMAgentCoreServiceBoundary-axprod-us-east-1"
             )
         }
     }
+    assert set(statements["ReadAndCleanUpAxonLLMServiceRoles"]["Action"]) == {
+        "iam:DeleteRole",
+        "iam:DeleteRolePermissionsBoundary",
+        "iam:DeleteRolePolicy",
+        "iam:GetRole",
+        "iam:GetRolePolicy",
+        "iam:ListAttachedRolePolicies",
+        "iam:ListRolePolicies",
+    }
+    assert "Condition" not in statements["ReadAndCleanUpAxonLLMServiceRoles"]
+    attachment = statements["ManageApprovedRolePolicyAttachment"]
+    assert set(attachment["Action"]) == {
+        "iam:AttachRolePolicy",
+        "iam:DetachRolePolicy",
+    }
+    assert attachment["Condition"] == {
+        "ArnEquals": {"iam:PolicyARN": ("arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole")}
+    }
     assert statements["PassAxonLLMServiceRoles"]["Action"] == ("iam:PassRole")
     assert statements["PassAxonLLMServiceRoles"]["Condition"] == {
         "StringEquals": {
             "iam:PassedToService": [
-                "backup.amazonaws.com",
                 "bedrock-agentcore.amazonaws.com",
                 "ecs-tasks.amazonaws.com",
                 "lambda.amazonaws.com",
@@ -1397,26 +1708,16 @@ def test_bootstrap_execution_policy_parts_fit_iam_limit_and_preserve_actions(
     original_actions = {
         action
         for statement in complete["Statement"]
-        for action in (
-            statement["Action"]
-            if isinstance(statement["Action"], list)
-            else [statement["Action"]]
-        )
+        for action in (statement["Action"] if isinstance(statement["Action"], list) else [statement["Action"]])
     }
     partitioned_actions = {
         action
         for part in parts
         for statement in part["Statement"]
-        for action in (
-            statement["Action"]
-            if isinstance(statement["Action"], list)
-            else [statement["Action"]]
-        )
+        for action in (statement["Action"] if isinstance(statement["Action"], list) else [statement["Action"]])
     }
     assert partitioned_actions == original_actions
-    assert sum(len(part["Statement"]) for part in parts) == (
-        len(complete["Statement"]) + 1
-    )
+    assert sum(len(part["Statement"]) for part in parts) == (len(complete["Statement"]) + 1)
 
 
 def test_bootstrap_trust_domains_have_distinct_qualifiers_and_boundaries():
@@ -1432,6 +1733,13 @@ def test_bootstrap_trust_domains_have_distinct_qualifiers_and_boundaries():
         for qualifier in ("axprod", "axqual", "axext")
     }
     assert len(names) == 3
+    external_roles = bootstrap_policy._role_resources(
+        partition="aws",
+        account_id="123456789012",
+        region="us-east-1",
+        qualifier="axext",
+    )
+    assert ("arn:aws:iam::123456789012:role/AxonLLMAgentCoreStack-ext-*") in external_roles
 
     boundary = bootstrap_policy.bootstrap_boundary_document(
         partition="aws",
@@ -1449,6 +1757,12 @@ def test_bootstrap_trust_domains_have_distinct_qualifiers_and_boundaries():
         "iam:AttachRolePolicy",
         "iam:UpdateAssumeRolePolicy",
     } <= denied
+    attachment_deny = next(
+        statement for statement in boundary["Statement"] if statement["Sid"] == "DenyUnapprovedRolePolicyAttachments"
+    )
+    assert attachment_deny["Condition"] == {
+        "ArnNotEquals": {"iam:PolicyARN": ("arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole")}
+    }
 
 
 class _CdkExecutionRoleIam:
@@ -1465,10 +1779,7 @@ class _CdkExecutionRoleIam:
     def list_attached_role_policies(self, *, RoleName, **_kwargs):
         self.role_names.append(RoleName)
         return {
-            "AttachedPolicies": [
-                {"PolicyArn": policy_arn}
-                for policy_arn in reversed(self.policy_arns)
-            ],
+            "AttachedPolicies": [{"PolicyArn": policy_arn} for policy_arn in reversed(self.policy_arns)],
             "IsTruncated": False,
         }
 
@@ -1495,8 +1806,7 @@ def test_cdk_execution_role_requires_exact_policy_boundary_and_qualifier():
         partition="aws",
     )
     policy_arns = tuple(
-        "arn:aws:iam::123456789012:policy/"
-        f"AxonLLMAgentCoreCloudFormationExecution-axprod-us-east-1-part{part}"
+        f"arn:aws:iam::123456789012:policy/AxonLLMAgentCoreCloudFormationExecution-axprod-us-east-1-part{part}"
         for part in range(1, 4)
     )
     boundary_arn = "arn:aws:iam::123456789012:policy/AxonLLMAgentCoreBootstrapBoundary-axprod-us-east-1"
@@ -1527,7 +1837,7 @@ def test_cdk_execution_role_requires_exact_policy_boundary_and_qualifier():
         )
 
 
-def test_bootstrap_rejects_repository_policy_drift():
+def test_bootstrap_rejects_repository_policy_drift(capsys):
     config = AgentCoreSetupConfig.from_mapping(_external())
     iam = _BootstrapIam(
         existing_document={
@@ -1544,13 +1854,400 @@ def test_bootstrap_rejects_repository_policy_drift():
 
     with pytest.raises(
         AgentCoreDeploymentError,
-        match="differs from this repository",
+        match="missing or stale",
     ):
         deployment._require_bootstrap_execution_policy(
             _PreflightSession(iam=iam),
             config=config,
             create_if_missing=False,
         )
+
+    output = capsys.readouterr().out
+    assert "CDK bootstrap managed-policy plan:" in output
+    assert "--- live/" in output
+    assert "+++ repository/" in output
+    assert '"Action": "*"' in output
+
+
+def test_bootstrap_transactionally_updates_stale_policies(tmp_path):
+    config = AgentCoreSetupConfig.from_mapping(_external())
+    stale = {
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Effect": "Allow",
+                "Action": "s3:ListAllMyBuckets",
+                "Resource": "*",
+            }
+        ],
+    }
+    iam = _BootstrapIam(existing_document=stale)
+    report_path = tmp_path / "bootstrap-policy-migration.json"
+
+    identity, policy_arns = deployment._require_bootstrap_execution_policy(
+        _PreflightSession(iam=iam),
+        config=config,
+        create_if_missing=True,
+        assume_yes=True,
+        report_path=report_path,
+    )
+
+    specs, _ = deployment._bootstrap_policy_specs(
+        identity=identity,
+        config=config,
+        qualifier="axprod",
+    )
+    assert len(iam.create_version_calls) == 5
+    assert all(call["SetAsDefault"] is False for call in iam.create_version_calls)
+    assert iam.create_calls == []
+    assert iam.delete_policy_calls == []
+    for spec in specs:
+        policy = iam.policies[spec.policy_arn]
+        assert policy["versions"][policy["default"]] == spec.document
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["status"] == "applied"
+    assert {item["action"] for item in report["policies"]} == {"update"}
+    assert all(
+        item["resultSha256"] == item["repositorySha256"] and item["resultVersionId"] == "v2"
+        for item in report["policies"]
+    )
+    assert report_path.stat().st_mode & 0o777 == 0o600
+    assert len(policy_arns) == 3
+
+
+def test_bootstrap_current_account_is_verified_without_mutation(tmp_path):
+    config = AgentCoreSetupConfig.from_mapping(_external())
+    identity = deployment.AwsIdentity(
+        account_id="123456789012",
+        partition="aws",
+    )
+    specs, _ = deployment._bootstrap_policy_specs(
+        identity=identity,
+        config=config,
+        qualifier="axprod",
+    )
+    iam = _BootstrapIam(existing_documents={spec.policy_arn: spec.document for spec in specs})
+    report_path = tmp_path / "bootstrap-policy-migration.json"
+
+    deployment._require_bootstrap_execution_policy(
+        _PreflightSession(iam=iam),
+        config=config,
+        create_if_missing=False,
+        report_path=report_path,
+    )
+
+    assert iam.create_calls == []
+    assert iam.create_version_calls == []
+    assert iam.delete_policy_calls == []
+    assert iam.delete_version_calls == []
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["status"] == "verified"
+    assert {item["action"] for item in report["policies"]} == {"current"}
+
+
+def test_existing_toolkit_policy_reconciliation_stops_before_cdk(
+    monkeypatch,
+    tmp_path,
+    capsys,
+):
+    config = AgentCoreSetupConfig.from_mapping(_external())
+    identity = deployment.AwsIdentity(
+        account_id="123456789012",
+        partition="aws",
+    )
+    policy_arns = tuple(
+        f"arn:aws:iam::123456789012:policy/AxonLLMAgentCoreCloudFormationExecution-axprod-us-east-1-part{part}"
+        for part in range(1, 4)
+    )
+    calls: list[tuple[str, object]] = []
+
+    class _CloudFormation:
+        def describe_stacks(self, *, StackName):
+            calls.append(("describe", StackName))
+            return {
+                "Stacks": [
+                    {
+                        "StackName": StackName,
+                        "StackStatus": "CREATE_COMPLETE",
+                        "Outputs": [
+                            {
+                                "OutputKey": "BootstrapVersion",
+                                "OutputValue": "32",
+                            }
+                        ],
+                    }
+                ]
+            }
+
+    monkeypatch.setattr(
+        deployment,
+        "_require_bootstrap_execution_policy",
+        lambda *_args, **kwargs: (
+            calls.append(("reconcile", kwargs)),
+            (identity, policy_arns),
+        )[1],
+    )
+    monkeypatch.setattr(
+        deployment,
+        "_assert_cdk_execution_role_policy",
+        lambda *_args, **kwargs: calls.append(("verify", kwargs)),
+    )
+
+    deployment.reconcile_bootstrap_policies(
+        config,
+        outputs_dir=tmp_path,
+        assume_yes=True,
+        boto3_session=_PreflightSession(
+            cloudformation=_CloudFormation(),
+        ),
+    )
+
+    assert calls[0] == ("describe", "AxonLLMToolkit-axprod")
+    reconcile = calls[1][1]
+    assert reconcile["create_if_missing"] is True
+    assert reconcile["assume_yes"] is True
+    assert reconcile["report_path"] == (tmp_path / "bootstrap-policy-migration.json")
+    assert calls[2][0] == "verify"
+    assert "bootstrap version 32" in capsys.readouterr().out
+
+
+def test_policy_only_reconciliation_requires_existing_toolkit(tmp_path):
+    config = AgentCoreSetupConfig.from_mapping(_external())
+
+    class _CloudFormation:
+        def describe_stacks(self, *, StackName):
+            raise _AwsError("ValidationError")
+
+    with pytest.raises(
+        AgentCoreDeploymentError,
+        match="use --bootstrap-cdk for the first bootstrap",
+    ):
+        deployment.reconcile_bootstrap_policies(
+            config,
+            outputs_dir=tmp_path,
+            assume_yes=True,
+            boto3_session=_PreflightSession(
+                cloudformation=_CloudFormation(),
+            ),
+        )
+
+
+def test_bootstrap_recovers_created_version_after_lost_response():
+    config = AgentCoreSetupConfig.from_mapping(_external())
+    identity = deployment.AwsIdentity(
+        account_id="123456789012",
+        partition="aws",
+    )
+    specs, _ = deployment._bootstrap_policy_specs(
+        identity=identity,
+        config=config,
+        qualifier="axprod",
+    )
+    existing = {spec.policy_arn: spec.document for spec in specs}
+    stale_spec = specs[-1]
+    existing[stale_spec.policy_arn] = {
+        "Version": "2012-10-17",
+        "Statement": [],
+    }
+    iam = _BootstrapIam(
+        existing_documents=existing,
+        raise_after_create_version_call=1,
+    )
+
+    deployment._require_bootstrap_execution_policy(
+        _PreflightSession(iam=iam),
+        config=config,
+        create_if_missing=True,
+        assume_yes=True,
+    )
+
+    policy = iam.policies[stale_spec.policy_arn]
+    assert policy["default"] == "v2"
+    assert policy["versions"]["v2"] == stale_spec.document
+
+
+def test_bootstrap_stops_if_live_policy_changes_after_plan_review():
+    config = AgentCoreSetupConfig.from_mapping(_external())
+    identity = deployment.AwsIdentity(
+        account_id="123456789012",
+        partition="aws",
+    )
+    specs, _ = deployment._bootstrap_policy_specs(
+        identity=identity,
+        config=config,
+        qualifier="axprod",
+    )
+    stale = {
+        "Version": "2012-10-17",
+        "Statement": [],
+    }
+    iam = _BootstrapIam(existing_document=stale)
+    inspection = deployment._inspect_managed_policy(
+        iam,
+        spec=specs[0],
+    )
+    iam.policies[specs[0].policy_arn]["versions"]["v1"] = {
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Effect": "Deny",
+                "Action": "s3:*",
+                "Resource": "*",
+            }
+        ],
+    }
+
+    with pytest.raises(
+        AgentCoreDeploymentError,
+        match="changed after plan review",
+    ):
+        deployment._apply_bootstrap_policy_plan(
+            iam,
+            (inspection,),
+        )
+
+    assert iam.create_version_calls == []
+    assert iam.delete_version_calls == []
+
+
+def test_bootstrap_rolls_back_all_updates_after_mid_batch_failure():
+    config = AgentCoreSetupConfig.from_mapping(_external())
+    stale = {
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Effect": "Allow",
+                "Action": "s3:ListAllMyBuckets",
+                "Resource": "*",
+            }
+        ],
+    }
+    iam = _BootstrapIam(
+        existing_document=stale,
+        fail_on_create_version_call=2,
+    )
+
+    with pytest.raises(
+        AgentCoreDeploymentError,
+        match="rollback completed; no CDK bootstrap was started",
+    ):
+        deployment._require_bootstrap_execution_policy(
+            _PreflightSession(iam=iam),
+            config=config,
+            create_if_missing=True,
+            assume_yes=True,
+        )
+
+    assert iam.set_default_calls
+    assert iam.delete_version_calls
+    assert iam.delete_policy_calls == []
+    assert all(
+        policy["default"] == "v1" and policy["versions"]["v1"] == stale and len(policy["versions"]) == 1
+        for policy in iam.policies.values()
+    )
+
+
+def test_bootstrap_prunes_oldest_non_default_version_at_iam_limit():
+    config = AgentCoreSetupConfig.from_mapping(_external())
+    identity = deployment.AwsIdentity(
+        account_id="123456789012",
+        partition="aws",
+    )
+    specs, _ = deployment._bootstrap_policy_specs(
+        identity=identity,
+        config=config,
+        qualifier="axprod",
+    )
+    existing = {spec.policy_arn: spec.document for spec in specs}
+    stale_spec = specs[-1]
+    existing[stale_spec.policy_arn] = {
+        "Version": "2012-10-17",
+        "Statement": [],
+    }
+    iam = _BootstrapIam(
+        existing_documents=existing,
+        version_counts={stale_spec.policy_arn: 5},
+    )
+
+    deployment._require_bootstrap_execution_policy(
+        _PreflightSession(iam=iam),
+        config=config,
+        create_if_missing=True,
+        assume_yes=True,
+    )
+
+    assert iam.delete_version_calls == [
+        (stale_spec.policy_arn, "v1"),
+    ]
+    policy = iam.policies[stale_spec.policy_arn]
+    assert policy["default"] == "v6"
+    assert len(policy["versions"]) == 5
+    assert policy["versions"]["v6"] == stale_spec.document
+
+
+def test_bootstrap_rolls_back_pruned_version_after_later_failure():
+    config = AgentCoreSetupConfig.from_mapping(_external())
+    identity = deployment.AwsIdentity(
+        account_id="123456789012",
+        partition="aws",
+    )
+    specs, _ = deployment._bootstrap_policy_specs(
+        identity=identity,
+        config=config,
+        qualifier="axprod",
+    )
+    stale = {
+        "Version": "2012-10-17",
+        "Statement": [],
+    }
+    existing = {spec.policy_arn: spec.document for spec in specs}
+    existing[specs[0].policy_arn] = stale
+    existing[specs[1].policy_arn] = stale
+    iam = _BootstrapIam(
+        existing_documents=existing,
+        version_counts={specs[0].policy_arn: 5},
+        fail_on_create_version_call=2,
+    )
+
+    with pytest.raises(
+        AgentCoreDeploymentError,
+        match="rollback completed",
+    ):
+        deployment._require_bootstrap_execution_policy(
+            _PreflightSession(iam=iam),
+            config=config,
+            create_if_missing=True,
+            assume_yes=True,
+        )
+
+    restored = iam.policies[specs[0].policy_arn]
+    assert restored["default"] == "v5"
+    assert len(restored["versions"]) == 5
+    assert restored["versions"]["v5"] == stale
+    assert any(
+        version_id not in {"v2", "v3", "v4", "v5"} and document == stale
+        for version_id, document in restored["versions"].items()
+    )
+
+
+def test_bootstrap_rolls_back_new_policies_after_creation_failure():
+    config = AgentCoreSetupConfig.from_mapping(_external())
+    iam = _BootstrapIam(fail_on_create_policy_call=3)
+
+    with pytest.raises(
+        AgentCoreDeploymentError,
+        match="rollback completed",
+    ):
+        deployment._require_bootstrap_execution_policy(
+            _PreflightSession(iam=iam),
+            config=config,
+            create_if_missing=True,
+            assume_yes=True,
+        )
+
+    assert len(iam.create_calls) == 3
+    assert len(iam.delete_policy_calls) == 2
+    assert iam.policies == {}
 
 
 class _PrefixLists:
@@ -1872,6 +2569,234 @@ def test_existing_stack_accepts_completed_update_rollback_only():
     ) == {"StackStatus": "ROLLBACK_COMPLETE"}
 
 
+class _FailedAgentCoreCloudFormation:
+    def __init__(
+        self,
+        config: AgentCoreSetupConfig,
+        *,
+        status: str = "ROLLBACK_FAILED",
+        outputs: dict[str, str] | None = None,
+        parameter_overrides: dict[str, str] | None = None,
+    ) -> None:
+        parameters = deployment._failed_first_deployment_parameters(
+            config,
+            rehearsal_control_table_arn=None,
+        )
+        parameters.update(parameter_overrides or {})
+        self.stack = {
+            "EnableTerminationProtection": False,
+            "Outputs": [
+                {
+                    "OutputKey": name,
+                    "OutputValue": value,
+                }
+                for name, value in (outputs or {}).items()
+            ],
+            "Parameters": [
+                {
+                    "ParameterKey": name,
+                    "ParameterValue": value,
+                }
+                for name, value in parameters.items()
+            ],
+            "RoleARN": ("arn:aws:iam::123456789012:role/cdk-axprod-cfn-exec-role-123456789012-us-east-1"),
+            "StackId": ("arn:aws:cloudformation:us-east-1:123456789012:stack/AxonLLMAgentCoreStack/12345678"),
+            "StackStatus": status,
+        }
+        self.delete_calls: list[dict] = []
+        self.wait_calls: list[tuple[str, dict]] = []
+
+    def describe_stacks(self, *, StackName):
+        assert StackName == deployment.AGENTCORE_STACK
+        if self.stack is None:
+            raise _AwsError("ValidationError")
+        return {"Stacks": [deepcopy(self.stack)]}
+
+    def delete_stack(self, **kwargs):
+        self.delete_calls.append(deepcopy(kwargs))
+        self.stack = None
+
+    def get_waiter(self, name):
+        return SimpleNamespace(wait=lambda **kwargs: self.wait_calls.append((name, deepcopy(kwargs))))
+
+
+def test_install_recovers_only_matching_failed_first_deployment(
+    tmp_path,
+    capsys,
+):
+    config = AgentCoreSetupConfig.from_mapping(_external())
+    client = _FailedAgentCoreCloudFormation(config)
+    identity = deployment.AwsIdentity(
+        account_id="123456789012",
+        partition="aws",
+    )
+
+    recovered = deployment._recover_failed_first_deployment(
+        client,
+        config=config,
+        identity=identity,
+        outputs_dir=tmp_path,
+        assume_yes=True,
+        rehearsal_control_table_arn=None,
+    )
+
+    assert recovered is True
+    assert len(client.delete_calls) == 1
+    delete_call = client.delete_calls[0]
+    assert delete_call["StackName"] == deployment.AGENTCORE_STACK
+    assert delete_call["RoleARN"].endswith("role/cdk-axprod-cfn-exec-role-123456789012-us-east-1")
+    assert delete_call["ClientRequestToken"].startswith("axonllm-install-recovery-")
+    assert client.wait_calls == [
+        (
+            "stack_delete_complete",
+            {
+                "StackName": deployment.AGENTCORE_STACK,
+                "WaiterConfig": {
+                    "Delay": 15,
+                    "MaxAttempts": 240,
+                },
+            },
+        )
+    ]
+    evidence = json.loads((tmp_path / "failed-stack-recovery.json").read_text(encoding="utf-8"))
+    assert evidence["status"] == "removed"
+    assert evidence["previousStatus"] == "ROLLBACK_FAILED"
+    assert len(evidence["reviewedParametersSha256"]) == 64
+    assert "continuing with a clean retry" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("outputs", "parameter_overrides", "message"),
+    [
+        (
+            {"RuntimeArn": ("arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/axonllm")},
+            None,
+            "live deployment outputs",
+        ),
+        (
+            None,
+            {"VerifiedImageUri": _IMAGE.replace(_DIGEST, "f" * 64)},
+            "configuration differs",
+        ),
+    ],
+)
+def test_install_refuses_ambiguous_failed_stack_cleanup(
+    tmp_path,
+    outputs,
+    parameter_overrides,
+    message,
+):
+    config = AgentCoreSetupConfig.from_mapping(_external())
+    client = _FailedAgentCoreCloudFormation(
+        config,
+        outputs=outputs,
+        parameter_overrides=parameter_overrides,
+    )
+
+    with pytest.raises(
+        AgentCoreDeploymentError,
+        match=message,
+    ):
+        deployment._recover_failed_first_deployment(
+            client,
+            config=config,
+            identity=deployment.AwsIdentity(
+                account_id="123456789012",
+                partition="aws",
+            ),
+            outputs_dir=tmp_path,
+            assume_yes=True,
+            rehearsal_control_table_arn=None,
+        )
+
+    assert client.delete_calls == []
+
+
+def test_install_reuses_existing_toolkit_before_deployment(
+    monkeypatch,
+    tmp_path,
+):
+    value = _external()
+    value["runtime"]["enabled_providers"] = ["bedrock"]
+    config = AgentCoreSetupConfig.from_mapping(value)
+    identity = deployment.AwsIdentity(
+        account_id="123456789012",
+        partition="aws",
+    )
+    policy_arns = tuple(
+        f"arn:aws:iam::123456789012:policy/AxonLLMAgentCoreCloudFormationExecution-axprod-us-east-1-part{part}"
+        for part in range(1, 4)
+    )
+    calls: list[tuple[str, object]] = []
+
+    class _CloudFormation:
+        def describe_stacks(self, *, StackName):
+            assert StackName == "AxonLLMToolkit-axprod"
+            return {
+                "Stacks": [
+                    {
+                        "StackStatus": "CREATE_COMPLETE",
+                    }
+                ]
+            }
+
+    class _StopAfterInstallPreparation(Exception):
+        pass
+
+    monkeypatch.setattr(
+        deployment,
+        "_assert_deployment_prerequisites",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        deployment,
+        "_validate_prefix_list_inputs",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        deployment,
+        "_require_bootstrap_execution_policy",
+        lambda *_args, **kwargs: (
+            calls.append(("reconcile", kwargs)),
+            (identity, policy_arns),
+        )[1],
+    )
+    monkeypatch.setattr(
+        deployment,
+        "_assert_cdk_execution_role_policy",
+        lambda *_args, **kwargs: calls.append(("verify", kwargs)),
+    )
+    monkeypatch.setattr(
+        deployment,
+        "_recover_failed_first_deployment",
+        lambda *_args, **kwargs: calls.append(("recover", kwargs)),
+    )
+    monkeypatch.setattr(
+        deployment,
+        "_existing_agentcore_outputs",
+        lambda _client: (_ for _ in ()).throw(_StopAfterInstallPreparation()),
+    )
+
+    with pytest.raises(_StopAfterInstallPreparation):
+        deployment.deploy(
+            config,
+            outputs_dir=tmp_path,
+            assume_yes=True,
+            bootstrap_cdk=False,
+            install=True,
+            runner=lambda *_args: pytest.fail("an existing toolkit must not be re-bootstrapped"),
+            boto3_session=_PreflightSession(
+                cloudformation=_CloudFormation(),
+            ),
+            provider_environment={},
+        )
+
+    assert calls[0][0] == "reconcile"
+    assert calls[0][1]["create_if_missing"] is True
+    assert calls[1][0] == "verify"
+    assert calls[2][0] == "recover"
+
+
 def test_canonical_bootstrap_retry_is_allowed_until_production_exists(
     monkeypatch,
 ):
@@ -2117,12 +3042,7 @@ _DEPLOYMENT_TRANSITION_ID = "b" * 64
 
 
 def _managed_transition_config() -> AgentCoreSetupConfig:
-    value = _base()
-    value["runtime"]["athena_query"] = {
-        "role_arns": [_ATHENA_ROLE_ARN],
-        "max_rows": 250,
-    }
-    return AgentCoreSetupConfig.from_mapping(value)
+    return AgentCoreSetupConfig.from_mapping(_base())
 
 
 def _promoted_runtime_outputs(
@@ -2228,7 +3148,6 @@ def _control_outputs(
         "EndpointMode": "custom-domain",
         "LoadBalancerScheme": "internet-facing",
         "PrimaryStateTableName": runtime_outputs["StateTableName"],
-        "QueryPlaneEnabled": "true",
         "RecoveryApprovalId": runtime_outputs.get(
             "RecoveryApprovalId",
             "",
@@ -2259,8 +3178,7 @@ def _cloudfront_control_outputs(
         "LoadBalancerScheme": "internal",
         "VpcOriginId": "vo_1234567890",
         "WebAclArn": (
-            "arn:aws:wafv2:us-east-1:123456789012:"
-            "global/webacl/axonllm/11111111-2222-3333-4444-555555555555"
+            "arn:aws:wafv2:us-east-1:123456789012:global/webacl/axonllm/11111111-2222-3333-4444-555555555555"
         ),
     }
 
@@ -3300,8 +4218,31 @@ def test_deployment_wrapper_validates_without_aws(tmp_path):
         AgentCoreSetupConfig.from_mapping(_base()),
         tmp_path / "agentcore.json",
     )
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    uv_arguments = tmp_path / "uv-arguments.json"
+    fake_uv = bin_dir / "uv"
+    fake_uv.write_text(
+        """#!/usr/bin/env bash
+set -euo pipefail
+python - "$AXON_TEST_UV_ARGUMENTS" "$@" <<'PY'
+import json
+import sys
+from pathlib import Path
+Path(sys.argv[1]).write_text(json.dumps(sys.argv[2:]), encoding="utf-8")
+PY
+shift 7
+exec "$AXON_TEST_PYTHON" "$@"
+""",
+        encoding="ascii",
+    )
+    fake_uv.chmod(0o700)
     environment = os.environ.copy()
+    environment["PATH"] = f"{bin_dir}{os.pathsep}{environment['PATH']}"
     environment["UV_CACHE_DIR"] = str(tmp_path / "uv-cache")
+    environment["AXON_AGENTCORE_UV_ENVIRONMENT"] = str(tmp_path / "deployment-environment")
+    environment["AXON_TEST_PYTHON"] = sys.executable
+    environment["AXON_TEST_UV_ARGUMENTS"] = str(uv_arguments)
 
     completed = subprocess.run(
         [
@@ -3321,6 +4262,40 @@ def test_deployment_wrapper_validates_without_aws(tmp_path):
 
     assert completed.returncode == 0, completed.stdout
     assert "Validated authenticated AgentCore configuration" in completed.stdout
+    assert json.loads(uv_arguments.read_text(encoding="utf-8"))[:9] == [
+        "run",
+        "--frozen",
+        "--extra",
+        "oidc",
+        "--extra",
+        "agentcore",
+        "python",
+        "-m",
+        "src.gateway.deployment.agentcore_deploy",
+    ]
+
+
+def test_deployment_wrapper_missing_uv_message_has_real_newline(tmp_path):
+    environment = os.environ.copy()
+    environment["PATH"] = "/usr/bin:/bin"
+    environment["UV_CACHE_DIR"] = str(tmp_path / "uv-cache")
+
+    completed = subprocess.run(
+        [
+            str(_REPO / "deploy-agentcore.sh"),
+            "--help",
+        ],
+        cwd=_REPO,
+        env=environment,
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        timeout=30,
+    )
+
+    assert completed.returncode == 2
+    assert completed.stdout == "uv is required: https://docs.astral.sh/uv/\n"
 
 
 def test_deployment_wrapper_never_sources_setup_data():
@@ -3329,4 +4304,9 @@ def test_deployment_wrapper_never_sources_setup_data():
     assert "source " not in script
     assert "eval " not in script
     assert "with_no_auth" not in script
+    assert "--no-sync" not in script
+    assert "uv run --frozen --extra oidc --extra agentcore python" in script
+    assert "UV_PROJECT_ENVIRONMENT" in script
+    assert "lock_digest" in script
+    assert "--install" in script
     assert "src.gateway.deployment.agentcore_deploy" in script

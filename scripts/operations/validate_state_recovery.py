@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate AxonLLM state backups and optionally exercise a PITR restore."""
+"""Validate AxonLLM DynamoDB protection and optionally exercise a PITR restore."""
 
 from __future__ import annotations
 
@@ -19,17 +19,8 @@ class RecoveryValidationError(RuntimeError):
     """Raised when state protection or a restore exercise violates policy."""
 
 
-_BACKUP_JOB_POLL_INTERVAL_SECONDS = 15
-_WORKFLOW_CREDENTIAL_ENVELOPE_SECONDS = 3 * 60 * 60
-_RECOVERY_WORKFLOW_MARGIN_SECONDS = 60 * 60
 _RESTORE_TIMEOUT_SECONDS = 45 * 60
-_BACKUP_JOB_TIMEOUT_SECONDS = (
-    _WORKFLOW_CREDENTIAL_ENVELOPE_SECONDS - _RECOVERY_WORKFLOW_MARGIN_SECONDS - _RESTORE_TIMEOUT_SECONDS
-)
-_BACKUP_JOB_PENDING_STATES = {"CREATED", "PENDING", "RUNNING"}
 _RESTORE_SAMPLE_LIMIT = 25
-_BACKUP_LIFECYCLE = "MoveToColdStorageAfterDays=30,DeleteAfterDays=365"
-_BACKUP_TAGS = "Application=AxonLLM,Runtime=AgentCore,Trigger=Deployment"
 
 
 def _stack_resources(aws: AwsCli, stack_name: str) -> list[dict[str, Any]]:
@@ -60,157 +51,6 @@ def _discover_table(
     return tables[0]
 
 
-def _discover_vault(
-    aws: AwsCli,
-    resources: list[dict[str, Any]],
-    stack_name: str,
-) -> str:
-    stack = aws.json(
-        "cloudformation",
-        "describe-stacks",
-        "--stack-name",
-        stack_name,
-    ).get("Stacks", [])
-    if isinstance(stack, list) and len(stack) == 1 and isinstance(stack[0], dict):
-        for output in stack[0].get("Outputs", []):
-            if (
-                isinstance(output, dict)
-                and output.get("OutputKey") == "StateBackupVaultArn"
-                and isinstance(output.get("OutputValue"), str)
-            ):
-                return output["OutputValue"].rsplit(":", 1)[-1]
-    vaults = [
-        item.get("PhysicalResourceId")
-        for item in resources
-        if item.get("ResourceType") == "AWS::Backup::BackupVault" and isinstance(item.get("PhysicalResourceId"), str)
-    ]
-    if len(vaults) != 1:
-        raise RecoveryValidationError("could not uniquely discover the AWS Backup vault")
-    return vaults[0]
-
-
-def _discover_backup_role(aws: AwsCli, stack_name: str) -> str:
-    stacks = aws.json(
-        "cloudformation",
-        "describe-stacks",
-        "--stack-name",
-        stack_name,
-    ).get("Stacks")
-    if not isinstance(stacks, list) or len(stacks) != 1 or not isinstance(stacks[0], dict):
-        raise RecoveryValidationError("could not discover the AWS Backup service role")
-    outputs = stacks[0].get("Outputs")
-    if not isinstance(outputs, list):
-        raise RecoveryValidationError("could not discover the AWS Backup service role")
-    matches = [
-        output.get("OutputValue")
-        for output in outputs
-        if (
-            isinstance(output, dict)
-            and output.get("OutputKey") == "StateBackupRoleArn"
-            and isinstance(output.get("OutputValue"), str)
-        )
-    ]
-    if len(matches) != 1 or not matches[0] or ":iam::" not in matches[0] or ":role/" not in matches[0]:
-        raise RecoveryValidationError("could not discover the AWS Backup service role")
-    return matches[0]
-
-
-def _completed_backup_metadata(
-    response: dict[str, Any],
-    *,
-    job_id: str,
-    recovery_point_arn: str,
-    table_arn: str,
-    vault_name: str,
-) -> dict[str, Any]:
-    if (
-        response.get("BackupJobId") != job_id
-        or response.get("State") != "COMPLETED"
-        or response.get("RecoveryPointArn") != recovery_point_arn
-        or response.get("ResourceArn") != table_arn
-        or response.get("BackupVaultName") != vault_name
-    ):
-        raise RecoveryValidationError("completed AWS Backup job metadata does not match the request")
-    creation = parse_aws_time(
-        response.get("CreationDate"),
-        "backup job creation time",
-    )
-    completion = parse_aws_time(
-        response.get("CompletionDate"),
-        "backup job completion time",
-    )
-    if completion < creation:
-        raise RecoveryValidationError("AWS Backup job completion precedes its creation")
-    return {
-        "backupJobId": job_id,
-        "status": "COMPLETED",
-        "backupVault": vault_name,
-        "resourceArn": table_arn,
-        "recoveryPointArn": recovery_point_arn,
-        "creationDate": creation.isoformat(),
-        "completionDate": completion.isoformat(),
-    }
-
-
-def _start_deployment_backup(
-    aws: AwsCli,
-    *,
-    table_arn: str,
-    vault_name: str,
-    role_arn: str,
-    poll_interval: float,
-    timeout_seconds: int,
-    sleep: Callable[[float], None],
-    monotonic: Callable[[], float],
-) -> dict[str, Any]:
-    if poll_interval <= 0 or timeout_seconds <= 0:
-        raise RecoveryValidationError("AWS Backup job polling bounds must be positive")
-    started = aws.json(
-        "backup",
-        "start-backup-job",
-        "--backup-vault-name",
-        vault_name,
-        "--resource-arn",
-        table_arn,
-        "--iam-role-arn",
-        role_arn,
-        "--lifecycle",
-        _BACKUP_LIFECYCLE,
-        "--recovery-point-tags",
-        _BACKUP_TAGS,
-    )
-    job_id = started.get("BackupJobId")
-    recovery_point_arn = started.get("RecoveryPointArn")
-    if not isinstance(job_id, str) or not job_id or not isinstance(recovery_point_arn, str) or not recovery_point_arn:
-        raise RecoveryValidationError("AWS Backup did not return deployment backup identifiers")
-
-    deadline = monotonic() + timeout_seconds
-    while monotonic() < deadline:
-        response = aws.json(
-            "backup",
-            "describe-backup-job",
-            "--backup-job-id",
-            job_id,
-        )
-        if response.get("BackupJobId") != job_id:
-            raise RecoveryValidationError("AWS Backup returned mismatched job metadata")
-        state = response.get("State")
-        if state == "COMPLETED":
-            return _completed_backup_metadata(
-                response,
-                job_id=job_id,
-                recovery_point_arn=recovery_point_arn,
-                table_arn=table_arn,
-                vault_name=vault_name,
-            )
-        if state not in _BACKUP_JOB_PENDING_STATES:
-            if not isinstance(state, str) or not state:
-                raise RecoveryValidationError("AWS Backup returned an invalid deployment backup state")
-            raise RecoveryValidationError(f"AWS Backup deployment job ended in {state}")
-        sleep(poll_interval)
-    raise RecoveryValidationError("AWS Backup deployment job did not complete before timeout")
-
-
 def _verify_table(table: dict[str, Any]) -> None:
     if table.get("TableStatus") != "ACTIVE":
         raise RecoveryValidationError("DynamoDB state table is not ACTIVE")
@@ -225,31 +65,6 @@ def _verify_table(table: dict[str, Any]) -> None:
     ]
     if key_schema != expected:
         raise RecoveryValidationError("DynamoDB state table key schema is unexpected")
-
-
-def _vault_lock_posture(
-    vault: dict[str, Any],
-    *,
-    required: bool,
-) -> dict[str, Any]:
-    locked = vault.get("Locked") is True
-    lock_date = vault.get("LockDate")
-    minimum = vault.get("MinRetentionDays")
-    maximum = vault.get("MaxRetentionDays")
-    mode = "UNLOCKED" if not locked else "COMPLIANCE" if lock_date is not None else "GOVERNANCE"
-    if required:
-        if not locked:
-            raise RecoveryValidationError("AWS Backup Vault Lock is not enabled")
-        if minimum != 30 or maximum != 365:
-            raise RecoveryValidationError("AWS Backup Vault Lock must enforce 30-365 day retention")
-        if mode not in {"GOVERNANCE", "COMPLIANCE"}:
-            raise RecoveryValidationError("AWS Backup Vault Lock must use governance or compliance mode")
-    return {
-        "locked": locked,
-        "mode": mode,
-        "minRetentionDays": minimum,
-        "maxRetentionDays": maximum,
-    }
 
 
 def _wait_for_active_table(
@@ -578,16 +393,10 @@ def validate_recovery(
     *,
     stack_name: str,
     table_name: str | None,
-    max_backup_age_hours: int,
-    require_vault_lock: bool,
     exercise_restore: bool,
     keep_restored_table: bool,
     now: datetime,
-    start_backup: bool = False,
-    backup_job_poll_interval: float = (_BACKUP_JOB_POLL_INTERVAL_SECONDS),
-    backup_job_timeout_seconds: int = _BACKUP_JOB_TIMEOUT_SECONDS,
     sleep: Callable[[float], None] = time.sleep,
-    monotonic: Callable[[], float] = time.monotonic,
 ) -> dict[str, Any]:
     resources = _stack_resources(aws, stack_name)
     resolved_table = _discover_table(resources, table_name)
@@ -621,73 +430,18 @@ def validate_recovery(
     if latest_restorable > now or now - latest_restorable > timedelta(hours=1):
         raise RecoveryValidationError("DynamoDB latest restorable time is stale")
 
-    vault_name = _discover_vault(aws, resources, stack_name)
-    vault = aws.json(
-        "backup",
-        "describe-backup-vault",
-        "--backup-vault-name",
-        vault_name,
-    )
-    if not vault.get("EncryptionKeyArn"):
-        raise RecoveryValidationError("AWS Backup vault has no KMS encryption key")
-    vault_lock = _vault_lock_posture(
-        vault,
-        required=require_vault_lock,
-    )
-
-    deployment_backup: dict[str, Any] | None = None
-    freshness_now = now
-    if start_backup:
-        deployment_backup = _start_deployment_backup(
-            aws,
-            table_arn=table_arn,
-            vault_name=vault_name,
-            role_arn=_discover_backup_role(aws, stack_name),
-            poll_interval=backup_job_poll_interval,
-            timeout_seconds=backup_job_timeout_seconds,
-            sleep=sleep,
-            monotonic=monotonic,
-        )
-        completion = parse_aws_time(
-            deployment_backup["completionDate"],
-            "backup job completion time",
-        )
-        freshness_now = max(now, completion)
-
-    recovery_points = aws.json(
-        "backup",
-        "list-recovery-points-by-backup-vault",
-        "--backup-vault-name",
-        vault_name,
-        "--by-resource-arn",
-        table_arn,
-    ).get("RecoveryPoints", [])
-    completed = [point for point in recovery_points if isinstance(point, dict) and point.get("Status") == "COMPLETED"]
-    if not completed:
-        raise RecoveryValidationError("no completed AWS Backup recovery point exists")
-    newest = max(parse_aws_time(point.get("CreationDate"), "backup creation time") for point in completed)
-    backup_age = freshness_now - newest
-    if backup_age < timedelta(0) or backup_age > timedelta(hours=max_backup_age_hours):
-        raise RecoveryValidationError("latest AWS Backup recovery point is outside the allowed age")
-
     result: dict[str, Any] = {
         "tableArn": table_arn,
+        "deletionProtection": True,
+        "serverSideEncryption": "ENABLED",
         "pointInTimeRecovery": "ENABLED",
         "latestRestorableAgeMinutes": round(
             (now - latest_restorable).total_seconds() / 60,
             2,
         ),
-        "backupVault": vault_name,
-        "backupVaultLocked": vault_lock["locked"],
-        "backupVaultLockMode": vault_lock["mode"],
-        "backupVaultMinRetentionDays": vault_lock["minRetentionDays"],
-        "backupVaultMaxRetentionDays": vault_lock["maxRetentionDays"],
-        "latestBackupAgeHours": round(backup_age.total_seconds() / 3600, 2),
         "restoreExercise": None,
     }
-    if deployment_backup is not None:
-        result["deploymentBackup"] = deployment_backup
-    if exercise_restore or start_backup:
+    if exercise_restore:
         result["restoreExercise"] = _exercise_restore(
             aws,
             table,
@@ -704,28 +458,16 @@ def main() -> int:
     parser.add_argument("--region", default="us-east-1")
     parser.add_argument("--stack-name", default="AxonLLMStack")
     parser.add_argument("--table-name")
-    parser.add_argument("--max-backup-age-hours", type=int, default=30)
-    parser.add_argument("--require-vault-lock", action="store_true")
-    parser.add_argument(
-        "--start-backup",
-        action="store_true",
-        help=("Start and await a retained on-demand backup before validating freshness, then exercise a restore"),
-    )
     parser.add_argument("--exercise-restore", action="store_true")
     parser.add_argument("--keep-restored-table", action="store_true")
     args = parser.parse_args()
-    if args.max_backup_age_hours < 1:
-        parser.error("--max-backup-age-hours must be positive")
-    if args.keep_restored_table and not args.exercise_restore and not args.start_backup:
-        parser.error("--keep-restored-table requires --exercise-restore or --start-backup")
+    if args.keep_restored_table and not args.exercise_restore:
+        parser.error("--keep-restored-table requires --exercise-restore")
     try:
         result = validate_recovery(
             AwsCli(args.region),
             stack_name=args.stack_name,
             table_name=args.table_name,
-            max_backup_age_hours=args.max_backup_age_hours,
-            require_vault_lock=args.require_vault_lock,
-            start_backup=args.start_backup,
             exercise_restore=args.exercise_restore,
             keep_restored_table=args.keep_restored_table,
             now=datetime.now(timezone.utc),

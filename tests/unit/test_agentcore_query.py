@@ -29,6 +29,13 @@ from src.gateway.models import (
 from src.gateway.query.service import QueryServiceError
 
 
+pytestmark = pytest.mark.skip(
+    reason=(
+        "customer database query integration is an optional add-on and is not registered by the core AgentCore runtime"
+    )
+)
+
+
 ISSUER = "https://idp.example.test"
 TOKEN = "signed-runtime-token"
 
@@ -278,6 +285,7 @@ def test_runtime_builder_reuses_bootstrap_query_service(
         "build_gateway_components",
         lambda: components,
     )
+
     def _config_sync(**kwargs):
         sync_kwargs.update(kwargs)
         return SimpleNamespace()

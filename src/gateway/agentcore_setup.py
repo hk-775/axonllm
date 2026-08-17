@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import ipaddress
 import json
-import math
 import os
 import re
 import subprocess
@@ -15,8 +14,22 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from src.gateway.deployment.topology import (
+    AGENTCORE_DEPLOYMENT_PROFILES,
+    AGENTCORE_EXECUTION,
+    DEFAULT_STANDALONE_AGENTCORE_TOPOLOGY,
+    OSTIARI_EXPERIENCE,
+    STANDALONE_AGENTCORE,
+    DeploymentTopology,
+)
 
-SCHEMA_VERSION = 2
+
+SCHEMA_VERSION = 3
+LEGACY_SCHEMA_VERSION = 2
+SUPPORTED_SCHEMA_VERSIONS = (
+    LEGACY_SCHEMA_VERSION,
+    SCHEMA_VERSION,
+)
 MANAGED_COGNITO = "managed-cognito"
 EXTERNAL_OIDC = "external-oidc"
 IDENTITY_MODES = (MANAGED_COGNITO, EXTERNAL_OIDC)
@@ -54,9 +67,7 @@ _DOMAIN_NAME_PATTERN = re.compile(
 )
 _PREFIX_LIST_PATTERN = re.compile(r"^pl-[0-9a-fA-F]+$")
 _HOSTED_ZONE_PATTERN = re.compile(r"^Z[A-Z0-9]+$")
-_SAML_LOGIN_PATH_PATTERN = re.compile(
-    r"^/[A-Za-z0-9._~!$&'()*+,;=:@/-]+$"
-)
+_SAML_LOGIN_PATH_PATTERN = re.compile(r"^/[A-Za-z0-9._~!$&'()*+,;=:@/-]+$")
 _IMAGE_PATTERN = re.compile(
     r"^(?P<account>[0-9]{12})\.dkr\.ecr\."
     r"(?P<region>[a-z0-9-]+)\.amazonaws\.com/"
@@ -78,10 +89,6 @@ _BEDROCK_ARN_PATTERN = re.compile(
     r"(?P<resource_type>foundation-model|inference-profile|"
     r"application-inference-profile|custom-model|provisioned-model|"
     r"imported-model)/[A-Za-z0-9][A-Za-z0-9._:/+-]*$"
-)
-_IAM_ROLE_ARN_PATTERN = re.compile(
-    r"^arn:(?:aws|aws-us-gov|aws-cn):iam::[0-9]{12}:"
-    r"role/[A-Za-z0-9+=,.@_/-]{1,512}$"
 )
 _SENSITIVE_KEY_PARTS = (
     "api_key",
@@ -135,9 +142,7 @@ def _provider_names(value: Any, name: str) -> tuple[str, ...]:
             max_length=64,
         )
         if provider not in SUPPORTED_AGENTCORE_PROVIDERS:
-            raise AgentCoreSetupError(
-                f"{name}[{index}] is not a supported AgentCore provider"
-            )
+            raise AgentCoreSetupError(f"{name}[{index}] is not a supported AgentCore provider")
         if provider in providers:
             raise AgentCoreSetupError(f"{name} must not contain duplicates")
         providers.append(provider)
@@ -207,22 +212,11 @@ def _viewer_cidrs(value: Any, name: str) -> tuple[str, ...]:
         try:
             network = ipaddress.ip_network(cidr, strict=True)
         except ValueError as exc:
-            raise AgentCoreSetupError(
-                f"{name}[{index}] must be a canonical IP network"
-            ) from exc
+            raise AgentCoreSetupError(f"{name}[{index}] must be a canonical IP network") from exc
         if not isinstance(network, ipaddress.IPv4Network):
-            raise AgentCoreSetupError(
-                f"{name}[{index}] must be an IPv4 network"
-            )
-        if (
-            not network.is_global
-            or network.is_multicast
-            or network.prefixlen < 24
-        ):
-            raise AgentCoreSetupError(
-                f"{name}[{index}] must be a public IPv4 network no broader "
-                "than /24"
-            )
+            raise AgentCoreSetupError(f"{name}[{index}] must be an IPv4 network")
+        if not network.is_global or network.is_multicast or network.prefixlen < 24:
+            raise AgentCoreSetupError(f"{name}[{index}] must be a public IPv4 network no broader than /24")
         if any(network.overlaps(existing) for existing in networks):
             raise AgentCoreSetupError(f"{name} must not contain overlapping CIDRs")
         networks.append(network)
@@ -232,9 +226,7 @@ def _viewer_cidrs(value: Any, name: str) -> tuple[str, ...]:
 def _oauth_identifier(value: Any, name: str) -> str:
     value = _required_string(value, name, max_length=512)
     if "," in value or any(character.isspace() for character in value):
-        raise AgentCoreSetupError(
-            f"{name} must not contain commas or whitespace"
-        )
+        raise AgentCoreSetupError(f"{name} must not contain commas or whitespace")
     return value
 
 
@@ -243,9 +235,7 @@ def _saml_login_path(value: Any, name: str) -> str:
     try:
         parsed = urlsplit(value)
     except ValueError as exc:
-        raise AgentCoreSetupError(
-            f"{name} must be a protected application-local path"
-        ) from exc
+        raise AgentCoreSetupError(f"{name} must be a protected application-local path") from exc
     path = parsed.path
     lowered = path.casefold()
     if (
@@ -262,14 +252,9 @@ def _saml_login_path(value: Any, name: str) -> str:
         or "%" in path
         or any(segment in {".", ".."} for segment in path.split("/"))
         or lowered in {"/", "/health", "/ready"}
-        or any(
-            lowered == prefix or lowered.startswith(f"{prefix}/")
-            for prefix in ("/saml", "/scim", "/oauth2")
-        )
+        or any(lowered == prefix or lowered.startswith(f"{prefix}/") for prefix in ("/saml", "/scim", "/oauth2"))
     ):
-        raise AgentCoreSetupError(
-            f"{name} must be a protected application-local path"
-        )
+        raise AgentCoreSetupError(f"{name} must be a protected application-local path")
     return path
 
 
@@ -284,9 +269,7 @@ def _optional_secret_arn(
     arn = _required_string(value, name, max_length=700)
     match = _SECRETS_MANAGER_ARN_PATTERN.fullmatch(arn)
     if match is None or match.group("region") != aws_region:
-        raise AgentCoreSetupError(
-            f"{name} must be a complete Secrets Manager ARN in {aws_region}"
-        )
+        raise AgentCoreSetupError(f"{name} must be a complete Secrets Manager ARN in {aws_region}")
     return arn
 
 
@@ -354,225 +337,9 @@ def _bounded_integer(
         or maximum is not None
         and value > maximum
     ):
-        qualifier = (
-            f"between {minimum} and {maximum}"
-            if maximum is not None
-            else f"at least {minimum}"
-        )
+        qualifier = f"between {minimum} and {maximum}" if maximum is not None else f"at least {minimum}"
         raise AgentCoreSetupError(f"{name} must be {qualifier}")
     return value
-
-
-def _bounded_float(
-    value: Any,
-    name: str,
-    *,
-    minimum: float,
-    maximum: float,
-) -> float:
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, (int, float))
-    ):
-        raise AgentCoreSetupError(
-            f"{name} must be between {minimum} and {maximum}"
-        )
-    try:
-        normalized = float(value)
-    except (OverflowError, ValueError) as exc:
-        raise AgentCoreSetupError(f"{name} must be finite") from exc
-    if (
-        not math.isfinite(normalized)
-        or not minimum <= normalized <= maximum
-    ):
-        raise AgentCoreSetupError(
-            f"{name} must be between {minimum} and {maximum}"
-        )
-    return normalized
-
-
-@dataclass(frozen=True)
-class AthenaQuerySetup:
-    """Optional deployment-bound query roles and result limits."""
-
-    role_arns: tuple[str, ...]
-    timeout_seconds: float = 30.0
-    max_rows: int = 1000
-    max_result_bytes: int = 1024 * 1024
-    max_bytes_scanned: int = 1024 * 1024 * 1024
-    poll_interval_seconds: float = 0.25
-    project_rpm: int = 30
-    principal_rpm: int = 10
-    project_concurrency: int = 5
-    principal_concurrency: int = 2
-    project_scan_bytes_per_minute: int = 5 * 1024 * 1024 * 1024
-    principal_scan_bytes_per_minute: int = 2 * 1024 * 1024 * 1024
-    max_datasources_per_tenant: int = 500
-
-    def __post_init__(self) -> None:
-        if self.principal_rpm > self.project_rpm:
-            raise AgentCoreSetupError(
-                "runtime.athena_query.principal_rpm must not exceed "
-                "project_rpm"
-            )
-        if self.principal_concurrency > self.project_concurrency:
-            raise AgentCoreSetupError(
-                "runtime.athena_query.principal_concurrency must not "
-                "exceed project_concurrency"
-            )
-        if (
-            self.principal_scan_bytes_per_minute
-            > self.project_scan_bytes_per_minute
-        ):
-            raise AgentCoreSetupError(
-                "runtime.athena_query principal scan budget must not "
-                "exceed the project scan budget"
-            )
-        if (
-            self.max_bytes_scanned
-            > self.principal_scan_bytes_per_minute
-        ):
-            raise AgentCoreSetupError(
-                "runtime.athena_query.max_bytes_scanned must fit within "
-                "the principal aggregate scan budget"
-            )
-
-    @classmethod
-    def from_mapping(cls, raw: Any) -> AthenaQuerySetup:
-        value = _strict_object(
-            raw,
-            "runtime.athena_query",
-            required={"role_arns"},
-            optional={
-                "timeout_seconds",
-                "max_rows",
-                "max_result_bytes",
-                "max_bytes_scanned",
-                "poll_interval_seconds",
-                "project_rpm",
-                "principal_rpm",
-                "project_concurrency",
-                "principal_concurrency",
-                "project_scan_bytes_per_minute",
-                "principal_scan_bytes_per_minute",
-                "max_datasources_per_tenant",
-            },
-        )
-        raw_roles = value["role_arns"]
-        if not isinstance(raw_roles, list) or not raw_roles:
-            raise AgentCoreSetupError(
-                "runtime.athena_query.role_arns must be a non-empty array"
-            )
-        roles: list[str] = []
-        for index, raw_role in enumerate(raw_roles):
-            role = _required_string(
-                raw_role,
-                f"runtime.athena_query.role_arns[{index}]",
-                max_length=600,
-            )
-            if (
-                "*" in role
-                or _IAM_ROLE_ARN_PATTERN.fullmatch(role) is None
-            ):
-                raise AgentCoreSetupError(
-                    "Athena query roles must be concrete IAM role ARNs"
-                )
-            if role in roles:
-                raise AgentCoreSetupError(
-                    "runtime.athena_query.role_arns must not contain "
-                    "duplicates"
-                )
-            roles.append(role)
-        return cls(
-            role_arns=tuple(roles),
-            timeout_seconds=_bounded_float(
-                value.get("timeout_seconds", 30.0),
-                "runtime.athena_query.timeout_seconds",
-                minimum=0.001,
-                maximum=300.0,
-            ),
-            max_rows=_bounded_integer(
-                value.get("max_rows", 1000),
-                "runtime.athena_query.max_rows",
-                minimum=1,
-                maximum=10_000,
-            ),
-            max_result_bytes=_bounded_integer(
-                value.get("max_result_bytes", 1024 * 1024),
-                "runtime.athena_query.max_result_bytes",
-                minimum=1024,
-                maximum=16 * 1024 * 1024,
-            ),
-            max_bytes_scanned=_bounded_integer(
-                value.get(
-                    "max_bytes_scanned",
-                    1024 * 1024 * 1024,
-                ),
-                "runtime.athena_query.max_bytes_scanned",
-                minimum=1,
-            ),
-            poll_interval_seconds=_bounded_float(
-                value.get("poll_interval_seconds", 0.25),
-                "runtime.athena_query.poll_interval_seconds",
-                minimum=0.05,
-                maximum=5.0,
-            ),
-            project_rpm=_bounded_integer(
-                value.get("project_rpm", 30),
-                "runtime.athena_query.project_rpm",
-                minimum=1,
-                maximum=10_000,
-            ),
-            principal_rpm=_bounded_integer(
-                value.get("principal_rpm", 10),
-                "runtime.athena_query.principal_rpm",
-                minimum=1,
-                maximum=10_000,
-            ),
-            project_concurrency=_bounded_integer(
-                value.get("project_concurrency", 5),
-                "runtime.athena_query.project_concurrency",
-                minimum=1,
-                maximum=100,
-            ),
-            principal_concurrency=_bounded_integer(
-                value.get("principal_concurrency", 2),
-                "runtime.athena_query.principal_concurrency",
-                minimum=1,
-                maximum=100,
-            ),
-            project_scan_bytes_per_minute=_bounded_integer(
-                value.get(
-                    "project_scan_bytes_per_minute",
-                    5 * 1024 * 1024 * 1024,
-                ),
-                (
-                    "runtime.athena_query."
-                    "project_scan_bytes_per_minute"
-                ),
-                minimum=1,
-            ),
-            principal_scan_bytes_per_minute=_bounded_integer(
-                value.get(
-                    "principal_scan_bytes_per_minute",
-                    2 * 1024 * 1024 * 1024,
-                ),
-                (
-                    "runtime.athena_query."
-                    "principal_scan_bytes_per_minute"
-                ),
-                minimum=1,
-            ),
-            max_datasources_per_tenant=_bounded_integer(
-                value.get("max_datasources_per_tenant", 500),
-                (
-                    "runtime.athena_query."
-                    "max_datasources_per_tenant"
-                ),
-                minimum=1,
-                maximum=10_000,
-            ),
-        )
 
 
 @dataclass(frozen=True)
@@ -641,7 +408,6 @@ class RuntimeSetup:
     bedrock_invoke_resource_arns: tuple[str, ...]
     approved_https_prefix_list_id: str
     enabled_providers: tuple[str, ...] = DEFAULT_AGENTCORE_PROVIDERS
-    athena_query: AthenaQuerySetup | None = None
 
     @classmethod
     def from_mapping(cls, raw: Any, *, aws_region: str) -> RuntimeSetup:
@@ -653,7 +419,7 @@ class RuntimeSetup:
                 "bedrock_invoke_resource_arns",
                 "approved_https_prefix_list_id",
             },
-            optional={"athena_query", "enabled_providers"},
+            optional={"enabled_providers"},
         )
         image = _required_string(
             value["verified_image_uri"],
@@ -675,14 +441,8 @@ class RuntimeSetup:
             )
             arn_match = _BEDROCK_ARN_PATTERN.fullmatch(arn)
             if arn_match is None or "*" in arn:
-                raise AgentCoreSetupError(
-                    "each Bedrock resource must be a concrete model or "
-                    "inference-profile ARN"
-                )
-            if (
-                arn_match.group("resource_type") != "foundation-model"
-                and arn_match.group("region") != aws_region
-            ):
+                raise AgentCoreSetupError("each Bedrock resource must be a concrete model or inference-profile ARN")
+            if arn_match.group("resource_type") != "foundation-model" and arn_match.group("region") != aws_region:
                 raise AgentCoreSetupError(
                     "Bedrock inference profiles and account-scoped resources "
                     f"must be in {aws_region}; cross-region foundation-model "
@@ -708,18 +468,12 @@ class RuntimeSetup:
                 ),
                 "runtime.enabled_providers",
             ),
-            athena_query=(
-                AthenaQuerySetup.from_mapping(value["athena_query"])
-                if value.get("athena_query") is not None
-                else None
-            ),
         )
 
 
 @dataclass(frozen=True)
 class ManagedCognitoSetup:
     hosted_ui_domain_prefix: str
-    oauth_callback_urls: tuple[str, ...]
     ses_from_email: str | None = None
     ses_verified_domain: str | None = None
 
@@ -728,7 +482,7 @@ class ManagedCognitoSetup:
         value = _strict_object(
             raw,
             "managed_cognito",
-            required={"hosted_ui_domain_prefix", "oauth_callback_urls"},
+            required={"hosted_ui_domain_prefix"},
             optional={"ses_from_email", "ses_verified_domain"},
         )
         prefix = _required_string(
@@ -742,26 +496,11 @@ class ManagedCognitoSetup:
                 "lowercase letters, numbers, or hyphens and cannot start or "
                 "end with a hyphen"
             )
-        raw_urls = value["oauth_callback_urls"]
-        if not isinstance(raw_urls, list) or not raw_urls:
-            raise AgentCoreSetupError("managed_cognito.oauth_callback_urls must be a non-empty array")
-        urls: list[str] = []
-        for index, raw_url in enumerate(raw_urls):
-            url = _https_url(
-                raw_url,
-                f"managed_cognito.oauth_callback_urls[{index}]",
-            )
-            if "," in url:
-                raise AgentCoreSetupError("managed Cognito callback URLs must not contain commas")
-            if url in urls:
-                raise AgentCoreSetupError("managed Cognito callback URLs must not contain duplicates")
-            urls.append(url)
         ses_from_email = value.get("ses_from_email")
         ses_verified_domain = value.get("ses_verified_domain")
         if (ses_from_email is None) != (ses_verified_domain is None):
             raise AgentCoreSetupError(
-                "managed_cognito.ses_from_email and "
-                "managed_cognito.ses_verified_domain must be supplied together"
+                "managed_cognito.ses_from_email and managed_cognito.ses_verified_domain must be supplied together"
             )
         if ses_from_email is not None:
             ses_from_email = _email(
@@ -771,20 +510,21 @@ class ManagedCognitoSetup:
             ses_verified_domain = _required_string(
                 ses_verified_domain,
                 "managed_cognito.ses_verified_domain",
-                max_length=253,
+                max_length=320,
             )
             if (
-                _DOMAIN_NAME_PATTERN.fullmatch(ses_verified_domain) is None
-                or ses_from_email.rpartition("@")[2].casefold()
-                != ses_verified_domain
+                ses_verified_domain != ses_from_email
+                and (
+                    _DOMAIN_NAME_PATTERN.fullmatch(ses_verified_domain) is None
+                    or ses_from_email.rpartition("@")[2].casefold() != ses_verified_domain
+                )
             ):
                 raise AgentCoreSetupError(
-                    "managed_cognito.ses_verified_domain must be the "
-                    "lowercase domain of managed_cognito.ses_from_email"
+                    "managed_cognito.ses_verified_domain must be either the exact sender email "
+                    "or its lowercase domain"
                 )
         return cls(
             hosted_ui_domain_prefix=prefix,
-            oauth_callback_urls=tuple(urls),
             ses_from_email=ses_from_email,
             ses_verified_domain=ses_verified_domain,
         )
@@ -829,10 +569,7 @@ class ControlPlaneSetup:
         )
         endpoint_mode = value.get("endpoint_mode", CUSTOM_DOMAIN)
         if endpoint_mode not in CONTROL_PLANE_ENDPOINT_MODES:
-            raise AgentCoreSetupError(
-                "control_plane.endpoint_mode must be 'custom-domain' or "
-                "'cloudfront'"
-            )
+            raise AgentCoreSetupError("control_plane.endpoint_mode must be 'custom-domain' or 'cloudfront'")
         image = _required_string(
             value["verified_image_uri"],
             "control_plane.verified_image_uri",
@@ -840,8 +577,7 @@ class ControlPlaneSetup:
         image_match = _IMAGE_PATTERN.fullmatch(image)
         if image_match is None or image_match.group("region") != aws_region:
             raise AgentCoreSetupError(
-                "control_plane.verified_image_uri must be an immutable "
-                f"private ECR digest URI in {aws_region}"
+                f"control_plane.verified_image_uri must be an immutable private ECR digest URI in {aws_region}"
             )
         approved_https_prefix_list_id = _required_string(
             value["approved_https_prefix_list_id"],
@@ -850,8 +586,7 @@ class ControlPlaneSetup:
         )
         if _PREFIX_LIST_PATTERN.fullmatch(approved_https_prefix_list_id) is None:
             raise AgentCoreSetupError(
-                "control_plane.approved_https_prefix_list_id must be an EC2 "
-                "managed prefix list ID"
+                "control_plane.approved_https_prefix_list_id must be an EC2 managed prefix list ID"
             )
 
         domain_name = None
@@ -869,38 +604,26 @@ class ControlPlaneSetup:
             missing = custom_fields.difference(value)
             if missing:
                 raise AgentCoreSetupError(
-                    "custom-domain control_plane is missing required fields: "
-                    + ", ".join(sorted(missing))
+                    "custom-domain control_plane is missing required fields: " + ", ".join(sorted(missing))
                 )
             if "allowed_viewer_cidrs" in value:
-                raise AgentCoreSetupError(
-                    "custom-domain control_plane forbids allowed_viewer_cidrs"
-                )
+                raise AgentCoreSetupError("custom-domain control_plane forbids allowed_viewer_cidrs")
             domain_name = _required_string(
                 value["domain_name"],
                 "control_plane.domain_name",
                 max_length=253,
             )
             if _DOMAIN_NAME_PATTERN.fullmatch(domain_name) is None:
-                raise AgentCoreSetupError(
-                    "control_plane.domain_name must be a lowercase fully "
-                    "qualified DNS hostname"
-                )
+                raise AgentCoreSetupError("control_plane.domain_name must be a lowercase fully qualified DNS hostname")
             certificate_arn = _required_string(
                 value["certificate_arn"],
                 "control_plane.certificate_arn",
                 max_length=512,
             )
-            certificate_match = _ACM_CERTIFICATE_ARN_PATTERN.fullmatch(
-                certificate_arn
-            )
-            if (
-                certificate_match is None
-                or certificate_match.group("region") != aws_region
-            ):
+            certificate_match = _ACM_CERTIFICATE_ARN_PATTERN.fullmatch(certificate_arn)
+            if certificate_match is None or certificate_match.group("region") != aws_region:
                 raise AgentCoreSetupError(
-                    "control_plane.certificate_arn must be a regional ACM "
-                    f"certificate ARN in {aws_region}"
+                    f"control_plane.certificate_arn must be a regional ACM certificate ARN in {aws_region}"
                 )
             public_hosted_zone_id = _required_string(
                 value["public_hosted_zone_id"],
@@ -909,30 +632,22 @@ class ControlPlaneSetup:
             )
             if _HOSTED_ZONE_PATTERN.fullmatch(public_hosted_zone_id) is None:
                 raise AgentCoreSetupError(
-                    "control_plane.public_hosted_zone_id must be a Route 53 "
-                    "public hosted-zone ID"
+                    "control_plane.public_hosted_zone_id must be a Route 53 public hosted-zone ID"
                 )
             approved_ingress_prefix_list_id = _required_string(
                 value["approved_ingress_prefix_list_id"],
                 "control_plane.approved_ingress_prefix_list_id",
                 max_length=64,
             )
-            if (
-                _PREFIX_LIST_PATTERN.fullmatch(
-                    approved_ingress_prefix_list_id
-                )
-                is None
-            ):
+            if _PREFIX_LIST_PATTERN.fullmatch(approved_ingress_prefix_list_id) is None:
                 raise AgentCoreSetupError(
-                    "control_plane.approved_ingress_prefix_list_id must be an "
-                    "EC2 managed prefix list ID"
+                    "control_plane.approved_ingress_prefix_list_id must be an EC2 managed prefix list ID"
                 )
         else:
             present = custom_fields.intersection(value)
             if present:
                 raise AgentCoreSetupError(
-                    "cloudfront control_plane forbids custom-domain fields: "
-                    + ", ".join(sorted(present))
+                    "cloudfront control_plane forbids custom-domain fields: " + ", ".join(sorted(present))
                 )
             if aws_region != "us-east-1":
                 raise AgentCoreSetupError(
@@ -1036,6 +751,7 @@ class AgentCoreSetupConfig:
     tenant: TenantSetup
     admin: AdminSetup
     runtime: RuntimeSetup
+    deployment: DeploymentTopology = DEFAULT_STANDALONE_AGENTCORE_TOPOLOGY
     managed_cognito: ManagedCognitoSetup | None = None
     control_plane: ControlPlaneSetup | None = None
     external_oidc: ExternalOidcSetup | None = None
@@ -1055,6 +771,7 @@ class AgentCoreSetupConfig:
                 "runtime",
             },
             optional={
+                "deployment",
                 "managed_cognito",
                 "control_plane",
                 "external_oidc",
@@ -1063,9 +780,28 @@ class AgentCoreSetupConfig:
         if (
             isinstance(value["schema_version"], bool)
             or not isinstance(value["schema_version"], int)
-            or value["schema_version"] != SCHEMA_VERSION
+            or value["schema_version"] not in SUPPORTED_SCHEMA_VERSIONS
         ):
-            raise AgentCoreSetupError(f"schema_version must be {SCHEMA_VERSION}")
+            raise AgentCoreSetupError(f"schema_version must be {LEGACY_SCHEMA_VERSION} or {SCHEMA_VERSION}")
+        schema_version = value["schema_version"]
+        deployment_raw = value.get("deployment")
+        if schema_version == LEGACY_SCHEMA_VERSION:
+            if deployment_raw is not None:
+                raise AgentCoreSetupError(
+                    "schema_version 2 forbids deployment; use schema_version 3 for an explicit deployment profile"
+                )
+            deployment = DEFAULT_STANDALONE_AGENTCORE_TOPOLOGY
+        else:
+            if deployment_raw is None:
+                raise AgentCoreSetupError("schema_version 3 requires deployment")
+            try:
+                deployment = DeploymentTopology.from_mapping(
+                    deployment_raw,
+                )
+            except ValueError as exc:
+                raise AgentCoreSetupError(str(exc)) from exc
+        if deployment.execution != AGENTCORE_EXECUTION:
+            raise AgentCoreSetupError("AgentCore setup requires deployment.execution 'agentcore'")
         if value["target"] != "agentcore":
             raise AgentCoreSetupError("target must be 'agentcore'")
         identity_mode = value["identity_mode"]
@@ -1079,26 +815,20 @@ class AgentCoreSetupConfig:
         control_plane_raw = value.get("control_plane")
         external_raw = value.get("external_oidc")
         if identity_mode == MANAGED_COGNITO:
-            if (
-                managed_raw is None
-                or control_plane_raw is None
-                or external_raw is not None
-            ):
+            if managed_raw is None or control_plane_raw is None or external_raw is not None:
                 raise AgentCoreSetupError(
-                    "managed-cognito requires managed_cognito and "
-                    "control_plane and forbids external_oidc"
+                    "managed-cognito requires managed_cognito and control_plane and forbids external_oidc"
                 )
-        elif (
-            external_raw is None
-            or managed_raw is not None
-            or control_plane_raw is not None
-        ):
+        elif external_raw is None or managed_raw is not None or control_plane_raw is not None:
             raise AgentCoreSetupError(
-                "external-oidc requires external_oidc and forbids "
-                "managed_cognito and control_plane"
+                "external-oidc requires external_oidc and forbids managed_cognito and control_plane"
+            )
+        if deployment.experience == OSTIARI_EXPERIENCE and identity_mode != EXTERNAL_OIDC:
+            raise AgentCoreSetupError(
+                "ostiari-agentcore requires external-oidc so Ostiari remains the identity and experience owner"
             )
         return cls(
-            schema_version=SCHEMA_VERSION,
+            schema_version=schema_version,
             target="agentcore",
             identity_mode=identity_mode,
             aws_region=aws_region,
@@ -1111,6 +841,7 @@ class AgentCoreSetupConfig:
                 value["runtime"],
                 aws_region=aws_region,
             ),
+            deployment=deployment,
             managed_cognito=(ManagedCognitoSetup.from_mapping(managed_raw) if managed_raw is not None else None),
             control_plane=(
                 ControlPlaneSetup.from_mapping(
@@ -1125,21 +856,20 @@ class AgentCoreSetupConfig:
 
     def to_dict(self) -> dict[str, Any]:
         value = asdict(self)
+        if self.schema_version == LEGACY_SCHEMA_VERSION:
+            value.pop("deployment")
         if self.admin.subject is None:
             value["admin"].pop("subject")
         if self.managed_cognito is None:
             value.pop("managed_cognito")
         else:
-            value["managed_cognito"]["oauth_callback_urls"] = list(self.managed_cognito.oauth_callback_urls)
             if self.managed_cognito.ses_from_email is None:
                 value["managed_cognito"].pop("ses_from_email")
                 value["managed_cognito"].pop("ses_verified_domain")
         if self.control_plane is None:
             value.pop("control_plane")
         else:
-            value["control_plane"]["allowed_viewer_cidrs"] = list(
-                self.control_plane.allowed_viewer_cidrs
-            )
+            value["control_plane"]["allowed_viewer_cidrs"] = list(self.control_plane.allowed_viewer_cidrs)
             if self.control_plane.endpoint_mode == CUSTOM_DOMAIN:
                 value["control_plane"].pop("endpoint_mode")
             for optional_field in (
@@ -1156,15 +886,7 @@ class AgentCoreSetupConfig:
         if self.external_oidc is None:
             value.pop("external_oidc")
         value["runtime"]["bedrock_invoke_resource_arns"] = list(self.runtime.bedrock_invoke_resource_arns)
-        value["runtime"]["enabled_providers"] = list(
-            self.runtime.enabled_providers
-        )
-        if self.runtime.athena_query is None:
-            value["runtime"].pop("athena_query")
-        else:
-            value["runtime"]["athena_query"]["role_arns"] = list(
-                self.runtime.athena_query.role_arns
-            )
+        value["runtime"]["enabled_providers"] = list(self.runtime.enabled_providers)
         return value
 
 
@@ -1241,9 +963,15 @@ def _comma_values(value: str | None) -> list[str]:
 
 def config_from_args(args: argparse.Namespace) -> AgentCoreSetupConfig:
     mode = args.identity_mode
+    topology_profile = getattr(args, "topology_profile", None) or STANDALONE_AGENTCORE
+    try:
+        deployment = DeploymentTopology.from_profile(topology_profile)
+    except ValueError as exc:
+        raise AgentCoreSetupError(str(exc)) from exc
     mapping: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "target": "agentcore",
+        "deployment": deployment.to_dict(),
         "identity_mode": mode,
         "aws_region": args.aws_region,
         "tenant": {
@@ -1268,46 +996,9 @@ def config_from_args(args: argparse.Namespace) -> AgentCoreSetupConfig:
             ),
         },
     }
-    athena_role_arns = list(args.athena_query_role_arn or [])
-    if not athena_role_arns:
-        athena_role_arns = _comma_values(
-            os.environ.get("AXON_ATHENA_QUERY_ROLE_ARNS")
-        )
-    if athena_role_arns:
-        mapping["runtime"]["athena_query"] = {
-            "role_arns": athena_role_arns,
-            "timeout_seconds": args.athena_query_timeout_seconds,
-            "max_rows": args.athena_query_max_rows,
-            "max_result_bytes": args.athena_query_max_result_bytes,
-            "max_bytes_scanned": args.athena_query_max_bytes_scanned,
-            "poll_interval_seconds": (
-                args.athena_query_poll_interval_seconds
-            ),
-            "project_rpm": args.athena_query_project_rpm,
-            "principal_rpm": args.athena_query_principal_rpm,
-            "project_concurrency": (
-                args.athena_query_project_concurrency
-            ),
-            "principal_concurrency": (
-                args.athena_query_principal_concurrency
-            ),
-            "project_scan_bytes_per_minute": (
-                args.athena_query_project_scan_bytes_per_minute
-            ),
-            "principal_scan_bytes_per_minute": (
-                args.athena_query_principal_scan_bytes_per_minute
-            ),
-            "max_datasources_per_tenant": (
-                args.athena_query_max_datasources_per_tenant
-            ),
-        }
     if mode == MANAGED_COGNITO:
-        callback_urls = list(args.oauth_callback_url or [])
-        if not callback_urls:
-            callback_urls = _comma_values(os.environ.get("AXON_OAUTH_CALLBACK_URLS"))
         mapping["managed_cognito"] = {
             "hosted_ui_domain_prefix": args.hosted_ui_domain_prefix,
-            "oauth_callback_urls": callback_urls,
         }
         if args.ses_from_email or args.ses_verified_domain:
             mapping["managed_cognito"].update(
@@ -1316,51 +1007,29 @@ def config_from_args(args: argparse.Namespace) -> AgentCoreSetupConfig:
                     "ses_verified_domain": args.ses_verified_domain,
                 }
             )
-        endpoint_mode = (
-            args.control_plane_endpoint_mode or CUSTOM_DOMAIN
-        )
+        endpoint_mode = args.control_plane_endpoint_mode or CUSTOM_DOMAIN
         mapping["control_plane"] = {
             "endpoint_mode": endpoint_mode,
-            "verified_image_uri": (
-                args.control_plane_verified_image_uri
-            ),
-            "approved_https_prefix_list_id": (
-                args.control_plane_approved_https_prefix_list_id
-            ),
-            "saml_login_path": (
-                args.control_plane_saml_login_path
-            ),
+            "verified_image_uri": (args.control_plane_verified_image_uri),
+            "approved_https_prefix_list_id": (args.control_plane_approved_https_prefix_list_id),
+            "saml_login_path": (args.control_plane_saml_login_path),
         }
         if endpoint_mode == CUSTOM_DOMAIN:
             mapping["control_plane"].update(
                 {
                     "domain_name": args.control_plane_domain_name,
-                    "certificate_arn": (
-                        args.control_plane_certificate_arn
-                    ),
-                    "public_hosted_zone_id": (
-                        args.control_plane_public_hosted_zone_id
-                    ),
-                    "approved_ingress_prefix_list_id": (
-                        args.control_plane_approved_ingress_prefix_list_id
-                    ),
+                    "certificate_arn": (args.control_plane_certificate_arn),
+                    "public_hosted_zone_id": (args.control_plane_public_hosted_zone_id),
+                    "approved_ingress_prefix_list_id": (args.control_plane_approved_ingress_prefix_list_id),
                 }
             )
         else:
-            viewer_cidrs = list(
-                args.control_plane_allowed_viewer_cidr or []
-            )
+            viewer_cidrs = list(args.control_plane_allowed_viewer_cidr or [])
             if not viewer_cidrs:
-                viewer_cidrs = _comma_values(
-                    os.environ.get(
-                        "AXON_CONTROL_PLANE_ALLOWED_VIEWER_CIDRS"
-                    )
-                )
+                viewer_cidrs = _comma_values(os.environ.get("AXON_CONTROL_PLANE_ALLOWED_VIEWER_CIDRS"))
             mapping["control_plane"]["allowed_viewer_cidrs"] = viewer_cidrs
         if args.control_plane_scim_tenants_secret_arn:
-            mapping["control_plane"]["scim_tenants_secret_arn"] = (
-                args.control_plane_scim_tenants_secret_arn
-            )
+            mapping["control_plane"]["scim_tenants_secret_arn"] = args.control_plane_scim_tenants_secret_arn
     elif mode == EXTERNAL_OIDC:
         mapping["admin"]["subject"] = args.admin_subject
         mapping["external_oidc"] = {
@@ -1408,27 +1077,45 @@ def add_setup_subcommands(subparsers: argparse._SubParsersAction) -> None:
     )
     agentcore.add_argument("--deploy", action="store_true")
     agentcore.add_argument("--yes", action="store_true")
-    agentcore.add_argument("--bootstrap-cdk", action="store_true")
+    deployment_preparation = agentcore.add_mutually_exclusive_group()
+    deployment_preparation.add_argument(
+        "--install",
+        action="store_true",
+        help=(
+            "Use the one-command AgentCore install or upgrade path, "
+            "including bounded bootstrap reconciliation and failed-first-"
+            "deployment recovery"
+        ),
+    )
+    deployment_preparation.add_argument(
+        "--bootstrap-cdk",
+        action="store_true",
+        help=("Create or reconcile the bounded AgentCore CDK bootstrap policies before deployment"),
+    )
     agentcore.add_argument("--show-config", action="store_true")
     agentcore.add_argument(
         "--provider-env-file",
         default=_env("AXON_PROVIDER_ENV_FILE"),
-        help=(
-            "Owner-only env file containing allowlisted provider "
-            "credentials"
-        ),
+        help=("Owner-only env file containing allowlisted provider credentials"),
     )
     agentcore.add_argument(
         "--rollback-provider-secret-version",
-        help=(
-            "Roll back the deployed provider secret and force a new runtime "
-            "version"
-        ),
+        help=("Roll back the deployed provider secret and force a new runtime version"),
     )
     agentcore.add_argument(
         "--identity-mode",
         choices=IDENTITY_MODES,
         default=_env("AXON_IDENTITY_MODE"),
+    )
+    agentcore.add_argument(
+        "--deployment-profile",
+        dest="topology_profile",
+        choices=AGENTCORE_DEPLOYMENT_PROFILES,
+        default=_env(
+            "AXON_TOPOLOGY_PROFILE",
+            STANDALONE_AGENTCORE,
+        ),
+        help=("Select who owns the user experience while AgentCore runs the routing runtime"),
     )
     agentcore.add_argument(
         "--aws-region",
@@ -1483,117 +1170,8 @@ def add_setup_subcommands(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     agentcore.add_argument(
-        "--athena-query-role-arn",
-        action="append",
-        help=(
-            "Enable read-only queries with an exact project IAM role; "
-            "repeat to approve more than one role"
-        ),
-    )
-    agentcore.add_argument(
-        "--athena-query-timeout-seconds",
-        type=float,
-        default=float(
-            _env("AXON_ATHENA_QUERY_TIMEOUT_SECONDS", "30")
-        ),
-    )
-    agentcore.add_argument(
-        "--athena-query-max-rows",
-        type=int,
-        default=int(_env("AXON_ATHENA_QUERY_MAX_ROWS", "1000")),
-    )
-    agentcore.add_argument(
-        "--athena-query-max-result-bytes",
-        type=int,
-        default=int(
-            _env(
-                "AXON_ATHENA_QUERY_MAX_RESULT_BYTES",
-                str(1024 * 1024),
-            )
-        ),
-    )
-    agentcore.add_argument(
-        "--athena-query-max-bytes-scanned",
-        type=int,
-        default=int(
-            _env(
-                "AXON_ATHENA_QUERY_MAX_BYTES_SCANNED",
-                str(1024 * 1024 * 1024),
-            )
-        ),
-    )
-    agentcore.add_argument(
-        "--athena-query-poll-interval-seconds",
-        type=float,
-        default=float(
-            _env(
-                "AXON_ATHENA_QUERY_POLL_INTERVAL_SECONDS",
-                "0.25",
-            )
-        ),
-    )
-    agentcore.add_argument(
-        "--athena-query-project-rpm",
-        type=int,
-        default=int(_env("AXON_ATHENA_QUERY_PROJECT_RPM", "30")),
-    )
-    agentcore.add_argument(
-        "--athena-query-principal-rpm",
-        type=int,
-        default=int(_env("AXON_ATHENA_QUERY_PRINCIPAL_RPM", "10")),
-    )
-    agentcore.add_argument(
-        "--athena-query-project-concurrency",
-        type=int,
-        default=int(
-            _env("AXON_ATHENA_QUERY_PROJECT_CONCURRENCY", "5")
-        ),
-    )
-    agentcore.add_argument(
-        "--athena-query-principal-concurrency",
-        type=int,
-        default=int(
-            _env("AXON_ATHENA_QUERY_PRINCIPAL_CONCURRENCY", "2")
-        ),
-    )
-    agentcore.add_argument(
-        "--athena-query-project-scan-bytes-per-minute",
-        type=int,
-        default=int(
-            _env(
-                "AXON_ATHENA_QUERY_PROJECT_SCAN_BYTES_PER_MINUTE",
-                str(5 * 1024 * 1024 * 1024),
-            )
-        ),
-    )
-    agentcore.add_argument(
-        "--athena-query-principal-scan-bytes-per-minute",
-        type=int,
-        default=int(
-            _env(
-                "AXON_ATHENA_QUERY_PRINCIPAL_SCAN_BYTES_PER_MINUTE",
-                str(2 * 1024 * 1024 * 1024),
-            )
-        ),
-    )
-    agentcore.add_argument(
-        "--athena-query-max-datasources-per-tenant",
-        type=int,
-        default=int(
-            _env(
-                "AXON_ATHENA_QUERY_MAX_DATASOURCES_PER_TENANT",
-                "500",
-            )
-        ),
-    )
-    agentcore.add_argument(
         "--hosted-ui-domain-prefix",
         default=_env("AXON_COGNITO_DOMAIN_PREFIX"),
-    )
-    agentcore.add_argument(
-        "--oauth-callback-url",
-        action="append",
-        help="Repeat for every managed Cognito PKCE callback URL",
     )
     agentcore.add_argument(
         "--ses-from-email",
@@ -1603,16 +1181,16 @@ def add_setup_subcommands(subparsers: argparse._SubParsersAction) -> None:
     agentcore.add_argument(
         "--ses-verified-domain",
         default=_env("AXON_COGNITO_SES_VERIFIED_DOMAIN"),
-        help="Verified SES domain matching --ses-from-email",
+        help=(
+            "Verified SES source identity: either the exact --ses-from-email "
+            "address or its lowercase domain"
+        ),
     )
     agentcore.add_argument(
         "--control-plane-endpoint-mode",
         choices=CONTROL_PLANE_ENDPOINT_MODES,
         default=_env("AXON_CONTROL_PLANE_ENDPOINT_MODE"),
-        help=(
-            "Use a custom Route 53/ACM hostname or an AWS-generated "
-            "CloudFront hostname"
-        ),
+        help=("Use a custom Route 53/ACM hostname or an AWS-generated CloudFront hostname"),
     )
     agentcore.add_argument(
         "--control-plane-domain-name",
@@ -1632,22 +1210,16 @@ def add_setup_subcommands(subparsers: argparse._SubParsersAction) -> None:
     )
     agentcore.add_argument(
         "--control-plane-approved-ingress-prefix-list-id",
-        default=_env(
-            "AXON_CONTROL_PLANE_APPROVED_INGRESS_PREFIX_LIST_ID"
-        ),
+        default=_env("AXON_CONTROL_PLANE_APPROVED_INGRESS_PREFIX_LIST_ID"),
     )
     agentcore.add_argument(
         "--control-plane-approved-https-prefix-list-id",
-        default=_env(
-            "AXON_CONTROL_PLANE_APPROVED_HTTPS_PREFIX_LIST_ID"
-        ),
+        default=_env("AXON_CONTROL_PLANE_APPROVED_HTTPS_PREFIX_LIST_ID"),
     )
     agentcore.add_argument(
         "--control-plane-allowed-viewer-cidr",
         action="append",
-        help=(
-            "CloudFront viewer CIDR; repeat for each reviewed public network"
-        ),
+        help=("CloudFront viewer CIDR; repeat for each reviewed public network"),
     )
     agentcore.add_argument(
         "--control-plane-scim-tenants-secret-arn",
@@ -1697,7 +1269,8 @@ def cmd_setup_agentcore(args: argparse.Namespace) -> None:
 
     print(
         "Validated AgentCore setup: "
-        f"{config.identity_mode}, {config.aws_region}, "
+        f"{config.deployment.profile}, {config.identity_mode}, "
+        f"{config.aws_region}, "
         f"tenant {config.tenant.tenant_id}, "
         f"project {config.tenant.project_id}"
     )
@@ -1711,9 +1284,7 @@ def cmd_setup_agentcore(args: argparse.Namespace) -> None:
         )
     if not args.deploy:
         print(
-            "Deploy with: "
-            f"{sys.executable} -m src.gateway.deployment.agentcore_deploy "
-            f"--config {config_path}"
+            f"Deploy with: {sys.executable} -m src.gateway.deployment.agentcore_deploy --config {config_path} --install"
         )
         return
 
@@ -1726,12 +1297,12 @@ def cmd_setup_agentcore(args: argparse.Namespace) -> None:
     ]
     if args.yes:
         command.append("--yes")
+    if getattr(args, "install", False):
+        command.append("--install")
     if args.bootstrap_cdk:
         command.append("--bootstrap-cdk")
     if args.provider_env_file:
-        command.extend(
-            ["--provider-env-file", args.provider_env_file]
-        )
+        command.extend(["--provider-env-file", args.provider_env_file])
     if args.rollback_provider_secret_version:
         command.extend(
             [
@@ -1742,9 +1313,7 @@ def cmd_setup_agentcore(args: argparse.Namespace) -> None:
     try:
         subprocess.run(command, check=True)
     except subprocess.CalledProcessError as exc:
-        raise AgentCoreSetupError(
-            f"AgentCore deployment failed with exit code {exc.returncode}"
-        ) from exc
+        raise AgentCoreSetupError(f"AgentCore deployment failed with exit code {exc.returncode}") from exc
 
 
 def local_demo_environment(
@@ -1758,7 +1327,6 @@ def local_demo_environment(
             "LLM_ROUTER_DYNAMODB_ENABLED": "false",
             "AXON_AUTH_MODE": "LOG_ONLY",
             "AXON_LOAD_DEMO_DATA": "true",
-            "AXON_ATHENA_QUERY_ENABLED": "false",
             "AXON_CONTROL_PLANE_ONLY": "false",
         }
     )

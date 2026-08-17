@@ -1,4 +1,4 @@
-"""Network-free tests for initialization and query launch domains."""
+"""Network-free tests for initialization and the dormant query add-on domain."""
 
 from __future__ import annotations
 
@@ -44,7 +44,7 @@ def _ownership(
 
 
 def _task(operation: str) -> worker.ActionTask:
-    gate = worker.ACTION_TO_GATE[operation]
+    gate = query.CONTROL_GATE if operation in query.OPERATIONS else worker.ACTION_TO_GATE[operation]
     parameters: dict[str, Any]
     if gate == initialization.CONTROL_GATE:
         parameters = {

@@ -23,12 +23,8 @@ import run_production_validation as validation  # noqa: E402
 
 CERTIFICATION_EXAMPLE = OPERATIONS / "agentcore_certification.example.json"
 LAUNCH_GATES_EXAMPLE = OPERATIONS / "agentcore_launch_gates.example.json"
-PRODUCTION_VALIDATION_EXAMPLE = (
-    OPERATIONS / "production_validation.example.json"
-)
-CLOUDFRONT_PRODUCTION_VALIDATION_EXAMPLE = (
-    OPERATIONS / "production_validation.cloudfront.example.json"
-)
+PRODUCTION_VALIDATION_EXAMPLE = OPERATIONS / "production_validation.example.json"
+CLOUDFRONT_PRODUCTION_VALIDATION_EXAMPLE = OPERATIONS / "production_validation.cloudfront.example.json"
 MODELS_CONFIG = ROOT / "config" / "models.yaml"
 REVIEWED_AT_PLACEHOLDER = "REPLACE_PER_LAUNCH_WITH_REVIEWED_AT_RFC3339"
 EXPIRES_AT_PLACEHOLDER = "REPLACE_PER_LAUNCH_WITH_EXPIRES_AT_RFC3339"
@@ -78,11 +74,7 @@ def _load(path: Path) -> dict[str, Any]:
 
 def _string_values(value: Any) -> list[str]:
     if isinstance(value, dict):
-        return [
-            item
-            for child in value.values()
-            for item in _string_values(child)
-        ]
+        return [item for child in value.values() for item in _string_values(child)]
     if isinstance(value, list):
         return [item for child in value for item in _string_values(child)]
     return [value] if isinstance(value, str) else []
@@ -90,50 +82,30 @@ def _string_values(value: Any) -> list[str]:
 
 def _configured_models() -> dict[str, dict[str, Any]]:
     raw = yaml.safe_load(MODELS_CONFIG.read_text(encoding="utf-8"))
-    return {
-        model["name"]: model
-        for model in raw["models"]
-    }
+    return {model["name"]: model for model in raw["models"]}
 
 
 def test_production_certification_example_uses_the_complete_launch_contract() -> None:
     raw = _load(CERTIFICATION_EXAMPLE)
     config = certification.load_config(CERTIFICATION_EXAMPLE)
-    cases = {
-        case.provider: case for case in config.providers
-    }
+    cases = {case.provider: case for case in config.providers}
     configured_models = _configured_models()
 
     assert config.profile == certification.PRODUCTION_LAUNCH_PROFILE
-    assert set(cases) == (
-        certification.PRODUCTION_LAUNCH_PROVIDERS
-    )
-    assert {
-        provider: case.model
-        for provider, case in cases.items()
-    } == EXPECTED_CERTIFICATION_MODELS
-    assert all(
-        certification.PRODUCTION_REQUIRED_PROVIDER_FEATURES
-        <= case.features
-        for case in cases.values()
-    )
-    assert cases["fireworks"].features == (
-        certification.PRODUCTION_REQUIRED_PROVIDER_FEATURES
-    )
+    assert set(cases) == (certification.PRODUCTION_LAUNCH_PROVIDERS)
+    assert {provider: case.model for provider, case in cases.items()} == EXPECTED_CERTIFICATION_MODELS
+    assert all(certification.PRODUCTION_REQUIRED_PROVIDER_FEATURES <= case.features for case in cases.values())
+    assert cases["fireworks"].features == (certification.PRODUCTION_REQUIRED_PROVIDER_FEATURES)
     for provider, case in cases.items():
         model = configured_models[case.model]
-        assert provider in {
-            mapping["provider"]
-            for mapping in model["providers"]
-        }
+        assert provider in {mapping["provider"] for mapping in model["providers"]}
         if "tool_calling" in case.features:
             assert "tools" in model["capabilities"]
     assert config.tenant_config == certification.TenantConfigCase(
         tenant_id="tenant-launch",
         project_id="project-launch",
     )
-    assert config.query.sql.startswith("SELECT ")
-    assert config.query.workgroup == "axonllm_read_only"
+    assert "query" not in raw
 
     identity_values = set(raw["identities"].values())
     assert identity_values == EXPECTED_CREDENTIAL_ENVIRONMENTS
@@ -141,12 +113,8 @@ def test_production_certification_example_uses_the_complete_launch_contract() ->
 
 
 def test_production_launch_provider_policy_is_explicit() -> None:
-    assert certification.PRODUCTION_LAUNCH_PROVIDERS == frozenset(
-        EXPECTED_CERTIFICATION_MODELS
-    )
-    assert certification.PRODUCTION_OPTIONAL_PROVIDERS == frozenset(
-        OPTIONAL_CERTIFICATION_MODELS
-    )
+    assert certification.PRODUCTION_LAUNCH_PROVIDERS == frozenset(EXPECTED_CERTIFICATION_MODELS)
+    assert certification.PRODUCTION_OPTIONAL_PROVIDERS == frozenset(OPTIONAL_CERTIFICATION_MODELS)
     assert "google_ai" in certification.PRODUCTION_LAUNCH_PROVIDERS
     assert "vertex_ai" not in certification.PRODUCTION_LAUNCH_PROVIDERS
 
@@ -173,19 +141,12 @@ def test_production_certification_accepts_valid_optional_provider(
     )
 
     config = certification.parse_config(raw)
-    optional_case = next(
-        case for case in config.providers if case.provider == provider
-    )
+    optional_case = next(case for case in config.providers if case.provider == provider)
     model = _configured_models()[optional_case.model]
 
     assert optional_case.model == model_name
-    assert (
-        optional_case.features
-        == certification.PRODUCTION_PROVIDER_FEATURES_BY_PROVIDER[provider]
-    )
-    assert provider in {
-        mapping["provider"] for mapping in model["providers"]
-    }
+    assert optional_case.features == certification.PRODUCTION_PROVIDER_FEATURES_BY_PROVIDER[provider]
+    assert provider in {mapping["provider"] for mapping in model["providers"]}
     assert "tools" in model["capabilities"]
 
 
@@ -206,9 +167,7 @@ def test_launch_gates_example_has_exact_replace_per_launch_bindings() -> None:
     reviewed_at = datetime(2026, 8, 12, 16, 0, tzinfo=timezone.utc)
     materialized = deepcopy(raw)
     materialized["review"]["reviewedAt"] = reviewed_at.isoformat()
-    materialized["review"]["expiresAt"] = (
-        reviewed_at + timedelta(hours=4)
-    ).isoformat()
+    materialized["review"]["expiresAt"] = (reviewed_at + timedelta(hours=4)).isoformat()
     config = rehearsal.parse_config(
         materialized,
         region="us-east-1",
@@ -218,34 +177,20 @@ def test_launch_gates_example_has_exact_replace_per_launch_bindings() -> None:
 
     assert config.account_id == "123456789012"
     assert config.resources.runtime_arn == materialized["resources"]["runtimeArn"]
-    assert config.resources.runtime_endpoint_arn == (
-        materialized["resources"]["runtimeEndpointArn"]
-    )
-    assert config.resources.agentcore_stack_name == (
-        "AxonLLMAgentCoreStack-managed"
-    )
-    assert config.resources.control_plane_stack_name == (
-        "AxonLLMControlPlaneStack-managed"
-    )
-    assert config.resources.state_table_name == (
-        "axonllm-agentcore-state-managed"
-    )
-    assert config.coordinator.state_machine_version_arn == (
-        materialized["coordinator"]["stateMachineVersionArn"]
-    )
-    assert config.coordinator.launch_role_arn == (
-        materialized["coordinator"]["launchRoleArn"]
-    )
-    assert config.scenario.select_sql.startswith("SELECT ")
+    assert config.resources.runtime_endpoint_arn == (materialized["resources"]["runtimeEndpointArn"])
+    assert config.resources.agentcore_stack_name == ("AxonLLMAgentCoreStack-managed")
+    assert config.resources.control_plane_stack_name == ("AxonLLMControlPlaneStack-managed")
+    assert config.resources.state_table_name == ("axonllm-agentcore-state-managed")
+    assert config.coordinator.state_machine_version_arn == (materialized["coordinator"]["stateMachineVersionArn"])
+    assert config.coordinator.launch_role_arn == (materialized["coordinator"]["launchRoleArn"])
+    assert "selectSql" not in materialized["scenario"]
     assert config.scenario.tenant_id == "tenant-launch"
     assert config.scenario.project_id == "project-launch"
     assert config.scenario.model == "claude-opus"
     assert config.scenario.primary_provider == "anthropic"
     assert config.scenario.fallback_provider == "bedrock"
     model = _configured_models()[config.scenario.model]
-    configured_providers = {
-        mapping["provider"] for mapping in model["providers"]
-    }
+    configured_providers = {mapping["provider"] for mapping in model["providers"]}
     assert {
         config.scenario.primary_provider,
         config.scenario.fallback_provider,
@@ -275,19 +220,10 @@ def test_production_validation_examples_use_the_launch_project(
         raw["load"]["request"],
     ]
     assert raw["target"] == "fargate"
-    assert all(
-        request["path"] == "/admin/projects/project-launch"
-        for request in requests
-    )
-    assert {
-        request["credentialType"] for request in requests
-    } == {credential_type}
-    assert _load(CERTIFICATION_EXAMPLE)["tenantConfig"]["projectId"] == (
-        "project-launch"
-    )
-    assert _load(LAUNCH_GATES_EXAMPLE)["scenario"]["projectId"] == (
-        "project-launch"
-    )
+    assert all(request["path"] == "/admin/projects/project-launch" for request in requests)
+    assert {request["credentialType"] for request in requests} == {credential_type}
+    assert _load(CERTIFICATION_EXAMPLE)["tenantConfig"]["projectId"] == ("project-launch")
+    assert _load(LAUNCH_GATES_EXAMPLE)["scenario"]["projectId"] == ("project-launch")
 
 
 @pytest.mark.parametrize(

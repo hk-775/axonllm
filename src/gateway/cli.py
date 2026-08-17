@@ -65,22 +65,13 @@ def cmd_issue_key(args):
         if persistence.enabled:
             await persistence.create_table_if_not_exists()
         tenant_id = getattr(args, "tenant", None)
-        default_scopes = (
-            ["model.list", "inference.invoke", "query.select"]
-            if tenant_id
-            else ["chat"]
-        )
+        default_scopes = ["model.list", "inference.invoke"] if tenant_id else ["chat"]
         scopes = args.scopes.split(",") if args.scopes else default_scopes
         scopes = [scope.strip() for scope in scopes if scope.strip()]
         if tenant_id:
-            legacy_admin = sorted(
-                scope for scope in scopes if scope.startswith("admin:")
-            )
+            legacy_admin = sorted(scope for scope in scopes if scope.startswith("admin:"))
             if legacy_admin:
-                raise ValueError(
-                    "canonical service keys cannot carry legacy admin scopes: "
-                    + ", ".join(legacy_admin)
-                )
+                raise ValueError("canonical service keys cannot carry legacy admin scopes: " + ", ".join(legacy_admin))
         _, raw_key = await service.issue_key(
             project_id=args.project,
             name=args.name,
@@ -107,7 +98,7 @@ def cmd_issue_key(args):
             "until the project exists it will not appear in /admin/projects and has no "
             "budget_limit, so its spend accrues unbudgeted. Create it with:\n"
             f"  curl -X POST localhost:8000/admin/projects -H 'Content-Type: application/json' \\\n"
-            f"    -d '{{\"project_id\": \"{args.project}\", \"name\": \"{args.project}\", "
+            f'    -d \'{{"project_id": "{args.project}", "name": "{args.project}", '
             '"budget_limit": 100.0}\'',
             file=sys.stderr,
         )
@@ -118,15 +109,8 @@ def cmd_issue_key(args):
             "(and point AXON_DYNAMODB_TABLE at the server's table) to mint a usable key.",
             file=sys.stderr,
         )
-    tenant_label = (
-        f" in tenant '{args.tenant}'"
-        if getattr(args, "tenant", None)
-        else ""
-    )
-    print(
-        f"\033[1mAPI key issued for project '{args.project}'"
-        f"{tenant_label}:\033[0m"
-    )
+    tenant_label = f" in tenant '{args.tenant}'" if getattr(args, "tenant", None) else ""
+    print(f"\033[1mAPI key issued for project '{args.project}'{tenant_label}:\033[0m")
     print(raw_key)
     print("\n\033[2mStore this now — it is shown only once. Use it as:")
     print("  Authorization: Bearer <key>   or   X-Api-Key: <key>\033[0m")
@@ -139,9 +123,7 @@ def cmd_bootstrap_tenant(args):
     from src.gateway.auth.tenant_bootstrap import bootstrap_tenant
     from src.gateway.persistence import DynamoPersistence
 
-    persistence = DynamoPersistence(
-        region=os.environ.get("AWS_DEFAULT_REGION", "us-east-1")
-    )
+    persistence = DynamoPersistence(region=os.environ.get("AWS_DEFAULT_REGION", "us-east-1"))
     result = asyncio.run(
         bootstrap_tenant(
             persistence,
@@ -165,10 +147,12 @@ def cmd_chat(args):
     import urllib.request
 
     base = f"http://localhost:{args.port}"
-    payload = json.dumps({
-        "model": args.model,
-        "messages": [{"role": "user", "content": " ".join(args.message)}],
-    }).encode()
+    payload = json.dumps(
+        {
+            "model": args.model,
+            "messages": [{"role": "user", "content": " ".join(args.message)}],
+        }
+    ).encode()
 
     headers = {"Content-Type": "application/json"}
     api_key = args.api_key or os.environ.get("AXON_API_KEY")
@@ -241,19 +225,17 @@ def main():
     p_key.add_argument(
         "-T",
         "--tenant",
-        help=(
-            "Tenant ID for a canonical service key. The default scopes become "
-            "model.list,inference.invoke,query.select."
-        ),
+        help=("Tenant ID for a canonical service key. The default scopes become model.list,inference.invoke."),
     )
     p_key.add_argument("-n", "--name", default="cli-issued", help="Human-readable key name")
     p_key.add_argument(
-        "-s", "--scopes",
+        "-s",
+        "--scopes",
         help="Comma-separated scopes (default: chat, or canonical read/invoke "
-             "scopes with --tenant). Admin scopes take an "
-             "optional access level: 'admin:quotas:read' for read-only, "
-             "'admin:quotas:write' or bare 'admin:quotas' for both, "
-             "'admin:*' for everything, 'admin:*:read' to read everything",
+        "scopes with --tenant). Admin scopes take an "
+        "optional access level: 'admin:quotas:read' for read-only, "
+        "'admin:quotas:write' or bare 'admin:quotas' for both, "
+        "'admin:*' for everything, 'admin:*:read' to read everything",
     )
 
     # canonical tenant bootstrap

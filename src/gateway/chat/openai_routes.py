@@ -30,6 +30,7 @@ from src.gateway.chat.request_body import (
     JSONBodyError,
     read_json_object,
 )
+from src.gateway.models import RequestContext
 from src.gateway.request_validator import RequestValidator
 
 if TYPE_CHECKING:
@@ -67,10 +68,20 @@ def _authorized_project(request: Request):
 
 def _allow_legacy_project_lookup(request: Request) -> bool:
     """Allow the global project map only outside canonical principal mode."""
-    return (
-        getattr(request.state, "principal", None) is None
-        and _authorized_project(request) is None
-    )
+    return getattr(request.state, "principal", None) is None and _authorized_project(request) is None
+
+
+def _request_context_options(
+    request: Request,
+    client_agent: Any,
+) -> dict[str, RequestContext]:
+    if not getattr(client_agent, "requires_request_context", False):
+        return {}
+    context = getattr(request.state, "context", None)
+    principal = getattr(request.state, "principal", None)
+    if not isinstance(context, RequestContext) or principal is None:
+        raise RuntimeError("canonical request context is required")
+    return {"request_context": context}
 
 
 def _error(status_code: int, message: str, err_type: str = "invalid_request_error") -> JSONResponse:
@@ -161,9 +172,7 @@ class OpenAICompatAPI:
         self.client_agent = client_agent
         self.max_request_bytes = max_request_bytes
         self.request_validator = (
-            request_validator
-            if request_validator is not None
-            else _resolve_request_validator(client_agent)
+            request_validator if request_validator is not None else _resolve_request_validator(client_agent)
         )
 
     # ------------------------------------------------------------------
@@ -184,8 +193,7 @@ class OpenAICompatAPI:
         # Otherwise a concrete model string is required. Lets standard OpenAI
         # clients opt into task-aware routing via `model: "auto"`.
         smart_routing = "model" not in body or (
-            isinstance(raw_model, str)
-            and raw_model.strip().lower() in ("", "auto")
+            isinstance(raw_model, str) and raw_model.strip().lower() in ("", "auto")
         )
         errors = self.request_validator.validate_payload(
             body,
@@ -218,23 +226,68 @@ class OpenAICompatAPI:
         user_id, project_id, tenant_id = _identity(request)
         authorized_project = _authorized_project(request)
         allow_legacy_project_lookup = _allow_legacy_project_lookup(request)
+        request_context_options = _request_context_options(
+            request,
+            self.client_agent,
+        )
 
         if stream:
-            return await self._stream(model, messages, temperature, max_tokens,
-                                      top_p, stop, system,
-                                      user_id, project_id, smart_routing,
-                                      tools, tool_choice, authorized_project,
-                                      tenant_id, allow_legacy_project_lookup)
-        return await self._complete(model, messages, temperature, max_tokens,
-                                    top_p, stop, system,
-                                    user_id, project_id, smart_routing,
-                                    tools, tool_choice, authorized_project,
-                                    tenant_id, allow_legacy_project_lookup)
+            return await self._stream(
+                model,
+                messages,
+                temperature,
+                max_tokens,
+                top_p,
+                stop,
+                system,
+                user_id,
+                project_id,
+                smart_routing,
+                tools,
+                tool_choice,
+                authorized_project,
+                tenant_id,
+                allow_legacy_project_lookup,
+                request_context_options,
+            )
+        return await self._complete(
+            model,
+            messages,
+            temperature,
+            max_tokens,
+            top_p,
+            stop,
+            system,
+            user_id,
+            project_id,
+            smart_routing,
+            tools,
+            tool_choice,
+            authorized_project,
+            tenant_id,
+            allow_legacy_project_lookup,
+            request_context_options,
+        )
 
-    async def _complete(self, model, messages, temperature, max_tokens, top_p,
-                        stop, system, user_id, project_id, smart_routing=False,
-                        tools=None, tool_choice=None, authorized_project=None,
-                        tenant_id=None, allow_legacy_project_lookup=False):
+    async def _complete(
+        self,
+        model,
+        messages,
+        temperature,
+        max_tokens,
+        top_p,
+        stop,
+        system,
+        user_id,
+        project_id,
+        smart_routing=False,
+        tools=None,
+        tool_choice=None,
+        authorized_project=None,
+        tenant_id=None,
+        allow_legacy_project_lookup=False,
+        request_context_options=None,
+    ):
         try:
             kwargs = {
                 "temperature": temperature,
@@ -254,6 +307,7 @@ class OpenAICompatAPI:
                 kwargs["authorized_project"] = authorized_project
             if allow_legacy_project_lookup:
                 kwargs["allow_legacy_project_lookup"] = True
+            kwargs.update(request_context_options or {})
             resp = await self.client_agent.chat(model, messages, **kwargs)
         except Exception:
             logger.exception("chat completion failed")
@@ -316,10 +370,25 @@ class OpenAICompatAPI:
             completion["x_cache_type"] = resp.get("cache_type", "exact")
         return JSONResponse(completion)
 
-    async def _stream(self, model, messages, temperature, max_tokens, top_p,
-                      stop, system, user_id, project_id, smart_routing=False,
-                      tools=None, tool_choice=None, authorized_project=None,
-                      tenant_id=None, allow_legacy_project_lookup=False):
+    async def _stream(
+        self,
+        model,
+        messages,
+        temperature,
+        max_tokens,
+        top_p,
+        stop,
+        system,
+        user_id,
+        project_id,
+        smart_routing=False,
+        tools=None,
+        tool_choice=None,
+        authorized_project=None,
+        tenant_id=None,
+        allow_legacy_project_lookup=False,
+        request_context_options=None,
+    ):
         completion_id = f"chatcmpl-{uuid.uuid4().hex}"
         created = int(time.time())
 
@@ -342,6 +411,7 @@ class OpenAICompatAPI:
                 kwargs["authorized_project"] = authorized_project
             if allow_legacy_project_lookup:
                 kwargs["allow_legacy_project_lookup"] = True
+            kwargs.update(request_context_options or {})
             chunks = self.client_agent.chat_stream(model, messages, **kwargs)
         except Exception:
             logger.exception("stream setup failed")
@@ -396,9 +466,9 @@ class OpenAICompatAPI:
                     "object": "chat.completion.chunk",
                     "created": created,
                     "model": resolved_model,
-                    "choices": [{"index": 0, "delta": {},
-                                 "finish_reason": _finish_reason(observed_finish,
-                                                                 saw_tool_call)}],
+                    "choices": [
+                        {"index": 0, "delta": {}, "finish_reason": _finish_reason(observed_finish, saw_tool_call)}
+                    ],
                 }
                 yield f"data: {json.dumps(final)}\n\n"
                 yield "data: [DONE]\n\n"
@@ -424,6 +494,12 @@ class OpenAICompatAPI:
                 kwargs["authorized_project"] = project
             elif _allow_legacy_project_lookup(request):
                 kwargs["allow_legacy_project_lookup"] = True
+            kwargs.update(
+                _request_context_options(
+                    request,
+                    self.client_agent,
+                )
+            )
             models = await self.client_agent.list_models(**kwargs)
         except Exception:
             logger.exception("list models failed")

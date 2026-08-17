@@ -66,9 +66,7 @@ QUALIFICATION_TEARDOWN_SIGNATURE_URI = (
 
 
 def test_deployment_evidence_uses_the_certification_provider_contract() -> None:
-    assert deployment_evidence.PRODUCTION_LAUNCH_PROVIDERS == (
-        external_oidc.PRODUCTION_LAUNCH_PROVIDERS
-    )
+    assert deployment_evidence.PRODUCTION_LAUNCH_PROVIDERS == (external_oidc.PRODUCTION_LAUNCH_PROVIDERS)
     assert deployment_evidence.PRODUCTION_OPTIONAL_PROVIDERS == frozenset(
         {
             "ai21",
@@ -198,7 +196,6 @@ def _fixtures(
         "TargetGroupArn": (
             f"arn:aws:elasticloadbalancing:{REGION}:{ACCOUNT}:targetgroup/axonllm-control-plane/0123456789abcdef"
         ),
-        "QueryPlaneEnabled": "true",
         "EndpointMode": "custom-domain",
         "ControlPlaneUrl": "https://axon.example.com",
         "ControlPlaneDomainName": "axon.example.com",
@@ -215,23 +212,10 @@ def _fixtures(
     }
     recovery = {
         "tableArn": (f"arn:aws:dynamodb:{REGION}:{ACCOUNT}:table/axonllm-agentcore-state"),
+        "deletionProtection": True,
+        "serverSideEncryption": "ENABLED",
         "pointInTimeRecovery": "ENABLED",
         "latestRestorableAgeMinutes": 4.0,
-        "backupVault": "axon-agent-vault",
-        "backupVaultLocked": True,
-        "backupVaultLockMode": "GOVERNANCE",
-        "backupVaultMinRetentionDays": 30,
-        "backupVaultMaxRetentionDays": 365,
-        "latestBackupAgeHours": 2.0,
-        "deploymentBackup": {
-            "backupJobId": "backup-job-123",
-            "status": "COMPLETED",
-            "backupVault": "axon-agent-vault",
-            "resourceArn": (f"arn:aws:dynamodb:{REGION}:{ACCOUNT}:table/axonllm-agentcore-state"),
-            "recoveryPointArn": (f"arn:aws:backup:{REGION}:{ACCOUNT}:recovery-point:backup-job-123"),
-            "creationDate": "2026-08-11T11:55:00+00:00",
-            "completionDate": "2026-08-11T11:59:00+00:00",
-        },
         "restoreExercise": {
             "targetTable": ("axonllm-agentcore-state-restore-validation-20260811115900-a1b2c3"),
             "status": "validated",
@@ -283,8 +267,6 @@ def _fixtures(
                 "missing_project_grant_denied",
                 "model_listing",
                 "payload_identity_rejected",
-                "query_mutation_denied",
-                "query_select",
             )
         ]
         + [
@@ -322,7 +304,6 @@ def _fixtures(
             "providerCount": len(provider_features),
             "profile": "production-launch",
             "providerFeatures": {provider: sorted(features) for provider, features in provider_features.items()},
-            "queryBackendExercised": True,
             "agentcoreHttpsInvoked": True,
         },
         "checks": certification_checks,
@@ -352,7 +333,6 @@ def _fixtures(
         "overallStatus": "PASS",
         "claims": {
             "agentcoreCutoverValidated": False,
-            "queryBackendExercised": False,
             "backingInstanceIdentityValidated": True,
         },
         "httpEndpoints": ["https://axon.example.com"],
@@ -627,21 +607,6 @@ def _fixtures(
             200,
             "admin_config_rollback_visible_on_strong_read",
         ),
-        "admin_query_select": (
-            [200],
-            200,
-            "signed_claims_canonical_role_and_query_backend",
-        ),
-        "viewer_query_select": (
-            [200],
-            200,
-            "signed_claims_canonical_role_and_query_backend",
-        ),
-        "viewer_query_mutation_denied": (
-            [400, 403],
-            400,
-            "read_only_query_boundary_rejected_mutation",
-        ),
         "viewer_payload_role_escalation_denied": (
             [400],
             400,
@@ -728,27 +693,6 @@ def _fixtures(
             403,
             "role_not_allowed",
         ),
-        "canonical_admin_query_select_allowed": (
-            "tenant_admin",
-            "query.select",
-            True,
-            200,
-            "role_allowed",
-        ),
-        "canonical_viewer_query_select_allowed": (
-            "tenant_member",
-            "query.select",
-            True,
-            200,
-            "role_allowed",
-        ),
-        "canonical_cross_tenant_query_concealed": (
-            "tenant_member",
-            "query.select",
-            False,
-            404,
-            "resource_not_found",
-        ),
     }
     external_checks.extend(
         {
@@ -827,11 +771,10 @@ def _fixtures(
             "brokerResponseSha256": "5" * 64,
             "expiresAt": "2026-08-11T12:14:00+00:00",
             "canonicalPrincipalCount": 5,
-            "datasourceId": "external-oidc-launch",
             "cleanup": {
                 "status": "PASS",
                 "complete": True,
-                "localItemsRemoved": 6,
+                "localItemsRemoved": 5,
                 "broker": {
                     "status": "PASS",
                     "complete": True,
@@ -863,7 +806,6 @@ def _fixtures(
                     provider_name: sorted(features) for provider_name, features in provider_features.items()
                 },
                 "agentcoreHttpsInvoked": True,
-                "queryBackendExercised": True,
                 "checkCount": len(external_full_checks),
                 "passed": len(external_full_checks),
                 "failed": 0,
@@ -881,7 +823,6 @@ def _fixtures(
             "shortLivedIdentitiesVerified": True,
             "canonicalTenantRbacVerified": True,
             "agentcoreHttpsInvoked": True,
-            "queryBackendExercised": True,
             "allLaunchProvidersExercised": True,
             "agentcoreTenantConfigMutationExercised": True,
             "fixturesCleaned": True,
@@ -1071,9 +1012,7 @@ def _use_cloudfront_endpoint(args: argparse.Namespace) -> None:
     setup["control_plane"].pop("domain_name")
     _write(args.setup_config, setup)
 
-    identity = json.loads(
-        args.identity_outputs.read_text(encoding="utf-8")
-    )
+    identity = json.loads(args.identity_outputs.read_text(encoding="utf-8"))
     identity_outputs = identity[deployment_evidence.IDENTITY_STACK]
     identity_outputs["EndpointMode"] = "cloudfront"
     identity_outputs["AlbClientId"] = ""
@@ -1081,9 +1020,7 @@ def _use_cloudfront_endpoint(args: argparse.Namespace) -> None:
     identity_outputs["ControlPlaneDomainName"] = ""
     _write(args.identity_outputs, identity)
 
-    control = json.loads(
-        args.control_outputs.read_text(encoding="utf-8")
-    )
+    control = json.loads(args.control_outputs.read_text(encoding="utf-8"))
     control_outputs = control[deployment_evidence.CONTROL_PLANE_STACK]
     control_outputs.update(
         {
@@ -1096,9 +1033,7 @@ def _use_cloudfront_endpoint(args: argparse.Namespace) -> None:
     )
     _write(args.control_outputs, control)
 
-    report = json.loads(
-        args.production_validation_report.read_text(encoding="utf-8")
-    )
+    report = json.loads(args.production_validation_report.read_text(encoding="utf-8"))
     report["httpEndpoints"] = [f"https://{domain}"]
     for result in report["canaries"]["results"]:
         result["baseUrl"] = f"https://{domain}"
@@ -1140,12 +1075,8 @@ def test_create_evidence_binds_release_runtime_secret_and_canaries(
     assert evidence["productionCertification"]["overallStatus"] == "PASS"
     assert evidence["productionCertification"]["endpoint"]["endpointName"] == "production"
     assert evidence["productionValidation"]["overallStatus"] == "PASS"
-    assert evidence["stacks"]["controlPlane"]["EndpointMode"] == (
-        "custom-domain"
-    )
-    assert evidence["productionValidation"]["httpEndpoints"] == [
-        "https://axon.example.com"
-    ]
+    assert evidence["stacks"]["controlPlane"]["EndpointMode"] == ("custom-domain")
+    assert evidence["productionValidation"]["httpEndpoints"] == ["https://axon.example.com"]
     assert evidence["launchRehearsal"]["gates"]["securityEventDeliveryAndDlq"]["environment"] == "production"
     assert set(evidence["launchRehearsal"]["gates"]) == (deployment_evidence.REQUIRED_REHEARSAL_GATES)
     assert evidence["launchRehearsalSource"]["artifact"] == {
@@ -1188,18 +1119,11 @@ def test_create_and_verify_bind_cloudfront_endpoint_mode(
     deployment_evidence._atomic_write(args.output, evidence)
     verified = deployment_evidence.verify_evidence(_verify_args(args))
 
-    assert verified["stacks"]["controlPlane"][
-        "ControlPlaneAuthMode"
-    ] == "application-oidc"
-    assert verified["productionValidation"]["httpEndpoints"] == [
-        "https://d111111abcdef8.cloudfront.net"
-    ]
-    assert {
-        result["credentialType"]
-        for result in verified["productionValidation"]["canaries"][
-            "results"
-        ]
-    } == {"browser-session-cookie"}
+    assert verified["stacks"]["controlPlane"]["ControlPlaneAuthMode"] == "application-oidc"
+    assert verified["productionValidation"]["httpEndpoints"] == ["https://d111111abcdef8.cloudfront.net"]
+    assert {result["credentialType"] for result in verified["productionValidation"]["canaries"]["results"]} == {
+        "browser-session-cookie"
+    }
 
 
 def test_create_defaults_omitted_setup_endpoint_mode_to_custom_domain(
@@ -1211,9 +1135,7 @@ def test_create_defaults_omitted_setup_endpoint_mode_to_custom_domain(
 
     evidence = deployment_evidence.create_evidence(args)
 
-    assert evidence["stacks"]["controlPlane"]["EndpointMode"] == (
-        "custom-domain"
-    )
+    assert evidence["stacks"]["controlPlane"]["EndpointMode"] == ("custom-domain")
 
 
 def test_create_rejects_setup_and_control_endpoint_mode_mismatch(
@@ -1237,9 +1159,7 @@ def test_verify_rejects_tampered_endpoint_auth_binding(
 ) -> None:
     args = _fixtures(tmp_path)
     evidence = deployment_evidence.create_evidence(args)
-    evidence["stacks"]["controlPlane"][
-        "ControlPlaneAuthMode"
-    ] = "application-oidc"
+    evidence["stacks"]["controlPlane"]["ControlPlaneAuthMode"] = "application-oidc"
     deployment_evidence._atomic_write(args.output, evidence)
 
     with pytest.raises(
@@ -1380,47 +1300,42 @@ def test_external_oidc_fixture_satisfies_published_evidence_contract(
     assert validated == report
 
 
-@pytest.mark.parametrize("mode", ["GOVERNANCE", "COMPLIANCE"])
-def test_create_evidence_accepts_supported_vault_lock_modes(
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("deletionProtection", False),
+        ("serverSideEncryption", "DISABLED"),
+        ("pointInTimeRecovery", "DISABLED"),
+    ],
+)
+def test_create_evidence_requires_production_recovery_controls(
     tmp_path: Path,
-    mode: str,
+    field: str,
+    value: object,
 ) -> None:
     args = _fixtures(tmp_path)
     recovery = json.loads(args.recovery_report.read_text(encoding="utf-8"))
-    recovery["backupVaultLockMode"] = mode
+    recovery[field] = value
     _write(args.recovery_report, recovery)
 
-    evidence = deployment_evidence.create_evidence(args)
+    with pytest.raises(
+        deployment_evidence.DeploymentEvidenceError,
+        match="required production controls",
+    ):
+        deployment_evidence.create_evidence(args)
 
-    assert evidence["recovery"]["validation"]["backupVaultLockMode"] == mode
 
-
-def test_create_evidence_rejects_missing_vault_lock_state(
+def test_create_evidence_rejects_backup_metadata_in_core_report(
     tmp_path: Path,
 ) -> None:
     args = _fixtures(tmp_path)
     recovery = json.loads(args.recovery_report.read_text(encoding="utf-8"))
-    recovery.pop("backupVaultLocked")
+    recovery["backupVault"] = "obsolete-vault"
     _write(args.recovery_report, recovery)
 
     with pytest.raises(
         deployment_evidence.DeploymentEvidenceError,
         match="recovery validation",
-    ):
-        deployment_evidence.create_evidence(args)
-
-
-def test_create_evidence_requires_completed_deployment_backup(
-    tmp_path: Path,
-) -> None:
-    args = _fixtures(tmp_path)
-    recovery = json.loads(args.recovery_report.read_text(encoding="utf-8"))
-    recovery.pop("deploymentBackup")
-    _write(args.recovery_report, recovery)
-
-    with pytest.raises(
-        deployment_evidence.DeploymentEvidenceError,
-        match="deployment backup",
     ):
         deployment_evidence.create_evidence(args)
 
@@ -1464,21 +1379,6 @@ def test_create_evidence_requires_restore_exercise(
     with pytest.raises(
         deployment_evidence.DeploymentEvidenceError,
         match="restore exercise",
-    ):
-        deployment_evidence.create_evidence(args)
-
-
-def test_create_evidence_rejects_invalid_vault_lock_mode(
-    tmp_path: Path,
-) -> None:
-    args = _fixtures(tmp_path)
-    recovery = json.loads(args.recovery_report.read_text(encoding="utf-8"))
-    recovery["backupVaultLockMode"] = "UNLOCKED"
-    _write(args.recovery_report, recovery)
-
-    with pytest.raises(
-        deployment_evidence.DeploymentEvidenceError,
-        match="recovery validation",
     ):
         deployment_evidence.create_evidence(args)
 
@@ -1584,7 +1484,7 @@ def test_create_rejects_unbound_production_certification(
 @pytest.mark.parametrize(
     ("category", "provider"),
     [
-        ("query_select", None),
+        ("model_listing", None),
         ("provider_stream", "openai"),
     ],
 )
@@ -1910,7 +1810,7 @@ def test_create_rejects_failed_launch_rehearsal_gate(
 @pytest.mark.parametrize(
     "gate",
     [
-        "queryBoundaryLimitsAndReconciliation",
+        "initializationTimeoutReplacement",
         "providerRoutingStrategies",
         "controlPlaneFaultRecovery",
     ],

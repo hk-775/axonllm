@@ -183,6 +183,7 @@ def _agent_parameters() -> dict[str, str]:
         "CandidateEndpointName": "candidate_" + "c" * 32,
         "ProviderSecretVersion": "provider-version-1",
         "EnabledProviders": "openai,anthropic",
+        "DeploymentExperience": "axonllm",
         "PublishCandidateEndpoint": "true",
         "PublishProductionEndpoint": "true",
         "ProductionRuntimeVersion": "7",
@@ -202,6 +203,8 @@ def _agent_outputs(*, finalized: bool = False, rolled_back: bool = False) -> dic
         "ApprovedHttpsPrefixListId": "pl-1234",
         "AthenaConfigurationFingerprint": "d" * 64,
         "BedrockInvokeResourceArns": ("arn:aws:bedrock:us-east-1::foundation-model/model"),
+        "DeploymentExperience": "axonllm",
+        "DeploymentExecution": "agentcore",
     }
     if not finalized and not rolled_back:
         values.update(
@@ -369,6 +372,8 @@ def _intent(*, stack_existed: bool, rollback_at: datetime) -> dict[str, Any]:
             "ApprovedHttpsPrefixListId": "pl-1234",
             "AthenaConfigurationFingerprint": "d" * 64,
             "BedrockInvokeResourceArns": ("arn:aws:bedrock:us-east-1::foundation-model/model"),
+            "DeploymentExperience": "axonllm",
+            "DeploymentExecution": "agentcore",
         },
         "controlPlane": {
             "previousParameters": (_previous_control_parameters() if stack_existed else None),
@@ -402,6 +407,52 @@ def _setup() -> dict[str, Any]:
             "domain_name": "axon.example.com",
         },
     }
+
+
+def test_recovery_setup_accepts_current_standalone_agentcore_topology() -> None:
+    setup = _setup()
+    setup["schema_version"] = 3
+    setup["deployment"] = {
+        "experience": "axonllm",
+        "execution": "agentcore",
+    }
+    intent = _intent(
+        stack_existed=True,
+        rollback_at=NOW - timedelta(hours=1),
+    )
+    config = broker.BrokerConfig.from_env(_environment())
+
+    assert broker._validate_setup(
+        setup,
+        intent=intent,
+        config=config,
+    ) == (
+        RUNTIME_IMAGE,
+        CONTROL_IMAGE,
+    )
+
+    setup["deployment"]["experience"] = "ostiari"
+    with pytest.raises(
+        broker.MutationBrokerError,
+        match="managed production setup",
+    ):
+        broker._validate_setup(
+            setup,
+            intent=intent,
+            config=config,
+        )
+
+    setup["deployment"]["experience"] = "axonllm"
+    intent["sharedRuntimeConfiguration"]["DeploymentExperience"] = "ostiari"
+    with pytest.raises(
+        broker.MutationBrokerError,
+        match="images, providers, or topology",
+    ):
+        broker._validate_setup(
+            setup,
+            intent=intent,
+            config=config,
+        )
 
 
 def _deployment_evidence(
@@ -841,7 +892,7 @@ def test_rejects_setup_image_that_differs_from_intent() -> None:
 
     with pytest.raises(
         broker.MutationBrokerError,
-        match="images or providers",
+        match="images, providers, or topology",
     ):
         fixture.invoke()
 
@@ -942,6 +993,7 @@ def test_valid_commit_finalizes_with_fixed_stack_role_and_parameters() -> None:
     values = _request_parameter_values(request)
     assert values == {
         "CandidateEndpointName": "candidate_" + "c" * 32,
+        "DeploymentExperience": "USE_PREVIOUS",
         "EnabledProviders": "USE_PREVIOUS",
         "ProductionRuntimeVersion": "7",
         "ProviderSecretVersion": "USE_PREVIOUS",

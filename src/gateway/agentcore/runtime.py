@@ -11,7 +11,7 @@ import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import Any, Protocol
 
 from src.gateway.auth.principal import PrincipalResolver
 from src.gateway.auth.project_repository import (
@@ -19,9 +19,6 @@ from src.gateway.auth.project_repository import (
     ProjectResolver,
 )
 from src.gateway.models import RequestContext
-
-if TYPE_CHECKING:
-    from src.gateway.query.service import QueryService
 
 logger = logging.getLogger(__name__)
 
@@ -77,10 +74,7 @@ class _ProcessDeadline:
 
     def _invoke_expiration_handler(self) -> None:
         self._on_expired(self._timeout_seconds)
-        logger.critical(
-            "AgentCore lifecycle timeout handler returned without "
-            "terminating the process"
-        )
+        logger.critical("AgentCore lifecycle timeout handler returned without terminating the process")
 
     def expire(self) -> bool:
         with self._lock:
@@ -210,7 +204,6 @@ class RuntimeServices:
     project_resolver: ProjectResolver
     project_config_store: ProjectConfigStore | None = None
     audit_trail: Any | None = None
-    query_service: QueryService | None = None
     policy_service: PolicyService | None = None
     config_sync: ConfigSync | None = None
     rehearsal_ledger: Any | None = None
@@ -353,18 +346,12 @@ def _retain_deadline_for_initialization_failure(
     deadline: _ProcessDeadline | None,
     error: BaseException,
 ) -> None:
-    if (
-        deadline is not None
-        and (
-            (
-                isinstance(error, _DependenciesUnavailable)
-                and (
-                    "timeout" in error.readiness.dependencies.values()
-                    or error.cleanup_incomplete
-                )
-            )
-            or isinstance(error, _InitializationCleanupIncomplete)
+    if deadline is not None and (
+        (
+            isinstance(error, _DependenciesUnavailable)
+            and ("timeout" in error.readiness.dependencies.values() or error.cleanup_incomplete)
         )
+        or isinstance(error, _InitializationCleanupIncomplete)
     ):
         deadline.require_expiration()
 
@@ -447,24 +434,6 @@ def build_runtime_services() -> RuntimeServices:
             await dispatcher.start()
         return await dispatcher.check_readiness()
 
-    query_reconciliation_worker = getattr(
-        components,
-        "query_reconciliation_worker",
-        None,
-    )
-
-    async def _query_reconciliation_startup_ready() -> bool:
-        return (
-            components.persistence.enabled
-            and components.audit_trail.durable_enabled
-        )
-
-    async def _query_reconciliation_ready() -> bool:
-        if query_reconciliation_worker is None:
-            return False
-        await query_reconciliation_worker.start()
-        return query_reconciliation_worker.running
-
     async def _close_provider_factory() -> None:
         close = getattr(components.multi_factory, "close", None)
         if callable(close):
@@ -481,29 +450,6 @@ def build_runtime_services() -> RuntimeServices:
         if callable(shutdown):
             await asyncio.to_thread(shutdown)
 
-    # Bootstrap owns the canonical query repository, executor, and audit trail.
-    query_service = getattr(components, "query_service", None)
-    query_readiness = (
-        (
-            RuntimeDependency(
-                "query_reconciliation",
-                _query_reconciliation_ready,
-                _query_reconciliation_startup_ready,
-            ),
-        )
-        if query_reconciliation_worker is not None
-        else ()
-    )
-    query_close_hooks = (
-        (
-            RuntimeCloseHook(
-                "query_reconciliation",
-                query_reconciliation_worker.stop,
-            ),
-        )
-        if query_reconciliation_worker is not None
-        else ()
-    )
     return RuntimeServices(
         gateway=components.gateway_agent,
         token_verifier=components.oidc_service,
@@ -511,7 +457,6 @@ def build_runtime_services() -> RuntimeServices:
         project_resolver=components.project_resolver,
         project_config_store=components.project_resolver,
         audit_trail=components.audit_trail,
-        query_service=query_service,
         policy_service=CedarPolicyService(
             components.policies,
             persistence=components.persistence,
@@ -534,10 +479,8 @@ def build_runtime_services() -> RuntimeServices:
                 _event_outbox_ready,
                 _event_outbox_startup_ready,
             ),
-        )
-        + query_readiness,
-        close_hooks=query_close_hooks
-        + (
+        ),
+        close_hooks=(
             RuntimeCloseHook(
                 "spoke_health_monitor",
                 components.health_monitor.stop,
@@ -584,22 +527,14 @@ class RuntimeProvider:
             shutdown_timeout_seconds,
             "shutdown_timeout_seconds",
         )
-        if _initialization_timeout_handler is not None and not callable(
-            _initialization_timeout_handler
-        ):
+        if _initialization_timeout_handler is not None and not callable(_initialization_timeout_handler):
             raise TypeError("_initialization_timeout_handler must be callable")
-        if _shutdown_timeout_handler is not None and not callable(
-            _shutdown_timeout_handler
-        ):
+        if _shutdown_timeout_handler is not None and not callable(_shutdown_timeout_handler):
             raise TypeError("_shutdown_timeout_handler must be callable")
         self._initialization_timeout_handler = (
-            _initialization_timeout_handler
-            or _terminate_process_on_initialization_timeout
+            _initialization_timeout_handler or _terminate_process_on_initialization_timeout
         )
-        self._shutdown_timeout_handler = (
-            _shutdown_timeout_handler
-            or _terminate_process_on_shutdown_timeout
-        )
+        self._shutdown_timeout_handler = _shutdown_timeout_handler or _terminate_process_on_shutdown_timeout
         self._runtime: RuntimeServices | None = None
         self._initialization: asyncio.Task[tuple[RuntimeServices, RuntimeReadiness]] | None = None
         self._initialization_deadline: _ProcessDeadline | None = None
@@ -645,9 +580,7 @@ class RuntimeProvider:
                 if isinstance(exc, _DependenciesUnavailable):
                     exc.cleanup_incomplete = True
                 else:
-                    raise _InitializationCleanupIncomplete(
-                        "AgentCore initialization cleanup timed out"
-                    ) from exc
+                    raise _InitializationCleanupIncomplete("AgentCore initialization cleanup timed out") from exc
             raise
 
     async def initialize(self) -> RuntimeServices:
@@ -670,9 +603,7 @@ class RuntimeProvider:
                 self._state = RuntimeState.INITIALIZING
 
         if deadline is None:
-            raise RuntimeInitializationError(
-                "AgentCore runtime initialization deadline is unavailable"
-            )
+            raise RuntimeInitializationError("AgentCore runtime initialization deadline is unavailable")
 
         try:
             done, _ = await asyncio.wait(
@@ -696,9 +627,7 @@ class RuntimeProvider:
                 deadline,
                 failure,
             )
-            raise RuntimeInitializationError(
-                "AgentCore runtime initialization timed out"
-            )
+            raise RuntimeInitializationError("AgentCore runtime initialization timed out")
 
         try:
             runtime, readiness = initialization.result()
@@ -762,9 +691,7 @@ class RuntimeProvider:
                 deadline,
                 failure,
             )
-            raise RuntimeInitializationError(
-                "AgentCore runtime initialization timed out"
-            )
+            raise RuntimeInitializationError("AgentCore runtime initialization timed out")
         return runtime
 
     async def _record_initialization_failure(
@@ -784,10 +711,7 @@ class RuntimeProvider:
                 if initialization.done() and not initialization.cancelled():
                     deadline_disarmed = deadline.disarm()
                     self._initialization = None
-                    if (
-                        deadline_disarmed
-                        and self._initialization_deadline is deadline
-                    ):
+                    if deadline_disarmed and self._initialization_deadline is deadline:
                         self._initialization_deadline = None
 
     async def get(self) -> RuntimeServices:
@@ -1044,6 +968,7 @@ class RuntimeProvider:
                 return
             loop = completed.get_loop()
             if loop.is_running():
+
                 async def _close_and_disarm() -> None:
                     cleanup_complete = await runtime.close(self._shutdown_timeout)
                     if cleanup_complete and deadline is not None:
@@ -1060,9 +985,7 @@ class RuntimeProvider:
     async def _close_owned_resources(
         self,
         runtime: RuntimeServices | None,
-        initialization: asyncio.Task[
-            tuple[RuntimeServices, RuntimeReadiness]
-        ] | None,
+        initialization: asyncio.Task[tuple[RuntimeServices, RuntimeReadiness]] | None,
         initialization_deadline: _ProcessDeadline | None,
     ) -> bool:
         if runtime is None and initialization is not None:
@@ -1112,9 +1035,7 @@ class RuntimeProvider:
     async def _finish_close(
         self,
         runtime: RuntimeServices | None,
-        initialization: asyncio.Task[
-            tuple[RuntimeServices, RuntimeReadiness]
-        ] | None,
+        initialization: asyncio.Task[tuple[RuntimeServices, RuntimeReadiness]] | None,
         initialization_deadline: _ProcessDeadline | None,
         shutdown_deadline: _ProcessDeadline,
     ) -> None:

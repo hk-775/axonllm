@@ -91,11 +91,7 @@ class _ProjectResolver:
             raise ProjectStoreUnavailable("unavailable")
         if self.missing:
             return None
-        if (
-            self.project is None
-            or self.project.tenant_id != tenant_id
-            or self.project.project_id != project_id
-        ):
+        if self.project is None or self.project.tenant_id != tenant_id or self.project.project_id != project_id:
             return None
         return self.project
 
@@ -185,9 +181,7 @@ class _Gateway:
     def __init__(self, chat_result: Any | None = None) -> None:
         self.chat_result = chat_result or {"id": "completion-1"}
         self.chat_calls: list[tuple[dict[str, Any], dict[str, Any]]] = []
-        self.list_calls: list[
-            tuple[str | None, str | None, str | None, Project | None]
-        ] = []
+        self.list_calls: list[tuple[str | None, str | None, str | None, Project | None]] = []
 
     async def handle_chat_completion(
         self,
@@ -204,9 +198,7 @@ class _Gateway:
         tenant_id: str | None = None,
         authorized_project: Project | None = None,
     ) -> dict[str, Any]:
-        self.list_calls.append(
-            (project_id, user_id, tenant_id, authorized_project)
-        )
+        self.list_calls.append((project_id, user_id, tenant_id, authorized_project))
         return {"models": [{"name": "claude-sonnet"}]}
 
 
@@ -248,11 +240,7 @@ def _principal(
         auth_method=AuthMethod.OIDC_JWT,
         membership_status=MembershipStatus.ACTIVE,
         project_ids=projects,
-        scopes=(
-            frozenset({"inference.invoke", "model.list"})
-            if scopes is None
-            else scopes
-        ),
+        scopes=(frozenset({"inference.invoke", "model.list"}) if scopes is None else scopes),
         authorization_version=9,
     )
 
@@ -298,11 +286,7 @@ def _runtime(
     verifier = _Verifier(verified_context or _verified_context())
     resolver = _Resolver(principal or _principal())
     projects = project_resolver or _ProjectResolver()
-    resolved_audit = (
-        _AuditTrail()
-        if audit_trail is ...
-        else audit_trail
-    )
+    resolved_audit = _AuditTrail() if audit_trail is ... else audit_trail
     services = RuntimeServices(
         gateway=resolved_gateway,
         token_verifier=verifier,
@@ -541,9 +525,7 @@ async def test_agentcore_config_refresh_failure_uses_loaded_config() -> None:
 
 @pytest.mark.asyncio
 async def test_agentcore_topology_refresh_failure_fails_closed() -> None:
-    config_sync = _ConfigSync(
-        RegionTopologyUnavailable("topology read unavailable")
-    )
+    config_sync = _ConfigSync(RegionTopologyUnavailable("topology read unavailable"))
     services, gateway, _, _ = _runtime(config_sync=config_sync)
     adapter = AgentCoreAdapter(_StaticProvider(services))
 
@@ -585,20 +567,12 @@ async def test_cedar_deny_skips_gateway_dispatch(
     policy = _PolicyService("DENY")
     services, gateway, _, _ = _runtime(policy_service=policy)
     adapter = AgentCoreAdapter(_StaticProvider(services))
-    payload = (
-        _chat_payload()
-        if invocation_action == "chat"
-        else {"action": "list_models"}
-    )
+    payload = _chat_payload() if invocation_action == "chat" else {"action": "list_models"}
 
     with pytest.raises(AgentCoreAdapterError) as raised:
         await adapter.invoke(payload, _sdk_context())
 
-    expected_target = (
-        ("post", "/v1/chat/completions")
-        if invocation_action == "chat"
-        else ("get", "/v1/models")
-    )
+    expected_target = ("post", "/v1/chat/completions") if invocation_action == "chat" else ("get", "/v1/models")
     assert raised.value.status_code == 403
     assert raised.value.code == "authorization_denied"
     assert raised.value.message == "Access denied by policy."
@@ -656,9 +630,7 @@ async def test_runtime_initializes_once_off_the_active_event_loop() -> None:
         return services
 
     provider = RuntimeProvider(factory)
-    results = await asyncio.gather(
-        *(provider.initialize() for _ in range(20))
-    )
+    results = await asyncio.gather(*(provider.initialize() for _ in range(20)))
 
     assert calls == 1
     assert all(result is services for result in results)
@@ -744,11 +716,7 @@ async def test_all_supported_chat_fields_and_canonical_context_are_forwarded() -
 
     assert result == {"id": "completion-1"}
     request_data, gateway_context = gateway.chat_calls[0]
-    assert request_data == {
-        key: value
-        for key, value in payload.items()
-        if key not in {"action", "provider"}
-    }
+    assert request_data == {key: value for key, value in payload.items() if key not in {"action", "provider"}}
     authorized_project = gateway_context.pop("authorized_project")
     assert gateway_context == {
         "user_id": "principal-123",
@@ -1169,12 +1137,7 @@ async def test_oversized_tenant_config_is_rejected_before_store_write() -> None:
             {
                 "action": "update_tenant_config",
                 "expected_revision": 0,
-                "config": {
-                    "guardrail_rules": [
-                        {**rule, "name": f"large-pattern-{index}"}
-                        for index in range(100)
-                    ]
-                },
+                "config": {"guardrail_rules": [{**rule, "name": f"large-pattern-{index}"} for index in range(100)]},
             },
             _sdk_context(),
         )
@@ -1365,7 +1328,10 @@ async def test_strict_types_reject_string_stream_flag() -> None:
 @pytest.mark.asyncio
 async def test_allowlisted_facade_identity_header_is_supported() -> None:
     services, gateway, verifier, _ = _runtime()
-    adapter = AgentCoreAdapter(_StaticProvider(services))
+    adapter = AgentCoreAdapter(
+        _StaticProvider(services),
+        allow_facade_identity=True,
+    )
 
     result = await adapter.invoke(
         _chat_payload(),
@@ -1375,6 +1341,23 @@ async def test_allowlisted_facade_identity_header_is_supported() -> None:
     assert result == {"id": "completion-1"}
     assert verifier.tokens == [TOKEN]
     assert len(gateway.chat_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_facade_identity_header_is_rejected_by_direct_jwt_runtime() -> None:
+    services, gateway, verifier, _ = _runtime()
+    adapter = AgentCoreAdapter(_StaticProvider(services))
+
+    with pytest.raises(AgentCoreAdapterError) as raised:
+        await adapter.invoke(
+            _chat_payload(),
+            _sdk_context(header_name=FACADE_IDENTITY_HEADER),
+        )
+
+    assert raised.value.status_code == 401
+    assert raised.value.code == "invalid_runtime_identity"
+    assert verifier.tokens == []
+    assert gateway.chat_calls == []
 
 
 @pytest.mark.asyncio

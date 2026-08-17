@@ -118,12 +118,28 @@ _TRANSITION_FIELDS = frozenset(
         "transitionId",
     }
 )
-_SHARED_RUNTIME_FIELDS = frozenset(
+_LEGACY_SHARED_RUNTIME_FIELDS = frozenset(
     {
         "AlarmNotificationEmail",
         "ApprovedHttpsPrefixListId",
         "AthenaConfigurationFingerprint",
         "BedrockInvokeResourceArns",
+    }
+)
+_PRE_ADDON_SHARED_RUNTIME_FIELDS = frozenset(
+    {
+        *_LEGACY_SHARED_RUNTIME_FIELDS,
+        "DeploymentExperience",
+        "DeploymentExecution",
+    }
+)
+_SHARED_RUNTIME_FIELDS = frozenset(
+    {
+        "AlarmNotificationEmail",
+        "ApprovedHttpsPrefixListId",
+        "BedrockInvokeResourceArns",
+        "DeploymentExperience",
+        "DeploymentExecution",
     }
 )
 _CONTROL_INTENT_FIELDS = frozenset(
@@ -787,7 +803,12 @@ def _validate_intent(
     shared = value.get("sharedRuntimeConfiguration")
     if (
         not isinstance(shared, dict)
-        or set(shared) != _SHARED_RUNTIME_FIELDS
+        or frozenset(shared)
+        not in {
+            _LEGACY_SHARED_RUNTIME_FIELDS,
+            _PRE_ADDON_SHARED_RUNTIME_FIELDS,
+            _SHARED_RUNTIME_FIELDS,
+        }
         or any(
             not isinstance(item, str) or item != item.strip() or any(character.isspace() for character in item)
             for item in shared.values()
@@ -839,8 +860,20 @@ def _validate_setup(
 ) -> tuple[str, str]:
     runtime = value.get("runtime")
     control = value.get("control_plane")
+    schema_version = value.get("schema_version")
+    deployment = value.get("deployment")
+    topology_valid = (
+        schema_version == 2
+        and deployment is None
+        or schema_version == 3
+        and deployment
+        == {
+            "experience": "axonllm",
+            "execution": "agentcore",
+        }
+    )
     if (
-        value.get("schema_version") != 2
+        not topology_valid
         or value.get("identity_mode") != "managed-cognito"
         or value.get("aws_region") != config.region
         or not isinstance(runtime, dict)
@@ -858,6 +891,10 @@ def _validate_setup(
         location="recovery setup control-plane image",
     )
     providers = runtime.get("enabled_providers")
+    shared = intent["sharedRuntimeConfiguration"]
+    topology_bound = (
+        "DeploymentExperience" not in shared and "DeploymentExecution" not in shared and schema_version == 2
+    ) or (shared.get("DeploymentExperience") == "axonllm" and shared.get("DeploymentExecution") == "agentcore")
     if (
         not isinstance(providers, list)
         or not providers
@@ -871,8 +908,9 @@ def _validate_setup(
         or len(set(providers)) != len(providers)
         or ",".join(providers) != intent["enabledProviders"]
         or control_image != intent["controlPlane"]["targetImage"]
+        or not topology_bound
     ):
-        raise MutationBrokerError("signed recovery setup images or providers do not match intent")
+        raise MutationBrokerError("signed recovery setup images, providers, or topology do not match intent")
     return runtime_image, control_image
 
 
@@ -1331,6 +1369,9 @@ def _validate_runtime_stack(
         "ProviderSecretVersion": intent["providerSecretVersion"],
         "EnabledProviders": intent["enabledProviders"],
     }
+    deployment_experience = intent["sharedRuntimeConfiguration"].get("DeploymentExperience")
+    if deployment_experience is not None:
+        required_parameters["DeploymentExperience"] = deployment_experience
     if any(parameters.get(name) != value for name, value in required_parameters.items()):
         raise MutationBrokerError("AgentCore stack parameters do not match signed intent")
     expected_outputs = {

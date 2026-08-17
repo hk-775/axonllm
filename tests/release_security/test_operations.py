@@ -30,17 +30,6 @@ class FakeAws:
         return self.responses[(service, operation)]
 
 
-class FakeClock:
-    def __init__(self) -> None:
-        self.value = 0.0
-
-    def monotonic(self) -> float:
-        return self.value
-
-    def sleep(self, seconds: float) -> None:
-        self.value += seconds
-
-
 def _restore_item(*, document: str = '{"name":"Production"}') -> dict[str, Any]:
     return {
         "PK": {"S": "TENANT#tenant-a"},
@@ -138,10 +127,6 @@ def _stack_resources() -> list[dict[str, str]]:
     return [
         {
             "ResourceType": "AWS::DynamoDB::Table",
-            "PhysicalResourceId": "axonllm-state",
-        },
-        {
-            "ResourceType": "AWS::Backup::BackupVault",
             "PhysicalResourceId": "axonllm-state",
         },
         {
@@ -341,7 +326,14 @@ class SecretRotationTests(unittest.TestCase):
 
 
 class RecoveryValidationTests(unittest.TestCase):
-    def _aws(self, *, backup_age_hours: int = 4) -> FakeAws:
+    def _aws(
+        self,
+        *,
+        latest_restorable_minutes: int = 5,
+        pitr_status: str = "ENABLED",
+        deletion_protection: bool = True,
+        encryption_status: str = "ENABLED",
+    ) -> FakeAws:
         table_arn = "arn:aws:dynamodb:us-east-1:123456789012:table/axonllm-state"
         return FakeAws(
             {
@@ -349,25 +341,13 @@ class RecoveryValidationTests(unittest.TestCase):
                     "cloudformation",
                     "list-stack-resources",
                 ): {"StackResourceSummaries": _stack_resources()},
-                ("cloudformation", "describe-stacks"): {
-                    "Stacks": [
-                        {
-                            "Outputs": [
-                                {
-                                    "OutputKey": "StateBackupVaultArn",
-                                    "OutputValue": ("arn:aws:backup:us-east-1:123456789012:backup-vault:axonllm-state"),
-                                }
-                            ]
-                        }
-                    ]
-                },
                 ("dynamodb", "describe-table"): {
                     "Table": {
                         "TableName": "axonllm-state",
                         "TableArn": table_arn,
                         "TableStatus": "ACTIVE",
-                        "DeletionProtectionEnabled": True,
-                        "SSEDescription": {"Status": "ENABLED"},
+                        "DeletionProtectionEnabled": deletion_protection,
+                        "SSEDescription": {"Status": encryption_status},
                         "KeySchema": [
                             {"AttributeName": "PK", "KeyType": "HASH"},
                             {"AttributeName": "SK", "KeyType": "RANGE"},
@@ -377,91 +357,41 @@ class RecoveryValidationTests(unittest.TestCase):
                 ("dynamodb", "describe-continuous-backups"): {
                     "ContinuousBackupsDescription": {
                         "PointInTimeRecoveryDescription": {
-                            "PointInTimeRecoveryStatus": "ENABLED",
-                            "LatestRestorableDateTime": (NOW - timedelta(minutes=5)).isoformat(),
+                            "PointInTimeRecoveryStatus": pitr_status,
+                            "LatestRestorableDateTime": (
+                                NOW - timedelta(minutes=latest_restorable_minutes)
+                            ).isoformat(),
                         }
                     }
                 },
-                ("backup", "describe-backup-vault"): {
-                    "EncryptionKeyArn": ("arn:aws:kms:us-east-1:123456789012:key/backup"),
-                    "Locked": False,
-                },
-                ("backup", "list-recovery-points-by-backup-vault"): {
-                    "RecoveryPoints": [
-                        {
-                            "Status": "COMPLETED",
-                            "CreationDate": (NOW - timedelta(hours=backup_age_hours)).isoformat(),
-                        }
-                    ]
-                },
             }
         )
 
-    def _backup_aws(self, *, state: str) -> FakeAws:
-        aws = self._aws()
-        table_arn = "arn:aws:dynamodb:us-east-1:123456789012:table/axonllm-state"
-        role_arn = "arn:aws:iam::123456789012:role/axonllm-state-backup"
-        recovery_point_arn = "arn:aws:backup:us-east-1:123456789012:recovery-point:deployment-backup"
-        stack = aws.responses[("cloudformation", "describe-stacks")]["Stacks"][0]
-        stack["Outputs"].append(
-            {
-                "OutputKey": "StateBackupRoleArn",
-                "OutputValue": role_arn,
-            }
-        )
-        aws.responses[("backup", "start-backup-job")] = {
-            "BackupJobId": "deployment-job-123",
-            "RecoveryPointArn": recovery_point_arn,
-        }
-        description: dict[str, Any] = {
-            "BackupJobId": "deployment-job-123",
-            "State": state,
-        }
-        if state == "COMPLETED":
-            description.update(
-                {
-                    "BackupVaultName": "axonllm-state",
-                    "ResourceArn": table_arn,
-                    "RecoveryPointArn": recovery_point_arn,
-                    "CreationDate": (NOW - timedelta(minutes=2)).isoformat(),
-                    "CompletionDate": NOW.isoformat(),
-                }
-            )
-        aws.responses[("backup", "describe-backup-job")] = description
-        aws.responses[("backup", "list-recovery-points-by-backup-vault")] = {
-            "RecoveryPoints": [
-                {
-                    "Status": "COMPLETED",
-                    "RecoveryPointArn": recovery_point_arn,
-                    "CreationDate": (NOW - timedelta(minutes=2)).isoformat(),
-                }
-            ]
-        }
-        return aws
-
-    def test_valid_backup_controls(self) -> None:
+    def test_valid_pitr_controls(self) -> None:
         aws = self._aws()
         result = validate_state_recovery.validate_recovery(
             aws,
             stack_name="AxonLLMStack",
             table_name=None,
-            max_backup_age_hours=30,
-            require_vault_lock=False,
             exercise_restore=False,
             keep_restored_table=False,
             now=NOW,
         )
-        self.assertEqual(result["pointInTimeRecovery"], "ENABLED")
-        self.assertEqual(result["backupVault"], "axonllm-state")
-        self.assertNotIn("deploymentBackup", result)
-        self.assertNotIn(
-            "start-backup-job",
-            [operation for _, operation, _ in aws.calls],
+        self.assertEqual(
+            result,
+            {
+                "tableArn": ("arn:aws:dynamodb:us-east-1:123456789012:table/axonllm-state"),
+                "deletionProtection": True,
+                "serverSideEncryption": "ENABLED",
+                "pointInTimeRecovery": "ENABLED",
+                "latestRestorableAgeMinutes": 5.0,
+                "restoreExercise": None,
+            },
         )
+        self.assertFalse(any(service in {"backup", "kms"} for service, _, _ in aws.calls))
 
-    def test_start_backup_completes_and_records_metadata(self) -> None:
-        aws = self._backup_aws(state="COMPLETED")
-        clock = FakeClock()
+    def test_restore_exercise_is_included_in_result(self) -> None:
+        aws = self._aws()
         restore_result = {
             "targetTable": "restored-table",
             "status": "validated",
@@ -479,258 +409,82 @@ class RecoveryValidationTests(unittest.TestCase):
                 aws,
                 stack_name="AxonLLMStack",
                 table_name=None,
-                max_backup_age_hours=30,
-                require_vault_lock=False,
-                exercise_restore=False,
+                exercise_restore=True,
                 keep_restored_table=False,
                 now=NOW,
-                start_backup=True,
-                backup_job_poll_interval=1,
-                backup_job_timeout_seconds=10,
-                sleep=clock.sleep,
-                monotonic=clock.monotonic,
+                sleep=lambda _: None,
             )
 
-        self.assertEqual(
-            result["deploymentBackup"],
-            {
-                "backupJobId": "deployment-job-123",
-                "status": "COMPLETED",
-                "backupVault": "axonllm-state",
-                "resourceArn": ("arn:aws:dynamodb:us-east-1:123456789012:table/axonllm-state"),
-                "recoveryPointArn": ("arn:aws:backup:us-east-1:123456789012:recovery-point:deployment-backup"),
-                "creationDate": (NOW - timedelta(minutes=2)).isoformat(),
-                "completionDate": NOW.isoformat(),
-            },
-        )
         self.assertEqual(result["restoreExercise"], restore_result)
         exercise.assert_called_once()
+        self.assertFalse(exercise.call_args.kwargs["keep"])
+        self.assertEqual(exercise.call_args.kwargs["poll_interval"], 10)
         self.assertEqual(
             exercise.call_args.kwargs["timeout_seconds"],
             validate_state_recovery._RESTORE_TIMEOUT_SECONDS,
         )
-        start_call = next(call for call in aws.calls if call[1] == "start-backup-job")
-        self.assertEqual(
-            start_call[2],
-            (
-                "--backup-vault-name",
-                "axonllm-state",
-                "--resource-arn",
-                ("arn:aws:dynamodb:us-east-1:123456789012:table/axonllm-state"),
-                "--iam-role-arn",
-                ("arn:aws:iam::123456789012:role/axonllm-state-backup"),
-                "--lifecycle",
-                "MoveToColdStorageAfterDays=30,DeleteAfterDays=365",
-                "--recovery-point-tags",
-                ("Application=AxonLLM,Runtime=AgentCore,Trigger=Deployment"),
-            ),
-        )
-        operations = [operation for _, operation, _ in aws.calls]
-        self.assertLess(
-            operations.index("describe-backup-job"),
-            operations.index("list-recovery-points-by-backup-vault"),
-        )
 
-    def test_recovery_timeouts_fit_workflow_credential_envelope(self) -> None:
-        self.assertEqual(
-            validate_state_recovery._WORKFLOW_CREDENTIAL_ENVELOPE_SECONDS,
-            3 * 60 * 60,
-        )
-        self.assertEqual(
-            validate_state_recovery._BACKUP_JOB_TIMEOUT_SECONDS,
-            75 * 60,
-        )
+    def test_restore_timeout_fits_workflow_credential_envelope(self) -> None:
         self.assertEqual(
             validate_state_recovery._RESTORE_TIMEOUT_SECONDS,
             45 * 60,
         )
-        self.assertEqual(
-            validate_state_recovery._BACKUP_JOB_TIMEOUT_SECONDS
-            + validate_state_recovery._RESTORE_TIMEOUT_SECONDS
-            + validate_state_recovery._RECOVERY_WORKFLOW_MARGIN_SECONDS,
-            validate_state_recovery._WORKFLOW_CREDENTIAL_ENVELOPE_SECONDS,
-        )
 
-    def test_start_backup_fails_on_terminal_job_failure(self) -> None:
-        aws = self._backup_aws(state="FAILED")
-        clock = FakeClock()
-
+    def test_stale_latest_restorable_time_fails(self) -> None:
         with self.assertRaisesRegex(
             validate_state_recovery.RecoveryValidationError,
-            "ended in FAILED",
+            "latest restorable time is stale",
         ):
             validate_state_recovery.validate_recovery(
-                aws,
+                self._aws(latest_restorable_minutes=61),
                 stack_name="AxonLLMStack",
                 table_name=None,
-                max_backup_age_hours=30,
-                require_vault_lock=False,
-                exercise_restore=False,
-                keep_restored_table=False,
-                now=NOW,
-                start_backup=True,
-                backup_job_poll_interval=1,
-                backup_job_timeout_seconds=10,
-                sleep=clock.sleep,
-                monotonic=clock.monotonic,
-            )
-        self.assertNotIn(
-            "list-recovery-points-by-backup-vault",
-            [operation for _, operation, _ in aws.calls],
-        )
-
-    def test_start_backup_fails_closed_on_timeout(self) -> None:
-        aws = self._backup_aws(state="RUNNING")
-        clock = FakeClock()
-
-        with self.assertRaisesRegex(
-            validate_state_recovery.RecoveryValidationError,
-            "did not complete before timeout",
-        ):
-            validate_state_recovery.validate_recovery(
-                aws,
-                stack_name="AxonLLMStack",
-                table_name=None,
-                max_backup_age_hours=30,
-                require_vault_lock=False,
-                exercise_restore=False,
-                keep_restored_table=False,
-                now=NOW,
-                start_backup=True,
-                backup_job_poll_interval=1,
-                backup_job_timeout_seconds=3,
-                sleep=clock.sleep,
-                monotonic=clock.monotonic,
-            )
-        describe_calls = [call for call in aws.calls if call[1] == "describe-backup-job"]
-        self.assertEqual(len(describe_calls), 3)
-        self.assertEqual(clock.value, 3)
-
-    def test_stale_backup_fails(self) -> None:
-        with self.assertRaisesRegex(
-            validate_state_recovery.RecoveryValidationError,
-            "outside the allowed age",
-        ):
-            validate_state_recovery.validate_recovery(
-                self._aws(backup_age_hours=31),
-                stack_name="AxonLLMStack",
-                table_name=None,
-                max_backup_age_hours=30,
-                require_vault_lock=False,
                 exercise_restore=False,
                 keep_restored_table=False,
                 now=NOW,
             )
 
-    def test_vault_lock_can_be_required(self) -> None:
+    def test_disabled_pitr_fails(self) -> None:
         with self.assertRaisesRegex(
             validate_state_recovery.RecoveryValidationError,
-            "Vault Lock",
+            "point-in-time recovery is disabled",
         ):
             validate_state_recovery.validate_recovery(
-                self._aws(),
+                self._aws(pitr_status="DISABLED"),
                 stack_name="AxonLLMStack",
                 table_name=None,
-                max_backup_age_hours=30,
-                require_vault_lock=True,
                 exercise_restore=False,
                 keep_restored_table=False,
                 now=NOW,
             )
 
-    def test_required_vault_lock_checks_governance_retention(self) -> None:
-        aws = self._aws()
-        vault = aws.responses[("backup", "describe-backup-vault")]
-        vault.update(
-            Locked=True,
-            MinRetentionDays=30,
-            MaxRetentionDays=365,
-        )
-
-        result = validate_state_recovery.validate_recovery(
-            aws,
-            stack_name="AxonLLMStack",
-            table_name=None,
-            max_backup_age_hours=30,
-            require_vault_lock=True,
-            exercise_restore=False,
-            keep_restored_table=False,
-            now=NOW,
-        )
-
-        self.assertEqual(result["backupVaultLockMode"], "GOVERNANCE")
-        self.assertEqual(result["backupVaultMinRetentionDays"], 30)
-        self.assertEqual(result["backupVaultMaxRetentionDays"], 365)
-
-    def test_required_vault_lock_rejects_wrong_retention(self) -> None:
-        aws = self._aws()
-        vault = aws.responses[("backup", "describe-backup-vault")]
-        vault.update(
-            Locked=True,
-            MinRetentionDays=7,
-            MaxRetentionDays=365,
-        )
-
+    def test_disabled_encryption_fails(self) -> None:
         with self.assertRaisesRegex(
             validate_state_recovery.RecoveryValidationError,
-            "30-365",
+            "server-side encryption is not enabled",
         ):
             validate_state_recovery.validate_recovery(
-                aws,
+                self._aws(encryption_status="DISABLED"),
                 stack_name="AxonLLMStack",
                 table_name=None,
-                max_backup_age_hours=30,
-                require_vault_lock=True,
                 exercise_restore=False,
                 keep_restored_table=False,
                 now=NOW,
             )
 
-    def test_required_vault_lock_accepts_compliance_mode(self) -> None:
-        aws = self._aws()
-        vault = aws.responses[("backup", "describe-backup-vault")]
-        vault.update(
-            Locked=True,
-            MinRetentionDays=30,
-            MaxRetentionDays=365,
-            LockDate=NOW.isoformat(),
-        )
-
-        result = validate_state_recovery.validate_recovery(
-            aws,
-            stack_name="AxonLLMStack",
-            table_name=None,
-            max_backup_age_hours=30,
-            require_vault_lock=True,
-            exercise_restore=False,
-            keep_restored_table=False,
-            now=NOW,
-        )
-
-        self.assertEqual(result["backupVaultLockMode"], "COMPLIANCE")
-        self.assertEqual(result["backupVaultMinRetentionDays"], 30)
-        self.assertEqual(result["backupVaultMaxRetentionDays"], 365)
-
-    def test_required_vault_lock_rejects_missing_or_invalid_lock_state(
-        self,
-    ) -> None:
-        for locked in (None, False, "true"):
-            with self.subTest(locked=locked):
-                vault = {
-                    "MinRetentionDays": 30,
-                    "MaxRetentionDays": 365,
-                }
-                if locked is not None:
-                    vault["Locked"] = locked
-
-                with self.assertRaisesRegex(
-                    validate_state_recovery.RecoveryValidationError,
-                    "Vault Lock is not enabled",
-                ):
-                    validate_state_recovery._vault_lock_posture(
-                        vault,
-                        required=True,
-                    )
+    def test_disabled_deletion_protection_fails(self) -> None:
+        with self.assertRaisesRegex(
+            validate_state_recovery.RecoveryValidationError,
+            "deletion protection is disabled",
+        ):
+            validate_state_recovery.validate_recovery(
+                self._aws(deletion_protection=False),
+                stack_name="AxonLLMStack",
+                table_name=None,
+                exercise_restore=False,
+                keep_restored_table=False,
+                now=NOW,
+            )
 
     def test_restore_exercise_validates_and_cleans_up_temporary_table(self) -> None:
         aws = RestoreAws()

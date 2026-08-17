@@ -1,10 +1,7 @@
 """Production Bedrock AgentCore deployment for the AxonLLM agent entrypoint."""
 
-import hashlib
 import json
-import math
 import re
-from dataclasses import dataclass
 
 from aws_cdk import (
     CfnCondition,
@@ -17,14 +14,12 @@ from aws_cdk import (
     RemovalPolicy,
     Stack,
     Token,
-    aws_backup as backup,
     aws_bedrockagentcore as agentcore,
     aws_cloudwatch as cloudwatch,
     aws_cloudwatch_actions as cloudwatch_actions,
     custom_resources as cr,
     aws_dynamodb as dynamodb,
     aws_ec2 as ec2,
-    aws_events as events,
     aws_iam as iam,
     aws_kms as kms,
     aws_lambda as lambda_,
@@ -37,30 +32,10 @@ from aws_cdk import (
 from constructs import Construct
 
 
-_ATHENA_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
-_ATHENA_ROLE_ARN = re.compile(
-    r"^arn:(?:aws|aws-us-gov|aws-cn):iam::[0-9]{12}:"
-    r"role/[A-Za-z0-9+=,.@_/-]{1,512}$"
-)
-ATHENA_QUERY_ACTIONS = [
-    "athena:GetQueryExecution",
-    "athena:GetQueryResults",
-    "athena:GetWorkGroup",
-    "athena:StartQueryExecution",
-    "athena:StopQueryExecution",
-]
-ATHENA_ASSUME_ROLE_ACTIONS = [
-    "sts:AssumeRole",
-    "sts:SetSourceIdentity",
-    "sts:TagSession",
-]
-_MAX_ATHENA_BINDINGS_CHARACTERS = 2_048
 _AGENTCORE_MAX_SESSION_SECONDS = 4 * 60 * 60
+_FACADE_IDENTITY_HEADER = "X-Amzn-Bedrock-AgentCore-Runtime-Custom-Identity-Token"
 _RECOVERY_PROPAGATION_MARGIN_SECONDS = 5 * 60
-_RECOVERY_MIN_QUIESCENCE_SECONDS = (
-    _AGENTCORE_MAX_SESSION_SECONDS
-    + _RECOVERY_PROPAGATION_MARGIN_SECONDS
-)
+_RECOVERY_MIN_QUIESCENCE_SECONDS = _AGENTCORE_MAX_SESSION_SECONDS + _RECOVERY_PROPAGATION_MARGIN_SECONDS
 _RUNTIME_DYNAMODB_STANDARD_ACTIONS = [
     "dynamodb:BatchGetItem",
     "dynamodb:BatchWriteItem",
@@ -507,352 +482,6 @@ def handler(event, _context):
 """
 
 
-@dataclass(frozen=True)
-class AthenaInfrastructureConfig:
-    """Deployment-bound query role allow-list and execution limits."""
-
-    bindings_json: str
-    role_arns: tuple[str, ...]
-    timeout_seconds: str
-    max_rows: str
-    max_result_bytes: str
-    max_bytes_scanned: str
-    poll_interval_seconds: str
-    project_rpm: str
-    principal_rpm: str
-    project_concurrency: str
-    principal_concurrency: str
-    project_scan_bytes_per_minute: str
-    principal_scan_bytes_per_minute: str
-    max_datasources_per_tenant: str
-
-    @property
-    def enabled(self) -> bool:
-        return bool(self.role_arns)
-
-    def fingerprint(self) -> str:
-        """Bind shared Athena IAM, endpoint, and runtime configuration."""
-        values: dict[str, object] = {"enabled": self.enabled}
-        if self.enabled:
-            values.update(
-                {
-                    "athena_query_bindings": self.bindings_json,
-                    "athena_query_max_bytes_scanned": self.max_bytes_scanned,
-                    "athena_query_max_datasources_per_tenant": (
-                        self.max_datasources_per_tenant
-                    ),
-                    "athena_query_max_result_bytes": self.max_result_bytes,
-                    "athena_query_max_rows": self.max_rows,
-                    "athena_query_poll_interval_seconds": (
-                        self.poll_interval_seconds
-                    ),
-                    "athena_query_principal_concurrency": (
-                        self.principal_concurrency
-                    ),
-                    "athena_query_principal_rpm": self.principal_rpm,
-                    "athena_query_principal_scan_bytes_per_minute": (
-                        self.principal_scan_bytes_per_minute
-                    ),
-                    "athena_query_project_concurrency": (
-                        self.project_concurrency
-                    ),
-                    "athena_query_project_rpm": self.project_rpm,
-                    "athena_query_project_scan_bytes_per_minute": (
-                        self.project_scan_bytes_per_minute
-                    ),
-                    "athena_query_timeout_seconds": self.timeout_seconds,
-                }
-            )
-        encoded = json.dumps(
-            values,
-            separators=(",", ":"),
-            sort_keys=True,
-        ).encode("utf-8")
-        return hashlib.sha256(encoded).hexdigest()
-
-    def environment(self) -> dict[str, str]:
-        return {
-            "AXON_ATHENA_QUERY_ENABLED": (
-                "true" if self.enabled else "false"
-            ),
-            "AXON_ATHENA_QUERY_BINDINGS": self.bindings_json,
-            "AXON_ATHENA_QUERY_TIMEOUT_SECONDS": self.timeout_seconds,
-            "AXON_ATHENA_QUERY_MAX_ROWS": self.max_rows,
-            "AXON_ATHENA_QUERY_MAX_RESULT_BYTES": self.max_result_bytes,
-            "AXON_ATHENA_QUERY_MAX_BYTES_SCANNED": (
-                self.max_bytes_scanned
-            ),
-            "AXON_ATHENA_QUERY_POLL_INTERVAL_SECONDS": (
-                self.poll_interval_seconds
-            ),
-            "AXON_ATHENA_QUERY_PROJECT_RPM": self.project_rpm,
-            "AXON_ATHENA_QUERY_PRINCIPAL_RPM": self.principal_rpm,
-            "AXON_ATHENA_QUERY_PROJECT_CONCURRENCY": (
-                self.project_concurrency
-            ),
-            "AXON_ATHENA_QUERY_PRINCIPAL_CONCURRENCY": (
-                self.principal_concurrency
-            ),
-            "AXON_ATHENA_QUERY_PROJECT_SCAN_BYTES_PER_MINUTE": (
-                self.project_scan_bytes_per_minute
-            ),
-            "AXON_ATHENA_QUERY_PRINCIPAL_SCAN_BYTES_PER_MINUTE": (
-                self.principal_scan_bytes_per_minute
-            ),
-            "AXON_ATHENA_QUERY_MAX_DATASOURCES_PER_TENANT": (
-                self.max_datasources_per_tenant
-            ),
-            "AWS_STS_REGIONAL_ENDPOINTS": "regional",
-        }
-
-
-def load_athena_infrastructure_config(
-    construct: Construct,
-) -> AthenaInfrastructureConfig:
-    """Validate CDK context before it can become runtime authority."""
-
-    raw_bindings = construct.node.try_get_context("athena_query_bindings")
-    if raw_bindings in (None, ""):
-        bindings: object = []
-    elif isinstance(raw_bindings, str):
-        try:
-            bindings = json.loads(raw_bindings)
-        except json.JSONDecodeError as exc:
-            raise ValueError(
-                "athena_query_bindings must be valid JSON"
-            ) from exc
-    else:
-        bindings = raw_bindings
-    if not isinstance(bindings, list):
-        raise ValueError("athena_query_bindings must be a JSON array")
-
-    normalized: list[dict[str, str]] = []
-    seen: set[tuple[str, str, str]] = set()
-    for index, binding in enumerate(bindings):
-        if not isinstance(binding, dict):
-            raise ValueError(
-                f"athena_query_bindings[{index}] must be an object"
-            )
-        expected = {"tenant_id", "project_id", "role_arn"}
-        if set(binding) != expected:
-            raise ValueError(
-                f"athena_query_bindings[{index}] must contain exactly "
-                "tenant_id, project_id, and role_arn"
-            )
-        tenant_id = binding["tenant_id"]
-        project_id = binding["project_id"]
-        role_arn = binding["role_arn"]
-        if (
-            not isinstance(tenant_id, str)
-            or _ATHENA_IDENTIFIER.fullmatch(tenant_id) is None
-        ):
-            raise ValueError(
-                f"athena_query_bindings[{index}].tenant_id is invalid"
-            )
-        if (
-            not isinstance(project_id, str)
-            or _ATHENA_IDENTIFIER.fullmatch(project_id) is None
-        ):
-            raise ValueError(
-                f"athena_query_bindings[{index}].project_id is invalid"
-            )
-        if (
-            not isinstance(role_arn, str)
-            or "*" in role_arn
-            or _ATHENA_ROLE_ARN.fullmatch(role_arn) is None
-        ):
-            raise ValueError(
-                f"athena_query_bindings[{index}].role_arn must be a "
-                "concrete IAM role ARN"
-            )
-        identity = (tenant_id, project_id, role_arn)
-        if identity in seen:
-            raise ValueError("athena_query_bindings contains a duplicate")
-        seen.add(identity)
-        normalized.append(
-            {
-                "tenant_id": tenant_id,
-                "project_id": project_id,
-                "role_arn": role_arn,
-            }
-        )
-
-    bindings_json = json.dumps(
-        normalized,
-        separators=(",", ":"),
-        sort_keys=True,
-    )
-    if len(bindings_json) > _MAX_ATHENA_BINDINGS_CHARACTERS:
-        raise ValueError(
-            "athena_query_bindings exceeds the AgentCore "
-            "2,048-character environment value limit"
-        )
-
-    def integer_limit(
-        context_name: str,
-        default: int,
-        minimum: int,
-        maximum: int | None = None,
-    ) -> str:
-        value = construct.node.try_get_context(context_name)
-        resolved = default if value in (None, "") else value
-        if (
-            isinstance(resolved, str)
-            and re.fullmatch(r"[0-9]+", resolved) is not None
-        ):
-            resolved = int(resolved)
-        if (
-            isinstance(resolved, bool)
-            or not isinstance(resolved, int)
-            or resolved < minimum
-            or (maximum is not None and resolved > maximum)
-        ):
-            if maximum is None:
-                raise ValueError(
-                    f"{context_name} must be at least {minimum}"
-                )
-            raise ValueError(
-                f"{context_name} must be between {minimum} and {maximum}"
-            )
-        return str(resolved)
-
-    def float_limit(
-        context_name: str,
-        default: float,
-        minimum: float,
-        maximum: float,
-    ) -> str:
-        value = construct.node.try_get_context(context_name)
-        resolved = default if value in (None, "") else value
-        if isinstance(resolved, str):
-            try:
-                resolved = float(resolved)
-            except ValueError:
-                pass
-        if (
-            isinstance(resolved, bool)
-            or not isinstance(resolved, (int, float))
-            or not math.isfinite(resolved)
-            or not minimum <= resolved <= maximum
-        ):
-            raise ValueError(
-                f"{context_name} must be between {minimum} and {maximum}"
-            )
-        return f"{resolved:g}"
-
-    max_bytes_scanned = integer_limit(
-        "athena_query_max_bytes_scanned",
-        1024 * 1024 * 1024,
-        1,
-    )
-    project_rpm = integer_limit(
-        "athena_query_project_rpm",
-        30,
-        1,
-        10_000,
-    )
-    principal_rpm = integer_limit(
-        "athena_query_principal_rpm",
-        10,
-        1,
-        10_000,
-    )
-    project_concurrency = integer_limit(
-        "athena_query_project_concurrency",
-        5,
-        1,
-        100,
-    )
-    principal_concurrency = integer_limit(
-        "athena_query_principal_concurrency",
-        2,
-        1,
-        100,
-    )
-    project_scan_bytes_per_minute = integer_limit(
-        "athena_query_project_scan_bytes_per_minute",
-        5 * 1024 * 1024 * 1024,
-        1,
-    )
-    principal_scan_bytes_per_minute = integer_limit(
-        "athena_query_principal_scan_bytes_per_minute",
-        2 * 1024 * 1024 * 1024,
-        1,
-    )
-    max_datasources_per_tenant = integer_limit(
-        "athena_query_max_datasources_per_tenant",
-        500,
-        1,
-        10_000,
-    )
-    if int(principal_rpm) > int(project_rpm):
-        raise ValueError(
-            "athena_query_principal_rpm must not exceed "
-            "athena_query_project_rpm"
-        )
-    if int(principal_concurrency) > int(project_concurrency):
-        raise ValueError(
-            "athena_query_principal_concurrency must not exceed "
-            "athena_query_project_concurrency"
-        )
-    if int(principal_scan_bytes_per_minute) > int(
-        project_scan_bytes_per_minute
-    ):
-        raise ValueError(
-            "principal query scan budget must not exceed project budget"
-        )
-    if int(max_bytes_scanned) > int(
-        principal_scan_bytes_per_minute
-    ):
-        raise ValueError(
-            "athena_query_max_bytes_scanned must fit within the "
-            "principal aggregate scan budget"
-        )
-
-    return AthenaInfrastructureConfig(
-        bindings_json=bindings_json,
-        role_arns=tuple(
-            sorted({binding["role_arn"] for binding in normalized})
-        ),
-        timeout_seconds=float_limit(
-            "athena_query_timeout_seconds",
-            30.0,
-            0.001,
-            300.0,
-        ),
-        max_rows=integer_limit(
-            "athena_query_max_rows",
-            1000,
-            1,
-            10_000,
-        ),
-        max_result_bytes=integer_limit(
-            "athena_query_max_result_bytes",
-            1024 * 1024,
-            1024,
-            16 * 1024 * 1024,
-        ),
-        max_bytes_scanned=max_bytes_scanned,
-        poll_interval_seconds=float_limit(
-            "athena_query_poll_interval_seconds",
-            0.25,
-            0.05,
-            5.0,
-        ),
-        project_rpm=project_rpm,
-        principal_rpm=principal_rpm,
-        project_concurrency=project_concurrency,
-        principal_concurrency=principal_concurrency,
-        project_scan_bytes_per_minute=(
-            project_scan_bytes_per_minute
-        ),
-        principal_scan_bytes_per_minute=(
-            principal_scan_bytes_per_minute
-        ),
-        max_datasources_per_tenant=max_datasources_per_tenant,
-    )
-
-
 class AxonLLMAgentCoreStack(Stack):
     """Contained AgentCore runtime with tenant-safe identity and state."""
 
@@ -861,29 +490,22 @@ class AxonLLMAgentCoreStack(Stack):
         scope: Construct,
         construct_id: str,
         *,
+        bootstrap_qualifier: str = "axprod",
         deployment_namespace: str = "",
         **kwargs,
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
-        physical_suffix = (
-            f"-{deployment_namespace}" if deployment_namespace else ""
-        )
-        removal_policy = (
-            RemovalPolicy.DESTROY
-            if deployment_namespace
-            else RemovalPolicy.RETAIN
-        )
+        physical_suffix = f"-{deployment_namespace}" if deployment_namespace else ""
+        removal_policy = RemovalPolicy.DESTROY if deployment_namespace else RemovalPolicy.RETAIN
         deletion_protection = not bool(deployment_namespace)
+        runtime_ingress = self.node.try_get_context("runtime_ingress")
+        if runtime_ingress is None:
+            runtime_ingress = "direct-jwt" if deployment_namespace else "facade"
+        if runtime_ingress not in {"direct-jwt", "facade"}:
+            raise ValueError("runtime_ingress must be 'direct-jwt' or 'facade'")
         runtime_suffix = deployment_namespace.replace("-", "_")
-        runtime_name = (
-            f"axonllm_{runtime_suffix}"
-            if runtime_suffix
-            else "axonllm"
-        )
-        control_plane_stack_name = (
-            f"AxonLLMControlPlaneStack{physical_suffix}"
-        )
-        query_config = load_athena_infrastructure_config(self)
+        runtime_name = f"axonllm_{runtime_suffix}" if runtime_suffix else "axonllm"
+        control_plane_stack_name = f"AxonLLMControlPlaneStack{physical_suffix}"
         rehearsal_control_table_arn = (
             CfnParameter(
                 self,
@@ -895,12 +517,10 @@ class AxonLLMAgentCoreStack(Stack):
                     r"table/axonllm-rehearsal-control-ledger$"
                 ),
                 constraint_description=(
-                    "must be the retained rehearsal-control ledger ARN in "
-                    "this stack's AWS region and account"
+                    "must be the retained rehearsal-control ledger ARN in this stack's AWS region and account"
                 ),
                 description=(
-                    "Exact retained rehearsal-control ledger ARN used only "
-                    "by an isolated qualification runtime"
+                    "Exact retained rehearsal-control ledger ARN used only by an isolated qualification runtime"
                 ),
             )
             if deployment_namespace
@@ -920,9 +540,7 @@ class AxonLLMAgentCoreStack(Stack):
             "OidcDiscoveryUrl",
             type="String",
             min_length=1,
-            allowed_pattern=(
-                r"^https://[^?#\s]+/\.well-known/openid-configuration$"
-            ),
+            allowed_pattern=(r"^https://[^?#\s]+/\.well-known/openid-configuration$"),
             description="OIDC discovery URL used by the AgentCore JWT authorizer",
         )
         oidc_client_ids = CfnParameter(
@@ -946,9 +564,7 @@ class AxonLLMAgentCoreStack(Stack):
             min_length=1,
             max_length=256,
             allowed_pattern=r"^\S+$",
-            description=(
-                "Signed OIDC claim containing the AxonLLM tenant hint"
-            ),
+            description=("Signed OIDC claim containing the AxonLLM tenant hint"),
         )
         oidc_project_claim = CfnParameter(
             self,
@@ -957,9 +573,14 @@ class AxonLLMAgentCoreStack(Stack):
             min_length=1,
             max_length=256,
             allowed_pattern=r"^\S+$",
-            description=(
-                "Signed OIDC claim containing the AxonLLM project hint"
-            ),
+            description=("Signed OIDC claim containing the AxonLLM project hint"),
+        )
+        deployment_experience = CfnParameter(
+            self,
+            "DeploymentExperience",
+            type="String",
+            allowed_values=["axonllm", "ostiari"],
+            description=("Product experience that owns identity, administration, and the human-facing control plane"),
         )
         approved_https_prefix_list_id = CfnParameter(
             self,
@@ -984,8 +605,7 @@ class AxonLLMAgentCoreStack(Stack):
                 r"imported-model)/[A-Za-z0-9][A-Za-z0-9._:/+-]*$"
             ),
             constraint_description=(
-                "each value must be a concrete Bedrock model or inference-profile "
-                "ARN without wildcards"
+                "each value must be a concrete Bedrock model or inference-profile ARN without wildcards"
             ),
             description=(
                 "Comma-separated Bedrock model or inference-profile ARNs "
@@ -1003,13 +623,9 @@ class AxonLLMAgentCoreStack(Stack):
                 r"sha256:[0-9a-f]{64}$"
             ),
             constraint_description=(
-                f"must be an immutable private ECR URI in {self.region} "
-                "ending in @sha256:<64 lowercase hex characters>"
+                f"must be an immutable private ECR URI in {self.region} ending in @sha256:<64 lowercase hex characters>"
             ),
-            description=(
-                "Immutable ARM64 AgentCore image emitted by the release "
-                "deployment verification gate"
-            ),
+            description=("Immutable ARM64 AgentCore image emitted by the release deployment verification gate"),
         )
         enabled_providers = CfnParameter(
             self,
@@ -1019,12 +635,8 @@ class AxonLLMAgentCoreStack(Stack):
             min_length=1,
             max_length=512,
             allowed_pattern=_PROVIDER_NAME_PATTERN,
-            constraint_description=(
-                "must be a comma-separated list of supported provider names"
-            ),
-            description=(
-                "Exact provider allowlist certified for this runtime version"
-            ),
+            constraint_description=("must be a comma-separated list of supported provider names"),
+            description=("Exact provider allowlist certified for this runtime version"),
         )
         provider_secret_version = CfnParameter(
             self,
@@ -1034,9 +646,7 @@ class AxonLLMAgentCoreStack(Stack):
             min_length=1,
             max_length=256,
             allowed_pattern=r"^[A-Za-z0-9-]+$",
-            constraint_description=(
-                "must be a Secrets Manager version identifier or bootstrap"
-            ),
+            constraint_description=("must be a Secrets Manager version identifier or bootstrap"),
             description=(
                 "Provider secret version bound into this AgentCore runtime "
                 "revision; changing it forces a fresh runtime version"
@@ -1050,9 +660,7 @@ class AxonLLMAgentCoreStack(Stack):
             max_length=320,
             allowed_pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$",
             constraint_description="must be a valid notification email",
-            description=(
-                "Required confirmed destination for production alarms"
-            ),
+            description=("Required confirmed destination for production alarms"),
         )
         candidate_endpoint_name = CfnParameter(
             self,
@@ -1061,13 +669,8 @@ class AxonLLMAgentCoreStack(Stack):
             min_length=42,
             max_length=42,
             allowed_pattern=r"^candidate_[0-9a-f]{32}$",
-            constraint_description=(
-                "must be a fresh high-entropy candidate endpoint name"
-            ),
-            description=(
-                "Unpredictable endpoint qualifier generated for this "
-                "certification deployment"
-            ),
+            constraint_description=("must be a fresh high-entropy candidate endpoint name"),
+            description=("Unpredictable endpoint qualifier generated for this certification deployment"),
         )
         publish_candidate_endpoint = CfnParameter(
             self,
@@ -1086,10 +689,7 @@ class AxonLLMAgentCoreStack(Stack):
             type="String",
             default="false",
             allowed_values=["true", "false"],
-            description=(
-                "Publish the production endpoint only for an explicitly "
-                "certified runtime version"
-            ),
+            description=("Publish the production endpoint only for an explicitly certified runtime version"),
         )
         production_runtime_version = CfnParameter(
             self,
@@ -1098,12 +698,8 @@ class AxonLLMAgentCoreStack(Stack):
             default="",
             max_length=32,
             allowed_pattern=r"^$|^[1-9][0-9]{0,31}$",
-            constraint_description=(
-                "must be empty or an exact positive AgentCore runtime version"
-            ),
-            description=(
-                "Exact certified runtime version targeted by production"
-            ),
+            constraint_description=("must be empty or an exact positive AgentCore runtime version"),
+            description=("Exact certified runtime version targeted by production"),
         )
         image_account_id = Fn.select(
             0,
@@ -1168,9 +764,7 @@ class AxonLLMAgentCoreStack(Stack):
             "DNS fallback to the VPC resolver",
         )
         runtime_security_group.add_egress_rule(
-            ec2.Peer.prefix_list(
-                approved_https_prefix_list_id.value_as_string
-            ),
+            ec2.Peer.prefix_list(approved_https_prefix_list_id.value_as_string),
             ec2.Port.tcp(443),
             "HTTPS to explicitly approved external destinations",
         )
@@ -1178,11 +772,7 @@ class AxonLLMAgentCoreStack(Stack):
         dynamodb_endpoint = vpc.add_gateway_endpoint(
             "DynamoDbEndpoint",
             service=ec2.GatewayVpcEndpointAwsService.DYNAMODB,
-            subnets=[
-                ec2.SubnetSelection(
-                    subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS
-                )
-            ],
+            subnets=[ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS)],
         )
         prefix_lookup_logs = logs.LogGroup(
             self,
@@ -1200,16 +790,12 @@ class AxonLLMAgentCoreStack(Stack):
                     "Filters": [
                         {
                             "Name": "prefix-list-name",
-                            "Values": [
-                                f"com.amazonaws.{self.region}.dynamodb"
-                            ],
+                            "Values": [f"com.amazonaws.{self.region}.dynamodb"],
                         }
                     ]
                 },
                 output_paths=["PrefixLists.0.PrefixListId"],
-                physical_resource_id=cr.PhysicalResourceId.from_response(
-                    "PrefixLists.0.PrefixListId"
-                ),
+                physical_resource_id=cr.PhysicalResourceId.from_response("PrefixLists.0.PrefixListId"),
             ),
             policy=cr.AwsCustomResourcePolicy.from_statements(
                 [
@@ -1224,11 +810,7 @@ class AxonLLMAgentCoreStack(Stack):
             timeout=Duration.seconds(30),
         )
         runtime_security_group.add_egress_rule(
-            ec2.Peer.prefix_list(
-                dynamodb_prefix_list.get_response_field(
-                    "PrefixLists.0.PrefixListId"
-                )
-            ),
+            ec2.Peer.prefix_list(dynamodb_prefix_list.get_response_field("PrefixLists.0.PrefixListId")),
             ec2.Port.tcp(443),
             "DynamoDB through the VPC gateway endpoint",
         )
@@ -1256,84 +838,18 @@ class AxonLLMAgentCoreStack(Stack):
             open=False,
             private_dns_enabled=True,
             security_groups=[endpoint_security_group],
-            subnets=ec2.SubnetSelection(
-                subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS
-            ),
+            subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS),
         )
-        athena_endpoint = None
-        sts_endpoint = None
-        if query_config.enabled:
-            athena_endpoint = vpc.add_interface_endpoint(
-                "AthenaEndpoint",
-                service=ec2.InterfaceVpcEndpointAwsService.ATHENA,
-                open=False,
-                private_dns_enabled=True,
-                security_groups=[endpoint_security_group],
-                subnets=ec2.SubnetSelection(
-                    subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS
-                ),
-            )
-            sts_endpoint = vpc.add_interface_endpoint(
-                "StsEndpoint",
-                service=ec2.InterfaceVpcEndpointAwsService.STS,
-                open=False,
-                private_dns_enabled=True,
-                security_groups=[endpoint_security_group],
-                subnets=ec2.SubnetSelection(
-                    subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS
-                ),
-            )
 
-        data_key = kms.Key(
+        sns_managed_key = kms.Alias.from_alias_name(
             self,
-            "DataKey",
-            alias=f"alias/axonllm/agentcore-data{physical_suffix}",
-            description="Encrypts AxonLLM AgentCore state and logs",
-            enable_key_rotation=True,
-            removal_policy=removal_policy,
-            pending_window=Duration.days(30),
-        )
-        data_key.add_to_resource_policy(
-            iam.PolicyStatement(
-                sid="AllowCloudWatchLogsEncryption",
-                principals=[
-                    iam.ServicePrincipal(
-                        f"logs.{self.region}.{self.url_suffix}"
-                    )
-                ],
-                actions=[
-                    "kms:Decrypt",
-                    "kms:DescribeKey",
-                    "kms:Encrypt",
-                    "kms:GenerateDataKey*",
-                    "kms:ReEncrypt*",
-                ],
-                resources=["*"],
-                conditions={
-                    "ArnLike": {
-                        "kms:EncryptionContext:aws:logs:arn": (
-                            f"arn:{self.partition}:logs:{self.region}:"
-                            f"{self.account}:log-group:*"
-                        )
-                    }
-                },
-            )
-        )
-        data_key.add_to_resource_policy(
-            iam.PolicyStatement(
-                sid="AllowCloudWatchAlarmEncryption",
-                principals=[iam.ServicePrincipal("cloudwatch.amazonaws.com")],
-                actions=["kms:Decrypt", "kms:GenerateDataKey*"],
-                resources=["*"],
-            )
+            "SnsManagedKey",
+            "alias/aws/sns",
         )
         provider_secret = secretsmanager.Secret(
             self,
             "ProviderCredentials",
-            description=(
-                "AxonLLM AgentCore HTTP-provider credentials and endpoints"
-            ),
-            encryption_key=data_key,
+            description=("AxonLLM AgentCore HTTP-provider credentials and endpoints"),
             generate_secret_string=secretsmanager.SecretStringGenerator(
                 secret_string_template=json.dumps(
                     {field_name: "" for field_name in _PROVIDER_SECRET_FIELDS},
@@ -1350,9 +866,7 @@ class AxonLLMAgentCoreStack(Stack):
             open=False,
             private_dns_enabled=True,
             security_groups=[endpoint_security_group],
-            subnets=ec2.SubnetSelection(
-                subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS
-            ),
+            subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS),
         )
         secrets_endpoint.add_to_policy(
             iam.PolicyStatement(
@@ -1365,19 +879,13 @@ class AxonLLMAgentCoreStack(Stack):
             )
         )
         state_table_name = (
-            self.node.try_get_context("agentcore_table_name")
-            or f"axonllm-agentcore-state{physical_suffix}"
+            self.node.try_get_context("agentcore_table_name") or f"axonllm-agentcore-state{physical_suffix}"
         )
         restore_table_marker = "-restore-validation-"
-        restore_table_suffix_limit = (
-            255
-            - len(state_table_name)
-            - len(restore_table_marker)
-        )
+        restore_table_suffix_limit = 255 - len(state_table_name) - len(restore_table_marker)
         if restore_table_suffix_limit < 21:
             raise ValueError(
-                "AgentCore state table name must be at most 214 characters "
-                "to preserve the PITR validation suffix"
+                "AgentCore state table name must be at most 214 characters to preserve the PITR validation suffix"
             )
         restored_state_table_pattern = (
             rf"^$|^{re.escape(state_table_name)}"
@@ -1391,13 +899,9 @@ class AxonLLMAgentCoreStack(Stack):
             default="",
             allowed_pattern=restored_state_table_pattern,
             constraint_description=(
-                "must be blank or a PITR validation table derived from the "
-                f"{state_table_name} primary table"
+                f"must be blank or a PITR validation table derived from the {state_table_name} primary table"
             ),
-            description=(
-                "Optional restored state table selected through the "
-                "reviewed AgentCore recovery workflow"
-            ),
+            description=("Optional restored state table selected through the reviewed AgentCore recovery workflow"),
         )
         recovery_cutover_mode = CfnParameter(
             self,
@@ -1410,10 +914,7 @@ class AxonLLMAgentCoreStack(Stack):
                 "selected",
                 "validation",
             ],
-            description=(
-                "AgentCore recovery phase; table changes are accepted only "
-                "from quiesced to selected"
-            ),
+            description=("AgentCore recovery phase; table changes are accepted only from quiesced to selected"),
         )
         recovery_approval_id = CfnParameter(
             self,
@@ -1422,13 +923,8 @@ class AxonLLMAgentCoreStack(Stack):
             default="",
             max_length=128,
             allowed_pattern=r"^$|^[A-Za-z0-9][A-Za-z0-9._:/-]{2,127}$",
-            constraint_description=(
-                "must be blank or a 3-128 character change/incident ID"
-            ),
-            description=(
-                "Reviewed change or incident identifier bound to a recovery "
-                "cutover and rollback"
-            ),
+            constraint_description=("must be blank or a 3-128 character change/incident ID"),
+            description=("Reviewed change or incident identifier bound to a recovery cutover and rollback"),
         )
         use_recovered_state = CfnCondition(
             self,
@@ -1519,13 +1015,10 @@ class AxonLLMAgentCoreStack(Stack):
                 type=dynamodb.AttributeType.STRING,
             ),
             billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
-            encryption=dynamodb.TableEncryption.CUSTOMER_MANAGED,
-            encryption_key=data_key,
+            encryption=dynamodb.TableEncryption.AWS_MANAGED,
             deletion_protection=deletion_protection,
             point_in_time_recovery_specification=(
-                dynamodb.PointInTimeRecoverySpecification(
-                    point_in_time_recovery_enabled=True
-                )
+                dynamodb.PointInTimeRecoverySpecification(point_in_time_recovery_enabled=True)
             ),
             time_to_live_attribute="expires_at",
             removal_policy=removal_policy,
@@ -1547,8 +1040,7 @@ class AxonLLMAgentCoreStack(Stack):
             "SecurityEventDeadLetterQueue",
             fifo=True,
             content_based_deduplication=False,
-            encryption=sqs.QueueEncryption.KMS,
-            encryption_master_key=data_key,
+            encryption=sqs.QueueEncryption.SQS_MANAGED,
             enforce_ssl=True,
             retention_period=Duration.days(14),
             removal_policy=removal_policy,
@@ -1558,8 +1050,7 @@ class AxonLLMAgentCoreStack(Stack):
             "SecurityEventOutboxQueue",
             fifo=True,
             content_based_deduplication=False,
-            encryption=sqs.QueueEncryption.KMS,
-            encryption_master_key=data_key,
+            encryption=sqs.QueueEncryption.SQS_MANAGED,
             enforce_ssl=True,
             retention_period=Duration.days(14),
             receive_message_wait_time=Duration.seconds(20),
@@ -1577,12 +1068,11 @@ class AxonLLMAgentCoreStack(Stack):
             fifo=True,
             content_based_deduplication=False,
             enforce_ssl=True,
-            master_key=data_key,
+            master_key=sns_managed_key,
         )
         security_event_log_group = logs.LogGroup(
             self,
             "SecurityEventLogGroup",
-            encryption_key=data_key,
             retention=logs.RetentionDays.ONE_YEAR,
             removal_policy=removal_policy,
         )
@@ -1599,9 +1089,7 @@ class AxonLLMAgentCoreStack(Stack):
             open=False,
             private_dns_enabled=True,
             security_groups=[endpoint_security_group],
-            subnets=ec2.SubnetSelection(
-                subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS
-            ),
+            subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS),
         )
         sqs_endpoint.add_to_policy(
             iam.PolicyStatement(
@@ -1622,9 +1110,7 @@ class AxonLLMAgentCoreStack(Stack):
             open=False,
             private_dns_enabled=True,
             security_groups=[endpoint_security_group],
-            subnets=ec2.SubnetSelection(
-                subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS
-            ),
+            subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS),
         )
         sns_endpoint.add_to_policy(
             iam.PolicyStatement(
@@ -1639,9 +1125,7 @@ class AxonLLMAgentCoreStack(Stack):
             open=False,
             private_dns_enabled=True,
             security_groups=[endpoint_security_group],
-            subnets=ec2.SubnetSelection(
-                subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS
-            ),
+            subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS),
         )
         logs_endpoint.add_to_policy(
             iam.PolicyStatement(
@@ -1689,165 +1173,15 @@ class AxonLLMAgentCoreStack(Stack):
             )
         )
 
-        backup_key = kms.Key(
-            self,
-            "BackupKey",
-            alias=f"alias/axonllm/agentcore-backups{physical_suffix}",
-            description="Encrypts scheduled AxonLLM AgentCore backups",
-            enable_key_rotation=True,
-            removal_policy=removal_policy,
-            pending_window=Duration.days(30),
-        )
-        backup_vault = backup.BackupVault(
-            self,
-            "StateBackupVault",
-            backup_vault_name=Fn.join(
-                "-",
-                [
-                    "axon-agent",
-                    Fn.select(2, Fn.split("/", self.stack_id)),
-                ],
-            ),
-            encryption_key=backup_key,
-            block_recovery_point_deletion=(
-                False if deployment_namespace else None
-            ),
-            lock_configuration=(
-                None
-                if deployment_namespace
-                else backup.LockConfiguration(
-                    min_retention=Duration.days(30),
-                    max_retention=Duration.days(365),
-                )
-            ),
-            removal_policy=removal_policy,
-        )
-        backup_service_role = iam.Role(
-            self,
-            "StateBackupServiceRole",
-            assumed_by=iam.ServicePrincipal(
-                "backup.amazonaws.com",
-                conditions={
-                    "StringEquals": {
-                        "aws:SourceAccount": self.account,
-                    }
-                },
-            ),
-            description=(
-                "AWS Backup service role scoped to AxonLLM AgentCore state"
-            ),
-        )
-        backup_table_arns = [
-            state_table.table_arn,
-            self.format_arn(
-                service="dynamodb",
-                resource="table",
-                resource_name=(
-                    f"{state_table_name}-restore-validation-*"
-                ),
-            ),
-        ]
-        backup_service_role.add_to_policy(
-            iam.PolicyStatement(
-                sid="BackUpAxonLLMStateTables",
-                actions=[
-                    "dynamodb:DescribeContinuousBackups",
-                    "dynamodb:DescribeTable",
-                    "dynamodb:ListTagsOfResource",
-                    "dynamodb:StartAwsBackupJob",
-                ],
-                resources=backup_table_arns,
-            )
-        )
-        backup_service_role.add_to_policy(
-            iam.PolicyStatement(
-                sid="UseAxonLLMStateKeyThroughDynamoDB",
-                actions=[
-                    "kms:Decrypt",
-                    "kms:GenerateDataKey*",
-                ],
-                resources=[data_key.key_arn],
-                conditions={
-                    "StringEquals": {
-                        "kms:CallerAccount": self.account,
-                        "kms:ViaService": (
-                            f"dynamodb.{self.region}.{self.url_suffix}"
-                        ),
-                    }
-                },
-            )
-        )
-        backup_plan = backup.BackupPlan(
-            self,
-            "StateBackupPlan",
-            backup_vault=backup_vault,
-        )
-        backup_plan.add_rule(
-            backup.BackupPlanRule(
-                rule_name="DailyRetainedBackup",
-                schedule_expression=events.Schedule.cron(
-                    minute="30",
-                    hour="5",
-                ),
-                start_window=Duration.hours(1),
-                completion_window=Duration.hours(4),
-                move_to_cold_storage_after=Duration.days(30),
-                delete_after=Duration.days(365),
-                recovery_point_tags={
-                    "Application": "AxonLLM",
-                    "Runtime": "AgentCore",
-                },
-            )
-        )
-        backup.CfnBackupSelection(
-            self,
-            "StateTableSelection",
-            backup_plan_id=backup_plan.backup_plan_id,
-            backup_selection=(
-                backup.CfnBackupSelection
-                .BackupSelectionResourceTypeProperty(
-                    iam_role_arn=backup_service_role.role_arn,
-                    selection_name="StateTableSelection",
-                    resources=[state_table.table_arn],
-                )
-            ),
-        )
-        recovered_backup_selection = backup.CfnBackupSelection(
-            self,
-            "RecoveredStateTableSelection",
-            backup_plan_id=backup_plan.backup_plan_id,
-            backup_selection=(
-                backup.CfnBackupSelection
-                .BackupSelectionResourceTypeProperty(
-                    iam_role_arn=backup_service_role.role_arn,
-                    selection_name="RecoveredStateTableSelection",
-                    resources=[
-                    self.format_arn(
-                        service="dynamodb",
-                        resource="table",
-                        resource_name=(
-                            runtime_state_table_name.value_as_string
-                        ),
-                    )
-                    ],
-                )
-            ),
-        )
-        recovered_backup_selection.cfn_options.condition = (
-            use_recovered_state
-        )
-
         application_logs = logs.LogGroup(
             self,
             "ApplicationLogs",
-            encryption_key=data_key,
             retention=logs.RetentionDays.ONE_YEAR,
             removal_policy=removal_policy,
         )
         usage_logs = logs.LogGroup(
             self,
             "UsageLogs",
-            encryption_key=data_key,
             retention=logs.RetentionDays.ONE_YEAR,
             removal_policy=removal_policy,
         )
@@ -1859,11 +1193,7 @@ class AxonLLMAgentCoreStack(Stack):
                 "-",
                 [
                     "axonllm-agentcore-runtime",
-                    *(
-                        [deployment_namespace]
-                        if deployment_namespace
-                        else []
-                    ),
+                    *([deployment_namespace] if deployment_namespace else []),
                     self.region,
                 ],
             ),
@@ -1885,9 +1215,7 @@ class AxonLLMAgentCoreStack(Stack):
             description="Execution role for Bedrock Agent Core Runtime",
             max_session_duration=Duration.hours(8),
         )
-        runtime_artifact = agentcore.AgentRuntimeArtifact.from_image_uri(
-            verified_image_uri.value_as_string
-        )
+        runtime_artifact = agentcore.AgentRuntimeArtifact.from_image_uri(verified_image_uri.value_as_string)
         blocked_authorizer_value = Fn.join(
             ":",
             [
@@ -1917,11 +1245,16 @@ class AxonLLMAgentCoreStack(Stack):
             agent_runtime_artifact=runtime_artifact,
             execution_role=runtime_execution_role,
             authorizer_configuration=(
-                agentcore.RuntimeAuthorizerConfiguration.using_jwt(
+                agentcore.RuntimeAuthorizerConfiguration.using_iam()
+                if runtime_ingress == "facade"
+                else agentcore.RuntimeAuthorizerConfiguration.using_jwt(
                     oidc_discovery_url.value_as_string,
                     selected_oidc_client_ids,
                     selected_oidc_audiences,
                 )
+            ),
+            request_header_configuration=agentcore.RequestHeaderConfiguration(
+                allowlisted_headers=([_FACADE_IDENTITY_HEADER] if runtime_ingress == "facade" else ["Authorization"])
             ),
             environment_variables={
                 "AWS_DEFAULT_REGION": self.region,
@@ -1930,45 +1263,33 @@ class AxonLLMAgentCoreStack(Stack):
                 "LLM_ROUTER_DYNAMODB_ENABLED": "true",
                 "AXON_DYNAMODB_TABLE": selected_state_table_name,
                 "AXON_EVENT_OUTBOX_QUEUE_URL": event_outbox_queue.queue_url,
-                "AXON_SECURITY_EVENT_SNS_TOPIC_ARN": (
-                    security_event_topic.topic_arn
-                ),
-                "AXON_SECURITY_EVENT_LOG_GROUP_ARN": (
-                    security_event_log_group.log_group_arn
-                ),
+                "AXON_SECURITY_EVENT_SNS_TOPIC_ARN": (security_event_topic.topic_arn),
+                "AXON_SECURITY_EVENT_LOG_GROUP_ARN": (security_event_log_group.log_group_arn),
                 "AXON_AUTH_MODE": "ENFORCE",
                 "AXON_DEPLOYMENT_PROFILE": "production",
+                "AXON_EXPERIENCE_OWNER": (deployment_experience.value_as_string),
+                "AXON_EXECUTION_TARGET": "agentcore",
                 "AXON_LOAD_DEMO_DATA": "false",
                 "AXON_OIDC_ISSUER": oidc_issuer.value_as_string,
                 "AXON_OIDC_AUDIENCE": Fn.join(
                     ",",
                     oidc_audiences.value_as_list,
                 ),
-                "AXON_OIDC_TENANT_CLAIM": (
-                    oidc_tenant_claim.value_as_string
-                ),
-                "AXON_OIDC_PROJECT_CLAIM": (
-                    oidc_project_claim.value_as_string
-                ),
+                "AXON_OIDC_TENANT_CLAIM": (oidc_tenant_claim.value_as_string),
+                "AXON_OIDC_PROJECT_CLAIM": (oidc_project_claim.value_as_string),
                 "AXON_REQUIRE_CANONICAL_IDENTITY": "true",
-                "AXON_ENABLED_PROVIDERS": (
-                    enabled_providers.value_as_string
-                ),
+                "AXON_AGENTCORE_FACADE_IDENTITY_ALLOWED": ("true" if runtime_ingress == "facade" else "false"),
+                "AXON_ENABLED_PROVIDERS": (enabled_providers.value_as_string),
                 "AXON_PROVIDER_SECRET_ARN": provider_secret.secret_arn,
-                "AXON_PROVIDER_SECRET_VERSION": (
-                    provider_secret_version.value_as_string
-                ),
+                "AXON_PROVIDER_SECRET_VERSION": (provider_secret_version.value_as_string),
                 **(
                     {
-                        "AXON_LAUNCH_REHEARSAL_TABLE": (
-                            rehearsal_control_table_arn.value_as_string
-                        ),
+                        "AXON_LAUNCH_REHEARSAL_TABLE": (rehearsal_control_table_arn.value_as_string),
                         "AXON_LAUNCH_REHEARSAL_ALLOW_PROCESS_EXIT": "true",
                     }
                     if rehearsal_control_table_arn is not None
                     else {}
                 ),
-                **query_config.environment(),
             },
             lifecycle_configuration=agentcore.LifecycleConfiguration(
                 idle_runtime_session_timeout=Duration.minutes(10),
@@ -1977,15 +1298,11 @@ class AxonLLMAgentCoreStack(Stack):
             logging_configs=[
                 agentcore.LoggingConfig(
                     log_type=agentcore.LogType.APPLICATION_LOGS,
-                    destination=agentcore.LoggingDestination.cloud_watch_logs(
-                        application_logs
-                    ),
+                    destination=agentcore.LoggingDestination.cloud_watch_logs(application_logs),
                 ),
                 agentcore.LoggingConfig(
                     log_type=agentcore.LogType.USAGE_LOGS,
-                    destination=agentcore.LoggingDestination.cloud_watch_logs(
-                        usage_logs
-                    ),
+                    destination=agentcore.LoggingDestination.cloud_watch_logs(usage_logs),
                 ),
             ],
             network_configuration=(
@@ -1993,17 +1310,10 @@ class AxonLLMAgentCoreStack(Stack):
                     self,
                     vpc=vpc,
                     security_groups=[runtime_security_group],
-                    vpc_subnets=ec2.SubnetSelection(
-                        subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS
-                    ),
+                    vpc_subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS),
                 )
             ),
             protocol_configuration=agentcore.ProtocolType.HTTP,
-            request_header_configuration=(
-                agentcore.RequestHeaderConfiguration(
-                    allowlisted_headers=["Authorization"]
-                )
-            ),
             tracing_enabled=True,
             tags={
                 "Application": "AxonLLM",
@@ -2044,9 +1354,7 @@ class AxonLLMAgentCoreStack(Stack):
                         "dynamodb:GetItem",
                         "dynamodb:PutItem",
                     ],
-                    resources=[
-                        rehearsal_control_table_arn.value_as_string
-                    ],
+                    resources=[rehearsal_control_table_arn.value_as_string],
                 )
             )
             dynamodb_endpoint.add_to_policy(
@@ -2056,9 +1364,7 @@ class AxonLLMAgentCoreStack(Stack):
                         "dynamodb:GetItem",
                         "dynamodb:PutItem",
                     ],
-                    resources=[
-                        rehearsal_control_table_arn.value_as_string
-                    ],
+                    resources=[rehearsal_control_table_arn.value_as_string],
                 )
             )
         transaction_policy = iam.Policy(
@@ -2096,39 +1402,9 @@ class AxonLLMAgentCoreStack(Stack):
         )
         runtime.add_to_role_policy(
             iam.PolicyStatement(
-                sid="DecryptProviderCredentials",
-                actions=["kms:Decrypt"],
-                resources=[data_key.key_arn],
-                conditions={
-                    "StringEquals": {
-                        "kms:CallerAccount": self.account,
-                        "kms:ViaService": (
-                            f"secretsmanager.{self.region}.{self.url_suffix}"
-                        ),
-                    }
-                },
-            )
-        )
-        runtime.add_to_role_policy(
-            iam.PolicyStatement(
                 sid="UseSecurityEventOutbox",
                 actions=_RUNTIME_SQS_ACTIONS,
                 resources=[event_outbox_queue.queue_arn],
-            )
-        )
-        runtime.add_to_role_policy(
-            iam.PolicyStatement(
-                sid="UseSecurityEventOutboxKey",
-                actions=["kms:Decrypt", "kms:GenerateDataKey*"],
-                resources=[data_key.key_arn],
-                conditions={
-                    "StringEquals": {
-                        "kms:CallerAccount": self.account,
-                        "kms:ViaService": (
-                            f"sqs.{self.region}.{self.url_suffix}"
-                        ),
-                    }
-                },
             )
         )
         runtime.add_to_role_policy(
@@ -2142,16 +1418,12 @@ class AxonLLMAgentCoreStack(Stack):
             iam.PolicyStatement(
                 sid="UseSecurityEventTopicKey",
                 actions=["kms:Decrypt", "kms:GenerateDataKey*"],
-                resources=[data_key.key_arn],
+                resources=["*"],
                 conditions={
                     "StringEquals": {
                         "kms:CallerAccount": self.account,
-                        "kms:ViaService": (
-                            f"sns.{self.region}.{self.url_suffix}"
-                        ),
-                        "kms:EncryptionContext:aws:sns:topicArn": (
-                            security_event_topic.topic_arn
-                        ),
+                        "kms:ViaService": (f"sns.{self.region}.{self.url_suffix}"),
+                        "kms:EncryptionContext:aws:sns:topicArn": (security_event_topic.topic_arn),
                     }
                 },
             )
@@ -2175,34 +1447,6 @@ class AxonLLMAgentCoreStack(Stack):
                 resources=["*"],
             )
         )
-        if query_config.enabled:
-            runtime.add_to_role_policy(
-                iam.PolicyStatement(
-                    actions=ATHENA_ASSUME_ROLE_ACTIONS,
-                    resources=list(query_config.role_arns),
-                )
-            )
-            if sts_endpoint is None or athena_endpoint is None:
-                raise RuntimeError(
-                    "query endpoints must exist when Athena is enabled"
-                )
-            sts_endpoint.add_to_policy(
-                iam.PolicyStatement(
-                    principals=[runtime.role],
-                    actions=ATHENA_ASSUME_ROLE_ACTIONS,
-                    resources=list(query_config.role_arns),
-                )
-            )
-            athena_endpoint.add_to_policy(
-                iam.PolicyStatement(
-                    principals=[
-                        iam.ArnPrincipal(role_arn)
-                        for role_arn in query_config.role_arns
-                    ],
-                    actions=ATHENA_QUERY_ACTIONS,
-                    resources=["*"],
-                )
-            )
         recovery_deny_resource = Token.as_string(
             Fn.condition_if(
                 recovery_access_blocked.logical_id,
@@ -2210,9 +1454,7 @@ class AxonLLMAgentCoreStack(Stack):
                 self.format_arn(
                     service="dynamodb",
                     resource="table",
-                    resource_name=(
-                        "__axonllm_recovery_access_not_blocked__"
-                    ),
+                    resource_name=("__axonllm_recovery_access_not_blocked__"),
                 ),
             )
         )
@@ -2229,9 +1471,7 @@ class AxonLLMAgentCoreStack(Stack):
             ],
         )
         recovery_deny_policy.attach_to_role(runtime.role)
-        cfn_recovery_deny_policy = (
-            recovery_deny_policy.node.default_child
-        )
+        cfn_recovery_deny_policy = recovery_deny_policy.node.default_child
         if not isinstance(cfn_recovery_deny_policy, iam.CfnPolicy):
             raise TypeError("recovery deny policy has no CfnPolicy child")
         recovery_transaction_deny_policy = iam.Policy(
@@ -2247,16 +1487,12 @@ class AxonLLMAgentCoreStack(Stack):
             ],
         )
         recovery_transaction_deny_policy.attach_to_role(runtime.role)
-        cfn_recovery_transaction_deny_policy = (
-            recovery_transaction_deny_policy.node.default_child
-        )
+        cfn_recovery_transaction_deny_policy = recovery_transaction_deny_policy.node.default_child
         if not isinstance(
             cfn_recovery_transaction_deny_policy,
             iam.CfnPolicy,
         ):
-            raise TypeError(
-                "recovery transaction deny policy has no CfnPolicy child"
-            )
+            raise TypeError("recovery transaction deny policy has no CfnPolicy child")
         # cfn-lint 1.52.1 omits this valid DynamoDB IAM action.
         cfn_recovery_transaction_deny_policy.add_metadata(
             "cfn-lint",
@@ -2266,16 +1502,13 @@ class AxonLLMAgentCoreStack(Stack):
         recovery_guard_handler_logs = logs.LogGroup(
             self,
             "RecoveryGuardHandlerLogs",
-            encryption_key=data_key,
             retention=logs.RetentionDays.ONE_YEAR,
             removal_policy=removal_policy,
         )
         recovery_guard_handler = lambda_.Function(
             self,
             "RecoveryGuardHandler",
-            description=(
-                "Blocks unsafe AgentCore DynamoDB recovery transitions"
-            ),
+            description=("Blocks unsafe AgentCore DynamoDB recovery transitions"),
             runtime=lambda_.Runtime.PYTHON_3_12,
             handler="index.handler",
             code=lambda_.Code.from_inline(_AGENTCORE_RECOVERY_GUARD),
@@ -2298,9 +1531,7 @@ class AxonLLMAgentCoreStack(Stack):
                     self.format_arn(
                         service="cloudformation",
                         resource="stack",
-                        resource_name=(
-                            f"{control_plane_stack_name}/*"
-                        ),
+                        resource_name=(f"{control_plane_stack_name}/*"),
                     )
                 ],
             )
@@ -2319,16 +1550,13 @@ class AxonLLMAgentCoreStack(Stack):
         )
         recovery_guard_handler.add_to_role_policy(
             iam.PolicyStatement(
-                actions=[
-                    "application-autoscaling:DescribeScalableTargets"
-                ],
+                actions=["application-autoscaling:DescribeScalableTargets"],
                 resources=["*"],
             )
         )
         recovery_guard_provider_logs = logs.LogGroup(
             self,
             "RecoveryGuardProviderLogs",
-            encryption_key=data_key,
             retention=logs.RetentionDays.ONE_YEAR,
             removal_policy=removal_policy,
         )
@@ -2346,9 +1574,7 @@ class AxonLLMAgentCoreStack(Stack):
                 "AgentCoreStackName": self.stack_name,
                 "ApprovalId": recovery_approval_id.value_as_string,
                 "ControlPlaneStackName": control_plane_stack_name,
-                "MinimumQuiescenceSeconds": str(
-                    _RECOVERY_MIN_QUIESCENCE_SECONDS
-                ),
+                "MinimumQuiescenceSeconds": str(_RECOVERY_MIN_QUIESCENCE_SECONDS),
                 "Mode": recovery_cutover_mode.value_as_string,
                 "PrimaryTable": state_table.table_name,
                 "RuntimeName": runtime_name,
@@ -2358,12 +1584,8 @@ class AxonLLMAgentCoreStack(Stack):
         recovery_guard_resource = recovery_guard.node.default_child
         if not isinstance(recovery_guard_resource, CfnResource):
             raise TypeError("recovery guard has no CloudFormation child")
-        recovery_guard_resource.add_dependency(
-            cfn_recovery_deny_policy
-        )
-        recovery_guard_resource.add_dependency(
-            cfn_recovery_transaction_deny_policy
-        )
+        recovery_guard_resource.add_dependency(cfn_recovery_deny_policy)
+        recovery_guard_resource.add_dependency(cfn_recovery_transaction_deny_policy)
         cfn_runtime = runtime.node.default_child
         if not isinstance(cfn_runtime, agentcore.CfnRuntime):
             raise TypeError("AgentCore runtime has no CfnRuntime child")
@@ -2390,25 +1612,23 @@ class AxonLLMAgentCoreStack(Stack):
         cfn_production_endpoint = production_endpoint.node.default_child
         cfn_candidate_endpoint = candidate_endpoint.node.default_child
         cfn_recovery_endpoint = recovery_endpoint.node.default_child
-        if not isinstance(
-            cfn_production_endpoint,
-            agentcore.CfnRuntimeEndpoint,
-        ) or not isinstance(
-            cfn_candidate_endpoint,
-            agentcore.CfnRuntimeEndpoint,
-        ) or not isinstance(
-            cfn_recovery_endpoint,
-            agentcore.CfnRuntimeEndpoint,
-        ):
-            raise TypeError(
-                "AgentCore endpoint has no CfnRuntimeEndpoint child"
+        if (
+            not isinstance(
+                cfn_production_endpoint,
+                agentcore.CfnRuntimeEndpoint,
             )
-        cfn_production_endpoint.cfn_options.condition = (
-            production_endpoint_enabled
-        )
-        cfn_candidate_endpoint.cfn_options.condition = (
-            candidate_endpoint_enabled
-        )
+            or not isinstance(
+                cfn_candidate_endpoint,
+                agentcore.CfnRuntimeEndpoint,
+            )
+            or not isinstance(
+                cfn_recovery_endpoint,
+                agentcore.CfnRuntimeEndpoint,
+            )
+        ):
+            raise TypeError("AgentCore endpoint has no CfnRuntimeEndpoint child")
+        cfn_production_endpoint.cfn_options.condition = production_endpoint_enabled
+        cfn_candidate_endpoint.cfn_options.condition = candidate_endpoint_enabled
         cfn_recovery_endpoint.cfn_options.condition = recovery_validation
         cfn_production_endpoint.add_dependency(recovery_guard_resource)
         cfn_candidate_endpoint.add_dependency(recovery_guard_resource)
@@ -2418,7 +1638,6 @@ class AxonLLMAgentCoreStack(Stack):
             self,
             "AlarmTopic",
             display_name="AxonLLM AgentCore production alarms",
-            master_key=data_key,
         )
         alarm_topic.add_subscription(
             sns_subscriptions.EmailSubscription(
@@ -2433,10 +1652,7 @@ class AxonLLMAgentCoreStack(Stack):
                 resources=[alarm_topic.topic_arn],
                 conditions={
                     "ArnLike": {
-                        "aws:SourceArn": (
-                            f"arn:{self.partition}:cloudwatch:{self.region}:"
-                            f"{self.account}:alarm:*"
-                        )
+                        "aws:SourceArn": (f"arn:{self.partition}:cloudwatch:{self.region}:{self.account}:alarm:*")
                     },
                     "StringEquals": {"aws:SourceAccount": self.account},
                 },
@@ -2515,20 +1731,15 @@ class AxonLLMAgentCoreStack(Stack):
                 self,
                 "SecurityEventDeadLettersAlarm",
                 metric=(
-                    event_dead_letter_queue
-                    .metric_approximate_number_of_messages_visible(
+                    event_dead_letter_queue.metric_approximate_number_of_messages_visible(
                         period=Duration.minutes(1),
                         statistic="Maximum",
                     )
                 ),
                 threshold=1,
                 evaluation_periods=1,
-                treat_missing_data=(
-                    cloudwatch.TreatMissingData.NOT_BREACHING
-                ),
-                alarm_description=(
-                    "A security event exhausted delivery retries"
-                ),
+                treat_missing_data=(cloudwatch.TreatMissingData.NOT_BREACHING),
+                alarm_description=("A security event exhausted delivery retries"),
             ),
         ]
         security_event_dead_letters_alarm = alarms[-1]
@@ -2540,9 +1751,7 @@ class AxonLLMAgentCoreStack(Stack):
         dashboard = cloudwatch.Dashboard(
             self,
             "OperationsDashboard",
-            dashboard_name=(
-                f"AxonLLM-AgentCore-Production{physical_suffix}"
-            ),
+            dashboard_name=(f"AxonLLM-AgentCore-Production{physical_suffix}"),
         )
         dashboard.add_widgets(
             cloudwatch.GraphWidget(
@@ -2572,6 +1781,10 @@ class AxonLLMAgentCoreStack(Stack):
             self,
             "RuntimeArn",
             value=runtime.agent_runtime_arn,
+            export_name=Fn.join(
+                ":",
+                [self.stack_name, "RuntimeArn"],
+            ),
         )
         CfnOutput(
             self,
@@ -2601,17 +1814,13 @@ class AxonLLMAgentCoreStack(Stack):
             "ProviderSecretVersionOutput",
             value=provider_secret_version.value_as_string,
         )
-        provider_secret_version_output.override_logical_id(
-            "ProviderSecretVersion"
-        )
+        provider_secret_version_output.override_logical_id("ProviderSecretVersion")
         approved_https_prefix_list_output = CfnOutput(
             self,
             "ApprovedHttpsPrefixListIdOutput",
             value=approved_https_prefix_list_id.value_as_string,
         )
-        approved_https_prefix_list_output.override_logical_id(
-            "ApprovedHttpsPrefixListId"
-        )
+        approved_https_prefix_list_output.override_logical_id("ApprovedHttpsPrefixListId")
         bedrock_invoke_resource_arns_output = CfnOutput(
             self,
             "BedrockInvokeResourceArnsOutput",
@@ -2620,30 +1829,34 @@ class AxonLLMAgentCoreStack(Stack):
                 bedrock_invoke_resource_arns.value_as_list,
             ),
         )
-        bedrock_invoke_resource_arns_output.override_logical_id(
-            "BedrockInvokeResourceArns"
+        bedrock_invoke_resource_arns_output.override_logical_id("BedrockInvokeResourceArns")
+        deployment_experience_output = CfnOutput(
+            self,
+            "DeploymentExperienceOutput",
+            value=deployment_experience.value_as_string,
+        )
+        deployment_experience_output.override_logical_id("DeploymentExperience")
+        CfnOutput(
+            self,
+            "DeploymentExecution",
+            value="agentcore",
         )
         CfnOutput(
             self,
-            "AthenaConfigurationFingerprint",
-            value=query_config.fingerprint(),
+            "RuntimeIngressMode",
+            value=runtime_ingress,
         )
         alarm_notification_email_output = CfnOutput(
             self,
             "AlarmNotificationEmailOutput",
             value=alarm_notification_email.value_as_string,
         )
-        alarm_notification_email_output.override_logical_id(
-            "AlarmNotificationEmail"
-        )
+        alarm_notification_email_output.override_logical_id("AlarmNotificationEmail")
         CfnOutput(
             self,
             "RuntimeExecutionRoleArn",
             value=runtime.role.role_arn,
-            description=(
-                "Exact principal that approved Athena datasource roles "
-                "must trust"
-            ),
+            description="Execution role assumed by the AgentCore runtime",
         )
         runtime_endpoint_output = CfnOutput(
             self,
@@ -2656,20 +1869,14 @@ class AxonLLMAgentCoreStack(Stack):
             "ProductionRuntimeVersionOutput",
             value=production_runtime_version.value_as_string,
         )
-        production_runtime_version_output.override_logical_id(
-            "ProductionRuntimeVersion"
-        )
-        production_runtime_version_output.condition = (
-            production_endpoint_enabled
-        )
+        production_runtime_version_output.override_logical_id("ProductionRuntimeVersion")
+        production_runtime_version_output.condition = production_endpoint_enabled
         candidate_runtime_version_output = CfnOutput(
             self,
             "CandidateRuntimeVersion",
             value=runtime.agent_runtime_version,
         )
-        candidate_runtime_version_output.condition = (
-            candidate_endpoint_enabled
-        )
+        candidate_runtime_version_output.condition = candidate_endpoint_enabled
         candidate_endpoint_output = CfnOutput(
             self,
             "CandidateRuntimeEndpointArn",
@@ -2722,15 +1929,6 @@ class AxonLLMAgentCoreStack(Stack):
             self,
             "RecoveryMinimumQuiescenceSeconds",
             value=str(_RECOVERY_MIN_QUIESCENCE_SECONDS),
-        )
-        CfnOutput(
-            self,
-            "DataKeyArn",
-            value=data_key.key_arn,
-            export_name=Fn.join(
-                ":",
-                [self.stack_name, "DataKeyArn"],
-            ),
         )
         CfnOutput(
             self,
@@ -2787,16 +1985,6 @@ class AxonLLMAgentCoreStack(Stack):
             self,
             "ProviderSecretArn",
             value=provider_secret.secret_arn,
-        )
-        CfnOutput(
-            self,
-            "StateBackupVaultArn",
-            value=backup_vault.backup_vault_arn,
-        )
-        CfnOutput(
-            self,
-            "StateBackupRoleArn",
-            value=backup_service_role.role_arn,
         )
         CfnOutput(
             self,

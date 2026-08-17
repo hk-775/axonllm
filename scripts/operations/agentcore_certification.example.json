@@ -1,6 +1,7 @@
 {
   "schemaVersion": 1,
   "profile": "production-launch",
+  "ingressMode": "iam-facade",
   "region": "us-east-1",
   "runtimeArn": "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/AxonLLMRuntime-ABCDEFGHIJ",
   "qualifier": "production",
@@ -99,15 +100,5 @@
         "tool_calling"
       ]
     }
-  ],
-  "query": {
-    "catalog": "AwsDataCatalog",
-    "database": "axonllm_launch",
-    "datasourceId": "launch-datasource",
-    "region": "us-east-1",
-    "roleArn": "arn:aws:iam::123456789012:role/AxonLLMAthenaReadOnlyRole",
-    "sql": "SELECT canary_id, status FROM launch_canary WHERE tenant_id = 'tenant-launch' LIMIT 10",
-    "maxRows": 10,
-    "workgroup": "axonllm_read_only"
-  }
+  ]
 }

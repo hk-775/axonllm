@@ -62,28 +62,16 @@ _LAUNCH_STATE_MACHINE_NAME = "AxonLLMLaunchCoordinator"
 _LAUNCH_SCHEDULE_GROUP_NAME = "axonllm-launch-coordinator"
 _LAUNCH_CLEANUP_SCHEDULE_NAME = "axonllm-launch-coordinator-cleanup"
 _LAUNCH_WATCHDOG_SCHEDULE_NAME = "axonllm-launch-coordinator-watchdog"
-_QUALIFICATION_MUTATION_AUTHORIZATION_TABLE_NAME = (
-    "axonllm-qualification-mutation-authorizations"
-)
-_QUALIFICATION_MUTATION_BROKER_NAME = (
-    "axonllm-qualification-selector-mutation-broker"
-)
+_QUALIFICATION_MUTATION_AUTHORIZATION_TABLE_NAME = "axonllm-qualification-mutation-authorizations"
+_QUALIFICATION_MUTATION_BROKER_NAME = "axonllm-qualification-selector-mutation-broker"
 _PRODUCTION_MUTATION_BROKER_NAME = "axonllm-production-transition-mutation-broker"
-_QUALIFICATION_MUTATION_BROKER_LOG_GROUP = (
-    f"/aws/lambda/{_QUALIFICATION_MUTATION_BROKER_NAME}"
-)
-_PRODUCTION_MUTATION_BROKER_LOG_GROUP = (
-    f"/aws/lambda/{_PRODUCTION_MUTATION_BROKER_NAME}"
-)
+_QUALIFICATION_MUTATION_BROKER_LOG_GROUP = f"/aws/lambda/{_QUALIFICATION_MUTATION_BROKER_NAME}"
+_PRODUCTION_MUTATION_BROKER_LOG_GROUP = f"/aws/lambda/{_PRODUCTION_MUTATION_BROKER_NAME}"
 _LAUNCH_WORKER_ACTIONS = (
     "induce-initialization-timeout",
     "observe-exit-124",
     "observe-runtime-replacement",
     "verify-replacement-ready",
-    "reject-query-boundaries",
-    "interrupt-query",
-    "verify-terminal-reconciliation",
-    "verify-deferred-accounting",
     "restore-state",
     "cutover-restored-state",
     "verify-restored-state",
@@ -402,13 +390,11 @@ class AxonLLMReleaseFoundationStack(Stack):
             launch_alarm_email=launch_alarm_email,
             state_table_names=state_table_names,
         )
-        production_mutation_broker_version = (
-            self._create_production_transition_mutation_broker(
-                evidence_bucket=evidence_bucket,
-                evidence_key=evidence_key,
-                transition_signing_key=transition_signing_key,
-                log_encryption_key=launch_coordinator.key,
-            )
+        production_mutation_broker_version = self._create_production_transition_mutation_broker(
+            evidence_bucket=evidence_bucket,
+            evidence_key=evidence_key,
+            transition_signing_key=transition_signing_key,
+            log_encryption_key=launch_coordinator.key,
         )
         self._grant_evidence_access(
             launch_coordinator.launch_role,
@@ -425,12 +411,8 @@ class AxonLLMReleaseFoundationStack(Stack):
             evidence_key=evidence_key,
             prerequisite_signing_key=prerequisite_signing_key,
             transition_signing_key=transition_signing_key,
-            transition_terminal_signing_key=(
-                transition_terminal_signing_key
-            ),
-            production_mutation_broker_version=(
-                production_mutation_broker_version
-            ),
+            transition_terminal_signing_key=(transition_terminal_signing_key),
+            production_mutation_broker_version=(production_mutation_broker_version),
             repositories=repositories,
             runtime_identity_secret=launch_coordinator.runtime_identity_secret,
             coordinator_key=launch_coordinator.key,
@@ -526,16 +508,12 @@ class AxonLLMReleaseFoundationStack(Stack):
         CfnOutput(
             self,
             "QualificationMutationBrokerVersionArn",
-            value=(
-                launch_coordinator.qualification_mutation_broker_version.function_arn
-            ),
+            value=(launch_coordinator.qualification_mutation_broker_version.function_arn),
         )
         CfnOutput(
             self,
             "QualificationMutationAuthorizationTableArn",
-            value=(
-                launch_coordinator.qualification_mutation_authorization_table.table_arn
-            ),
+            value=(launch_coordinator.qualification_mutation_authorization_table.table_arn),
         )
         CfnOutput(
             self,
@@ -768,13 +746,7 @@ class AxonLLMReleaseFoundationStack(Stack):
 
     @staticmethod
     def _mutation_broker_source(filename: str) -> str:
-        path = (
-            Path(__file__).resolve().parents[1]
-            / "src"
-            / "gateway"
-            / "deployment"
-            / filename
-        )
+        path = Path(__file__).resolve().parents[1] / "src" / "gateway" / "deployment" / filename
         source = path.read_text(encoding="ascii")
         if not source.endswith("\n"):
             raise ValueError(f"mutation broker source is not newline terminated: {path}")
@@ -792,18 +764,13 @@ class AxonLLMReleaseFoundationStack(Stack):
             service="iam",
             region="",
             resource="role",
-            resource_name=(
-                f"cdk-{_PRODUCTION_CDK_QUALIFIER}-cfn-exec-role-"
-                f"{self.account}-{self.region}"
-            ),
+            resource_name=(f"cdk-{_PRODUCTION_CDK_QUALIFIER}-cfn-exec-role-{self.account}-{self.region}"),
         )
         role = iam.Role(
             self,
             "ProductionTransitionMutationBrokerRole",
             role_name="AxonLLMProductionTransitionMutationBrokerRole",
-            description=(
-                "Executes only evidence-bound production transition mutations"
-            ),
+            description=("Executes only evidence-bound production transition mutations"),
             assumed_by=iam.ServicePrincipal("lambda.amazonaws.com"),
             max_session_duration=Duration.hours(1),
         )
@@ -847,11 +814,7 @@ class AxonLLMReleaseFoundationStack(Stack):
                     "s3:GetObjectRetention",
                     "s3:GetObjectVersion",
                 ],
-                resources=[
-                    evidence_bucket.arn_for_objects(
-                        f"{_TRANSITION_EVIDENCE_PREFIX}/*"
-                    )
-                ],
+                resources=[evidence_bucket.arn_for_objects(f"{_TRANSITION_EVIDENCE_PREFIX}/*")],
             )
         )
         role.add_to_policy(
@@ -865,9 +828,7 @@ class AxonLLMReleaseFoundationStack(Stack):
                 conditions={
                     "StringEquals": {
                         "kms:CallerAccount": self.account,
-                        "kms:ViaService": (
-                            f"s3.{self.region}.{self.url_suffix}"
-                        ),
+                        "kms:ViaService": (f"s3.{self.region}.{self.url_suffix}"),
                     }
                 },
             )
@@ -907,11 +868,7 @@ class AxonLLMReleaseFoundationStack(Stack):
                 sid="PassProductionCloudFormationExecutionRole",
                 actions=["iam:PassRole"],
                 resources=[execution_role_arn],
-                conditions={
-                    "StringEquals": {
-                        "iam:PassedToService": "cloudformation.amazonaws.com"
-                    }
-                },
+                conditions={"StringEquals": {"iam:PassedToService": "cloudformation.amazonaws.com"}},
             )
         )
         role.add_to_policy(
@@ -929,11 +886,7 @@ class AxonLLMReleaseFoundationStack(Stack):
                     )
                 ],
                 conditions={
-                    "StringEquals": {
-                        "aws:ResourceTag/aws:cloudformation:stack-name": (
-                            "AxonLLMControlPlaneStack"
-                        )
-                    }
+                    "StringEquals": {"aws:ResourceTag/aws:cloudformation:stack-name": ("AxonLLMControlPlaneStack")}
                 },
             )
         )
@@ -941,18 +894,11 @@ class AxonLLMReleaseFoundationStack(Stack):
             self,
             "ProductionTransitionMutationBroker",
             function_name=_PRODUCTION_MUTATION_BROKER_NAME,
-            description=(
-                "Evidence-verifying broker for one bounded production "
-                "transition mutation per invocation"
-            ),
+            description=("Evidence-verifying broker for one bounded production transition mutation per invocation"),
             runtime=lambda_.Runtime.PYTHON_3_12,
             architecture=lambda_.Architecture.X86_64,
             handler="index.lambda_handler",
-            code=lambda_.Code.from_inline(
-                self._mutation_broker_source(
-                    "production_transition_mutation_broker.py"
-                )
-            ),
+            code=lambda_.Code.from_inline(self._mutation_broker_source("production_transition_mutation_broker.py")),
             role=role,
             log_group=log_group,
             memory_size=512,
@@ -960,12 +906,8 @@ class AxonLLMReleaseFoundationStack(Stack):
             reserved_concurrent_executions=1,
             environment={
                 "AXON_DEPLOYMENT_EVIDENCE_BUCKET": evidence_bucket.bucket_name,
-                "AXON_DEPLOYMENT_EVIDENCE_PREFIX": (
-                    _TRANSITION_EVIDENCE_PREFIX
-                ),
-                "AXON_AGENTCORE_TRANSITION_SIGNING_KEY_ARN": (
-                    transition_signing_key.key_arn
-                ),
+                "AXON_DEPLOYMENT_EVIDENCE_PREFIX": (_TRANSITION_EVIDENCE_PREFIX),
+                "AXON_AGENTCORE_TRANSITION_SIGNING_KEY_ARN": (transition_signing_key.key_arn),
                 "AXON_AGENTCORE_STACK_NAME": "AxonLLMAgentCoreStack",
                 "AXON_CONTROL_PLANE_STACK_NAME": "AxonLLMControlPlaneStack",
                 "AXON_CLOUDFORMATION_EXECUTION_ROLE_ARN": execution_role_arn,
@@ -1134,9 +1076,7 @@ class AxonLLMReleaseFoundationStack(Stack):
             runtime_identity_secret=runtime_identity_secret,
             coordinator_key=coordinator_key,
         )
-        production_mutation_broker_version.grant_invoke(
-            transition_watchdog_role
-        )
+        production_mutation_broker_version.grant_invoke(transition_watchdog_role)
         return _LaunchAuthorities(
             deploy_role=deploy_role,
             rehearsal_evidence_role=rehearsal_evidence_role,
@@ -1322,13 +1262,8 @@ class AxonLLMReleaseFoundationStack(Stack):
                     "s3:PutObjectRetention",
                 ],
                 resources=[
-                    bucket.arn_for_objects(
-                        f"{prefix}/*/transition-terminal.json"
-                    ),
-                    bucket.arn_for_objects(
-                        f"{prefix}/*/"
-                        "transition-terminal-kms-signature.json"
-                    ),
+                    bucket.arn_for_objects(f"{prefix}/*/transition-terminal.json"),
+                    bucket.arn_for_objects(f"{prefix}/*/transition-terminal-kms-signature.json"),
                 ],
             )
         )
@@ -1345,9 +1280,7 @@ class AxonLLMReleaseFoundationStack(Stack):
                 conditions={
                     "StringEquals": {
                         "kms:CallerAccount": self.account,
-                        "kms:ViaService": (
-                            f"s3.{self.region}.{self.url_suffix}"
-                        ),
+                        "kms:ViaService": (f"s3.{self.region}.{self.url_suffix}"),
                     }
                 },
             )
@@ -1500,8 +1433,7 @@ class AxonLLMReleaseFoundationStack(Stack):
                     )
                     for name in (
                         *(
-                            "AxonLLMAgentCoreCloudFormationExecution-"
-                            f"{cdk_qualifier}-{self.region}-part{part}"
+                            f"AxonLLMAgentCoreCloudFormationExecution-{cdk_qualifier}-{self.region}-part{part}"
                             for part in range(
                                 1,
                                 _CDK_EXECUTION_POLICY_PART_COUNT + 1,
@@ -1788,19 +1720,13 @@ class AxonLLMReleaseFoundationStack(Stack):
             service="iam",
             region="",
             resource="role",
-            resource_name=(
-                f"cdk-{_QUALIFICATION_CDK_QUALIFIER}-cfn-exec-role-"
-                f"{self.account}-{self.region}"
-            ),
+            resource_name=(f"cdk-{_QUALIFICATION_CDK_QUALIFIER}-cfn-exec-role-{self.account}-{self.region}"),
         )
         role = iam.Role(
             self,
             "QualificationMutationBrokerRole",
             role_name="AxonLLMQualificationMutationBrokerRole",
-            description=(
-                "Executes only coordinator-authorized qualification selector "
-                "mutations"
-            ),
+            description=("Executes only coordinator-authorized qualification selector mutations"),
             assumed_by=iam.ServicePrincipal("lambda.amazonaws.com"),
             max_session_duration=Duration.hours(1),
         )
@@ -1855,11 +1781,7 @@ class AxonLLMReleaseFoundationStack(Stack):
                 sid="PassQualificationCloudFormationExecutionRole",
                 actions=["iam:PassRole"],
                 resources=[execution_role_arn],
-                conditions={
-                    "StringEquals": {
-                        "iam:PassedToService": "cloudformation.amazonaws.com"
-                    }
-                },
+                conditions={"StringEquals": {"iam:PassedToService": "cloudformation.amazonaws.com"}},
             )
         )
         function = lambda_.Function(
@@ -1867,32 +1789,21 @@ class AxonLLMReleaseFoundationStack(Stack):
             "QualificationMutationBroker",
             function_name=_QUALIFICATION_MUTATION_BROKER_NAME,
             description=(
-                "Coordinator-authorized broker for one bounded qualification "
-                "selector mutation per invocation"
+                "Coordinator-authorized broker for one bounded qualification selector mutation per invocation"
             ),
             runtime=lambda_.Runtime.PYTHON_3_12,
             architecture=lambda_.Architecture.X86_64,
             handler="index.lambda_handler",
-            code=lambda_.Code.from_inline(
-                self._mutation_broker_source(
-                    "qualification_mutation_broker.py"
-                )
-            ),
+            code=lambda_.Code.from_inline(self._mutation_broker_source("qualification_mutation_broker.py")),
             role=role,
             log_group=log_group,
             memory_size=256,
             timeout=Duration.seconds(30),
             reserved_concurrent_executions=1,
             environment={
-                "AXON_QUALIFICATION_MUTATION_AUTHORIZATION_TABLE": (
-                    authorization_table.table_arn
-                ),
-                "AXON_QUALIFICATION_PRIMARY_TABLE_NAME": (
-                    "axonllm-agentcore-state-managed"
-                ),
-                "AXON_QUALIFICATION_CLOUDFORMATION_EXECUTION_ROLE_ARN": (
-                    execution_role_arn
-                ),
+                "AXON_QUALIFICATION_MUTATION_AUTHORIZATION_TABLE": (authorization_table.table_arn),
+                "AXON_QUALIFICATION_PRIMARY_TABLE_NAME": ("axonllm-agentcore-state-managed"),
+                "AXON_QUALIFICATION_CLOUDFORMATION_EXECUTION_ROLE_ARN": (execution_role_arn),
             },
         )
         function.node.add_dependency(log_group)
@@ -2073,9 +1984,7 @@ class AxonLLMReleaseFoundationStack(Stack):
                 )
             ),
             time_to_live_attribute="expiresAtEpoch",
-            contributor_insights_specification=(
-                dynamodb.ContributorInsightsSpecification(enabled=True)
-            ),
+            contributor_insights_specification=(dynamodb.ContributorInsightsSpecification(enabled=True)),
             removal_policy=RemovalPolicy.RETAIN,
             resource_policy=iam.PolicyDocument(
                 statements=[
@@ -2085,20 +1994,14 @@ class AxonLLMReleaseFoundationStack(Stack):
                         principals=[iam.AnyPrincipal()],
                         actions=["dynamodb:*"],
                         resources=["*"],
-                        conditions={
-                            "Bool": {"aws:SecureTransport": "false"}
-                        },
+                        conditions={"Bool": {"aws:SecureTransport": "false"}},
                     )
                 ]
             ),
         )
-        qualification_mutation_broker_version = (
-            self._create_qualification_mutation_broker(
-                authorization_table=(
-                    qualification_mutation_authorization_table
-                ),
-                log_encryption_key=coordinator_key,
-            )
+        qualification_mutation_broker_version = self._create_qualification_mutation_broker(
+            authorization_table=(qualification_mutation_authorization_table),
+            log_encryption_key=coordinator_key,
         )
         runtime_identity_secret = secretsmanager.CfnSecret(
             self,
@@ -2192,9 +2095,7 @@ class AxonLLMReleaseFoundationStack(Stack):
             iam.PolicyStatement(
                 sid="IssueQualificationMutationAuthorizations",
                 actions=["dynamodb:TransactWriteItems"],
-                resources=[
-                    qualification_mutation_authorization_table.table_arn
-                ],
+                resources=[qualification_mutation_authorization_table.table_arn],
             )
         )
         execution_role.add_to_policy(
@@ -2236,9 +2137,7 @@ class AxonLLMReleaseFoundationStack(Stack):
                 conditions={
                     "StringEquals": {
                         "kms:CallerAccount": self.account,
-                        "kms:EncryptionContext:aws:states:stateMachineArn": (
-                            state_machine_arn
-                        ),
+                        "kms:EncryptionContext:aws:states:stateMachineArn": (state_machine_arn),
                     }
                 },
             )
@@ -2290,9 +2189,7 @@ class AxonLLMReleaseFoundationStack(Stack):
             runtime_identity_secret=runtime_identity_secret,
             coordinator_key=coordinator_key,
             state_table_names=state_table_names,
-            qualification_mutation_broker_version=(
-                qualification_mutation_broker_version
-            ),
+            qualification_mutation_broker_version=(qualification_mutation_broker_version),
             cleanup=False,
         )
         cleanup_worker_role = self._launch_worker_role(
@@ -2305,9 +2202,7 @@ class AxonLLMReleaseFoundationStack(Stack):
             runtime_identity_secret=runtime_identity_secret,
             coordinator_key=coordinator_key,
             state_table_names=state_table_names,
-            qualification_mutation_broker_version=(
-                qualification_mutation_broker_version
-            ),
+            qualification_mutation_broker_version=(qualification_mutation_broker_version),
             cleanup=True,
         )
 
@@ -2330,17 +2225,12 @@ class AxonLLMReleaseFoundationStack(Stack):
                 lease_table_name=lease_table.table_name,
                 action_activity_arn=action_activity.attr_arn,
                 cleanup_activity_arn=cleanup_activity.attr_arn,
-                qualification_mutation_authorization_table_name=(
-                    qualification_mutation_authorization_table.table_name
-                ),
+                qualification_mutation_authorization_table_name=(qualification_mutation_authorization_table.table_name),
                 qualification_execution_role_arn=self.format_arn(
                     service="iam",
                     region="",
                     resource="role",
-                    resource_name=(
-                        f"cdk-{_QUALIFICATION_CDK_QUALIFIER}-"
-                        f"cfn-exec-role-{self.account}-{self.region}"
-                    ),
+                    resource_name=(f"cdk-{_QUALIFICATION_CDK_QUALIFIER}-cfn-exec-role-{self.account}-{self.region}"),
                 ),
             ),
             encryption_configuration=(
@@ -2479,12 +2369,8 @@ class AxonLLMReleaseFoundationStack(Stack):
                     },
                     "ArnEquals": {
                         "kms:EncryptionContext:aws:scheduler:schedule:arn": [
-                            self._launch_schedule_arn(
-                                _LAUNCH_CLEANUP_SCHEDULE_NAME
-                            ),
-                            self._launch_schedule_arn(
-                                _LAUNCH_WATCHDOG_SCHEDULE_NAME
-                            ),
+                            self._launch_schedule_arn(_LAUNCH_CLEANUP_SCHEDULE_NAME),
+                            self._launch_schedule_arn(_LAUNCH_WATCHDOG_SCHEDULE_NAME),
                         ]
                     },
                 },
@@ -2729,12 +2615,8 @@ class AxonLLMReleaseFoundationStack(Stack):
             key=coordinator_key,
             lease_table=lease_table,
             rehearsal_control_table=rehearsal_control_table,
-            qualification_mutation_authorization_table=(
-                qualification_mutation_authorization_table
-            ),
-            qualification_mutation_broker_version=(
-                qualification_mutation_broker_version
-            ),
+            qualification_mutation_authorization_table=(qualification_mutation_authorization_table),
+            qualification_mutation_broker_version=(qualification_mutation_broker_version),
             runtime_identity_secret=runtime_identity_secret,
             state_machine=state_machine,
             version=version,
@@ -3058,44 +2940,6 @@ class AxonLLMReleaseFoundationStack(Stack):
                 ],
             )
         )
-        role.add_to_policy(
-            iam.PolicyStatement(
-                sid="UseRuntimeDataKeyThroughDomainServices",
-                actions=[
-                    "kms:Decrypt",
-                    "kms:DescribeKey",
-                    "kms:Encrypt",
-                    "kms:GenerateDataKey",
-                ],
-                resources=[self._account_key_arn()],
-                conditions={
-                    **self._qualification_data_key_alias_condition(),
-                    "StringEquals": {
-                        "kms:CallerAccount": self.account,
-                        "kms:ViaService": [
-                            (f"dynamodb.{self.region}.{self.url_suffix}"),
-                            f"sqs.{self.region}.{self.url_suffix}",
-                        ],
-                    },
-                },
-            )
-        )
-        if not cleanup:
-            role.add_to_policy(
-                iam.PolicyStatement(
-                    sid="GrantAgentCoreStateKeysForRestore",
-                    actions=["kms:CreateGrant"],
-                    resources=[self._account_key_arn()],
-                    conditions={
-                        **self._qualification_data_key_alias_condition(),
-                        "Bool": {"kms:GrantIsForAWSResource": "true"},
-                        "StringEquals": {
-                            "kms:CallerAccount": self.account,
-                            "kms:ViaService": (f"dynamodb.{self.region}.{self.url_suffix}"),
-                        },
-                    },
-                )
-            )
 
     def _launch_schedule(
         self,
@@ -3226,22 +3070,13 @@ class AxonLLMReleaseFoundationStack(Stack):
             legal_edge: str,
         ) -> dict[str, object]:
             stack_path = (
-                "$.binding.agentcoreStackArn"
-                if stack_kind == "agentcore"
-                else "$.binding.controlPlaneStackArn"
+                "$.binding.agentcoreStackArn" if stack_kind == "agentcore" else "$.binding.controlPlaneStackArn"
             )
             return {
                 "Put": {
-                    "TableName": (
-                        qualification_mutation_authorization_table_name
-                    ),
+                    "TableName": (qualification_mutation_authorization_table_name),
                     "Item": {
-                        "schema": {
-                            "S": (
-                                "axonllm.qualification-selector-"
-                                "authorization"
-                            )
-                        },
+                        "schema": {"S": ("axonllm.qualification-selector-authorization")},
                         "version": {"N": "1"},
                         "authorizationId": {
                             "S.$": (
@@ -3252,32 +3087,16 @@ class AxonLLMReleaseFoundationStack(Stack):
                             )
                         },
                         "ownerId": {"S.$": "$.owner.id"},
-                        "fenceToken": {
-                            "N.$": "$.lease.Attributes.fenceToken.N"
-                        },
+                        "fenceToken": {"N.$": "$.lease.Attributes.fenceToken.N"},
                         "stackKind": {"S": stack_kind},
                         "legalEdge": {"S": legal_edge},
                         "status": {"S": "ACTIVE"},
-                        "expiresAtEpoch": {
-                            "N.$": (
-                                "$.owner.authorizationExpiresAtEpoch"
-                            )
-                        },
+                        "expiresAtEpoch": {"N.$": ("$.owner.authorizationExpiresAtEpoch")},
                         "stackArn": {"S.$": stack_path},
-                        "primaryTableName": {
-                            "S.$": "$.parameters.primaryTableName"
-                        },
-                        "restoredTableName": {
-                            "S.$": "$.parameters.restoredTableName"
-                        },
-                        "approvalId": {
-                            "S.$": (
-                                "States.Format('launch/{}', $.owner.id)"
-                            )
-                        },
-                        "executionRoleArn": {
-                            "S": qualification_execution_role_arn
-                        },
+                        "primaryTableName": {"S.$": "$.parameters.primaryTableName"},
+                        "restoredTableName": {"S.$": "$.parameters.restoredTableName"},
+                        "approvalId": {"S.$": ("States.Format('launch/{}', $.owner.id)")},
+                        "executionRoleArn": {"S": qualification_execution_role_arn},
                     },
                 }
             }
@@ -3287,15 +3106,9 @@ class AxonLLMReleaseFoundationStack(Stack):
         ) -> dict[str, object]:
             return {
                 "Type": "Task",
-                "Resource": (
-                    "arn:aws:states:::aws-sdk:"
-                    "dynamodb:transactWriteItems"
-                ),
+                "Resource": ("arn:aws:states:::aws-sdk:dynamodb:transactWriteItems"),
                 "Parameters": {
-                    "TransactItems": [
-                        authorization_item(stack_kind, legal_edge)
-                        for stack_kind, legal_edge in edges
-                    ],
+                    "TransactItems": [authorization_item(stack_kind, legal_edge) for stack_kind, legal_edge in edges],
                 },
                 "ResultPath": "$.mutationAuthorization",
                 "Catch": [
@@ -3463,12 +3276,8 @@ class AxonLLMReleaseFoundationStack(Stack):
                     ],
                     "Default": "RunActionWorker",
                 },
-                "AuthorizePrimarySelectorRecovery": authorization_state(
-                    primary_recovery_edges
-                ),
-                "AuthorizeRestoredSelectorCutover": authorization_state(
-                    restored_cutover_edges
-                ),
+                "AuthorizePrimarySelectorRecovery": authorization_state(primary_recovery_edges),
+                "AuthorizeRestoredSelectorCutover": authorization_state(restored_cutover_edges),
                 "RunActionWorker": {
                     "Type": "Task",
                     "Resource": action_activity_arn,
@@ -3633,16 +3442,6 @@ class AxonLLMReleaseFoundationStack(Stack):
         )
         role.add_to_policy(
             iam.PolicyStatement(
-                sid="InspectRecoveryPoints",
-                actions=[
-                    "backup:DescribeBackupVault",
-                    "backup:ListRecoveryPointsByBackupVault",
-                ],
-                resources=self._backup_vault_arns(),
-            )
-        )
-        role.add_to_policy(
-            iam.PolicyStatement(
                 sid="InspectStateProtection",
                 actions=[
                     "dynamodb:DescribeContinuousBackups",
@@ -3668,17 +3467,6 @@ class AxonLLMReleaseFoundationStack(Stack):
                 ],
             )
         )
-        role.add_to_policy(
-            iam.PolicyStatement(
-                sid="InspectDataKeyRotation",
-                actions=[
-                    "kms:DescribeKey",
-                    "kms:GetKeyRotationStatus",
-                ],
-                resources=[self._account_key_arn()],
-                conditions=self._data_key_alias_condition(),
-            )
-        )
 
     def _grant_operations_recovery(
         self,
@@ -3694,16 +3482,6 @@ class AxonLLMReleaseFoundationStack(Stack):
                     "cloudformation:ListStackResources",
                 ],
                 resources=self._runtime_stack_arns(),
-            )
-        )
-        role.add_to_policy(
-            iam.PolicyStatement(
-                sid="InspectRecoveryPoints",
-                actions=[
-                    "backup:DescribeBackupVault",
-                    "backup:ListRecoveryPointsByBackupVault",
-                ],
-                resources=self._backup_vault_arns(),
             )
         )
         role.add_to_policy(
@@ -3734,41 +3512,6 @@ class AxonLLMReleaseFoundationStack(Stack):
                     "dynamodb:UpdateTimeToLive",
                 ],
                 resources=self._restored_table_arns(state_table_names),
-            )
-        )
-        via_dynamodb = {
-            "kms:CallerAccount": self.account,
-            "kms:ViaService": (f"dynamodb.{self.region}.{self.url_suffix}"),
-        }
-        role.add_to_policy(
-            iam.PolicyStatement(
-                sid="UseStateKeysForRestore",
-                actions=[
-                    "kms:Decrypt",
-                    "kms:DescribeKey",
-                    "kms:Encrypt",
-                    "kms:GenerateDataKey",
-                    "kms:GenerateDataKeyWithoutPlaintext",
-                    "kms:ReEncryptFrom",
-                    "kms:ReEncryptTo",
-                ],
-                resources=[self._account_key_arn()],
-                conditions={
-                    **self._data_key_alias_condition(),
-                    "StringEquals": via_dynamodb,
-                },
-            )
-        )
-        role.add_to_policy(
-            iam.PolicyStatement(
-                sid="GrantStateKeysToDynamoDb",
-                actions=["kms:CreateGrant"],
-                resources=[self._account_key_arn()],
-                conditions={
-                    **self._data_key_alias_condition(),
-                    "Bool": {"kms:GrantIsForAWSResource": "true"},
-                    "StringEquals": via_dynamodb,
-                },
             )
         )
 
@@ -3850,44 +3593,12 @@ class AxonLLMReleaseFoundationStack(Stack):
     ) -> list[str]:
         return [f"{table_arn}-restore-validation-*" for table_arn in self._source_table_arns(state_table_names)]
 
-    def _backup_vault_arns(self) -> list[str]:
-        return [
-            self.format_arn(
-                service="backup",
-                resource="backup-vault",
-                resource_name=prefix,
-                arn_format=ArnFormat.COLON_RESOURCE_NAME,
-            )
-            for prefix in ("axon-state-*", "axon-agent-*")
-        ]
-
     def _account_key_arn(self) -> str:
         return self.format_arn(
             service="kms",
             resource="key",
             resource_name="*",
         )
-
-    @staticmethod
-    def _data_key_alias_condition() -> dict[str, dict[str, list[str]]]:
-        return {
-            "ForAnyValue:StringEquals": {
-                "kms:ResourceAliases": [
-                    "alias/axonllm/data",
-                    "alias/axonllm/agentcore-data",
-                ]
-            }
-        }
-
-    @staticmethod
-    def _qualification_data_key_alias_condition() -> dict[str, dict[str, list[str]]]:
-        return {
-            "ForAnyValue:StringEquals": {
-                "kms:ResourceAliases": [
-                    (f"alias/axonllm/agentcore-data-{_QUALIFICATION_NAMESPACE}"),
-                ]
-            }
-        }
 
     @staticmethod
     def _release_signing_alias_condition() -> dict[

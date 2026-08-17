@@ -25,22 +25,10 @@ PREFIX = "deployment-evidence"
 NOW = datetime(2026, 8, 12, 16, 0, tzinfo=timezone.utc)
 RELEASE_COMMIT = "1" * 40
 WORKFLOW_COMMIT = RELEASE_COMMIT
-AGENTCORE_IMAGE = (
-    f"{ACCOUNT}.dkr.ecr.{REGION}.amazonaws.com/axonllm/agentcore@"
-    f"sha256:{'a' * 64}"
-)
-CONTROL_IMAGE = (
-    f"{ACCOUNT}.dkr.ecr.{REGION}.amazonaws.com/axonllm/fargate@"
-    f"sha256:{'b' * 64}"
-)
-STORAGE_KEY = (
-    f"arn:aws:kms:{REGION}:{ACCOUNT}:"
-    "key/11111111-1111-1111-1111-111111111111"
-)
-SIGNING_KEY = (
-    f"arn:aws:kms:{REGION}:{ACCOUNT}:"
-    "key/22222222-2222-2222-2222-222222222222"
-)
+AGENTCORE_IMAGE = f"{ACCOUNT}.dkr.ecr.{REGION}.amazonaws.com/axonllm/agentcore@sha256:{'a' * 64}"
+CONTROL_IMAGE = f"{ACCOUNT}.dkr.ecr.{REGION}.amazonaws.com/axonllm/fargate@sha256:{'b' * 64}"
+STORAGE_KEY = f"arn:aws:kms:{REGION}:{ACCOUNT}:key/11111111-1111-1111-1111-111111111111"
+SIGNING_KEY = f"arn:aws:kms:{REGION}:{ACCOUNT}:key/22222222-2222-2222-2222-222222222222"
 
 
 def _release() -> dict[str, str]:
@@ -55,22 +43,14 @@ def _release() -> dict[str, str]:
 def _execution() -> dict[str, str]:
     return {
         "repository": "owner/repo",
-        "workflowRef": (
-            "owner/repo/.github/workflows/"
-            "agentcore-launch-gates.yml@refs/heads/main"
-        ),
+        "workflowRef": ("owner/repo/.github/workflows/agentcore-launch-gates.yml@refs/heads/main"),
         "workflowCommit": WORKFLOW_COMMIT,
-        "parentWorkflowRef": (
-            "owner/repo/.github/workflows/"
-            "launch-agentcore-production.yml@refs/heads/main"
-        ),
+        "parentWorkflowRef": ("owner/repo/.github/workflows/launch-agentcore-production.yml@refs/heads/main"),
         "parentWorkflowCommit": RELEASE_COMMIT,
         "checkedOutCommit": RELEASE_COMMIT,
         "runId": "41",
         "runAttempt": "1",
-        "reviewedConfigS3Uri": (
-            f"s3://{BUCKET}/{PREFIX}/reviewed/launch-gates.json"
-        ),
+        "reviewedConfigS3Uri": (f"s3://{BUCKET}/{PREFIX}/reviewed/launch-gates.json"),
         "reviewedConfigVersionId": "reviewed-config-version",
         "reviewedConfigSha256": "c" * 64,
     }
@@ -79,15 +59,9 @@ def _execution() -> dict[str, str]:
 def _producer() -> dict[str, str]:
     return {
         "repository": "owner/repo",
-        "workflowRef": (
-            "owner/repo/.github/workflows/"
-            "agentcore-launch-rehearsal-evidence.yml@refs/heads/main"
-        ),
+        "workflowRef": ("owner/repo/.github/workflows/agentcore-launch-rehearsal-evidence.yml@refs/heads/main"),
         "workflowCommit": RELEASE_COMMIT,
-        "parentWorkflowRef": (
-            "owner/repo/.github/workflows/"
-            "launch-agentcore-production.yml@refs/heads/main"
-        ),
+        "parentWorkflowRef": ("owner/repo/.github/workflows/launch-agentcore-production.yml@refs/heads/main"),
         "parentWorkflowCommit": RELEASE_COMMIT,
         "runId": "41",
         "runAttempt": "1",
@@ -120,10 +94,7 @@ def _source_manifest() -> dict[str, Any]:
         "release": _release(),
         "execution": _execution(),
         "terminal": _pair("terminal"),
-        "gates": {
-            gate: _pair(gate)
-            for gate in evidence.ALL_GATES
-        },
+        "gates": {gate: _pair(gate) for gate in evidence.ALL_GATES},
     }
 
 
@@ -156,17 +127,12 @@ def _commands(gate: str) -> list[dict[str, Any]]:
         commands.append(
             {
                 "name": name,
-                "tool": (
-                    "python:scripts/operations/"
-                    "rehearse_agentcore_launch.py"
-                ),
+                "tool": ("python:scripts/operations/rehearse_agentcore_launch.py"),
                 "argv": argv,
                 "commandSha256": evidence._canonical_sha(argv),
                 "stdout": _reference(
                     f"{gate}-{index + 1}-stdout",
-                    digest=hashlib.sha256(
-                        _command_output(gate, index, "stdout")
-                    ).hexdigest(),
+                    digest=hashlib.sha256(_command_output(gate, index, "stdout")).hexdigest(),
                     suffix="json",
                 ),
                 "stderr": _reference(
@@ -193,11 +159,7 @@ def _command_output(gate: str, index: int, stream: str) -> bytes:
             "action": names[index],
             "release": _release(),
             "execution": _execution(),
-            "observations": (
-                _observations(gate)
-                if index == len(names) - 1
-                else None
-            ),
+            "observations": (_observations(gate) if index == len(names) - 1 else None),
         }
     )
 
@@ -212,10 +174,7 @@ def _command_outputs() -> dict[tuple[str, int, str], bytes]:
 
 
 def _observations(gate: str) -> dict[str, Any]:
-    primary = (
-        f"arn:aws:dynamodb:{REGION}:{ACCOUNT}:"
-        "table/axonllm-agentcore-state"
-    )
+    primary = f"arn:aws:dynamodb:{REGION}:{ACCOUNT}:table/axonllm-agentcore-state"
     restored = primary + "-restore-validation-20260812-abcd"
     values: dict[str, dict[str, Any]] = {
         "initializationTimeoutReplacement": {
@@ -224,21 +183,6 @@ def _observations(gate: str) -> dict[str, Any]:
             "timedOutRuntimeId": "runtime-old",
             "replacementRuntimeId": "runtime-new",
             "replacementReadyStatusCode": 200,
-        },
-        "queryBoundaryLimitsAndReconciliation": {
-            "mutationStatusCode": 400,
-            "multipleStatementsStatusCode": 400,
-            "outOfDatasourceStatusCode": 403,
-            "requestedMaxRows": 100,
-            "returnedRowCount": 25,
-            "scanLimitBytes": 1024 * 1024,
-            "observedBytesScanned": 512 * 1024,
-            "interruptedRequestId": "query-request-1",
-            "terminalState": "CANCELLED",
-            "reservationUnitsAfter": 0,
-            "durableResultAuditCount": 1,
-            "unavailableBindingState": "DEFERRED",
-            "unavailableBindingReservationReleased": False,
         },
         "recoveryCutoverAndRollback": {
             "primaryTableArn": primary,
@@ -320,7 +264,7 @@ def _cleanup_observations() -> dict[str, Any]:
     return {
         "restoredSnapshotRefs": ["snapshot/control-plane"],
         "clearedFaultIds": ["fault/control-plane"],
-        "clearedFixtureIds": ["fixture/query"],
+        "clearedFixtureIds": ["fixture/routing"],
         "redrivenDlqCorrelationIds": ["event/redriven"],
         "removedDlqCorrelationIds": ["event/removed"],
         "primaryStateSelected": True,
@@ -340,12 +284,8 @@ def _terminal() -> dict[str, Any]:
         "failureStage": None,
         "cleanupStatus": "SUCCEEDED",
         "cleanupObservations": _cleanup_observations(),
-        "startedAt": (NOW - timedelta(hours=3)).isoformat(
-            timespec="seconds"
-        ),
-        "completedAt": (NOW - timedelta(minutes=30)).isoformat(
-            timespec="seconds"
-        ),
+        "startedAt": (NOW - timedelta(hours=3)).isoformat(timespec="seconds"),
+        "completedAt": (NOW - timedelta(minutes=30)).isoformat(timespec="seconds"),
     }
 
 
@@ -385,7 +325,7 @@ def _build(
     )
 
 
-def test_builds_seven_gate_report_and_current_deployment_projection() -> None:
+def test_builds_complete_gate_report_and_current_deployment_projection() -> None:
     detailed, compatibility = _build()
 
     assert detailed["schema"] == evidence.REPORT_SCHEMA
@@ -422,9 +362,7 @@ def test_detailed_report_is_accepted_by_deployment_evidence_contract() -> None:
 
 def test_deployment_contract_requires_protected_rehearsal_producer() -> None:
     detailed, _ = _build()
-    detailed["producer"]["workflowRef"] = (
-        "owner/repo/.github/workflows/other.yml@refs/heads/main"
-    )
+    detailed["producer"]["workflowRef"] = "owner/repo/.github/workflows/other.yml@refs/heads/main"
 
     with pytest.raises(
         deployment_evidence.DeploymentEvidenceError,
@@ -455,9 +393,7 @@ def test_receipt_cannot_supply_a_hand_authored_pass() -> None:
 
 def test_gate_execution_requires_the_single_allowlisted_workflow() -> None:
     manifest = _source_manifest()
-    manifest["execution"]["workflowRef"] = (
-        "owner/repo/.github/workflows/other.yml@refs/heads/main"
-    )
+    manifest["execution"]["workflowRef"] = "owner/repo/.github/workflows/other.yml@refs/heads/main"
 
     with pytest.raises(
         evidence.LaunchRehearsalError,
@@ -541,9 +477,7 @@ def test_terminal_rejects_non_string_cleanup_inventory() -> None:
 
 def test_terminal_must_bracket_gate_commands() -> None:
     terminal = _terminal()
-    terminal["startedAt"] = (NOW - timedelta(hours=1)).isoformat(
-        timespec="seconds"
-    )
+    terminal["startedAt"] = (NOW - timedelta(hours=1)).isoformat(timespec="seconds")
 
     with pytest.raises(
         evidence.LaunchRehearsalError,
@@ -609,12 +543,8 @@ def test_command_receipt_rejects_sensitive_argv() -> None:
 def test_command_receipt_cannot_complete_after_report_generation() -> None:
     receipts = _receipts()
     command = receipts["providerRoutingStrategies"]["commands"][-1]
-    command["startedAt"] = (NOW + timedelta(minutes=1)).isoformat(
-        timespec="seconds"
-    )
-    command["completedAt"] = (NOW + timedelta(minutes=2)).isoformat(
-        timespec="seconds"
-    )
+    command["startedAt"] = (NOW + timedelta(minutes=1)).isoformat(timespec="seconds")
+    command["completedAt"] = (NOW + timedelta(minutes=2)).isoformat(timespec="seconds")
 
     with pytest.raises(
         evidence.LaunchRehearsalError,
@@ -644,9 +574,7 @@ def test_nonexistent_command_script_is_rejected() -> None:
 
 def test_mutable_image_reference_is_rejected() -> None:
     release = _release()
-    release["agentcoreImage"] = (
-        f"{ACCOUNT}.dkr.ecr.{REGION}.amazonaws.com/axonllm/agentcore:latest"
-    )
+    release["agentcoreImage"] = f"{ACCOUNT}.dkr.ecr.{REGION}.amazonaws.com/axonllm/agentcore:latest"
 
     with pytest.raises(
         evidence.LaunchRehearsalError,
@@ -678,23 +606,9 @@ def test_target_image_repositories_cannot_be_substituted() -> None:
             "runtime-old",
         ),
         (
-            "queryBoundaryLimitsAndReconciliation",
-            "durableResultAuditCount",
-            0,
-        ),
-        (
-            "queryBoundaryLimitsAndReconciliation",
-            "durableResultAuditCount",
-            True,
-        ),
-        (
             "recoveryCutoverAndRollback",
             "finalSelectedTableArn",
-            (
-                f"arn:aws:dynamodb:{REGION}:{ACCOUNT}:"
-                "table/axonllm-agentcore-state-restore-validation-"
-                "20260812-abcd"
-            ),
+            (f"arn:aws:dynamodb:{REGION}:{ACCOUNT}:table/axonllm-agentcore-state-restore-validation-20260812-abcd"),
         ),
         ("securityEventDeliveryAndDlq", "dlqAlarmState", "OK"),
         (
@@ -722,15 +636,11 @@ def test_gate_specific_partial_or_failed_observations_are_rejected(
     receipts = _receipts()
     outputs = _command_outputs()
     final_index = len(evidence.EXPECTED_COMMANDS[gate]) - 1
-    output = json.loads(
-        outputs[(gate, final_index, "stdout")].decode("utf-8")
-    )
+    output = json.loads(outputs[(gate, final_index, "stdout")].decode("utf-8"))
     output["observations"][field] = value
     encoded = _encoded(output)
     outputs[(gate, final_index, "stdout")] = encoded
-    receipts[gate]["commands"][final_index]["stdout"]["sha256"] = (
-        hashlib.sha256(encoded).hexdigest()
-    )
+    receipts[gate]["commands"][final_index]["stdout"]["sha256"] = hashlib.sha256(encoded).hexdigest()
 
     with pytest.raises(evidence.LaunchRehearsalError):
         _build(receipts, outputs)
@@ -738,9 +648,7 @@ def test_gate_specific_partial_or_failed_observations_are_rejected(
 
 def test_source_manifest_rejects_reused_object_version() -> None:
     manifest = _source_manifest()
-    reused = deepcopy(
-        manifest["gates"]["providerFallbackRecovery"]["artifact"]
-    )
+    reused = deepcopy(manifest["gates"]["providerFallbackRecovery"]["artifact"])
     manifest["gates"]["controlPlaneFaultRecovery"]["signature"] = reused
 
     with pytest.raises(
@@ -785,9 +693,7 @@ def test_reference_rejects_null_version_and_outside_prefix() -> None:
 
 def test_compatibility_report_rejects_arbitrary_evidence_id() -> None:
     detailed, compatibility = _build()
-    compatibility["gates"]["initializationTimeoutReplacement"][
-        "evidenceId"
-    ] = "operator-says-pass"
+    compatibility["gates"]["initializationTimeoutReplacement"]["evidenceId"] = "operator-says-pass"
 
     with pytest.raises(
         evidence.LaunchRehearsalError,
@@ -852,9 +758,7 @@ def test_download_requires_exact_compliance_locked_version(
         "ServerSideEncryption": "aws:kms",
         "SSEKMSKeyId": STORAGE_KEY,
         "ObjectLockMode": "COMPLIANCE",
-        "ObjectLockRetainUntilDate": (
-            NOW + timedelta(days=30)
-        ).isoformat(),
+        "ObjectLockRetainUntilDate": (NOW + timedelta(days=30)).isoformat(),
     }
     metadata[field] = value
 
@@ -904,9 +808,7 @@ def _materialized_gate_set() -> tuple[
     for gate in evidence.ALL_GATES:
         receipt = _receipt(gate)
         receipt_bytes = _encoded(receipt)
-        signature_bytes = _encoded(
-            {"fixture": f"{gate}-kms-signature"}
-        )
+        signature_bytes = _encoded({"fixture": f"{gate}-kms-signature"})
         artifact_raw = _reference(
             gate,
             digest=hashlib.sha256(receipt_bytes).hexdigest(),
@@ -919,23 +821,15 @@ def _materialized_gate_set() -> tuple[
             "artifact": artifact_raw,
             "signature": signature_raw,
         }
-        objects[
-            (artifact_raw["s3Uri"], artifact_raw["versionId"])
-        ] = receipt_bytes
-        objects[
-            (signature_raw["s3Uri"], signature_raw["versionId"])
-        ] = signature_bytes
+        objects[(artifact_raw["s3Uri"], artifact_raw["versionId"])] = receipt_bytes
+        objects[(signature_raw["s3Uri"], signature_raw["versionId"])] = signature_bytes
         for index, command in enumerate(receipt["commands"]):
             for stream in ("stdout", "stderr"):
                 reference = command[stream]
-                objects[
-                    (reference["s3Uri"], reference["versionId"])
-                ] = _command_output(gate, index, stream)
+                objects[(reference["s3Uri"], reference["versionId"])] = _command_output(gate, index, stream)
 
     terminal_bytes = _encoded(_terminal())
-    terminal_signature_bytes = _encoded(
-        {"fixture": "terminal-kms-signature"}
-    )
+    terminal_signature_bytes = _encoded({"fixture": "terminal-kms-signature"})
     terminal_artifact_raw = _reference(
         "terminal",
         digest=hashlib.sha256(terminal_bytes).hexdigest(),
@@ -967,9 +861,7 @@ def _materialized_gate_set() -> tuple[
         "gates": gates,
     }
     manifest_bytes = _encoded(manifest)
-    manifest_signature_bytes = _encoded(
-        {"fixture": "gate-set-kms-signature"}
-    )
+    manifest_signature_bytes = _encoded({"fixture": "gate-set-kms-signature"})
     artifact_raw = _reference(
         "gate-set",
         digest=hashlib.sha256(manifest_bytes).hexdigest(),
@@ -978,12 +870,8 @@ def _materialized_gate_set() -> tuple[
         "gate-set-signature",
         digest=hashlib.sha256(manifest_signature_bytes).hexdigest(),
     )
-    objects[
-        (artifact_raw["s3Uri"], artifact_raw["versionId"])
-    ] = manifest_bytes
-    objects[
-        (signature_raw["s3Uri"], signature_raw["versionId"])
-    ] = manifest_signature_bytes
+    objects[(artifact_raw["s3Uri"], artifact_raw["versionId"])] = manifest_bytes
+    objects[(signature_raw["s3Uri"], signature_raw["versionId"])] = manifest_signature_bytes
     pair = evidence.ArtifactPair(
         artifact=evidence._validate_reference(
             artifact_raw,
@@ -1049,13 +937,8 @@ def test_producer_fetches_and_verifies_every_signed_object(
         script_checker=lambda _commit, _script: None,
     )
 
-    command_object_count = sum(
-        2 * len(evidence.EXPECTED_COMMANDS[gate])
-        for gate in evidence.ALL_GATES
-    )
-    assert len(fetched) == (
-        4 + (2 * len(evidence.ALL_GATES)) + command_object_count
-    )
+    command_object_count = sum(2 * len(evidence.EXPECTED_COMMANDS[gate]) for gate in evidence.ALL_GATES)
+    assert len(fetched) == (4 + (2 * len(evidence.ALL_GATES)) + command_object_count)
     assert len(set(fetched)) == len(fetched)
     assert len(verified) == 2 + len(evidence.ALL_GATES)
     assert json.loads(output.read_text(encoding="utf-8")) == detailed
@@ -1076,9 +959,7 @@ def test_producer_fails_before_emitting_reports_when_signature_is_invalid(
         now: datetime,
     ) -> None:
         del storage_key, now
-        destination.write_bytes(
-            objects[(reference.uri, reference.version_id)]
-        )
+        destination.write_bytes(objects[(reference.uri, reference.version_id)])
 
     def reject_signature(
         artifact: Path,
@@ -1086,9 +967,7 @@ def test_producer_fails_before_emitting_reports_when_signature_is_invalid(
         signing_key: str,
     ) -> None:
         del artifact, signature, signing_key
-        raise evidence.LaunchRehearsalError(
-            "KMS signature verification failed"
-        )
+        raise evidence.LaunchRehearsalError("KMS signature verification failed")
 
     output = tmp_path / "detailed.json"
     compatible = tmp_path / "compatible.json"

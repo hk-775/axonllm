@@ -19,10 +19,6 @@ from aws_support import AwsError  # noqa: E402
 
 PRIMARY = "axonllm-agentcore-state"
 RESTORED = f"{PRIMARY}-restore-validation-20260811120000-a1b2c3"
-DATA_KEY_ARN = (
-    "arn:aws:kms:us-east-1:123456789012:"
-    "key/11111111-2222-3333-4444-555555555555"
-)
 
 
 class RecoveryAws:
@@ -41,10 +37,7 @@ class RecoveryAws:
         self.target = {
             "MinCapacity": 2,
             "MaxCapacity": 6,
-            "SuspendedState": {
-                key: False
-                for key in agentcore_recovery._SUSPENSION_KEYS
-            },
+            "SuspendedState": {key: False for key in agentcore_recovery._SUSPENSION_KEYS},
         }
         self.service = {
             "desiredCount": 2,
@@ -57,7 +50,6 @@ class RecoveryAws:
             "DeletionProtectionEnabled": True,
             "SSEDescription": {
                 "Status": "ENABLED",
-                "KMSMasterKeyArn": DATA_KEY_ARN,
             },
             "KeySchema": [
                 {"AttributeName": "PK", "KeyType": "HASH"},
@@ -75,11 +67,10 @@ class RecoveryAws:
 
     def _runtime_stack(self) -> dict:
         outputs = [
-            {"OutputKey": "DataKeyArn", "OutputValue": DATA_KEY_ARN},
-            {"OutputKey": "RuntimeArn", "OutputValue": (
-                "arn:aws:bedrock-agentcore:us-east-1:123456789012:"
-                "runtime/axonllm-abcdefghij"
-            )},
+            {
+                "OutputKey": "RuntimeArn",
+                "OutputValue": ("arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/axonllm-abcdefghij"),
+            },
             {"OutputKey": "StateTableName", "OutputValue": PRIMARY},
             {
                 "OutputKey": "SelectedRuntimeStateTableName",
@@ -95,11 +86,7 @@ class RecoveryAws:
             },
             {
                 "OutputKey": "RecoveryQuiescedAt",
-                "OutputValue": (
-                    "2026-08-11T12:00:00+00:00"
-                    if self.mode != "normal"
-                    else "not-quiesced"
-                ),
+                "OutputValue": ("2026-08-11T12:00:00+00:00" if self.mode != "normal" else "not-quiesced"),
             },
             {
                 "OutputKey": "RecoveryMinimumQuiescenceSeconds",
@@ -129,19 +116,11 @@ class RecoveryAws:
                 }
             )
         return {
-            "StackId": (
-                "arn:aws:cloudformation:us-east-1:123456789012:"
-                "stack/AxonLLMAgentCoreStack/stack-id"
-            ),
-            "RoleARN": (
-                "arn:aws:iam::123456789012:"
-                "role/axonllm-cloudformation-execution"
-            ),
+            "StackId": ("arn:aws:cloudformation:us-east-1:123456789012:stack/AxonLLMAgentCoreStack/stack-id"),
+            "RoleARN": ("arn:aws:iam::123456789012:role/axonllm-cloudformation-execution"),
             "StackStatus": "UPDATE_COMPLETE",
             "CreationTime": "2026-08-11T10:00:00+00:00",
-            "LastUpdatedTime": (
-                f"2026-08-11T10:{self.updated:02d}:00+00:00"
-            ),
+            "LastUpdatedTime": (f"2026-08-11T10:{self.updated:02d}:00+00:00"),
             "Parameters": [
                 {"ParameterKey": "OidcIssuer", "ParameterValue": "issuer"},
                 {
@@ -162,19 +141,11 @@ class RecoveryAws:
 
     def _control_stack(self) -> dict:
         return {
-            "StackId": (
-                "arn:aws:cloudformation:us-east-1:123456789012:"
-                "stack/AxonLLMControlPlaneStack/control-id"
-            ),
-            "RoleARN": (
-                "arn:aws:iam::123456789012:"
-                "role/axonllm-cloudformation-execution"
-            ),
+            "StackId": ("arn:aws:cloudformation:us-east-1:123456789012:stack/AxonLLMControlPlaneStack/control-id"),
+            "RoleARN": ("arn:aws:iam::123456789012:role/axonllm-cloudformation-execution"),
             "StackStatus": "UPDATE_COMPLETE",
             "CreationTime": "2026-08-11T10:00:00+00:00",
-            "LastUpdatedTime": (
-                f"2026-08-11T11:{self.control_updated:02d}:00+00:00"
-            ),
+            "LastUpdatedTime": (f"2026-08-11T11:{self.control_updated:02d}:00+00:00"),
             "Parameters": [
                 {
                     "ParameterKey": "AgentCoreStackName",
@@ -249,63 +220,43 @@ class RecoveryAws:
             "cloudformation",
             "update-stack",
         ):
-            payload = json.loads(
-                arguments[arguments.index("--parameters") + 1]
-            )
-            changes = {
-                item["ParameterKey"]: item["ParameterValue"]
-                for item in payload
-                if "ParameterValue" in item
-            }
+            payload = json.loads(arguments[arguments.index("--parameters") + 1])
+            changes = {item["ParameterKey"]: item["ParameterValue"] for item in payload if "ParameterValue" in item}
             name = arguments[arguments.index("--stack-name") + 1]
             if name == "AxonLLMAgentCoreStack":
-                assert next(
-                    item
-                    for item in payload
-                    if item["ParameterKey"] == "OidcIssuer"
-                )["UsePreviousValue"] is True
+                assert (
+                    next(item for item in payload if item["ParameterKey"] == "OidcIssuer")["UsePreviousValue"] is True
+                )
                 self.mode = changes["RecoveryCutoverMode"]
                 self.approval = changes["RecoveryApprovalId"]
                 self.target_parameter = changes["RuntimeStateTableName"]
                 self.updated += 1
                 return {"StackId": self._runtime_stack()["StackId"]}
             if name == "AxonLLMControlPlaneStack":
-                assert next(
-                    item
-                    for item in payload
-                    if item["ParameterKey"] == "AgentCoreStackName"
-                )["UsePreviousValue"] is True
+                assert (
+                    next(item for item in payload if item["ParameterKey"] == "AgentCoreStackName")["UsePreviousValue"]
+                    is True
+                )
                 self.control_mode = changes["RecoveryCutoverMode"]
                 self.control_approval = changes["RecoveryApprovalId"]
-                self.control_target_parameter = changes[
-                    "RuntimeStateTableName"
-                ]
+                self.control_target_parameter = changes["RuntimeStateTableName"]
                 self.control_updated += 1
                 return {"StackId": self._control_stack()["StackId"]}
             raise AssertionError(f"unexpected stack update: {name}")
         if operation == "describe-scalable-targets":
             return {"ScalableTargets": [copy.deepcopy(self.target)]}
         if operation == "register-scalable-target":
-            self.target["MinCapacity"] = int(
-                arguments[arguments.index("--min-capacity") + 1]
-            )
-            self.target["MaxCapacity"] = int(
-                arguments[arguments.index("--max-capacity") + 1]
-            )
+            self.target["MinCapacity"] = int(arguments[arguments.index("--min-capacity") + 1])
+            self.target["MaxCapacity"] = int(arguments[arguments.index("--max-capacity") + 1])
             raw = arguments[arguments.index("--suspended-state") + 1]
             self.target["SuspendedState"] = {
-                name: value == "true"
-                for name, value in (
-                    item.split("=", 1) for item in raw.split(",")
-                )
+                name: value == "true" for name, value in (item.split("=", 1) for item in raw.split(","))
             }
             return {}
         if operation == "describe-services":
             return {"services": [self._service()], "failures": []}
         if operation == "update-service":
-            desired = int(
-                arguments[arguments.index("--desired-count") + 1]
-            )
+            desired = int(arguments[arguments.index("--desired-count") + 1])
             self.service.update(
                 desiredCount=desired,
                 pendingCount=0,
@@ -314,16 +265,12 @@ class RecoveryAws:
             return {"service": self._service()}
         if operation == "describe-table":
             table = copy.deepcopy(self.table)
-            table["TableName"] = arguments[
-                arguments.index("--table-name") + 1
-            ]
+            table["TableName"] = arguments[arguments.index("--table-name") + 1]
             return {"Table": table}
         if operation == "describe-continuous-backups":
             return {
                 "ContinuousBackupsDescription": {
-                    "PointInTimeRecoveryDescription": {
-                        "PointInTimeRecoveryStatus": "ENABLED"
-                    }
+                    "PointInTimeRecoveryDescription": {"PointInTimeRecoveryStatus": "ENABLED"}
                 }
             }
         if operation == "describe-time-to-live":
@@ -527,10 +474,7 @@ def test_quiesce_retries_after_runtime_update_before_checkpoint(
         agentcore_recovery.quiesce(aws, **common)
 
     assert aws.mode == aws.control_mode == "quiesced"
-    assert (
-        json.loads(state_file.read_text())["phase"]
-        == "control-plane-quiesced"
-    )
+    assert json.loads(state_file.read_text())["phase"] == "control-plane-quiesced"
 
     result = agentcore_recovery.quiesce(aws, **common)
 
@@ -632,12 +576,10 @@ def test_select_rejects_unprotected_or_out_of_namespace_table(
         )
 
     aws.table["DeletionProtectionEnabled"] = True
-    aws.table["SSEDescription"]["KMSMasterKeyArn"] = (
-        "arn:aws:kms:us-east-1:123456789012:key/other"
-    )
+    aws.table["SSEDescription"]["Status"] = "DISABLED"
     with pytest.raises(
         agentcore_recovery.AgentCoreRecoveryError,
-        match="AgentCore data key",
+        match="encryption is not enabled",
     ):
         agentcore_recovery.select(
             aws,

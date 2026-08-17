@@ -14,17 +14,18 @@ schema-v3 with distinct Fargate and AgentCore targets. Controlled publication
 copies both signed OCI archives into retained immutable private ECR
 repositories, and deployment verification selects and verifies either target.
 
-The repository also contains the newer shared HTTP/AgentCore Athena query
-service, credential-free datasource administration, and managed-Cognito
-shared-state control-plane stack. These changes postdate `v0.2.4`; they do not
-yet have tagged release evidence, a deployed Athena canary, or a deployed
-control-plane canary.
+The repository also contains the managed-Cognito shared-state control-plane
+stack. It postdates `v0.2.4` and does not yet have tagged release evidence or a
+deployed control-plane canary. Customer database querying is retained only as
+an optional add-on implementation; core deployments and certification contain
+no Athena or customer datasource-role STS integration. See
+[Customer Database Query Add-On](CUSTOMER_DATABASE_QUERY_ADDON.md).
 
 The protected AgentCore launch orchestrator now certifies isolated external
-OIDC and managed-Cognito qualification deployments, runs seven launch gates,
+OIDC and managed-Cognito qualification deployments, runs six launch gates,
 records signed teardown evidence, and only then invokes the production leaf.
-That leaf deploys a separate candidate, starts and validates a backup plus
-restore, certifies every enabled provider and the identity/query contract,
+That leaf deploys a separate candidate, performs and validates a PITR restore,
+certifies every enabled provider and the identity contract,
 promotes the exact runtime version, and persists KMS-signed schema-v5
 deployment evidence under S3 Object Lock. This implemented path still requires
 a successful target-account run for the exact release before launch.
@@ -59,20 +60,19 @@ the first successful KMS-backed release is `v0.2.4`.
 The operational workflow implements daily recovery metadata audits and a
 monthly temporary-table PITR exercise with separate audit and recovery roles.
 A real AWS restore exercise has not yet been externally verified. Configure the
-production roles and both target KMS keys, run the exercise in AWS, and retain
-recovery and application-cutover evidence before promotion.
+production roles, run the exercise in AWS, and retain recovery and
+application-cutover evidence before promotion.
 
 A read-only target-account audit on 2026-08-10 found no promotable AxonLLM
 runtime. The Fargate service is a stopped legacy/demo deployment with a public
 HTTP origin, mutable CDK asset image, open task egress, noncanonical runtime
-settings, and no hardened backup or customer-managed data-key posture. The
-current state table has PITR but lacks deletion protection, customer-managed
-encryption, TTL, an AWS Backup vault, and recovery points. The legacy provider
-secret lacks customer-managed encryption and rotation.
+settings, deletion protection, and restore evidence. The current state table has
+PITR but lacks deletion protection and TTL. The legacy provider secret lacks
+rotation.
 
 The hardened AgentCore, retained identity, shared control plane, and state
 stacks are absent, so there is no deployed AxonLLM AgentCore target on which to
-run release canaries, identity validation, datasource/query validation,
+run release canaries, identity validation,
 recovery validation, or rollback checks.
 
 The account also lacks the selected control-plane endpoint prerequisites,
@@ -80,17 +80,15 @@ control-plane HTTPS egress prefix list, AgentCore HTTPS prefix list, dedicated
 OIDC configuration, and confirmed alarm/event subscribers. A custom-domain
 control plane requires the production DNS zone, regional ACM certificate, and
 approved ingress prefix list. The CloudFront alternative removes those three
-requirements but requires reviewed public IPv4 viewer CIDRs. The protected
-GitHub `production` environment lacks both target data-key variables because
-the hardened stacks have not produced those keys.
+requirements but requires reviewed public IPv4 viewer CIDRs.
 Until those prerequisites are supplied and a reviewed deployment is complete,
 restore/cutover, authenticated RBAC, load, security-event, and multi-replica
 canaries remain blocked.
 
 For the audited Fargate stack, synthesize with the existing physical table name
 as `-c table_name=...`. The 2026-08-10 synthesis preserved the table's
-CloudFormation logical identity and applied encryption, TTL, deletion
-protection, and backup controls as updates. Review the real change set before
+CloudFormation logical identity and applied AWS-managed encryption, TTL,
+deletion protection, and PITR controls as updates. Review the real change set before
 deployment and abort if it proposes replacing or deleting the state table or
 provider secret.
 
@@ -169,9 +167,9 @@ uv run axon issue-key \
   --name production-service
 ```
 
-The default canonical scopes are `model.list`, `inference.invoke`, and
-`query.select`; canonical issuance rejects every legacy `admin:` scope. The raw
-key is shown once.
+The default canonical scopes are `model.list` and `inference.invoke`;
+canonical issuance rejects every legacy `admin:` scope. The raw key is shown
+once.
 
 When SCIM provisioning is required, create a Secrets Manager value containing
 the complete `AXON_SCIM_TENANTS` JSON map, then pass its complete ARN as
@@ -200,10 +198,10 @@ There is no role literally named `viewer`. Use `tenant_member` or
 
 | Role | Tenant control plane | Project data plane |
 |---|---|---|
-| `tenant_admin` | Read/write tenant-owned configuration and datasource metadata; no write access to platform-global resources | Explicit project grant required for model listing, inference, and `query.select` |
-| `tenant_member` | Read only, including datasource metadata with the role ARN concealed | Explicit project grant required |
-| `tenant_auditor` | Read only, including datasource metadata with the role ARN concealed | Explicit project grant required |
-| `service` | No canonical admin or datasource access; legacy admin scopes are ignored and canonical key issuance rejects them | Explicit project grant plus server-held action scope required |
+| `tenant_admin` | Read/write tenant-owned configuration; no write access to platform-global resources | Explicit project grant required for model listing and inference |
+| `tenant_member` | Read only | Explicit project grant required |
+| `tenant_auditor` | Read only | Explicit project grant required |
+| `service` | No canonical admin access; legacy admin scopes are ignored and canonical key issuance rejects them | Explicit project grant plus server-held action scope required |
 | `platform_admin` | Platform resources; tenant control-plane access requires `X-Axon-Break-Glass-Reason` | No ordinary project data-plane access is exposed |
 
 Platform-global resources include models, health, architecture, catalogue and
@@ -214,11 +212,13 @@ roles/scopes to mutate, and canonical services cannot use them to enter the
 control plane. Legacy `admin` roles and `admin:*` scopes remain compatibility
 only for noncanonical migration mode.
 
-`query.select` gates both normal-Starlette `POST /v1/query` and the AgentCore
-`query` action. Both use the same canonical `QueryService`. `query.mutate`
-always denies.
+## Customer Database Query Add-On Design
 
-## Query And Shared Control Plane
+This section describes retained add-on implementation, not the core production
+deployment. Core standalone and AgentCore installs expose no query or
+datasource routes and create no Athena endpoint or customer datasource-role STS
+authority. See
+[Customer Database Query Add-On](CUSTOMER_DATABASE_QUERY_ADDON.md).
 
 Datasource administration is exposed at `/admin/datasources`. Records contain
 tenant/project ownership, display metadata, exact IAM role ARN, region,
@@ -277,11 +277,10 @@ on private Fargate tasks. The default custom-domain mode uses a
 Cognito-authenticated public TLS ALB and stable Route 53 alias. CloudFront mode
 uses an AWS-generated hostname and certificate, IPv4 WAF allowlist, VPC origin,
 internal ALB, and application-managed Cognito PKCE sessions. Both use
-AgentCore's verified `StateTableName` output and import the data key, outbox,
-SNS topic, and CloudWatch event log.
-`AXON_CONTROL_PLANE_ONLY=true` suppresses chat, model, OpenAI-compatible, and
-query execution routes. The task receives binding metadata for datasource
-validation but has no Athena or STS authority.
+AgentCore's verified `StateTableName` output and import the outbox, SNS topic,
+and CloudWatch event log.
+`AXON_CONTROL_PLANE_ONLY=true` suppresses execution routes. Core control-plane
+tasks receive no customer datasource bindings or query authority.
 
 See [Features And Flows](FEATURES_AND_FLOWS.md) for request sequences.
 
@@ -303,8 +302,8 @@ See [Features And Flows](FEATURES_AND_FLOWS.md) for request sequences.
   `release` environment;
 - an `AxonLLMReleaseVerifier` role trusted only by the protected GitHub
   `production` environment;
-- an `AxonLLMOperationsAudit` role that can read recovery, secret-version, and
-  key-rotation metadata but cannot read secret values or restore data;
+- an `AxonLLMOperationsAudit` role that can read recovery and secret-version
+  metadata but cannot read secret values or restore data;
 - an `AxonLLMOperationsRecovery` role that can run PITR validation and remove
   only temporary `*-restore-validation-*` tables;
 - separate AgentCore qualification, external-certification, launch-gates,
@@ -404,9 +403,7 @@ Configure `production` with `AXON_AWS_ACCOUNT_ID`. Set
 `OperationsAuditRoleArn`, and `AXON_OPERATIONS_RECOVERY_ROLE_ARN` to
 `OperationsRecoveryRoleArn`. Also set `AXON_FARGATE_STATE_TABLE_NAME` and
 `AXON_AGENTCORE_STATE_TABLE_NAME` to the physical names supplied to the
-foundation stack. The target data-key variables described in
-[Backup And Restore](#backup-and-restore) are additional production-environment
-settings.
+foundation stack.
 
 AgentCore launch additionally requires the qualification,
 external-certification, launch-gates, rehearsal-evidence, production-deploy,
@@ -454,15 +451,14 @@ Rotate the asymmetric signing key through a reviewed migration:
 - ALB OIDC for `/admin/*` in `DeploymentMode=production`;
 - canonical identity and enforced authentication in production mode;
 - a private ECR image parameter that accepts only `@sha256` URIs;
-- KMS-encrypted DynamoDB with deletion protection and PITR;
-- daily AWS Backup at 05:00 UTC, 30-day cold transition, 365-day deletion, and
-  governance-mode Vault Lock enforcing 30-365 day retention;
-- a KMS-encrypted FIFO security-event outbox and DLQ retained for 14 days;
-- a managed encrypted FIFO SNS topic, retained encrypted CloudWatch log group,
+- AWS-managed-encrypted DynamoDB with deletion protection and PITR;
+- an SQS-managed-encrypted FIFO security-event outbox and DLQ retained for 14 days;
+- an AWS-managed-encrypted FIFO SNS topic, retained CloudWatch log group using
+  AWS default encryption,
   and resource-scoped private SQS/SNS/Logs endpoints;
 - optional Secrets Manager delivery of the complete `AXON_SCIM_TENANTS` value;
 - a controlled restored-table parameter, exact task access, selected-table
-  alarms/backups, and a quiescence guard for Fargate recovery cutover;
+  alarms, and a quiescence guard for Fargate recovery cutover;
 - alarms, an operations dashboard, and two tasks scaling to ten.
 
 `deploy-fargate.sh` requires `AXON_VERIFIED_IMAGE_URI` and
@@ -547,8 +543,8 @@ provider adapters but defaults to nine: Bedrock, Bedrock Mantle, Anthropic,
 OpenAI, Google AI Studio, xAI, Groq, Together, and Fireworks. Direct `ai21`,
 Azure OpenAI, Cohere, and Vertex AI must be explicitly enabled; AI21 Jamba 1.5
 remains available through the default `bedrock` provider. Direct HTTP providers
-are advertised only when their credentials load from the retained
-KMS-encrypted `ProviderSecretArn`. Its runtime egress prefix list must cover
+are advertised only when their credentials load from the retained,
+default-encrypted `ProviderSecretArn`. Its runtime egress prefix list must cover
 `bedrock-mantle.<region>.api.aws` and every credentialled provider hostname.
 Mantle authenticates with SigV4 and does not use a provider secret.
 
@@ -567,35 +563,63 @@ AgentCore has two production identity choices and no unauthenticated mode:
 
 | Identity mode | Operator responsibility | Automated work |
 |---|---|---|
-| `managed-cognito` | Choose a hosted-UI prefix and AgentCore callback, verified ARM64 AgentCore and AMD64 control-plane digests, AgentCore/control-plane egress prefix lists, tenant/project/admin, Bedrock ARNs, at least one exact Athena role and certification datasource/workgroup, optional complete SCIM secret ARN, protected SAML landing path, tenant-specific Cognito SAML configuration, and one control-plane endpoint contract: custom domain/ACM/Route 53/ingress prefix list or generated CloudFront plus reviewed viewer CIDRs | Deploy retained/deletion-protected Cognito, invite the user, deploy AgentCore, bootstrap canonical authority, and deploy the shared-state web control plane |
-| `external-oidc` | Provision the IdP user/client and supply exact issuer, discovery URL, client, audience, immutable subject, tenant/project claim names, runtime egress, Bedrock ARNs, and at least one exact Athena role plus certification datasource/workgroup | Deploy AgentCore and bootstrap canonical authority; expose read-only viewer and CAS administrator project-config actions, but no Cognito-authenticated web control plane |
+| `managed-cognito` | Choose a hosted-UI prefix and AgentCore callback, verified ARM64 AgentCore and AMD64 control-plane digests, AgentCore/control-plane egress prefix lists, tenant/project/admin, Bedrock ARNs, optional complete SCIM secret ARN, protected SAML landing path, tenant-specific Cognito SAML configuration, and one control-plane endpoint contract: custom domain/ACM/Route 53/ingress prefix list or generated CloudFront plus reviewed viewer CIDRs | Deploy retained/deletion-protected Cognito, invite the user, deploy AgentCore, bootstrap canonical authority, and deploy the shared-state web control plane |
+| `external-oidc` | Provision the IdP user/client and supply exact issuer, discovery URL, client, audience, immutable subject, tenant/project claim names, runtime egress, and Bedrock ARNs | Deploy AgentCore and bootstrap canonical authority; expose read-only viewer and CAS administrator project-config actions, but no Cognito-authenticated web control plane |
 
-Generate the strict schema-v2 setup file with `uv run axon setup agentcore`,
+Select `standalone-agentcore` when AxonLLM owns the experience or
+`ostiari-agentcore` when Ostiari owns it. Ostiari requires external OIDC and
+never deploys the AxonLLM control plane. See
+[Deployment Profiles](DEPLOYMENT_PROFILES.md).
+
+Generate the strict schema-v3 setup file with `uv run axon setup agentcore`,
 validate it with `./deploy-agentcore.sh --config FILE --validate-only`, then
-deploy it. Managed-Cognito schema v2 requires the `control_plane` object;
-regenerate or migrate schema-v1 files. Use `--bootstrap-cdk` only for the first
-deployment in an account/region and add `--yes` only in reviewed
-noninteractive automation. The setup rejects mutable image tags, wildcard
-Bedrock ARNs, non-HTTPS identity metadata, client secrets, and missing claim
-mappings.
+deploy it. Managed-Cognito schema v3 requires the `control_plane` object.
+Schema-v2 files remain accepted as `standalone-agentcore`; regenerate or
+migrate schema-v1 files. Use `--install` for a clean account, an older
+installation, or a retry after a failed first create. It bootstraps only when
+the toolkit is absent and otherwise reuses it. Use
+`--reconcile-bootstrap-policies` for policy-only security maintenance and
+`--bootstrap-cdk` only to force a reviewed toolkit update. Add `--yes` only in
+reviewed noninteractive automation. The setup rejects mutable image tags,
+wildcard Bedrock ARNs, non-HTTPS identity metadata, client secrets, and missing
+claim mappings.
 
-For the first account/region bootstrap, use a separate IAM bootstrap principal
-with permission to create/read the repository-owned
+For a first bootstrap or policy upgrade, use a separate temporary IAM bootstrap
+principal with permission to read, create, version, select the default version,
+and roll back the repository-owned
 `AxonLLMAgentCoreCloudFormationExecution-<qualifier>-<region>-part1` through
-`part3` policy set and create or update the isolated CDK bootstrap stack
-resources. `--bootstrap-cdk` generates and verifies those exact bounded
-policies, supplies all three as the only CloudFormation execution policies,
-and enables bootstrap-stack termination protection. Routine deployment
-verifies every canonical policy document and rejects missing, extra, or inline
-policies on the CDK execution role. Do not bootstrap AgentCore with
-`AdministratorAccess`, and do not give the one-time bootstrap principal to the
-routine deployment workflow.
+`part3` policy set, both boundaries, and create or update the isolated CDK
+bootstrap stack resources. The exact managed-policy actions are
+`sts:GetCallerIdentity`, `iam:GetPolicy`, `iam:GetPolicyVersion`,
+`iam:ListPolicyVersions`,
+`iam:CreatePolicy`, `iam:TagPolicy`, `iam:CreatePolicyVersion`,
+`iam:SetDefaultPolicyVersion`, `iam:DeletePolicyVersion`, and
+`iam:DeletePolicy`. Final verification also requires `iam:GetRole`,
+`iam:ListAttachedRolePolicies`, and `iam:ListRolePolicies` on the exact
+isolated CDK CloudFormation execution role.
+
+All installer/bootstrap modes inspect all five policies before mutation, print and
+record the complete hash-bound diff, ask for one approval, apply the batch, and
+verify every resulting default document. A partial policy update
+automatically restores prior defaults, deletes newly created versions, and
+recreates any non-default historical document pruned at IAM's five-version
+limit. `--reconcile-bootstrap-policies` then verifies the existing toolkit role
+and stops. `--install` supplies the three execution policies and enables
+bootstrap-stack termination protection only when the toolkit is absent;
+`--bootstrap-cdk` forces that operation. A later CDK failure leaves an exact,
+retryable policy set. The installer may remove a failed first-create stack only
+after verifying the exact execution role, immutable image/runtime parameters,
+absence of live outputs, and disabled termination protection. Routine
+deployment verifies every canonical policy document and rejects missing,
+extra, or inline policies on the CDK execution role. Do not bootstrap AgentCore
+with `AdministratorAccess`, and do not give the temporary bootstrap principal
+to the routine deployment workflow.
 
 The repository policy includes bounded CloudFront distribution/function/VPC
 origin and WAFv2 lifecycle actions plus condition-scoped CloudFront
-service-linked-role creation. Accounts bootstrapped with an older policy must
-run the reviewed bootstrap update before selecting `cloudfront`; the normal
-deployer rejects the stale policy rather than broadening itself.
+service-linked-role creation. Accounts with a current toolkit and an older
+policy run the reviewed `--reconcile-bootstrap-policies` command to migrate;
+the normal deployer rejects the stale policy rather than broadening itself.
 
 Before changing AWS resources, the wrapper resolves every supplied managed
 prefix list and requires a stable, nonempty, customer-owned IPv4 list in the
@@ -607,11 +631,8 @@ private/reserved ranges, and broader entries are rejected. Re-resolve every
 hostname's A records after provider, IdP, Mantle, ALB-key, or Cognito DNS
 changes.
 
-The reusable schema and stack can omit Athena, but that configuration is not
-launchable through the current protected AgentCore workflow. Fixture
-preparation requires the certification datasource role to match a reviewed
-Athena binding, and certification always runs a governed `SELECT`; there is no
-query-disabled certification mode.
+The core schema and stack contain no customer database query inputs. Query
+activation and certification belong to a separately versioned add-on.
 
 The wrapper reads the deployed AgentCore stack's verified `StateTableName`
 output, passes it as the control plane's required `PrimaryStateTableName`
@@ -679,7 +700,7 @@ canaries, and retain restore evidence. Successful setup is not production
 certification.
 
 The AgentCore config actions cover runtime project settings only. They do not
-administer principals, project grants, datasources, API keys, Cedar policies,
+administer principals, project grants, API keys, Cedar policies,
 webhooks, provider secrets, or security-event destinations. Managed Cognito
 uses the shared web control plane for those resources; an external-OIDC adopter
 must provide a separately trusted operator/control-plane path where needed.
@@ -843,13 +864,13 @@ pre-stage and review must be repeated for every later launch. See
 for the complete procedure and example document.
 
 Before production mutation, the orchestrator produces three additive signed
-inputs. The detailed launch-rehearsal report must cover all seven gates:
-initialization replacement, query boundaries/reconciliation, recovery
-cutover/rollback, security-event delivery/DLQ, provider routing, provider
-fallback/recovery, and control-plane fault recovery. The external-OIDC
+inputs. The detailed launch-rehearsal report must cover all six gates:
+initialization replacement, recovery cutover/rollback, security-event
+delivery/DLQ, provider routing, provider fallback/recovery, and control-plane
+fault recovery. The external-OIDC
 schema-v3 report must prove issuer/JWKS validation, completion and streaming
 for every launch provider, tools for each provider that declares
-`tool_calling`, governed query, viewer write denial, and an administrator
+`tool_calling`, viewer write denial, and an administrator
 tenant-config mutate-confirm-rollback flow. The qualification-teardown receipt
 must prove both fixture sets existed, their identities were revoked, exactly
 two launch workers stopped, and all four `managed` qualification stacks are
@@ -908,17 +929,11 @@ Before shifting traffic:
 6. Through AgentCore, read the canonical tenant-project config as admin and
    viewer, deny the viewer update, then perform and confirm an admin CAS
    mutation and rollback. Require the original value after rollback.
-7. For AgentCore production launch, run AgentCore `SELECT` canaries plus
-   mutation, cross-project, missing-scope, unbound-role, unsafe-workgroup,
-   row/result/scan-limit, audit-record, interrupted-lifecycle reconciliation,
-   and missing-authority deferral checks. Also run the HTTP `SELECT` canary
-   when launching the normal Starlette data plane. AgentCore query
-   certification is mandatory, not an optional launch gate.
-8. For managed Cognito, verify S256 PKCE, required TOTP enrollment, the exact
+7. For managed Cognito, verify S256 PKCE, required TOTP enrollment, the exact
    ID-token issuer/audience/tenant/project claims, and access-token rejection.
-9. Verify the shared control-plane canonical URL, datasource RBAC, shared state,
-   suppressed execution routes, and lack of Athena/STS task authority. For
-   custom-domain, verify DNS/TLS, ALB Cognito, and ingress restrictions. For
+8. Verify the shared control-plane canonical URL, shared state, and suppressed
+   execution routes. For custom-domain, verify DNS/TLS, ALB Cognito, and
+   ingress restrictions. For
    CloudFront, verify WAF allow/deny and rate-limit behavior, IPv6 disabled,
    cache disabled, VPC-origin/internal-ALB isolation, stripped viewer identity
    headers, cross-replica opaque-session refresh, CSRF denial, and POST logout.
@@ -928,42 +943,33 @@ Before shifting traffic:
    issuer/`sub` canonical lookup, the configured local landing path, and direct
    ACS and metadata `410` responses. Skip this only for external OIDC, which
    does not deploy the control plane.
-10. Verify alarms, a confirmed SNS subscription, logs, tenant audit-chain
+9. Verify alarms, a confirmed SNS subscription, logs, tenant audit-chain
     verification, and rollback.
-11. Verify the independent transition watchdog can assume its protected role
+10. Verify the independent transition watchdog can assume its protected role
     and retain a signed terminal record for a rehearsal commit or compensation.
-
-AgentCore `/ready` does not enumerate datasource roles or validate Athena
-workgroups. Workgroup validation occurs immediately before each execution, so
-an authenticated query canary is required. The production validation tool's
-`query.mutate` policy check alone is not a remote query canary.
 
 AgentCore creates and verifies its administrator-email alarm subscription.
 Fargate alarms and both stacks' tenant security-event topics still require
 configured and tested receivers before launch.
 
-## Backup And Restore
+## Point-In-Time Recovery
 
-Both AWS stacks enable DynamoDB PITR, daily AWS Backup, and governance-mode
-Vault Lock with a 30-day minimum and 365-day maximum retention.
+Both AWS stacks enable DynamoDB PITR, deletion protection, retained state, and
+AWS-managed encryption. They create no AWS Backup resources or customer-managed
+runtime KMS keys.
 `.github/workflows/operations-security.yml` uses a Fargate/AgentCore matrix for
 the daily metadata audit and monthly PITR restore exercise, with separate
 least-privilege audit and recovery roles. Configure
-`AXON_OPERATIONS_AUDIT_ROLE_ARN`, `AXON_OPERATIONS_RECOVERY_ROLE_ARN`,
-`AXON_AWS_ACCOUNT_ID`, `AXON_DATA_KMS_KEY_ARN`, and
-`AXON_AGENTCORE_DATA_KMS_KEY_ARN` in the protected production environment.
+`AXON_OPERATIONS_AUDIT_ROLE_ARN`, `AXON_OPERATIONS_RECOVERY_ROLE_ARN`, and
+`AXON_AWS_ACCOUNT_ID` in the protected production environment.
 Set `AXON_FARGATE_STATE_TABLE_NAME` and
 `AXON_AGENTCORE_STATE_TABLE_NAME` when either physical name differs from its
-documented default. The two KMS variables must contain the data-key ARN for
-their respective stack. With `--require-vault-lock`, the validator checks the
-exact 30-day minimum, 365-day maximum, and governance mode rather than accepting
-an arbitrary locked vault.
+documented default.
 
 Validate Fargate:
 
 ```bash
 python scripts/operations/validate_state_recovery.py
-python scripts/operations/validate_state_recovery.py --require-vault-lock
 python scripts/operations/validate_state_recovery.py --exercise-restore
 ```
 
@@ -1003,8 +1009,8 @@ python scripts/operations/fargate_recovery.py \
    `AXON_RUNTIME_STATE_TABLE_NAME=$RESTORED_TABLE_NAME` and
    `AXON_RECOVERY_CUTOVER_MODE=true`. CloudFormation rejects the state switch
    unless step 3 is still true and pins the service's declared desired count to
-   zero. The update grants the task role only the selected table, moves
-   DynamoDB alarms to it, and adds it to the backup plan.
+   zero. The update grants the task role only the selected table and moves
+   DynamoDB alarms to it.
 5. Start the recorded number of canary tasks. The helper leaves autoscaling
    suspended and returns only after ECS is stable and at least that many ALB
    targets are healthy:
@@ -1092,7 +1098,7 @@ the production endpoint, explicitly denies runtime DynamoDB access, blocks JWT
 invocation, quiesces the shared control plane, and waits the four-hour maximum
 session lifetime plus five minutes before permitting a reviewed table switch.
 The switch updates the runtime environment, exact table IAM, VPC endpoint
-policy, metrics, and backup selection while access remains denied. A separate
+policy, and metrics while access remains denied. A separate
 `recovery` endpoint is then created for canaries before promotion.
 
 The finite operator sequence is:
@@ -1118,7 +1124,7 @@ Use a new state file and approval to repeat the same sequence back to the
 primary table, then run `resume-control-plane` with that rollback state file
 before cleaning up the restore. The helper updates only the deployed reviewed
 template and refuses stacks without a CloudFormation execution role. See
-[AgentCore Backup And Recovery](AGENTCORE_RUNBOOK.md#backup-and-recovery) for
+[AgentCore PITR And Recovery](AGENTCORE_RUNBOOK.md#pitr-and-recovery) for
 phase invariants, IAM separation, abort, rollback, and cleanup commands.
 
 The managed web control plane now follows the reviewed AgentCore-selected
@@ -1127,8 +1133,8 @@ endpoint policies. Both planes remain stopped and explicitly denied state
 access during selection; resume is allowed only after they agree on the same
 table and recovery ownership.
 
-The protected AgentCore deployment fails unless AWS completes a fresh backup
-and PITR restore, up to 25 restored items match strongly consistent source
+The protected AgentCore deployment fails unless AWS completes a fresh PITR
+restore, up to 25 restored items match strongly consistent source
 reads, the temporary table is removed, and that proof is bound into signed
 deployment evidence. The scheduled exercises provide separate recurring
 coverage. A full application cutover to a retained restored table and back is a

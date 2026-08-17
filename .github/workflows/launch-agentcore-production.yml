@@ -440,8 +440,20 @@ jobs:
           validation = json.loads(
               Path(sys.argv[3]).read_text(encoding="utf-8")
           )
+          schema_version = setup.get("schema_version")
+          deployment = setup.get("deployment")
+          topology_valid = (
+              schema_version == 2
+              and deployment is None
+              or schema_version == 3
+              and deployment
+              == {
+                  "experience": "axonllm",
+                  "execution": "agentcore",
+              }
+          )
           if (
-              setup.get("schema_version") != 2
+              not topology_valid
               or setup.get("target") != "agentcore"
               or setup.get("identity_mode") != "managed-cognito"
               or setup.get("aws_region") != "us-east-1"
@@ -484,6 +496,7 @@ jobs:
               certification.get("schemaVersion") != 1
               or certification.get("region") != "us-east-1"
               or certification.get("profile") != "production-launch"
+              or certification.get("ingressMode") != "iam-facade"
           ):
               raise SystemExit(
                   "certification is not the production launch contract"
@@ -611,6 +624,7 @@ jobs:
             --arg qualifier "${qualifier}" '
             .runtimeArn = $runtime_arn
             | .qualifier = $qualifier
+            | .ingressMode = "iam-facade"
           ' "${work}/certification-reviewed.json" \
             >"${work}/certification-bound.json"
           chmod 0600 \
@@ -728,7 +742,6 @@ jobs:
             --arg stack "AxonLLMControlPlaneStack-${QUALIFICATION_NAMESPACE}" '
             .[$stack]
             | .ControlPlaneImageUri == $image
-            and .QueryPlaneEnabled == "true"
             and (.EndpointMode
               | . == "custom-domain" or . == "cloudfront")
             and (.ControlPlaneUrl
@@ -1390,9 +1403,6 @@ jobs:
             and .coordinator.kmsKeyArn == $coordinator_key
             and .scenario.tenantId == $setup[0].tenant.tenant_id
             and .scenario.projectId == $setup[0].tenant.project_id
-            and .scenario.datasourceId
-              == $certification[0].query.datasourceId
-            and .scenario.selectSql == $certification[0].query.sql
             and (
               $certification[0].providers
               | map(.provider)

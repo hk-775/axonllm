@@ -186,7 +186,6 @@ dependencies = [
     { name = "boto3" },
     { name = "google-auth", extra = ["requests"] },
     { name = "pyyaml" },
-    { name = "sqlglot" },
     { name = "starlette" },
     { name = "tiktoken" },
     { name = "uvicorn", extra = ["standard"] },
@@ -195,6 +194,9 @@ dependencies = [
 [package.optional-dependencies]
 agentcore = [
     { name = "bedrock-agentcore" },
+]
+customer-database-query = [
+    { name = "sqlglot" },
 ]
 dev = [
     { name = "httpx" },
@@ -207,6 +209,7 @@ dev = [
     { name = "python-jose", extra = ["cryptography"] },
     { name = "ruff" },
     { name = "setuptools" },
+    { name = "sqlglot" },
 ]
 oidc = [
     { name = "httpx" },
@@ -240,12 +243,13 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = "==0.16.2" },
     { name = "setuptools", marker = "extra == 'dev'", specifier = "==83.0.0" },
-    { name = "sqlglot", specifier = ">=27.0.0" },
+    { name = "sqlglot", marker = "extra == 'customer-database-query'", specifier = ">=27.0.0" },
+    { name = "sqlglot", marker = "extra == 'dev'", specifier = ">=27.0.0" },
     { name = "starlette", specifier = ">=0.37.0" },
     { name = "tiktoken", specifier = ">=0.7.0" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.27.0" },
 ]
-provides-extras = ["otel", "oidc", "agentcore", "dev", "security"]
+provides-extras = ["customer-database-query", "otel", "oidc", "agentcore", "dev", "security"]
 
 [[package]]
 name = "bedrock-agentcore"

@@ -75,9 +75,9 @@ def test_workflow_gates_deployment_before_signed_promotion() -> None:
         "Stage identity and AgentCore candidate only"
     )
     assert names.index("Stage identity and AgentCore candidate only") < names.index(
-        "Start deployment backup and validate state protection"
+        "Exercise PITR and validate state protection"
     )
-    assert names.index("Start deployment backup and validate state protection") < names.index(
+    assert names.index("Exercise PITR and validate state protection") < names.index(
         "Prepare fresh certification identities"
     )
     assert names.index("Prepare fresh certification identities") < names.index(
@@ -137,8 +137,9 @@ def test_workflow_gates_deployment_before_signed_promotion() -> None:
     assert "cloudformation get-template" in body
     assert "separate approved infrastructure migration" in body
     assert "trivy config" in body
-    assert "--require-vault-lock" in body
-    assert "--start-backup" in body
+    assert "--exercise-restore" in body
+    assert "--require-vault-lock" not in body
+    assert "--start-backup" not in body
     assert "agentcore_recovery.py" in body
     assert "prepare_agentcore_certification.py prepare" in body
     assert "prepare_agentcore_certification.py cleanup" in body
@@ -193,17 +194,9 @@ def test_workflow_gates_deployment_before_signed_promotion() -> None:
 
 def test_control_plane_validation_is_endpoint_mode_bound() -> None:
     steps = _workflow()["jobs"]["deploy"]["steps"]
-    prepare = next(
-        step
-        for step in steps
-        if step.get("name")
-        == "Prepare fresh control-plane canary sessions"
-    )["run"]
+    prepare = next(step for step in steps if step.get("name") == "Prepare fresh control-plane canary sessions")["run"]
     validation = next(
-        step
-        for step in steps
-        if step.get("name")
-        == "Run production control-plane RBAC and load validation"
+        step for step in steps if step.get("name") == "Run production control-plane RBAC and load validation"
     )["run"]
 
     for body in (prepare, validation):

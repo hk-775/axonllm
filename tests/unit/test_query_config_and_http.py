@@ -196,9 +196,7 @@ def test_http_query_rejects_project_context_override() -> None:
     )
 
     assert response.status_code == 400
-    assert response.json()["error"]["code"] == (
-        "project_context_mismatch"
-    )
+    assert response.json()["error"]["code"] == ("project_context_mismatch")
     assert service.call is None
 
 
@@ -250,9 +248,7 @@ def test_http_query_requires_canonical_identity() -> None:
     )
 
     assert response.status_code == 401
-    assert response.json()["error"]["code"] == (
-        "canonical_identity_required"
-    )
+    assert response.json()["error"]["code"] == ("canonical_identity_required")
 
 
 def test_http_query_returns_only_sanitized_service_error() -> None:
@@ -281,201 +277,72 @@ def test_http_query_returns_only_sanitized_service_error() -> None:
 
 def _clean_query_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     for key in list(__import__("os").environ):
-        if key.startswith("AXON_") or key == (
-            "LLM_ROUTER_DYNAMODB_ENABLED"
-        ):
+        if key.startswith("AXON_") or key == ("LLM_ROUTER_DYNAMODB_ENABLED"):
             monkeypatch.delenv(key, raising=False)
     monkeypatch.setenv("AXON_DEPLOYMENT_PROFILE", "development")
 
 
-def test_query_plane_is_disabled_by_default(
+def test_customer_query_environment_is_not_loaded_by_core(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _clean_query_environment(monkeypatch)
+    monkeypatch.setenv("AXON_ATHENA_QUERY_ENABLED", "true")
+    monkeypatch.setenv("AXON_ATHENA_QUERY_BINDINGS", "[]")
 
     config = load_app_config()
 
-    assert config.athena_query_enabled is False
-    assert config.athena_query_bindings == ""
+    assert not hasattr(config, "athena_query_enabled")
+    assert not hasattr(config, "athena_query_bindings")
     assert config.control_plane_only is False
 
 
-def test_control_plane_only_omits_all_data_plane_routes() -> None:
+def test_agentcore_control_plane_exposes_full_data_plane_routes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Proxy:
+        requires_request_context = True
+
+        def __init__(self, **kwargs: Any) -> None:
+            local_gateway = kwargs["local_gateway"]
+            self.cost_tracker = local_gateway.cost_tracker
+            self._user_configs = local_gateway._user_configs
+            self.request_validator = local_gateway.request_validator
+
+    monkeypatch.setattr(
+        "src.gateway.bootstrap.AgentCoreGatewayProxy",
+        _Proxy,
+    )
     app = build_starlette_app(
         AppConfig(
             deployment_profile="development",
             auth_mode="LOG_ONLY",
             control_plane_only=True,
+            execution_target="agentcore",
+            agentcore_runtime_arn=("arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/axonllm-AbCdEf1234"),
         )
     )
     paths = {getattr(route, "path", None) for route in app.routes}
 
     assert "/admin/datasources" not in paths
-    assert "/api/chat" not in paths
-    assert "/api/chat/stream" not in paths
-    assert "/api/models" not in paths
-    assert "/v1/chat/completions" not in paths
-    assert "/v1/models" not in paths
+    assert "/api/chat" in paths
+    assert "/api/chat/stream" in paths
+    assert "/api/models" in paths
+    assert "/v1/chat/completions" in paths
+    assert "/v1/models" in paths
     assert "/v1/query" not in paths
     assert "/admin/projects" in paths
     assert "/health" in paths
     assert "/ready" in paths
 
 
-@pytest.mark.parametrize(
-    ("control_plane_only", "expected"),
-    [
-        (False, ["start", "stop"]),
-        (True, []),
-    ],
-)
-def test_query_reconciler_lifecycle_is_data_plane_only(
-    monkeypatch: pytest.MonkeyPatch,
-    control_plane_only: bool,
-    expected: list[str],
-) -> None:
-    calls: list[str] = []
-
-    class Worker:
-        async def start(self) -> None:
-            calls.append("start")
-
-        async def stop(self) -> None:
-            calls.append("stop")
-
-    components = build_gateway_components(
+def test_standard_runtime_omits_customer_query_routes() -> None:
+    app = build_starlette_app(
         AppConfig(
             deployment_profile="development",
             auth_mode="LOG_ONLY",
         )
     )
-    components.datasource_repository = _QueryService()
-    components.query_service = _QueryService()
-    components.query_reconciliation_worker = Worker()
-    monkeypatch.setattr(
-        "src.gateway.bootstrap.build_gateway_components",
-        lambda *_args, **_kwargs: components,
-    )
-    app = build_starlette_app(
-        AppConfig(
-            deployment_profile="development",
-            auth_mode="ENFORCE",
-            canonical_identity_required=True,
-            durable_persistence_enabled=True,
-            athena_query_enabled=True,
-            control_plane_only=control_plane_only,
-        )
-    )
+    paths = {getattr(route, "path", None) for route in app.routes}
 
-    with TestClient(app):
-        if control_plane_only:
-            assert calls == []
-        else:
-            assert calls == ["start"]
-
-    assert calls == expected
-
-
-def test_query_settings_are_loaded_strictly(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _clean_query_environment(monkeypatch)
-    monkeypatch.setenv("AXON_AUTH_MODE", "ENFORCE")
-    monkeypatch.setenv("AXON_REQUIRE_CANONICAL_IDENTITY", "true")
-    monkeypatch.setenv("LLM_ROUTER_DYNAMODB_ENABLED", "true")
-    monkeypatch.setenv("AXON_ATHENA_QUERY_ENABLED", "true")
-    monkeypatch.setenv("AXON_CONTROL_PLANE_ONLY", "true")
-    monkeypatch.setenv("AXON_ATHENA_QUERY_MAX_ROWS", "250")
-    monkeypatch.setenv(
-        "AXON_ATHENA_QUERY_MAX_RESULT_BYTES",
-        "524288",
-    )
-    monkeypatch.setenv(
-        "AXON_ATHENA_QUERY_MAX_BYTES_SCANNED",
-        "104857600",
-    )
-    monkeypatch.setenv(
-        "AXON_ATHENA_QUERY_TIMEOUT_SECONDS",
-        "12.5",
-    )
-
-    config = load_app_config()
-
-    assert config.athena_query_enabled is True
-    assert config.control_plane_only is True
-    assert config.athena_query_max_rows == 250
-    assert config.athena_query_max_result_bytes == 524288
-    assert config.athena_query_max_bytes_scanned == 104857600
-    assert config.athena_query_timeout_seconds == 12.5
-
-
-@pytest.mark.parametrize("raw", ["1", "yes", "enabled", ""])
-def test_query_enablement_rejects_ambiguous_boolean(
-    monkeypatch: pytest.MonkeyPatch,
-    raw: str,
-) -> None:
-    _clean_query_environment(monkeypatch)
-    monkeypatch.setenv("AXON_ATHENA_QUERY_ENABLED", raw)
-
-    with pytest.raises(ValueError, match="true.*false"):
-        load_app_config()
-
-
-@pytest.mark.parametrize(
-    "changes",
-    [
-        {"auth_mode": "LOG_ONLY"},
-        {"canonical_identity_required": False},
-        {"durable_persistence_enabled": False},
-    ],
-)
-def test_query_enablement_rejects_weak_runtime(
-    changes: dict[str, object],
-) -> None:
-    settings: dict[str, object] = {
-        "deployment_profile": "development",
-        "auth_mode": "ENFORCE",
-        "canonical_identity_required": True,
-        "durable_persistence_enabled": True,
-        "athena_query_enabled": True,
-    }
-    settings.update(changes)
-
-    with pytest.raises(RuntimeError, match="canonical identity"):
-        AppConfig(**settings)
-
-
-def test_query_bindings_enforce_agentcore_character_boundary() -> None:
-    multibyte_character = "\u00e9"
-
-    AppConfig(
-        athena_query_bindings=multibyte_character * 2_048,
-    )
-    with pytest.raises(ValueError, match="2,048-character"):
-        AppConfig(
-            athena_query_bindings=multibyte_character * 2_049,
-        )
-
-
-@pytest.mark.parametrize(
-    ("field", "value"),
-    [
-        ("athena_query_timeout_seconds", 0),
-        ("athena_query_timeout_seconds", True),
-        ("athena_query_timeout_seconds", "30"),
-        ("athena_query_timeout_seconds", float("nan")),
-        ("athena_query_max_rows", 0),
-        ("athena_query_max_rows", 10_001),
-        ("athena_query_max_result_bytes", 1023),
-        ("athena_query_max_bytes_scanned", 0),
-        ("athena_query_poll_interval_seconds", 0.01),
-        ("athena_query_poll_interval_seconds", False),
-        ("athena_query_poll_interval_seconds", "0.25"),
-    ],
-)
-def test_query_limits_reject_unsafe_values(
-    field: str,
-    value: object,
-) -> None:
-    with pytest.raises(ValueError):
-        AppConfig(**{field: value})
+    assert "/v1/query" not in paths
+    assert "/admin/datasources" not in paths

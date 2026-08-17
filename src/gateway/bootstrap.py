@@ -9,9 +9,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-import math
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
 from starlette.applications import Starlette
 from starlette.requests import Request
@@ -19,10 +19,6 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from src.gateway.admin.audit_routes import AuditAPI, create_audit_routes
-from src.gateway.admin.datasource_routes import (
-    DatasourceAPI,
-    create_datasource_routes,
-)
 from src.gateway.admin.key_routes import KeyManagementAPI, create_key_routes
 from src.gateway.admin.policy_routes import PolicyHierarchyAPI, create_policy_hierarchy_routes
 from src.gateway.admin.quota_routes import QuotaAPI, create_quota_routes
@@ -35,6 +31,7 @@ from src.gateway.admin.routes import (
 )
 from src.gateway.admin.webhook_routes import WebhookAPI, create_webhook_routes
 from src.gateway.agent import GatewayAgent
+from src.gateway.agentcore.facade_client import AgentCoreGatewayProxy
 from src.gateway.auth.api_key_service import APIKeyService
 from src.gateway.auth.browser_session import (
     BrowserAuthAPI,
@@ -103,6 +100,7 @@ from src.gateway.config_loader import (
     load_pricing_config,
 )
 from src.gateway.cost_tracker import CostTracker
+from src.gateway.deployment.topology import OSTIARI_EXPERIENCE
 from src.gateway.feedback_tracker import FeedbackTracker
 from src.gateway.guardrail_engine import GuardrailEngine
 from src.gateway.health_tracker import ProviderHealthTracker
@@ -114,22 +112,6 @@ from src.gateway.persistence import DynamoPersistence
 from src.gateway.provider_config import ProviderConfig
 from src.gateway.provider_loader import load_provider_routes
 from src.gateway.rate_limiter import SlidingWindowRateLimiter
-from src.gateway.query.admission import (
-    QueryAdmissionController,
-    QueryAdmissionLimits,
-)
-from src.gateway.query.athena import AthenaExecutor, AthenaQueryLimits
-from src.gateway.query.models import AthenaRoleBindings
-from src.gateway.query.repository import (
-    DatasourceRepository,
-    DynamoDatasourceRepository,
-)
-from src.gateway.query.reconciliation import (
-    QueryLifecycleReconciler,
-    QueryReconciliationWorker,
-)
-from src.gateway.query.routes import QueryAPI, create_query_routes
-from src.gateway.query.service import QueryService
 from src.gateway.request_validator import RequestValidator
 from src.gateway.router import Router
 from src.gateway.semantic_efficiency import SemanticEfficiencyEngine
@@ -188,12 +170,6 @@ class GatewayComponents:
     # so this is also the set the readiness checklist can distinguish
     # "configured" from "in models.yaml but unusable".
     provider_configs: dict[str, ProviderConfig] = field(default_factory=dict)
-    datasource_repository: DatasourceRepository | None = None
-    athena_role_bindings: AthenaRoleBindings = field(
-        default_factory=AthenaRoleBindings
-    )
-    query_service: QueryService | None = None
-    query_reconciliation_worker: QueryReconciliationWorker | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -216,9 +192,7 @@ def _load_runtime_model_registry(
     # deletions, so replace rather than merge. A failed read is allowed to abort
     # startup; treating an outage as "no override" could silently reactivate a
     # route that was removed in production.
-    snapshot = asyncio.run(
-        persistence.load_model_registry_snapshot()
-    )
+    snapshot = asyncio.run(persistence.load_model_registry_snapshot())
     if snapshot is not None:
         model_config, model_revision = snapshot
         registry.replace_config(
@@ -242,9 +216,7 @@ def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComp
     # --- Persistence ---
     persistence = DynamoPersistence(region=app_config.aws_region)
     if persistence.enabled:
-        asyncio.run(
-            persistence.create_table_if_not_exists()
-        )
+        asyncio.run(persistence.create_table_if_not_exists())
 
     # --- Auth services ---
     api_key_service = APIKeyService(persistence=persistence)
@@ -268,27 +240,18 @@ def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComp
     browser_session_service = None
     if app_config.browser_auth_enabled:
         if not persistence.enabled:
-            raise RuntimeError(
-                "CloudFront browser authentication requires enabled "
-                "DynamoDB persistence"
-            )
+            raise RuntimeError("CloudFront browser authentication requires enabled DynamoDB persistence")
         browser_session_service = BrowserSessionService(
             config=BrowserSessionConfig(
                 hosted_ui_url=app_config.cognito_hosted_ui_url,
                 client_id=app_config.browser_auth_client_id,
                 callback_url=app_config.browser_auth_callback_url,
                 signed_out_url=app_config.browser_auth_signed_out_url,
-                authorization_endpoint=(
-                    app_config.browser_auth_authorization_endpoint
-                ),
+                authorization_endpoint=(app_config.browser_auth_authorization_endpoint),
                 token_endpoint=app_config.browser_auth_token_endpoint,
                 logout_endpoint=app_config.browser_auth_logout_endpoint,
-                session_max_seconds=(
-                    app_config.browser_session_max_seconds
-                ),
-                flow_ttl_seconds=(
-                    app_config.browser_auth_flow_ttl_seconds
-                ),
+                session_max_seconds=(app_config.browser_session_max_seconds),
+                flow_ttl_seconds=(app_config.browser_auth_flow_ttl_seconds),
             ),
             store=DynamoBrowserSessionStore(persistence),
             oidc_service=oidc_service,
@@ -297,24 +260,16 @@ def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComp
     project_resolver = None
     if app_config.canonical_identity_required:
         if app_config.auth_mode != "ENFORCE":
-            raise RuntimeError(
-                "canonical identity requires AXON_AUTH_MODE=ENFORCE"
-            )
+            raise RuntimeError("canonical identity requires AXON_AUTH_MODE=ENFORCE")
         if not persistence.enabled:
-            raise RuntimeError(
-                "AXON_REQUIRE_CANONICAL_IDENTITY=true requires DynamoDB persistence"
-            )
-        principal_resolver = CanonicalPrincipalResolver(
-            DynamoPrincipalRepository(persistence)
-        )
+            raise RuntimeError("AXON_REQUIRE_CANONICAL_IDENTITY=true requires DynamoDB persistence")
+        principal_resolver = CanonicalPrincipalResolver(DynamoPrincipalRepository(persistence))
         project_resolver = DynamoProjectRepository(persistence)
 
     # --- Enterprise identity: SCIM + ALB/Cognito-managed SAML federation ---
     scim_store = ScimStore(
         persistence=persistence,
-        canonical_identity_required=(
-            app_config.canonical_identity_required
-        ),
+        canonical_identity_required=(app_config.canonical_identity_required),
     )
     if persistence.enabled:
         asyncio.run(scim_store.initialize())
@@ -322,9 +277,7 @@ def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComp
         config=load_saml_config(
             deployment_profile=app_config.deployment_profile,
             auth_mode=app_config.auth_mode,
-            canonical_identity_required=(
-                app_config.canonical_identity_required
-            ),
+            canonical_identity_required=(app_config.canonical_identity_required),
             control_plane_only=app_config.control_plane_only,
             aws_region=app_config.aws_region,
             oidc_issuer=app_config.oidc_issuer,
@@ -350,8 +303,7 @@ def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComp
     # --- Multi-region ---
     # Load a real hub/spoke topology from spokes.yaml when present; otherwise a
     # single-region default (single-region deploys need no config file).
-    hub_config = load_hub_config(
-        app_config.spokes_config_path, default_region=app_config.aws_region)
+    hub_config = load_hub_config(app_config.spokes_config_path, default_region=app_config.aws_region)
     region_router = RegionRouter(hub_config=hub_config)
     health_monitor = SpokeHealthMonitor(hub_config=hub_config)
 
@@ -360,97 +312,13 @@ def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComp
     # policy sets pii_ner_enabled: building it costs nothing (the boto3 client is
     # lazy) and wiring it here keeps the decision in policy rather than in
     # startup config, so one BU can enable name detection without a redeploy.
-    pii_redactor = PIIRedactor(
-        entity_detector=build_entity_detector(region=app_config.aws_region))
+    pii_redactor = PIIRedactor(entity_detector=build_entity_detector(region=app_config.aws_region))
     injection_detector = PromptInjectionDetector()
     audit_trail = AuditTrail(persistence=persistence)
     # Reload the hash-chain head so audit continuity survives restarts. Loop-safe:
     # runs now when standalone, defers to the running loop when embedded (Ostiari)
     # — never calls asyncio.run inside an active loop.
     audit_trail.initialize_sync()
-    athena_role_bindings = AthenaRoleBindings.from_json(
-        app_config.athena_query_bindings
-    )
-    datasource_repository: DatasourceRepository | None = None
-    query_service: QueryService | None = None
-    query_reconciliation_worker: QueryReconciliationWorker | None = None
-    if app_config.athena_query_enabled:
-        datasource_repository = DynamoDatasourceRepository(
-            persistence,
-            max_datasources_per_tenant=(
-                app_config.athena_query_max_datasources_per_tenant
-            ),
-        )
-        query_admission = QueryAdmissionController(
-            persistence,
-            limits=QueryAdmissionLimits(
-                project_rpm=app_config.athena_query_project_rpm,
-                principal_rpm=app_config.athena_query_principal_rpm,
-                project_concurrency=(
-                    app_config.athena_query_project_concurrency
-                ),
-                principal_concurrency=(
-                    app_config.athena_query_principal_concurrency
-                ),
-                project_scan_bytes_per_minute=(
-                    app_config
-                    .athena_query_project_scan_bytes_per_minute
-                ),
-                principal_scan_bytes_per_minute=(
-                    app_config
-                    .athena_query_principal_scan_bytes_per_minute
-                ),
-                lease_seconds=max(
-                    30,
-                    math.ceil(
-                        app_config.athena_query_timeout_seconds
-                    )
-                    + 30,
-                ),
-            ),
-            max_scan_bytes_per_query=(
-                app_config.athena_query_max_bytes_scanned
-            ),
-        )
-        athena_executor = AthenaExecutor(
-            limits=AthenaQueryLimits(
-                timeout_seconds=(
-                    app_config.athena_query_timeout_seconds
-                ),
-                max_rows=app_config.athena_query_max_rows,
-                max_result_bytes=(
-                    app_config.athena_query_max_result_bytes
-                ),
-                max_bytes_scanned=(
-                    app_config.athena_query_max_bytes_scanned
-                ),
-                poll_interval_seconds=(
-                    app_config.athena_query_poll_interval_seconds
-                ),
-            )
-        )
-        query_service = QueryService(
-            repository=datasource_repository,
-            bindings=athena_role_bindings,
-            executor=athena_executor,
-            audit_trail=audit_trail,
-            require_durable_audit=True,
-            admission=query_admission,
-            require_durable_admission=True,
-        )
-        query_reconciliation_worker = QueryReconciliationWorker(
-            QueryLifecycleReconciler(
-                store=persistence,
-                repository=datasource_repository,
-                bindings=athena_role_bindings,
-                executor=athena_executor,
-                audit_trail=audit_trail,
-                claim_seconds=300,
-                page_size=5,
-            ),
-            interval_seconds=30,
-            max_pages=10,
-        )
     event_dispatcher = EventDispatcher()
     # Forwards request traces to an embedding Ostiari when detected (OSTIARI_TRACES_URL
     # set, or an in-process sink registered via observability.trace_forwarder). No-op
@@ -473,12 +341,10 @@ def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComp
         from src.gateway.security.event_dispatcher import SecurityEvent
         from src.gateway.security.audit_trail import LEGACY_TENANT_ID
         from datetime import timezone
+
         event_tenant_id = tenant_id or LEGACY_TENANT_ID
         event = SecurityEvent(
-            event_id=(
-                f"budget_{event_tenant_id}_{project_id}_"
-                f"{billing_epoch}_{int(threshold_pct * 100)}"
-            ),
+            event_id=(f"budget_{event_tenant_id}_{project_id}_{billing_epoch}_{int(threshold_pct * 100)}"),
             event_type="budget_threshold",
             timestamp=datetime.now(timezone.utc).isoformat(),
             severity="warning" if threshold_pct < 1.0 else "critical",
@@ -513,17 +379,28 @@ def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComp
     if app_config.load_demo_data:
         seed = load_demo_seed_config(app_config.demo_seed_config_path)
         projects, user_configs, policies = _apply_seed_data(
-            seed, cost_tracker, health_tracker, all_model_names,
-            quota_enforcer, policy_resolver,
-            audit_trail, api_key_service, event_dispatcher,
+            seed,
+            cost_tracker,
+            health_tracker,
+            all_model_names,
+            quota_enforcer,
+            policy_resolver,
+            audit_trail,
+            api_key_service,
+            event_dispatcher,
         )
 
     # --- DynamoDB persisted state (merges on top of seed data) ---
     loaded_feedback: list = []
     if persistence.enabled:
         (
-            loaded_projects, loaded_user_configs, loaded_records, loaded_feedback,
-            loaded_policies, loaded_destinations, loaded_topology,
+            loaded_projects,
+            loaded_user_configs,
+            loaded_records,
+            loaded_feedback,
+            loaded_policies,
+            loaded_destinations,
+            loaded_topology,
         ) = asyncio.run(_load_persisted_state(persistence))
         projects.update(loaded_projects)
         user_configs.update(loaded_user_configs)
@@ -534,8 +411,7 @@ def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComp
         # displayed correctly on the dashboard, and enforced by nothing.
         # _apply_seed_data does this registration for seeded entities; persisted
         # ones need the same treatment or they are decorative.
-        _register_persisted_budgets(
-            cost_tracker, policy_resolver, loaded_projects, loaded_user_configs)
+        _register_persisted_budgets(cost_tracker, policy_resolver, loaded_projects, loaded_user_configs)
         # Merge by name, matching POST /admin/policies' update-by-name identity: a
         # persisted policy replaces the seeded one it shares a name with rather
         # than being evaluated alongside it, which for a permit/forbid pair would
@@ -543,8 +419,7 @@ def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComp
         by_name = {p["name"]: p for p in policies}
         by_name.update({p["name"]: p for p in loaded_policies})
         policies = list(by_name.values())
-        _apply_persisted_infrastructure(
-            event_dispatcher, hub_config, loaded_destinations, loaded_topology)
+        _apply_persisted_infrastructure(event_dispatcher, hub_config, loaded_destinations, loaded_topology)
         # Rehydrate via load_records so the running spend counters (which back
         # budget checks) are seeded from history, not just the record list.
         cost_tracker.load_records(loaded_records)
@@ -624,9 +499,7 @@ def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComp
         ensemble_config=ensemble_config,
         cost_tracker=cost_tracker,
         available_providers=None,
-        require_priced_mappings=(
-            app_config.deployment_profile == "production"
-        ),
+        require_priced_mappings=(app_config.deployment_profile == "production"),
     )
     rate_limiter = SlidingWindowRateLimiter(
         config=RateLimitConfig(),
@@ -711,7 +584,8 @@ def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComp
 
     # --- Catalog ---
     catalog = load_catalog_config(
-        app_config.catalog_config_path, fallback=PROVIDER_MODEL_CATALOG,
+        app_config.catalog_config_path,
+        fallback=PROVIDER_MODEL_CATALOG,
     )
 
     return GatewayComponents(
@@ -749,10 +623,6 @@ def build_gateway_components(app_config: AppConfig | None = None) -> GatewayComp
         semantic_engine=semantic_engine,
         semantic_cache=semantic_cache,
         provider_configs=provider_configs,
-        datasource_repository=datasource_repository,
-        athena_role_bindings=athena_role_bindings,
-        query_service=query_service,
-        query_reconciliation_worker=query_reconciliation_worker,
     )
 
 
@@ -787,6 +657,12 @@ def build_starlette_app(app_config: AppConfig | None = None) -> Starlette:
     """Build a fully-wired Starlette application."""
     if app_config is None:
         app_config = load_app_config()
+    if app_config.experience_owner == OSTIARI_EXPERIENCE:
+        raise RuntimeError(
+            "Ostiari-owned deployments are headless AxonLLM integrations; "
+            "use build_gateway_agent() instead of exposing AxonLLM's web "
+            "control plane"
+        )
 
     comp = build_gateway_components(app_config)
 
@@ -808,8 +684,7 @@ def build_starlette_app(app_config: AppConfig | None = None) -> Starlette:
     # a bump in between leaves _known_version behind and self-corrects on the
     # next poll, whereas one ahead would skip a change.
     if comp.persistence.enabled:
-        cedar_service.note_local_version(
-            asyncio.run(comp.persistence.get_policy_version()))
+        cedar_service.note_local_version(asyncio.run(comp.persistence.get_policy_version()))
 
     # Handed the *same* dicts the agent and the admin API hold, so a config write
     # on another task converges into the objects the request path actually reads.
@@ -826,8 +701,7 @@ def build_starlette_app(app_config: AppConfig | None = None) -> Starlette:
         health_monitor=comp.health_monitor,
     )
     if comp.persistence.enabled:
-        config_sync.note_local_version(
-            asyncio.run(comp.persistence.get_config_version()))
+        config_sync.note_local_version(asyncio.run(comp.persistence.get_config_version()))
 
     admin_api = AdminAPI(
         cost_tracker=comp.cost_tracker,
@@ -866,12 +740,14 @@ def build_starlette_app(app_config: AppConfig | None = None) -> Starlette:
     )
     policy_api = PolicyHierarchyAPI(resolver=comp.policy_resolver)
     audit_api = AuditAPI(audit_trail=comp.audit_trail)
-    webhook_api = WebhookAPI(
-        dispatcher=comp.event_dispatcher, persistence=comp.persistence)
+    webhook_api = WebhookAPI(dispatcher=comp.event_dispatcher, persistence=comp.persistence)
     region_api = RegionAPI(
-        router=comp.region_router, monitor=comp.health_monitor,
-        persistence=comp.persistence, config_sync=config_sync,
-        topology_lock=config_sync.region_lock)
+        router=comp.region_router,
+        monitor=comp.health_monitor,
+        persistence=comp.persistence,
+        config_sync=config_sync,
+        topology_lock=config_sync.region_lock,
+    )
     quota_api = QuotaAPI(
         quota_enforcer=comp.quota_enforcer,
         policy_resolver=comp.policy_resolver,
@@ -879,45 +755,26 @@ def build_starlette_app(app_config: AppConfig | None = None) -> Starlette:
     )
     scim_api = ScimAPI(
         store=comp.scim_store,
-        canonical_identity_required=(
-            app_config.canonical_identity_required
-        ),
+        canonical_identity_required=(app_config.canonical_identity_required),
     )
     saml_api = SamlAPI(service=comp.saml_service)
     browser_auth_routes = (
-        create_browser_auth_routes(
-            BrowserAuthAPI(comp.browser_session_service)
-        )
+        create_browser_auth_routes(BrowserAuthAPI(comp.browser_session_service))
         if comp.browser_session_service is not None
         else []
     )
-    datasource_routes: list[Route] = []
-    query_routes: list[Route] = []
-    if app_config.athena_query_enabled:
-        if (
-            comp.datasource_repository is None
-            or comp.query_service is None
-        ):
-            raise RuntimeError(
-                "Athena query services were not initialized"
-            )
-        datasource_api = DatasourceAPI(
-            repository=comp.datasource_repository,
-            bindings=comp.athena_role_bindings,
-            project_resolver=comp.project_resolver,
-            audit_trail=comp.audit_trail,
-            require_durable_audit=True,
-        )
-        datasource_routes = create_datasource_routes(datasource_api)
-        if not app_config.control_plane_only:
-            query_routes = create_query_routes(
-                QueryAPI(comp.query_service)
-            )
-
     # Default chat project is the first demo project or "default"
     default_project = next(iter(comp.projects), "default")
+    chat_gateway: Any = comp.gateway_agent
+    if app_config.control_plane_only and app_config.execution_target == "agentcore":
+        chat_gateway = AgentCoreGatewayProxy(
+            runtime_arn=app_config.agentcore_runtime_arn,
+            qualifier=app_config.agentcore_runtime_qualifier,
+            region=app_config.aws_region,
+            local_gateway=comp.gateway_agent,
+        )
     client_agent = ClientAgent(
-        comp.gateway_agent,
+        chat_gateway,
         default_project_id=default_project,
         default_user_id="chat-user",
     )
@@ -949,9 +806,7 @@ def build_starlette_app(app_config: AppConfig | None = None) -> Starlette:
                 outbox_ready = False
                 dependencies["security_event_outbox"] = "unavailable"
             else:
-                dependencies["security_event_outbox"] = (
-                    "ready" if outbox_ready else "unavailable"
-                )
+                dependencies["security_event_outbox"] = "ready" if outbox_ready else "unavailable"
             ready = ready and outbox_ready
         return JSONResponse(
             {
@@ -973,16 +828,11 @@ def build_starlette_app(app_config: AppConfig | None = None) -> Starlette:
         + create_scim_routes(scim_api)
         + create_saml_routes(saml_api)
         + browser_auth_routes
-        + datasource_routes
     )
     data_routes = (
-        []
-        if app_config.control_plane_only
-        else (
-            create_chat_routes(chat_api)
-            + create_openai_routes(openai_api)
-            + query_routes
-        )
+        create_chat_routes(chat_api) + create_openai_routes(openai_api)
+        if not app_config.control_plane_only or app_config.execution_target == "agentcore"
+        else []
     )
     routes = (
         [Route("/health", health_check), Route("/ready", readiness_check)]
@@ -997,21 +847,13 @@ def build_starlette_app(app_config: AppConfig | None = None) -> Starlette:
     # startup mode. Fleet refresh can add or remove spokes after boot.
     monitor = comp.health_monitor
     dispatcher = comp.event_dispatcher
-    query_reconciliation_worker = (
-        comp.query_reconciliation_worker
-        if app_config.athena_query_enabled
-        and not app_config.control_plane_only
-        else None
-    )
 
     @contextlib.asynccontextmanager
     async def _lifespan(_app):
         try:
             if dispatcher is not None and dispatcher.outbox_enabled:
                 if not await dispatcher.check_readiness():
-                    raise RuntimeError(
-                        "security event outbox is unavailable"
-                    )
+                    raise RuntimeError("security event outbox is unavailable")
                 await dispatcher.start()
             if monitor is not None:
                 await monitor.reconcile()
@@ -1020,12 +862,8 @@ def build_starlette_app(app_config: AppConfig | None = None) -> Starlette:
                     "Spoke health monitor started (%d spokes)",
                     len(monitor.config.spokes),
                 )
-            if query_reconciliation_worker is not None:
-                await query_reconciliation_worker.start()
             yield
         finally:
-            if query_reconciliation_worker is not None:
-                await query_reconciliation_worker.stop()
             if dispatcher is not None:
                 await dispatcher.stop()
             if monitor is not None:
@@ -1119,9 +957,7 @@ def _validate_seed_hierarchy(policy_resolver: PolicyHierarchyResolver) -> None:
         if node.parent_id is not None and node.parent_id not in policy_resolver._nodes:
             violations.append(f"{node.node_id} -> unknown parent {node.parent_id!r}")
     if violations:
-        raise ValueError(
-            "Seeded policy hierarchy is invalid: " + "; ".join(sorted(violations))
-        )
+        raise ValueError("Seeded policy hierarchy is invalid: " + "; ".join(sorted(violations)))
 
 
 def _apply_seed_data(
@@ -1207,29 +1043,32 @@ def _apply_seed_data(
         for i, s in enumerate(seed.usage_seeds):
             pt = s.get("prompt_tokens", 0)
             ct = s.get("completion_tokens", 0)
-            await cost_tracker.record_usage(UsageRecord(
-                # Indexed, because project+user+provider is not unique: several
-                # seeded calls share all three, and identical request ids read as
-                # one request retried rather than a populated trace log.
-                request_id=f"req-{i:04d}-{s['project_id']}-{s['user_id']}",
-                project_id=s["project_id"],
-                user_id=s["user_id"],
-                provider=s["provider"],
-                model=s["model"],
-                prompt_tokens=pt,
-                completion_tokens=ct,
-                total_tokens=pt + ct,
-                cost=s.get("cost", 0.0),
-                # Spread over the window the seed asks for. Stamping every record
-                # at import time puts the whole trace log on one clock minute,
-                # which is not what a live gateway looks like.
-                timestamp=now - timedelta(minutes=float(s.get("minutes_ago", 0))),
-                # The dashboard shows an average latency tile; unset it reads
-                # 0ms, i.e. a gateway that answered instantly.
-                latency_ms=float(s.get("latency_ms", 0.0)),
-                cached_tokens=s.get("cached_tokens", 0),
-                cache_creation_tokens=s.get("cache_creation_tokens", 0),
-            ), share=False)
+            await cost_tracker.record_usage(
+                UsageRecord(
+                    # Indexed, because project+user+provider is not unique: several
+                    # seeded calls share all three, and identical request ids read as
+                    # one request retried rather than a populated trace log.
+                    request_id=f"req-{i:04d}-{s['project_id']}-{s['user_id']}",
+                    project_id=s["project_id"],
+                    user_id=s["user_id"],
+                    provider=s["provider"],
+                    model=s["model"],
+                    prompt_tokens=pt,
+                    completion_tokens=ct,
+                    total_tokens=pt + ct,
+                    cost=s.get("cost", 0.0),
+                    # Spread over the window the seed asks for. Stamping every record
+                    # at import time puts the whole trace log on one clock minute,
+                    # which is not what a live gateway looks like.
+                    timestamp=now - timedelta(minutes=float(s.get("minutes_ago", 0))),
+                    # The dashboard shows an average latency tile; unset it reads
+                    # 0ms, i.e. a gateway that answered instantly.
+                    latency_ms=float(s.get("latency_ms", 0.0)),
+                    cached_tokens=s.get("cached_tokens", 0),
+                    cache_creation_tokens=s.get("cache_creation_tokens", 0),
+                ),
+                share=False,
+            )
             # Mirror spend into the quota enforcer so /admin/quotas reflects
             # seeded usage (enforcer tracks spend separately from cost_tracker).
             #
@@ -1240,8 +1079,7 @@ def _apply_seed_data(
             await quota_enforcer.record_spend(
                 s["project_id"],
                 s.get("cost", 0.0),
-                budget_limit=projects[s["project_id"]].budget_limit
-                if s["project_id"] in projects else None,
+                budget_limit=projects[s["project_id"]].budget_limit if s["project_id"] in projects else None,
                 share=False,
             )
 
@@ -1307,16 +1145,19 @@ def _apply_seed_data(
         except ValueError:
             logger.warning(
                 "Demo seed: skipping webhook destination %r with invalid type %r",
-                wd.get("name"), wd.get("type"),
+                wd.get("name"),
+                wd.get("type"),
             )
             continue
-        event_dispatcher.add_destination(EventDestination(
-            name=wd["name"],
-            destination_type=dest_type,
-            config=wd.get("config", {}),
-            event_filter=wd.get("event_filter"),
-            enabled=wd.get("enabled", True),
-        ))
+        event_dispatcher.add_destination(
+            EventDestination(
+                name=wd["name"],
+                destination_type=dest_type,
+                config=wd.get("config", {}),
+                event_filter=wd.get("event_filter"),
+                enabled=wd.get("enabled", True),
+            )
+        )
 
     return projects, user_configs, seed.policies
 
@@ -1374,9 +1215,7 @@ def _register_persisted_budgets(
             alert_threshold=project.alert_threshold,
             tenant_id=project.tenant_id,
         )
-        if project.budget_limit is not None and (
-            project.project_id not in policy_resolver._nodes
-        ):
+        if project.budget_limit is not None and (project.project_id not in policy_resolver._nodes):
             policy_resolver._nodes[project.project_id] = PolicyNode(
                 node_id=project.project_id,
                 node_type="project",
@@ -1445,20 +1284,23 @@ def _apply_persisted_destinations(dispatcher, loaded: list[dict]) -> None:
             # receive now go nowhere.
             logger.error(
                 "Skipping persisted event destination %s: unknown type %r",
-                dest.get("name"), dest.get("destination_type"),
+                dest.get("name"),
+                dest.get("destination_type"),
             )
             continue
         # remove-then-add rather than a bare add: the stored set is written from
         # the dispatcher's own deduped list, but a hand-edited row shouldn't be
         # able to install the same name twice and double-deliver every event.
         dispatcher.remove_destination(dest["name"])
-        dispatcher.add_destination(EventDestination(
-            name=dest["name"],
-            destination_type=dest_type,
-            config=dest.get("config", {}),
-            event_filter=dest.get("event_filter"),
-            enabled=dest.get("enabled", True),
-        ))
+        dispatcher.add_destination(
+            EventDestination(
+                name=dest["name"],
+                destination_type=dest_type,
+                config=dest.get("config", {}),
+                event_filter=dest.get("event_filter"),
+                enabled=dest.get("enabled", True),
+            )
+        )
 
 
 def _apply_persisted_topology(hub_config: HubConfig, loaded: dict) -> None:

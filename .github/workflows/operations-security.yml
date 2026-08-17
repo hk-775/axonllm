@@ -6,11 +6,6 @@ on:
     - cron: "30 11 1 * *"
   workflow_dispatch:
     inputs:
-      require_vault_lock:
-        description: Fail unless AWS Backup Vault Lock is enabled
-        required: false
-        default: false
-        type: boolean
       exercise_restore:
         description: Run the PITR restore exercise in addition to metadata auditing
         required: false
@@ -55,14 +50,10 @@ jobs:
           - target: fargate
             stack_name: AxonLLMStack
             table_name: ${{ vars.AXON_FARGATE_STATE_TABLE_NAME || 'axonllm-state' }}
-            vault_prefix: axon-state-
-            kms_key_arn: ${{ vars.AXON_DATA_KMS_KEY_ARN }}
             validate_secret: true
           - target: agentcore
             stack_name: AxonLLMAgentCoreStack
             table_name: ${{ vars.AXON_AGENTCORE_STATE_TABLE_NAME || 'axonllm-agentcore-state' }}
-            vault_prefix: axon-agent-
-            kms_key_arn: ${{ vars.AXON_AGENTCORE_DATA_KMS_KEY_ARN }}
             validate_secret: false
     permissions:
       contents: read
@@ -88,20 +79,13 @@ jobs:
           allowed-account-ids: ${{ vars.AXON_AWS_ACCOUNT_ID }}
           mask-aws-account-id: true
           inline-session-policy: >-
-            {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["backup:DescribeBackupVault","backup:ListRecoveryPointsByBackupVault"],"Resource":"arn:aws:backup:us-east-1:${{ vars.AXON_AWS_ACCOUNT_ID }}:backup-vault:${{ matrix.vault_prefix }}*"},{"Effect":"Allow","Action":["cloudformation:DescribeStacks","cloudformation:ListStackResources"],"Resource":"arn:aws:cloudformation:us-east-1:${{ vars.AXON_AWS_ACCOUNT_ID }}:stack/${{ matrix.stack_name }}/*"},{"Effect":"Allow","Action":["dynamodb:DescribeContinuousBackups","dynamodb:DescribeTable"],"Resource":"arn:aws:dynamodb:us-east-1:${{ vars.AXON_AWS_ACCOUNT_ID }}:table/${{ matrix.table_name }}"},{"Effect":"Allow","Action":["secretsmanager:DescribeSecret","secretsmanager:ListSecretVersionIds"],"Resource":"arn:aws:secretsmanager:us-east-1:${{ vars.AXON_AWS_ACCOUNT_ID }}:secret:AxonLLMStack-*"},{"Effect":"Allow","Action":["kms:DescribeKey","kms:GetKeyRotationStatus"],"Resource":"${{ matrix.kms_key_arn }}"}]}
+            {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["cloudformation:DescribeStacks","cloudformation:ListStackResources"],"Resource":"arn:aws:cloudformation:us-east-1:${{ vars.AXON_AWS_ACCOUNT_ID }}:stack/${{ matrix.stack_name }}/*"},{"Effect":"Allow","Action":["dynamodb:DescribeContinuousBackups","dynamodb:DescribeTable"],"Resource":"arn:aws:dynamodb:us-east-1:${{ vars.AXON_AWS_ACCOUNT_ID }}:table/${{ matrix.table_name }}"},{"Effect":"Allow","Action":["secretsmanager:DescribeSecret","secretsmanager:ListSecretVersionIds"],"Resource":"arn:aws:secretsmanager:us-east-1:${{ vars.AXON_AWS_ACCOUNT_ID }}:secret:AxonLLMStack-*"}]}
 
       - name: Validate state recovery controls
-        env:
-          REQUIRE_VAULT_LOCK: ${{ github.event_name == 'schedule' || inputs.require_vault_lock }}
         run: |
           set -euo pipefail
-          arguments=()
-          if [[ "${REQUIRE_VAULT_LOCK}" == "true" ]]; then
-            arguments+=(--require-vault-lock)
-          fi
           python scripts/operations/validate_state_recovery.py \
-            --stack-name "${{ matrix.stack_name }}" \
-            "${arguments[@]}"
+            --stack-name "${{ matrix.stack_name }}"
 
       - name: Validate provider-secret rotation
         if: ${{ matrix.validate_secret && !cancelled() }}
@@ -132,13 +116,9 @@ jobs:
           - target: fargate
             stack_name: AxonLLMStack
             table_name: ${{ vars.AXON_FARGATE_STATE_TABLE_NAME || 'axonllm-state' }}
-            vault_prefix: axon-state-
-            kms_key_arn: ${{ vars.AXON_DATA_KMS_KEY_ARN }}
           - target: agentcore
             stack_name: AxonLLMAgentCoreStack
             table_name: ${{ vars.AXON_AGENTCORE_STATE_TABLE_NAME || 'axonllm-agentcore-state' }}
-            vault_prefix: axon-agent-
-            kms_key_arn: ${{ vars.AXON_AGENTCORE_DATA_KMS_KEY_ARN }}
     permissions:
       contents: read
       id-token: write
@@ -164,12 +144,11 @@ jobs:
           allowed-account-ids: ${{ vars.AXON_AWS_ACCOUNT_ID }}
           mask-aws-account-id: true
           inline-session-policy: >-
-            {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["backup:DescribeBackupVault","backup:ListRecoveryPointsByBackupVault"],"Resource":"arn:aws:backup:us-east-1:${{ vars.AXON_AWS_ACCOUNT_ID }}:backup-vault:${{ matrix.vault_prefix }}*"},{"Effect":"Allow","Action":["cloudformation:DescribeStacks","cloudformation:ListStackResources"],"Resource":"arn:aws:cloudformation:us-east-1:${{ vars.AXON_AWS_ACCOUNT_ID }}:stack/${{ matrix.stack_name }}/*"},{"Effect":"Allow","Action":["dynamodb:DescribeContinuousBackups","dynamodb:DescribeTable","dynamodb:RestoreTableToPointInTime","dynamodb:Scan"],"Resource":"arn:aws:dynamodb:us-east-1:${{ vars.AXON_AWS_ACCOUNT_ID }}:table/${{ matrix.table_name }}"},{"Effect":"Allow","Action":["dynamodb:DeleteTable","dynamodb:DescribeContinuousBackups","dynamodb:DescribeTable","dynamodb:DescribeTimeToLive","dynamodb:RestoreTableToPointInTime","dynamodb:Scan","dynamodb:UpdateContinuousBackups","dynamodb:UpdateTable","dynamodb:UpdateTimeToLive"],"Resource":"arn:aws:dynamodb:us-east-1:${{ vars.AXON_AWS_ACCOUNT_ID }}:table/${{ matrix.table_name }}-restore-validation-*"},{"Effect":"Allow","Action":["kms:Decrypt","kms:DescribeKey","kms:Encrypt","kms:GenerateDataKey","kms:GenerateDataKeyWithoutPlaintext","kms:ReEncryptFrom","kms:ReEncryptTo"],"Resource":"${{ matrix.kms_key_arn }}","Condition":{"StringEquals":{"kms:CallerAccount":"${{ vars.AXON_AWS_ACCOUNT_ID }}","kms:ViaService":"dynamodb.us-east-1.amazonaws.com"}}},{"Effect":"Allow","Action":"kms:CreateGrant","Resource":"${{ matrix.kms_key_arn }}","Condition":{"Bool":{"kms:GrantIsForAWSResource":"true"},"StringEquals":{"kms:CallerAccount":"${{ vars.AXON_AWS_ACCOUNT_ID }}","kms:ViaService":"dynamodb.us-east-1.amazonaws.com"}}}]}
+            {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["cloudformation:DescribeStacks","cloudformation:ListStackResources"],"Resource":"arn:aws:cloudformation:us-east-1:${{ vars.AXON_AWS_ACCOUNT_ID }}:stack/${{ matrix.stack_name }}/*"},{"Effect":"Allow","Action":["dynamodb:DescribeContinuousBackups","dynamodb:DescribeTable","dynamodb:RestoreTableToPointInTime","dynamodb:Scan"],"Resource":"arn:aws:dynamodb:us-east-1:${{ vars.AXON_AWS_ACCOUNT_ID }}:table/${{ matrix.table_name }}"},{"Effect":"Allow","Action":["dynamodb:DeleteTable","dynamodb:DescribeContinuousBackups","dynamodb:DescribeTable","dynamodb:DescribeTimeToLive","dynamodb:RestoreTableToPointInTime","dynamodb:Scan","dynamodb:UpdateContinuousBackups","dynamodb:UpdateTable","dynamodb:UpdateTimeToLive"],"Resource":"arn:aws:dynamodb:us-east-1:${{ vars.AXON_AWS_ACCOUNT_ID }}:table/${{ matrix.table_name }}-restore-validation-*"}]}
 
       - name: Restore and validate temporary table
         id: restore
         env:
-          REQUIRE_VAULT_LOCK: ${{ github.event_name == 'schedule' || inputs.require_vault_lock }}
           RETAIN_RESTORE: >-
             ${{ github.event_name == 'workflow_dispatch' &&
                 ((inputs.retain_fargate_restore &&
@@ -180,9 +159,6 @@ jobs:
         run: |
           set -euo pipefail
           arguments=(--exercise-restore)
-          if [[ "${REQUIRE_VAULT_LOCK}" == "true" ]]; then
-            arguments+=(--require-vault-lock)
-          fi
           if [[ "${RETAIN_RESTORE}" == "true" ]]; then
             arguments+=(--keep-restored-table)
           fi

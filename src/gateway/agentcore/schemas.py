@@ -22,7 +22,6 @@ from .errors import AgentCoreAdapterError
 class InvocationAction(Enum):
     CHAT = "chat"
     LIST_MODELS = "list_models"
-    QUERY = "query"
     HEALTH = "health"
     READINESS = "readiness"
     GET_TENANT_CONFIG = "get_tenant_config"
@@ -40,6 +39,7 @@ CHAT_FIELDS = frozenset(
         "top_p",
         "stop",
         "stream",
+        "smart_routing",
         "tools",
         "tool_choice",
     }
@@ -61,14 +61,6 @@ SUPPORTED_CHAT_PROVIDERS = frozenset(
         "xai",
     }
 )
-QUERY_FIELDS = frozenset(
-    {
-        "datasource_id",
-        "sql",
-        "max_rows",
-        "request_id",
-    }
-)
 REHEARSAL_FIELD = "rehearsal"
 REHEARSAL_SCHEMA = "axonllm.agentcore-launch-runtime-binding/v1"
 REHEARSAL_OPERATIONS = frozenset(
@@ -76,10 +68,6 @@ REHEARSAL_OPERATIONS = frozenset(
         "induce-initialization-timeout",
         "observe-runtime-replacement",
         "verify-replacement-ready",
-        "reject-query-boundaries",
-        "interrupt-query",
-        "verify-terminal-reconciliation",
-        "verify-deferred-accounting",
         "deliver-security-events",
         "verify-outbox-drained",
         "force-dead-letter",
@@ -105,15 +93,12 @@ REHEARSAL_ROUTING_STRATEGIES = frozenset(
 )
 REHEARSAL_DEPENDENCIES = frozenset(
     {
-        "athena",
         "dynamodb",
         "secrets-manager",
         "security-event-outbox",
     }
 )
-TENANT_CONFIG_UPDATE_FIELDS = frozenset(
-    {"expected_revision", "config"}
-)
+TENANT_CONFIG_UPDATE_FIELDS = frozenset({"expected_revision", "config"})
 PROJECT_CONFIG_FIELDS = frozenset(
     {
         "name",
@@ -226,14 +211,8 @@ class RehearsalInvocation:
             or not isinstance(expires_at_epoch, int)
             or not 1 <= expires_at_epoch <= 32_503_680_000
             or operation not in REHEARSAL_OPERATIONS
-            or (
-                routing_strategy is not None
-                and routing_strategy not in REHEARSAL_ROUTING_STRATEGIES
-            )
-            or (
-                dependency is not None
-                and dependency not in REHEARSAL_DEPENDENCIES
-            )
+            or (routing_strategy is not None and routing_strategy not in REHEARSAL_ROUTING_STRATEGIES)
+            or (dependency is not None and dependency not in REHEARSAL_DEPENDENCIES)
         ):
             raise _invalid_payload("Field 'rehearsal' is malformed.")
         return cls(
@@ -330,23 +309,14 @@ class QueryInvocationRequest:
 def _optional_non_negative_number(value: Any, name: str) -> float | None:
     if value is None:
         return None
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, (int, float))
-    ):
-        raise _invalid_payload(
-            f"Field '{name}' must be a finite non-negative number or null."
-        )
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise _invalid_payload(f"Field '{name}' must be a finite non-negative number or null.")
     try:
         normalized = float(value)
     except (OverflowError, TypeError, ValueError) as exc:
-        raise _invalid_payload(
-            f"Field '{name}' must be a finite non-negative number or null."
-        ) from exc
+        raise _invalid_payload(f"Field '{name}' must be a finite non-negative number or null.") from exc
     if not math.isfinite(normalized) or normalized < 0:
-        raise _invalid_payload(
-            f"Field '{name}' must be a finite non-negative number or null."
-        )
+        raise _invalid_payload(f"Field '{name}' must be a finite non-negative number or null.")
     return normalized
 
 
@@ -358,15 +328,8 @@ def _optional_positive_integer(
 ) -> int | None:
     if value is None:
         return None
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, int)
-        or not 1 <= value <= maximum
-    ):
-        raise _invalid_payload(
-            f"Field '{name}' must be an integer between 1 and {maximum}, "
-            "or null."
-        )
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= maximum:
+        raise _invalid_payload(f"Field '{name}' must be an integer between 1 and {maximum}, or null.")
     return value
 
 
@@ -379,37 +342,22 @@ def _boolean(value: Any, name: str) -> bool:
 def _allowed_models(value: Any) -> list[str] | None:
     if value is None:
         return None
-    if (
-        type(value) is not list
-        or len(value) > 256
-        or any(not isinstance(item, str) for item in value)
-    ):
-        raise _invalid_payload(
-            "Field 'allowed_models' must be an array of model names or null."
-        )
-    models = [
-        _required_string(item, "allowed_models item", max_length=256)
-        for item in value
-    ]
+    if type(value) is not list or len(value) > 256 or any(not isinstance(item, str) for item in value):
+        raise _invalid_payload("Field 'allowed_models' must be an array of model names or null.")
+    models = [_required_string(item, "allowed_models item", max_length=256) for item in value]
     if len(models) != len(set(models)):
-        raise _invalid_payload(
-            "Field 'allowed_models' must not contain duplicates."
-        )
+        raise _invalid_payload("Field 'allowed_models' must not contain duplicates.")
     return models
 
 
 def _guardrail_rules(value: Any) -> list[dict[str, Any]]:
     if type(value) is not list or len(value) > 100:
-        raise _invalid_payload(
-            "Field 'guardrail_rules' must be an array of at most 100 rules."
-        )
+        raise _invalid_payload("Field 'guardrail_rules' must be an array of at most 100 rules.")
     rules: list[dict[str, Any]] = []
     fields = {"name", "rule_type", "pattern", "action", "applies_to"}
     for index, raw in enumerate(value):
         if type(raw) is not dict or set(raw) != fields:
-            raise _invalid_payload(
-                f"Guardrail rule {index} fields do not match the contract."
-            )
+            raise _invalid_payload(f"Guardrail rule {index} fields do not match the contract.")
         pattern = _required_string(
             raw["pattern"],
             f"guardrail_rules[{index}].pattern",
@@ -431,24 +379,16 @@ def _guardrail_rules(value: Any) -> list[dict[str, Any]]:
             max_length=64,
         )
         if rule_type not in ALLOWED_GUARDRAIL_RULE_TYPES:
-            raise _invalid_payload(
-                f"guardrail_rules[{index}].rule_type is unsupported."
-            )
+            raise _invalid_payload(f"guardrail_rules[{index}].rule_type is unsupported.")
         if action not in ALLOWED_GUARDRAIL_ACTIONS:
-            raise _invalid_payload(
-                f"guardrail_rules[{index}].action is unsupported."
-            )
+            raise _invalid_payload(f"guardrail_rules[{index}].action is unsupported.")
         if applies_to not in ALLOWED_GUARDRAIL_TARGETS:
-            raise _invalid_payload(
-                f"guardrail_rules[{index}].applies_to is unsupported."
-            )
+            raise _invalid_payload(f"guardrail_rules[{index}].applies_to is unsupported.")
         if rule_type == "regex_match":
             try:
                 compile_guardrail_regex(pattern)
             except ValueError as exc:
-                raise _invalid_payload(
-                    f"guardrail_rules[{index}].pattern is not a valid regex."
-                ) from exc
+                raise _invalid_payload(f"guardrail_rules[{index}].pattern is not a valid regex.") from exc
         rules.append(
             {
                 "name": _required_string(
@@ -467,16 +407,10 @@ def _guardrail_rules(value: Any) -> list[dict[str, Any]]:
 
 def _project_config_updates(value: Any) -> dict[str, Any]:
     if type(value) is not dict or not value:
-        raise _invalid_payload(
-            "Field 'config' must be a non-empty JSON object."
-        )
+        raise _invalid_payload("Field 'config' must be a non-empty JSON object.")
     unexpected = sorted(set(value).difference(PROJECT_CONFIG_FIELDS))
     if unexpected:
-        raise _invalid_payload(
-            "Field 'config' contains unsupported fields: "
-            + ", ".join(unexpected)
-            + "."
-        )
+        raise _invalid_payload("Field 'config' contains unsupported fields: " + ", ".join(unexpected) + ".")
     result: dict[str, Any] = {}
     for name, raw in value.items():
         if name == "name":
@@ -501,9 +435,7 @@ def _project_config_updates(value: Any) -> dict[str, Any]:
                 maximum=86_400,
             )
             if result[name] is None:
-                raise _invalid_payload(
-                    "Field 'cache_ttl_seconds' cannot be null."
-                )
+                raise _invalid_payload("Field 'cache_ttl_seconds' cannot be null.")
         elif name == "semantic_cache_threshold":
             if raw is None:
                 result[name] = None
@@ -511,20 +443,14 @@ def _project_config_updates(value: Any) -> dict[str, Any]:
                 try:
                     threshold = float(raw)
                 except (OverflowError, TypeError, ValueError) as exc:
-                    raise _invalid_payload(
-                        "Field 'semantic_cache_threshold' must be in "
-                        "(0.0, 1.0], or null."
-                    ) from exc
+                    raise _invalid_payload("Field 'semantic_cache_threshold' must be in (0.0, 1.0], or null.") from exc
                 if (
                     isinstance(raw, bool)
                     or not isinstance(raw, (int, float))
                     or not math.isfinite(threshold)
                     or not 0 < threshold <= 1
                 ):
-                    raise _invalid_payload(
-                        "Field 'semantic_cache_threshold' must be in "
-                        "(0.0, 1.0], or null."
-                    )
+                    raise _invalid_payload("Field 'semantic_cache_threshold' must be in (0.0, 1.0], or null.")
                 result[name] = threshold
         elif name == "log_level":
             level = _required_string(raw, name, max_length=16).upper()
@@ -535,16 +461,10 @@ def _project_config_updates(value: Any) -> dict[str, Any]:
                 "INFO",
                 "DEBUG",
             }:
-                raise _invalid_payload(
-                    "Field 'log_level' is not a supported level."
-                )
+                raise _invalid_payload("Field 'log_level' is not a supported level.")
             result[name] = level
         elif name == "log_destination":
-            result[name] = (
-                None
-                if raw is None
-                else _required_string(raw, name, max_length=2048)
-            )
+            result[name] = None if raw is None else _required_string(raw, name, max_length=2048)
         elif name == "retention_period_hours":
             result[name] = _optional_positive_integer(
                 raw,
@@ -552,9 +472,7 @@ def _project_config_updates(value: Any) -> dict[str, Any]:
                 maximum=87_600,
             )
             if result[name] is None:
-                raise _invalid_payload(
-                    "Field 'retention_period_hours' cannot be null."
-                )
+                raise _invalid_payload("Field 'retention_period_hours' cannot be null.")
         elif name == "rate_limit_rpm":
             result[name] = _optional_positive_integer(
                 raw,
@@ -577,19 +495,10 @@ class TenantConfigUpdateRequest:
         payload: dict[str, Any],
     ) -> TenantConfigUpdateRequest:
         if "expected_revision" not in payload or "config" not in payload:
-            raise _invalid_payload(
-                "Tenant configuration update requires "
-                "'expected_revision' and 'config'."
-            )
+            raise _invalid_payload("Tenant configuration update requires 'expected_revision' and 'config'.")
         revision = payload["expected_revision"]
-        if (
-            isinstance(revision, bool)
-            or not isinstance(revision, int)
-            or revision < 0
-        ):
-            raise _invalid_payload(
-                "Field 'expected_revision' must be a non-negative integer."
-            )
+        if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
+            raise _invalid_payload("Field 'expected_revision' must be a non-negative integer.")
         return cls(
             expected_revision=revision,
             updates=_project_config_updates(payload["config"]),
@@ -828,9 +737,9 @@ class QueryInvocationResponse:
 class ParsedInvocation:
     action: InvocationAction
     request_data: dict[str, Any] | None = None
-    query_request: QueryInvocationRequest | None = None
     tenant_config_update: TenantConfigUpdateRequest | None = None
     preferred_provider: str | None = None
+    smart_routing: bool = False
     rehearsal: RehearsalInvocation | None = None
 
 
@@ -850,10 +759,7 @@ def _validate_provider_controls(
         raise AgentCoreAdapterError(
             400,
             "unsupported_provider_feature",
-            (
-                "Cohere v1 does not support required or named tool "
-                "selection. Use automatic tool selection instead."
-            ),
+            ("Cohere v1 does not support required or named tool selection. Use automatic tool selection instead."),
         )
 
 
@@ -884,34 +790,20 @@ def parse_invocation_payload(
     except ValueError as exc:
         raise _invalid_payload("Field 'action' is not supported.") from exc
 
-    rehearsal = (
-        RehearsalInvocation.from_payload(payload[REHEARSAL_FIELD])
-        if REHEARSAL_FIELD in payload
-        else None
-    )
+    rehearsal = RehearsalInvocation.from_payload(payload[REHEARSAL_FIELD]) if REHEARSAL_FIELD in payload else None
     allowed_fields = {"action", REHEARSAL_FIELD}
     if action is InvocationAction.CHAT:
         allowed_fields.update(CHAT_FIELDS)
-    elif action is InvocationAction.QUERY:
-        allowed_fields.update(QUERY_FIELDS)
     elif action is InvocationAction.UPDATE_TENANT_CONFIG:
         allowed_fields.update(TENANT_CONFIG_UPDATE_FIELDS)
     unexpected = sorted(set(payload).difference(allowed_fields))
     if unexpected:
         raise _invalid_payload("Invocation payload contains unsupported fields: " + ", ".join(unexpected) + ".")
 
-    if action is InvocationAction.QUERY:
-        return ParsedInvocation(
-            action=action,
-            query_request=QueryInvocationRequest.from_payload(payload),
-            rehearsal=rehearsal,
-        )
     if action is InvocationAction.UPDATE_TENANT_CONFIG:
         return ParsedInvocation(
             action=action,
-            tenant_config_update=TenantConfigUpdateRequest.from_payload(
-                payload
-            ),
+            tenant_config_update=TenantConfigUpdateRequest.from_payload(payload),
             rehearsal=rehearsal,
         )
     if action is not InvocationAction.CHAT:
@@ -924,18 +816,19 @@ def parse_invocation_payload(
             "provider",
         )
         if preferred_provider not in SUPPORTED_CHAT_PROVIDERS:
-            raise _invalid_payload(
-                "Field 'provider' is not a supported provider."
-            )
+            raise _invalid_payload("Field 'provider' is not a supported provider.")
     request_data = {
         field_name: payload[field_name]
         for field_name in CHAT_FIELDS
-        if field_name in payload and field_name != "provider"
+        if field_name in payload and field_name not in {"provider", "smart_routing"}
     }
     request_data.setdefault("stream", False)
+    smart_routing = payload.get("smart_routing", False)
+    if not isinstance(smart_routing, bool):
+        raise _invalid_payload("Field 'smart_routing' must be a boolean.")
     errors = (validator or RequestValidator()).validate_payload(
         request_data,
-        allow_empty_model=False,
+        allow_empty_model=smart_routing,
         check_model=False,
     )
     if errors:
@@ -945,5 +838,6 @@ def parse_invocation_payload(
         action=action,
         request_data=request_data,
         preferred_provider=preferred_provider,
+        smart_routing=smart_routing,
         rehearsal=rehearsal,
     )

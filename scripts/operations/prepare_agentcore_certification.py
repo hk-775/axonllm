@@ -17,7 +17,6 @@ import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -38,9 +37,6 @@ from src.gateway.models import (
     Principal,
     TenantRole,
 )
-from src.gateway.persistence import DynamoPersistence
-from src.gateway.query.models import AthenaDatasource
-
 
 IDENTITY_STACK = "AxonLLMIdentityStack"
 RUNTIME_STACK = "AxonLLMAgentCoreStack"
@@ -310,9 +306,6 @@ def _validate_configuration(
         raise FixtureError("fixture preparation requires managed-cognito")
     if setup.aws_region != certification.region:
         raise FixtureError("setup and certification regions do not match")
-    athena = setup.runtime.athena_query
-    if athena is None or certification.query.role_arn not in athena.role_arns:
-        raise FixtureError("certification datasource role is not in the reviewed setup")
     enabled_providers = set(setup.runtime.enabled_providers)
     certified_providers = {provider.provider for provider in certification.providers}
     if certified_providers != enabled_providers:
@@ -322,19 +315,12 @@ def _validate_configuration(
         or certification.identities.viewer_env is None
         or certification.tenant_config is None
     ):
-        raise FixtureError(
-            "managed certification requires fresh admin and viewer "
-            "identity configuration"
-        )
+        raise FixtureError("managed certification requires fresh admin and viewer identity configuration")
     if (
-        certification.tenant_config.tenant_id
-        != setup.tenant.tenant_id
-        or certification.tenant_config.project_id
-        != setup.tenant.project_id
+        certification.tenant_config.tenant_id != setup.tenant.tenant_id
+        or certification.tenant_config.project_id != setup.tenant.project_id
     ):
-        raise FixtureError(
-            "certification tenant configuration binding does not match setup"
-        )
+        raise FixtureError("certification tenant configuration binding does not match setup")
 
 
 def _private_output_path(path: Path, location: str) -> Path:
@@ -628,12 +614,7 @@ def _fixture_cases(
         raise FixtureError("secure random source produced duplicate usernames")
     cross_nonce = nonce_values[_CASES.index("cross")]
     cross_tenant_id = (
-        "cert-cross-"
-        + hashlib.sha256(
-            (
-                f"{setup.tenant.tenant_id}\0{cross_nonce}"
-            ).encode("utf-8")
-        ).hexdigest()[:20]
+        "cert-cross-" + hashlib.sha256((f"{setup.tenant.tenant_id}\0{cross_nonce}").encode("utf-8")).hexdigest()[:20]
     )
     env_names = (
         certification.identities.active_env,
@@ -644,9 +625,7 @@ def _fixture_cases(
         certification.identities.viewer_env,
     )
     if any(env_name is None for env_name in env_names):
-        raise FixtureError(
-            "managed certification identity environment is missing"
-        )
+        raise FixtureError("managed certification identity environment is missing")
     cases: list[_FixtureCase] = []
     for index, (name, env_name, nonce) in enumerate(zip(_CASES, env_names, nonce_values, strict=True)):
         claim_tenant_id = cross_tenant_id if name == "cross" else setup.tenant.tenant_id
@@ -661,11 +640,7 @@ def _fixture_cases(
                 role=(
                     TenantRole.TENANT_ADMIN
                     if name == "admin"
-                    else (
-                        TenantRole.PLATFORM_ADMIN
-                        if name == "ungranted"
-                        else TenantRole.TENANT_MEMBER
-                    )
+                    else (TenantRole.PLATFORM_ADMIN if name == "ungranted" else TenantRole.TENANT_MEMBER)
                 ),
                 membership_status=(MembershipStatus.SUSPENDED if name == "inactive" else MembershipStatus.ACTIVE),
                 project_ids=(frozenset() if name == "ungranted" else frozenset({setup.tenant.project_id})),
@@ -695,51 +670,6 @@ def _principal(
     )
 
 
-def _datasource_item(
-    setup: AgentCoreSetupConfig,
-    certification: CertificationConfig,
-    *,
-    fixture_id: str,
-    timestamp: float,
-) -> dict[str, Any]:
-    instant = datetime.fromtimestamp(
-        timestamp,
-        tz=timezone.utc,
-    ).isoformat()
-    datasource = AthenaDatasource(
-        datasource_id=certification.query.datasource_id,
-        tenant_id=setup.tenant.tenant_id,
-        project_id=setup.tenant.project_id,
-        name=certification.query.datasource_id,
-        role_arn=certification.query.role_arn,
-        region=certification.query.region,
-        catalog=certification.query.catalog,
-        database=certification.query.database,
-        workgroup=certification.query.workgroup,
-        enabled=True,
-        revision=1,
-        created_at=instant,
-        updated_at=instant,
-    )
-    document = datasource.to_dict()
-    for field in (
-        "tenant_id",
-        "project_id",
-        "datasource_id",
-        "revision",
-    ):
-        document.pop(field)
-    item = DynamoPersistence.serialize_tenant_datasource(
-        setup.tenant.tenant_id,
-        setup.tenant.project_id,
-        certification.query.datasource_id,
-        document,
-        revision=1,
-    )
-    item[_FIXTURE_ID_FIELD] = fixture_id
-    return item
-
-
 def _put_owned_item(table: Any, item: dict[str, Any], kind: str) -> None:
     try:
         table.put_item(
@@ -757,7 +687,6 @@ def _state_for(
     identity: _IdentityOutputs,
     table_name: str,
     credentials_path: Path,
-    datasource_item: dict[str, Any],
 ) -> dict[str, Any]:
     return {
         "schema": STATE_SCHEMA,
@@ -768,12 +697,8 @@ def _state_for(
         "credentialsPath": str(credentials_path),
         "users": [],
         "principals": [],
-        "datasource": {
-            "PK": datasource_item["PK"],
-            "SK": datasource_item["SK"],
-            "document": datasource_item["document"],
-            "revision": datasource_item["revision"],
-        },
+        # Backward-compatible cleanup slot for pre-add-on fixture state.
+        "datasource": None,
     }
 
 
@@ -866,25 +791,18 @@ def _cleanup_user(
         if _aws_error_code(exc) == "UserNotFoundException":
             return
         raise
-    attributes = (
-        response.get("UserAttributes")
-        if type(response) is dict
-        else None
-    )
+    attributes = response.get("UserAttributes") if type(response) is dict else None
     subjects = (
         [
             attribute.get("Value")
             for attribute in attributes
-            if type(attribute) is dict
-            and attribute.get("Name") == "sub"
+            if type(attribute) is dict and attribute.get("Name") == "sub"
         ]
         if isinstance(attributes, list)
         else []
     )
     if subjects != [value["subject"]]:
-        raise FixtureError(
-            "refusing to delete a Cognito user not owned by this fixture"
-        )
+        raise FixtureError("refusing to delete a Cognito user not owned by this fixture")
     cognito.admin_delete_user(
         UserPoolId=user_pool_id,
         Username=value["username"],
@@ -918,10 +836,7 @@ def _validate_state(value: Any) -> dict[str, Any]:
     ):
         raise FixtureError("cleanup state resource identifiers are malformed")
     users = value.get("users")
-    if (
-        not isinstance(users, list)
-        or len(users) > len(_CASES)
-    ):
+    if not isinstance(users, list) or len(users) > len(_CASES):
         raise FixtureError("cleanup state users are malformed")
     seen_usernames: set[str] = set()
     for user in users:
@@ -967,28 +882,29 @@ def _validate_state(value: Any) -> dict[str, Any]:
         )
         seen_cases.add(case)
     datasource = value.get("datasource")
-    if type(datasource) is not dict or set(datasource) != {
-        "PK",
-        "SK",
-        "document",
-        "revision",
-    }:
-        raise FixtureError("cleanup state datasource is malformed")
-    if (
-        not isinstance(datasource.get("PK"), str)
-        or not datasource["PK"].startswith("TENANT#")
-        or not isinstance(datasource.get("SK"), str)
-        or not datasource["SK"].startswith("DATASOURCE#")
-        or not isinstance(datasource.get("document"), str)
-        or datasource.get("revision") != 1
-    ):
-        raise FixtureError("cleanup state datasource is malformed")
-    try:
-        document = json.loads(datasource["document"])
-    except json.JSONDecodeError as exc:
-        raise FixtureError("cleanup state datasource is malformed") from exc
-    if not isinstance(document, dict):
-        raise FixtureError("cleanup state datasource is malformed")
+    if datasource is not None:
+        if type(datasource) is not dict or set(datasource) != {
+            "PK",
+            "SK",
+            "document",
+            "revision",
+        }:
+            raise FixtureError("cleanup state datasource is malformed")
+        if (
+            not isinstance(datasource.get("PK"), str)
+            or not datasource["PK"].startswith("TENANT#")
+            or not isinstance(datasource.get("SK"), str)
+            or not datasource["SK"].startswith("DATASOURCE#")
+            or not isinstance(datasource.get("document"), str)
+            or datasource.get("revision") != 1
+        ):
+            raise FixtureError("cleanup state datasource is malformed")
+        try:
+            document = json.loads(datasource["document"])
+        except json.JSONDecodeError as exc:
+            raise FixtureError("cleanup state datasource is malformed") from exc
+        if not isinstance(document, dict):
+            raise FixtureError("cleanup state datasource is malformed")
     return value
 
 
@@ -1036,14 +952,15 @@ def _cleanup_state(
     except Exception as exc:
         failures.append(exc)
     if table is not None:
-        try:
-            _cleanup_datasource(
-                table,
-                state["datasource"],
-                fixture_id=state["fixtureId"],
-            )
-        except Exception as exc:
-            failures.append(exc)
+        if state["datasource"] is not None:
+            try:
+                _cleanup_datasource(
+                    table,
+                    state["datasource"],
+                    fixture_id=state["fixtureId"],
+                )
+            except Exception as exc:
+                failures.append(exc)
         for principal in reversed(state["principals"]):
             try:
                 _cleanup_principal(
@@ -1136,19 +1053,12 @@ def prepare_fixtures(
         certification,
         random_bytes=random_bytes,
     )
-    datasource_item = _datasource_item(
-        setup,
-        certification,
-        fixture_id=fixture_id,
-        timestamp=clock(),
-    )
     state = _state_for(
         fixture_id=fixture_id,
         region=setup.aws_region,
         identity=identity,
         table_name=table_name,
         credentials_path=credential_path,
-        datasource_item=datasource_item,
     )
     _write_private_json(state_path, state)
 
@@ -1201,7 +1111,6 @@ def prepare_fixtures(
             _write_private_json(state_path, state)
             _put_owned_item(table, principal_item, "principal")
 
-        _put_owned_item(table, datasource_item, "datasource")
         if set(credentials) != {
             certification.identities.active_env,
             certification.identities.inactive_env,
@@ -1228,7 +1137,6 @@ def prepare_fixtures(
         secret = ""
 
     return {
-        "datasourceId": certification.query.datasource_id,
         "principalCount": len(state["principals"]),
         "userCount": len(state["users"]),
     }

@@ -32,15 +32,12 @@ TERMINAL_SCHEMA = "axonllm.agentcore-launch-gate-terminal/v1"
 COMMAND_OUTPUT_SCHEMA = "axonllm.agentcore-launch-command-output/v1"
 REPORT_SCHEMA = "axonllm.agentcore-launch-rehearsal-evidence/v2"
 COMPATIBILITY_SCHEMA = "axonllm.agentcore-launch-rehearsal/v1"
-PRODUCER_WORKFLOW = (
-    ".github/workflows/agentcore-launch-rehearsal-evidence.yml"
-)
+PRODUCER_WORKFLOW = ".github/workflows/agentcore-launch-rehearsal-evidence.yml"
 GATE_WORKFLOW = ".github/workflows/agentcore-launch-gates.yml"
 LAUNCH_WORKFLOW = ".github/workflows/launch-agentcore-production.yml"
 
 CORE_GATES = (
     "initializationTimeoutReplacement",
-    "queryBoundaryLimitsAndReconciliation",
     "recoveryCutoverAndRollback",
     "securityEventDeliveryAndDlq",
 )
@@ -57,12 +54,6 @@ EXPECTED_COMMANDS: Mapping[str, tuple[str, ...]] = {
         "observe-exit-124",
         "observe-runtime-replacement",
         "verify-replacement-ready",
-    ),
-    "queryBoundaryLimitsAndReconciliation": (
-        "reject-query-boundaries",
-        "interrupt-query",
-        "verify-terminal-reconciliation",
-        "verify-deferred-accounting",
     ),
     "recoveryCutoverAndRollback": (
         "restore-state",
@@ -242,9 +233,7 @@ def _read_regular(path: Path, *, maximum: int = MAX_INPUT_BYTES) -> bytes:
     except OSError as exc:
         raise LaunchRehearsalError(f"cannot inspect input: {path}") from exc
     if stat.S_ISLNK(initial.st_mode) or not stat.S_ISREG(initial.st_mode):
-        raise LaunchRehearsalError(
-            f"input must be a regular non-symlink file: {path}"
-        )
+        raise LaunchRehearsalError(f"input must be a regular non-symlink file: {path}")
     if initial.st_size > maximum:
         raise LaunchRehearsalError(f"input is too large: {path}")
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
@@ -285,9 +274,7 @@ def _strict_json_bytes(raw: bytes, *, location: str) -> Any:
             parse_constant=_reject_constant,
         )
     except (UnicodeError, json.JSONDecodeError, LaunchRehearsalError) as exc:
-        raise LaunchRehearsalError(
-            f"input is not strict JSON: {location}"
-        ) from exc
+        raise LaunchRehearsalError(f"input is not strict JSON: {location}") from exc
 
 
 def _atomic_write(path: Path, value: Mapping[str, Any]) -> None:
@@ -298,12 +285,8 @@ def _atomic_write(path: Path, value: Mapping[str, Any]) -> None:
         current = None
     except OSError as exc:
         raise LaunchRehearsalError(f"cannot inspect output: {path}") from exc
-    if current is not None and (
-        stat.S_ISLNK(current.st_mode) or not stat.S_ISREG(current.st_mode)
-    ):
-        raise LaunchRehearsalError(
-            f"output must be a regular non-symlink file: {path}"
-        )
+    if current is not None and (stat.S_ISLNK(current.st_mode) or not stat.S_ISREG(current.st_mode)):
+        raise LaunchRehearsalError(f"output must be a regular non-symlink file: {path}")
     encoded = (
         json.dumps(
             value,
@@ -371,12 +354,7 @@ def _string(
     *,
     maximum: int = 512,
 ) -> str:
-    if (
-        not isinstance(value, str)
-        or not value
-        or len(value) > maximum
-        or SAFE_TEXT.fullmatch(value) is None
-    ):
+    if not isinstance(value, str) or not value or len(value) > maximum or SAFE_TEXT.fullmatch(value) is None:
         raise LaunchRehearsalError(f"{location} is malformed")
     return value
 
@@ -388,12 +366,7 @@ def _integer(
     minimum: int,
     maximum: int,
 ) -> int:
-    if (
-        not isinstance(value, int)
-        or isinstance(value, bool)
-        or value < minimum
-        or value > maximum
-    ):
+    if not isinstance(value, int) or isinstance(value, bool) or value < minimum or value > maximum:
         raise LaunchRehearsalError(f"{location} is malformed")
     return value
 
@@ -403,9 +376,7 @@ def _timestamp(value: Any, location: str) -> tuple[str, datetime]:
     try:
         parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
     except ValueError as exc:
-        raise LaunchRehearsalError(
-            f"{location} must be an ISO-8601 timestamp"
-        ) from exc
+        raise LaunchRehearsalError(f"{location} must be an ISO-8601 timestamp") from exc
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise LaunchRehearsalError(f"{location} must include a timezone")
     normalized = parsed.astimezone(timezone.utc).isoformat(timespec="seconds")
@@ -428,9 +399,7 @@ def _validate_workflow_ref(
     workflow_ref = _string(value, location, maximum=256)
     match = WORKFLOW_REF.fullmatch(workflow_ref)
     if match is None or match.group("repository") != repository:
-        raise LaunchRehearsalError(
-            f"{location} must identify this repository's main-branch workflow"
-        )
+        raise LaunchRehearsalError(f"{location} must identify this repository's main-branch workflow")
     return workflow_ref
 
 
@@ -466,9 +435,7 @@ def _validate_execution(
         repository=repository,
         location="gate execution workflowRef",
     )
-    expected_workflow_ref = (
-        f"{repository}/{GATE_WORKFLOW}@refs/heads/main"
-    )
+    expected_workflow_ref = f"{repository}/{GATE_WORKFLOW}@refs/heads/main"
     parent_workflow_ref = _validate_workflow_ref(
         execution.get("parentWorkflowRef"),
         repository=repository,
@@ -494,29 +461,13 @@ def _validate_execution(
         maximum=40,
     )
     if workflow_ref != expected_workflow_ref:
-        raise LaunchRehearsalError(
-            "gate execution is not the allowlisted launch-gate workflow"
-        )
+        raise LaunchRehearsalError("gate execution is not the allowlisted launch-gate workflow")
     if parent_workflow_ref not in allowed_parent_refs:
-        raise LaunchRehearsalError(
-            "gate execution parent is not an allowlisted protected workflow"
-        )
-    if (
-        SHA.fullmatch(workflow_commit) is None
-        or SHA.fullmatch(parent_workflow_commit) is None
-    ):
-        raise LaunchRehearsalError(
-            "gate execution workflow commits must be full commit SHAs"
-        )
-    if (
-        workflow_commit != release_commit
-        or parent_workflow_commit != release_commit
-        or checked_out != release_commit
-    ):
-        raise LaunchRehearsalError(
-            "gate execution workflow, parent, and checkout must equal the "
-            "release commit"
-        )
+        raise LaunchRehearsalError("gate execution parent is not an allowlisted protected workflow")
+    if SHA.fullmatch(workflow_commit) is None or SHA.fullmatch(parent_workflow_commit) is None:
+        raise LaunchRehearsalError("gate execution workflow commits must be full commit SHAs")
+    if workflow_commit != release_commit or parent_workflow_commit != release_commit or checked_out != release_commit:
+        raise LaunchRehearsalError("gate execution workflow, parent, and checkout must equal the release commit")
     run_id = _string(execution.get("runId"), "gate execution runId")
     run_attempt = _string(
         execution.get("runAttempt"),
@@ -543,9 +494,7 @@ def _validate_execution(
         or reviewed_config_version == "null"
         or SHA256.fullmatch(reviewed_config_sha256) is None
     ):
-        raise LaunchRehearsalError(
-            "gate execution reviewed config binding is malformed"
-        )
+        raise LaunchRehearsalError("gate execution reviewed config binding is malformed")
     return {
         "repository": repository,
         "workflowRef": workflow_ref,
@@ -605,35 +554,21 @@ def _validate_producer(
         maximum=40,
     )
     if (
-        workflow_ref
-        != f"{repository}/{PRODUCER_WORKFLOW}@refs/heads/main"
-        or parent_workflow_ref
-        != f"{repository}/{LAUNCH_WORKFLOW}@refs/heads/main"
+        workflow_ref != f"{repository}/{PRODUCER_WORKFLOW}@refs/heads/main"
+        or parent_workflow_ref != f"{repository}/{LAUNCH_WORKFLOW}@refs/heads/main"
     ):
         raise LaunchRehearsalError(
-            "evidence producer is not the protected rehearsal workflow "
-            "called by the production launch workflow"
+            "evidence producer is not the protected rehearsal workflow called by the production launch workflow"
         )
     run_id = _string(producer.get("runId"), "evidence producer runId")
     run_attempt = _string(
         producer.get("runAttempt"),
         "evidence producer runAttempt",
     )
-    if (
-        SHA.fullmatch(workflow_commit) is None
-        or SHA.fullmatch(parent_workflow_commit) is None
-    ):
-        raise LaunchRehearsalError(
-            "evidence producer workflow commits must be full commit SHAs"
-        )
-    if release_commit is not None and (
-        workflow_commit != release_commit
-        or parent_workflow_commit != release_commit
-    ):
-        raise LaunchRehearsalError(
-            "evidence producer workflow and parent commits must equal the "
-            "release commit"
-        )
+    if SHA.fullmatch(workflow_commit) is None or SHA.fullmatch(parent_workflow_commit) is None:
+        raise LaunchRehearsalError("evidence producer workflow commits must be full commit SHAs")
+    if release_commit is not None and (workflow_commit != release_commit or parent_workflow_commit != release_commit):
+        raise LaunchRehearsalError("evidence producer workflow and parent commits must equal the release commit")
     if RUN_ID.fullmatch(run_id) is None or RUN_ID.fullmatch(run_attempt) is None:
         raise LaunchRehearsalError("evidence producer run identity is malformed")
     return {
@@ -656,14 +591,8 @@ def _validate_image(
 ) -> tuple[str, str]:
     image = _string(value, location, maximum=512)
     match = ECR_IMAGE.fullmatch(image)
-    if (
-        match is None
-        or match.group("region") != expected_region
-        or match.group("repository") != expected_repository
-    ):
-        raise LaunchRehearsalError(
-            f"{location} must be an immutable ECR digest URI in {expected_region}"
-        )
+    if match is None or match.group("region") != expected_region or match.group("repository") != expected_repository:
+        raise LaunchRehearsalError(f"{location} must be an immutable ECR digest URI in {expected_region}")
     return image, match.group("account")
 
 
@@ -716,19 +645,13 @@ def _validate_kms_key(
         or match.group("region") != release["region"]
         or match.group("account") != image_match.group("account")
     ):
-        raise LaunchRehearsalError(
-            f"{location} must be a full key ARN in the release account and region"
-        )
+        raise LaunchRehearsalError(f"{location} must be a full key ARN in the release account and region")
     return value
 
 
 def _validate_prefix(value: str) -> str:
     prefix = _string(value, "evidence prefix", maximum=256).strip("/")
-    if (
-        not prefix
-        or S3_KEY.fullmatch(prefix) is None
-        or any(part in {"", ".", ".."} for part in prefix.split("/"))
-    ):
+    if not prefix or S3_KEY.fullmatch(prefix) is None or any(part in {"", ".", ".."} for part in prefix.split("/")):
         raise LaunchRehearsalError("evidence prefix is malformed")
     return prefix
 
@@ -768,9 +691,7 @@ def _validate_reference(
     )
     uri, bucket, key = _parse_s3_uri(reference.get("s3Uri"), f"{location} URI")
     if bucket != expected_bucket or not key.startswith(f"{expected_prefix}/"):
-        raise LaunchRehearsalError(
-            f"{location} is outside the approved evidence prefix"
-        )
+        raise LaunchRehearsalError(f"{location} is outside the approved evidence prefix")
     version_id = _string(
         reference.get("versionId"),
         f"{location} versionId",
@@ -781,11 +702,7 @@ def _validate_reference(
         f"{location} sha256",
         maximum=64,
     )
-    if (
-        VERSION_ID.fullmatch(version_id) is None
-        or version_id == "null"
-        or SHA256.fullmatch(digest) is None
-    ):
+    if VERSION_ID.fullmatch(version_id) is None or version_id == "null" or SHA256.fullmatch(digest) is None:
         raise LaunchRehearsalError(f"{location} immutable binding is malformed")
     return S3Reference(
         uri=uri,
@@ -834,9 +751,7 @@ def _validate_source_manifest(
         raise LaunchRehearsalError("gate-set manifest schema is unsupported")
     release = _validate_release(source.get("release"))
     if release != dict(expected_release):
-        raise LaunchRehearsalError(
-            "gate-set manifest is not bound to the requested release"
-        )
+        raise LaunchRehearsalError("gate-set manifest is not bound to the requested release")
     execution = _validate_execution(
         source.get("execution"),
         release_commit=release["commit"],
@@ -845,20 +760,13 @@ def _validate_source_manifest(
         execution["reviewedConfigS3Uri"],
         "gate-set reviewed config URI",
     )
-    if (
-        config_bucket != evidence_bucket
-        or not config_key.startswith(f"{evidence_prefix}/")
-    ):
-        raise LaunchRehearsalError(
-            "gate-set reviewed config is outside the approved evidence prefix"
-        )
+    if config_bucket != evidence_bucket or not config_key.startswith(f"{evidence_prefix}/"):
+        raise LaunchRehearsalError("gate-set reviewed config is outside the approved evidence prefix")
     if execution["repository"] == "":
         raise LaunchRehearsalError("gate-set execution repository is missing")
     raw_gates = _object(source.get("gates"), "gate-set gates")
     if set(raw_gates) != set(ALL_GATES):
-        raise LaunchRehearsalError(
-            "gate-set manifest must contain every required launch gate"
-        )
+        raise LaunchRehearsalError("gate-set manifest must contain every required launch gate")
 
     gates: dict[str, ArtifactPair] = {}
     normalized_gates: dict[str, Any] = {}
@@ -889,9 +797,7 @@ def _validate_source_manifest(
     for reference in (terminal.artifact, terminal.signature):
         identity = (reference.uri, reference.version_id)
         if identity in identities:
-            raise LaunchRehearsalError(
-                "gate-set manifest reuses an immutable object version"
-            )
+            raise LaunchRehearsalError("gate-set manifest reuses an immutable object version")
         identities.add(identity)
     for gate_name in sorted(ALL_GATES):
         raw_pair = _object(
@@ -918,9 +824,7 @@ def _validate_source_manifest(
         for reference in (artifact, signature):
             identity = (reference.uri, reference.version_id)
             if identity in identities:
-                raise LaunchRehearsalError(
-                    "gate-set manifest reuses an immutable object version"
-                )
+                raise LaunchRehearsalError("gate-set manifest reuses an immutable object version")
             identities.add(identity)
         pair = ArtifactPair(artifact=artifact, signature=signature)
         gates[gate_name] = pair
@@ -975,9 +879,7 @@ def _validate_cleanup_observations(value: Any) -> dict[str, Any]:
             or raw != sorted(raw)
             or len(raw) != len(set(raw))
         ):
-            raise LaunchRehearsalError(
-                f"launch-gate terminal cleanup {name} is malformed"
-            )
+            raise LaunchRehearsalError(f"launch-gate terminal cleanup {name} is malformed")
         normalized[name] = [
             _string(
                 item,
@@ -986,12 +888,8 @@ def _validate_cleanup_observations(value: Any) -> dict[str, Any]:
             )
             for item in raw
         ]
-    if set(normalized["redrivenDlqCorrelationIds"]).intersection(
-        normalized["removedDlqCorrelationIds"]
-    ):
-        raise LaunchRehearsalError(
-            "launch-gate terminal cleanup DLQ inventories overlap"
-        )
+    if set(normalized["redrivenDlqCorrelationIds"]).intersection(normalized["removedDlqCorrelationIds"]):
+        raise LaunchRehearsalError("launch-gate terminal cleanup DLQ inventories overlap")
     if (
         observations.get("primaryStateSelected") is not True
         or observations.get("productionEndpointStatus") != "READY"
@@ -1017,9 +915,7 @@ def _validate_cleanup_observations(value: Any) -> dict[str, Any]:
         )
         != 0
     ):
-        raise LaunchRehearsalError(
-            "launch-gate terminal does not prove complete cleanup"
-        )
+        raise LaunchRehearsalError("launch-gate terminal does not prove complete cleanup")
     return {
         **normalized,
         "primaryStateSelected": True,
@@ -1066,9 +962,7 @@ def _validate_terminal(
         "launch-gate terminal completedAt",
     )
     if now.tzinfo is None or now.utcoffset() is None:
-        raise LaunchRehearsalError(
-            "launch-gate terminal validation time must include timezone"
-        )
+        raise LaunchRehearsalError("launch-gate terminal validation time must include timezone")
     current = now.astimezone(timezone.utc)
     if (
         terminal.get("schema") != TERMINAL_SCHEMA
@@ -1081,12 +975,8 @@ def _validate_terminal(
         or completed > current
         or current - completed > MAX_GATE_AGE
     ):
-        raise LaunchRehearsalError(
-            "launch-gate terminal does not prove a successful current run"
-        )
-    cleanup = _validate_cleanup_observations(
-        terminal.get("cleanupObservations")
-    )
+        raise LaunchRehearsalError("launch-gate terminal does not prove a successful current run")
+    cleanup = _validate_cleanup_observations(terminal.get("cleanupObservations"))
     normalized = {
         "schema": TERMINAL_SCHEMA,
         "release": release,
@@ -1125,16 +1015,12 @@ def _validate_commands(
         raise LaunchRehearsalError(f"{gate_name} commands must be an array")
     expected_names = EXPECTED_COMMANDS[gate_name]
     if len(value) != len(expected_names):
-        raise LaunchRehearsalError(
-            f"{gate_name} command receipt sequence is incomplete"
-        )
+        raise LaunchRehearsalError(f"{gate_name} command receipt sequence is incomplete")
     normalized: list[dict[str, Any]] = []
     previous_completed: datetime | None = None
     first_started: datetime | None = None
     last_completed: datetime | None = None
-    for index, (raw_command, expected_name) in enumerate(
-        zip(value, expected_names, strict=True)
-    ):
+    for index, (raw_command, expected_name) in enumerate(zip(value, expected_names, strict=True)):
         location = f"{gate_name} command {index + 1}"
         command = _object(raw_command, location)
         _exact_fields(
@@ -1189,14 +1075,9 @@ def _validate_commands(
             argv_size > 8192
             or normalized_argv[: len(expected_prefix)] != expected_prefix
             or any(argument in SENSITIVE_FLAGS for argument in normalized_argv)
-            or any(
-                SENSITIVE_ARGUMENT.search(argument) is not None
-                for argument in normalized_argv
-            )
+            or any(SENSITIVE_ARGUMENT.search(argument) is not None for argument in normalized_argv)
         ):
-            raise LaunchRehearsalError(
-                f"{location} argv is unsafe or not bound to its tool"
-            )
+            raise LaunchRehearsalError(f"{location} argv is unsafe or not bound to its tool")
         command_sha = _string(
             command.get("commandSha256"),
             f"{location} commandSha256",
@@ -1235,14 +1116,9 @@ def _validate_commands(
             or exit_code != 0
             or completed < started
             or completed - started > timedelta(days=7)
-            or (
-                previous_completed is not None
-                and started < previous_completed
-            )
+            or (previous_completed is not None and started < previous_completed)
         ):
-            raise LaunchRehearsalError(
-                f"{location} does not prove the required successful command"
-            )
+            raise LaunchRehearsalError(f"{location} does not prove the required successful command")
         script = _script_from_tool(tool)
         if script is not None:
             script_checker(execution["workflowCommit"], script)
@@ -1256,13 +1132,9 @@ def _validate_commands(
             or hashlib.sha256(stdout_bytes).hexdigest() != stdout.sha256
             or hashlib.sha256(stderr_bytes).hexdigest() != stderr.sha256
         ):
-            raise LaunchRehearsalError(
-                f"{location} output bytes do not match immutable references"
-            )
+            raise LaunchRehearsalError(f"{location} output bytes do not match immutable references")
         if stderr_bytes != b"":
-            raise LaunchRehearsalError(
-                f"{location} successful command has non-empty stderr"
-            )
+            raise LaunchRehearsalError(f"{location} successful command has non-empty stderr")
         output = _object(
             _strict_json_bytes(
                 stdout_bytes,
@@ -1289,18 +1161,10 @@ def _validate_commands(
             or output.get("action") != expected_name
             or output.get("release") != dict(release)
             or output.get("execution") != dict(execution)
-            or (
-                not final_command
-                and output.get("observations") is not None
-            )
-            or (
-                final_command
-                and not isinstance(output.get("observations"), dict)
-            )
+            or (not final_command and output.get("observations") is not None)
+            or (final_command and not isinstance(output.get("observations"), dict))
         ):
-            raise LaunchRehearsalError(
-                f"{location} stdout is not bound to this command execution"
-            )
+            raise LaunchRehearsalError(f"{location} stdout is not bound to this command execution")
         if first_started is None:
             first_started = started
         previous_completed = completed
@@ -1324,9 +1188,7 @@ def _validate_commands(
         normalized,
         _object(
             _strict_json_bytes(
-                command_outputs[
-                    (gate_name, len(expected_names) - 1, "stdout")
-                ],
+                command_outputs[(gate_name, len(expected_names) - 1, "stdout")],
                 location=f"{gate_name} final stdout",
             ),
             f"{gate_name} final stdout",
@@ -1357,9 +1219,7 @@ def _verify_script_at_commit(commit: str, script: str) -> None:
             timeout=30,
         )
     except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
-        raise LaunchRehearsalError(
-            f"command script does not exist at the release commit: {script}"
-        ) from exc
+        raise LaunchRehearsalError(f"command script does not exist at the release commit: {script}") from exc
 
 
 def _command_output_references(
@@ -1373,9 +1233,7 @@ def _command_output_references(
     commands = value.get("commands")
     expected = EXPECTED_COMMANDS[gate_name]
     if not isinstance(commands, list) or len(commands) != len(expected):
-        raise LaunchRehearsalError(
-            f"{gate_name} command receipt sequence is incomplete"
-        )
+        raise LaunchRehearsalError(f"{gate_name} command receipt sequence is incomplete")
     references: list[tuple[int, str, S3Reference]] = []
     for index, command_value in enumerate(commands):
         command = _object(
@@ -1391,9 +1249,7 @@ def _command_output_references(
                         command.get(stream),
                         expected_bucket=evidence_bucket,
                         expected_prefix=evidence_prefix,
-                        location=(
-                            f"{gate_name} command {index + 1} {stream}"
-                        ),
+                        location=(f"{gate_name} command {index + 1} {stream}"),
                     ),
                 )
             )
@@ -1426,9 +1282,7 @@ def _provider_list(
             raise LaunchRehearsalError(f"{location} is malformed")
         providers.append(provider)
     if len(set(providers)) != len(providers) or providers != sorted(providers):
-        raise LaunchRehearsalError(
-            f"{location} must be unique and lexically sorted"
-        )
+        raise LaunchRehearsalError(f"{location} must be unique and lexically sorted")
     return providers
 
 
@@ -1447,9 +1301,7 @@ def _table_arn(
         or match.group("region") != release["region"]
         or match.group("account") != image_match.group("account")
     ):
-        raise LaunchRehearsalError(
-            f"{location} is outside the release account and region"
-        )
+        raise LaunchRehearsalError(f"{location} is outside the release account and region")
     return arn, match.group("table")
 
 
@@ -1485,118 +1337,13 @@ def _initialization_observations(value: Any) -> dict[str, Any]:
         or observations.get("replacementReadyStatusCode") != 200
         or timed_out == replacement
     ):
-        raise LaunchRehearsalError(
-            "initialization timeout replacement was not observed"
-        )
+        raise LaunchRehearsalError("initialization timeout replacement was not observed")
     return {
         "timeoutExitCode": 124,
         "startupDeadlineSeconds": deadline,
         "timedOutRuntimeId": timed_out,
         "replacementRuntimeId": replacement,
         "replacementReadyStatusCode": 200,
-    }
-
-
-def _query_observations(value: Any) -> dict[str, Any]:
-    observations = _object(value, "query observations")
-    _exact_fields(
-        observations,
-        {
-            "mutationStatusCode",
-            "multipleStatementsStatusCode",
-            "outOfDatasourceStatusCode",
-            "requestedMaxRows",
-            "returnedRowCount",
-            "scanLimitBytes",
-            "observedBytesScanned",
-            "interruptedRequestId",
-            "terminalState",
-            "reservationUnitsAfter",
-            "durableResultAuditCount",
-            "unavailableBindingState",
-            "unavailableBindingReservationReleased",
-        },
-        "query observations",
-    )
-    mutation = _client_error(
-        observations.get("mutationStatusCode"),
-        "query mutation status",
-    )
-    multiple = _client_error(
-        observations.get("multipleStatementsStatusCode"),
-        "multiple-statement query status",
-    )
-    out_of_scope = _client_error(
-        observations.get("outOfDatasourceStatusCode"),
-        "out-of-datasource query status",
-    )
-    requested_rows = _integer(
-        observations.get("requestedMaxRows"),
-        "requested query row limit",
-        minimum=1,
-        maximum=10_000,
-    )
-    returned_rows = _integer(
-        observations.get("returnedRowCount"),
-        "returned query row count",
-        minimum=0,
-        maximum=10_000,
-    )
-    scan_limit = _integer(
-        observations.get("scanLimitBytes"),
-        "query scan limit",
-        minimum=1,
-        maximum=1024 * 1024 * 1024,
-    )
-    scanned = _integer(
-        observations.get("observedBytesScanned"),
-        "observed query scan bytes",
-        minimum=0,
-        maximum=1024 * 1024 * 1024,
-    )
-    request_id = _safe_id(
-        observations.get("interruptedRequestId"),
-        "interrupted query request ID",
-    )
-    reservation_units = _integer(
-        observations.get("reservationUnitsAfter"),
-        "query reservation units after reconciliation",
-        minimum=0,
-        maximum=1_000_000,
-    )
-    audit_count = _integer(
-        observations.get("durableResultAuditCount"),
-        "durable query result audit count",
-        minimum=0,
-        maximum=100,
-    )
-    terminal_state = observations.get("terminalState")
-    if (
-        returned_rows > requested_rows
-        or scanned > scan_limit
-        or terminal_state not in {"CANCELLED", "FAILED"}
-        or reservation_units != 0
-        or audit_count != 1
-        or observations.get("unavailableBindingState") != "DEFERRED"
-        or observations.get("unavailableBindingReservationReleased") is not False
-    ):
-        raise LaunchRehearsalError(
-            "query limits or reconciliation observations did not pass"
-        )
-    return {
-        "mutationStatusCode": mutation,
-        "multipleStatementsStatusCode": multiple,
-        "outOfDatasourceStatusCode": out_of_scope,
-        "requestedMaxRows": requested_rows,
-        "returnedRowCount": returned_rows,
-        "scanLimitBytes": scan_limit,
-        "observedBytesScanned": scanned,
-        "interruptedRequestId": request_id,
-        "terminalState": terminal_state,
-        "reservationUnitsAfter": 0,
-        "durableResultAuditCount": 1,
-        "unavailableBindingState": "DEFERRED",
-        "unavailableBindingReservationReleased": False,
     }
 
 
@@ -1668,9 +1415,7 @@ def _recovery_observations(
         or observations.get("productionEndpointStatusAfter") != "READY"
         or running != desired
     ):
-        raise LaunchRehearsalError(
-            "recovery cutover and rollback did not return to healthy primary state"
-        )
+        raise LaunchRehearsalError("recovery cutover and rollback did not return to healthy primary state")
     return {
         "primaryTableArn": primary_arn,
         "restoredTableArn": restored_arn,
@@ -1751,9 +1496,7 @@ def _security_event_observations(value: Any) -> dict[str, Any]:
         or dlq_after_redrive != 0
         or outbox_after_redrive != 0
     ):
-        raise LaunchRehearsalError(
-            "security-event delivery, DLQ alarm, or redrive did not pass"
-        )
+        raise LaunchRehearsalError("security-event delivery, DLQ alarm, or redrive did not pass")
     return {
         "configuredDestinationCount": configured,
         "deliveredDestinationCount": delivered,
@@ -1780,9 +1523,7 @@ def _routing_observations(value: Any) -> dict[str, Any]:
         "provider-routing observations",
     )
     if observations.get("strategiesExercised") != list(ROUTING_STRATEGIES):
-        raise LaunchRehearsalError(
-            "provider-routing evidence does not cover every launch strategy"
-        )
+        raise LaunchRehearsalError("provider-routing evidence does not cover every launch strategy")
     candidates = _provider_list(
         observations.get("candidateProviders"),
         "candidate providers",
@@ -1876,9 +1617,7 @@ def _fallback_observations(value: Any) -> dict[str, Any]:
         or observations.get("fallbackResponseStatusCode") != 200
         or observations.get("postRecoveryStatusCode") != 200
     ):
-        raise LaunchRehearsalError(
-            "provider fallback or post-fault recovery did not pass"
-        )
+        raise LaunchRehearsalError("provider fallback or post-fault recovery did not pass")
     return {
         "primaryProvider": primary,
         "fallbackProvider": fallback,
@@ -1907,14 +1646,11 @@ def _control_fault_observations(value: Any) -> dict[str, Any]:
     )
     dependency = observations.get("faultedDependency")
     if dependency not in {
-        "athena",
         "dynamodb",
         "secrets-manager",
         "security-event-outbox",
     }:
-        raise LaunchRehearsalError(
-            "control-plane faulted dependency is unsupported"
-        )
+        raise LaunchRehearsalError("control-plane faulted dependency is unsupported")
     if (
         observations.get("readyDuringFaultStatusCode") != 503
         or observations.get("readDuringFaultStatusCode") != 503
@@ -1922,9 +1658,7 @@ def _control_fault_observations(value: Any) -> dict[str, Any]:
         or observations.get("readyAfterRecoveryStatusCode") != 200
         or observations.get("readAfterRecoveryStatusCode") != 200
     ):
-        raise LaunchRehearsalError(
-            "control-plane dependency fault did not fail closed and recover"
-        )
+        raise LaunchRehearsalError("control-plane dependency fault did not fail closed and recover")
     return {
         "faultedDependency": dependency,
         "readyDuringFaultStatusCode": 503,
@@ -1943,8 +1677,6 @@ def _validate_observations(
 ) -> dict[str, Any]:
     if gate_name == "initializationTimeoutReplacement":
         return _initialization_observations(value)
-    if gate_name == "queryBoundaryLimitsAndReconciliation":
-        return _query_observations(value)
     if gate_name == "recoveryCutoverAndRollback":
         return _recovery_observations(value, release=release)
     if gate_name == "securityEventDeliveryAndDlq":
@@ -1989,14 +1721,8 @@ def _validate_gate_receipt(
         receipt.get("execution"),
         release_commit=release["commit"],
     )
-    if (
-        release != source.release
-        or execution != source.execution
-        or receipt.get("environment") != "production"
-    ):
-        raise LaunchRehearsalError(
-            f"{gate_name} receipt is not bound to this production gate run"
-        )
+    if release != source.release or execution != source.execution or receipt.get("environment") != "production":
+        raise LaunchRehearsalError(f"{gate_name} receipt is not bound to this production gate run")
     (
         commands,
         raw_observations,
@@ -2014,14 +1740,8 @@ def _validate_gate_receipt(
         command_outputs=command_outputs,
         script_checker=script_checker,
     )
-    if (
-        completed > now
-        or now - completed > MAX_GATE_AGE
-        or started > completed
-    ):
-        raise LaunchRehearsalError(
-            f"{gate_name} command receipt time is outside the accepted window"
-        )
+    if completed > now or now - completed > MAX_GATE_AGE or started > completed:
+        raise LaunchRehearsalError(f"{gate_name} command receipt time is outside the accepted window")
     observations = _validate_observations(
         gate_name,
         raw_observations,
@@ -2036,14 +1756,9 @@ def _validate_gate_receipt(
 
 
 def _evidence_id(reference: S3Reference) -> str:
-    value = (
-        f"{reference.uri}?versionId={quote(reference.version_id, safe='')}"
-        f"&sha256={reference.sha256}"
-    )
+    value = f"{reference.uri}?versionId={quote(reference.version_id, safe='')}&sha256={reference.sha256}"
     if len(value) > 512:
-        raise LaunchRehearsalError(
-            "immutable gate evidence identifier is too long for compatibility"
-        )
+        raise LaunchRehearsalError("immutable gate evidence identifier is too long for compatibility")
     return value
 
 
@@ -2094,21 +1809,16 @@ def _validate_detailed_report(
         or report.get("releaseCommit") != expected_release["commit"]
         or report.get("region") != expected_release["region"]
         or report.get("agentcoreImage") != expected_release["agentcoreImage"]
-        or report.get("controlPlaneImage")
-        != expected_release["controlPlaneImage"]
+        or report.get("controlPlaneImage") != expected_release["controlPlaneImage"]
     ):
-        raise LaunchRehearsalError(
-            "launch-rehearsal report is not bound to the requested release"
-        )
+        raise LaunchRehearsalError("launch-rehearsal report is not bound to the requested release")
     generated_text, generated = _timestamp(
         report.get("generatedAt"),
         "launch-rehearsal generatedAt",
     )
     producer = _validate_producer(report.get("producer"))
     if producer != dict(expected_producer):
-        raise LaunchRehearsalError(
-            "launch-rehearsal producer identity does not match expectation"
-        )
+        raise LaunchRehearsalError("launch-rehearsal producer identity does not match expectation")
     gate_execution = _validate_execution(
         report.get("gateExecution"),
         release_commit=expected_release["commit"],
@@ -2138,18 +1848,14 @@ def _validate_detailed_report(
     )
     raw_gates = _object(report.get("gates"), "launch-rehearsal gates")
     if set(raw_gates) != set(ALL_GATES):
-        raise LaunchRehearsalError(
-            "launch-rehearsal report is missing required gates"
-        )
+        raise LaunchRehearsalError("launch-rehearsal report is missing required gates")
     normalized_gates: dict[str, Any] = {}
     identities = {
         (source_pair.artifact.uri, source_pair.artifact.version_id),
         (source_pair.signature.uri, source_pair.signature.version_id),
     }
     if len(identities) != 2:
-        raise LaunchRehearsalError(
-            "launch-rehearsal source artifact and signature are not distinct"
-        )
+        raise LaunchRehearsalError("launch-rehearsal source artifact and signature are not distinct")
     for gate_name in sorted(ALL_GATES):
         gate = _object(raw_gates.get(gate_name), f"report gate {gate_name}")
         _exact_fields(
@@ -2199,9 +1905,7 @@ def _validate_detailed_report(
         for reference in (artifact, signature):
             identity = (reference.uri, reference.version_id)
             if identity in identities:
-                raise LaunchRehearsalError(
-                    "launch-rehearsal report reuses an immutable object version"
-                )
+                raise LaunchRehearsalError("launch-rehearsal report reuses an immutable object version")
             identities.add(identity)
         if (
             gate.get("status") != "PASS"
@@ -2211,9 +1915,7 @@ def _validate_detailed_report(
             or completed < started
             or completed > generated
         ):
-            raise LaunchRehearsalError(
-                f"launch-rehearsal gate {gate_name} is invalid"
-            )
+            raise LaunchRehearsalError(f"launch-rehearsal gate {gate_name} is invalid")
         normalized_gates[gate_name] = {
             "status": "PASS",
             "environment": "production",
@@ -2237,9 +1939,7 @@ def _validate_detailed_report(
         "gates": normalized_gates,
     }
     if normalized != report:
-        raise LaunchRehearsalError(
-            "launch-rehearsal evidence report is not normalized"
-        )
+        raise LaunchRehearsalError("launch-rehearsal evidence report is not normalized")
     return normalized
 
 
@@ -2264,21 +1964,14 @@ def validate_detailed_report(
         _object(value, "launch-rehearsal evidence report").get("producer"),
         release_commit=release_commit,
     )
-    expected_workflow_ref = (
-        f"{normalized_repository}/{PRODUCER_WORKFLOW}@refs/heads/main"
-    )
-    expected_parent_workflow_ref = (
-        f"{normalized_repository}/{LAUNCH_WORKFLOW}@refs/heads/main"
-    )
+    expected_workflow_ref = f"{normalized_repository}/{PRODUCER_WORKFLOW}@refs/heads/main"
+    expected_parent_workflow_ref = f"{normalized_repository}/{LAUNCH_WORKFLOW}@refs/heads/main"
     if (
         producer["repository"] != normalized_repository
         or producer["workflowRef"] != expected_workflow_ref
         or producer["parentWorkflowRef"] != expected_parent_workflow_ref
     ):
-        raise LaunchRehearsalError(
-            "launch-rehearsal report was not created by the protected "
-            "producer workflow"
-        )
+        raise LaunchRehearsalError("launch-rehearsal report was not created by the protected producer workflow")
     normalized = _validate_detailed_report(
         value,
         expected_release=_expected_release(
@@ -2294,15 +1987,11 @@ def validate_detailed_report(
     gate_execution = normalized["gateExecution"]
     if (
         gate_execution["repository"] != normalized_repository
-        or gate_execution["parentWorkflowRef"]
-        != expected_parent_workflow_ref
+        or gate_execution["parentWorkflowRef"] != expected_parent_workflow_ref
         or gate_execution["runId"] != producer["runId"]
         or gate_execution["runAttempt"] != producer["runAttempt"]
     ):
-        raise LaunchRehearsalError(
-            "launch-rehearsal gate execution is not bound to the protected "
-            "parent run"
-        )
+        raise LaunchRehearsalError("launch-rehearsal gate execution is not bound to the protected parent run")
     return normalized
 
 
@@ -2330,18 +2019,13 @@ def _validate_compatibility_report(
         or report.get("releaseCommit") != detailed_report["releaseCommit"]
         or report.get("region") != detailed_report["region"]
         or report.get("agentcoreImage") != detailed_report["agentcoreImage"]
-        or report.get("controlPlaneImage")
-        != detailed_report["controlPlaneImage"]
+        or report.get("controlPlaneImage") != detailed_report["controlPlaneImage"]
         or report.get("generatedAt") != detailed_report["generatedAt"]
     ):
-        raise LaunchRehearsalError(
-            "compatibility report is not bound to detailed evidence"
-        )
+        raise LaunchRehearsalError("compatibility report is not bound to detailed evidence")
     raw_gates = _object(report.get("gates"), "compatibility gates")
     if set(raw_gates) != set(CORE_GATES):
-        raise LaunchRehearsalError(
-            "compatibility report must contain the four deployment gates"
-        )
+        raise LaunchRehearsalError("compatibility report must contain the four deployment gates")
     normalized_gates: dict[str, Any] = {}
     for gate_name in sorted(CORE_GATES):
         gate = _object(
@@ -2369,9 +2053,7 @@ def _validate_compatibility_report(
             or gate.get("completedAt") != detailed_gate["completedAt"]
             or gate.get("evidenceId") != expected_id
         ):
-            raise LaunchRehearsalError(
-                f"compatibility gate {gate_name} is not immutable evidence"
-            )
+            raise LaunchRehearsalError(f"compatibility gate {gate_name} is not immutable evidence")
         normalized_gates[gate_name] = {
             "status": "PASS",
             "environment": "production",
@@ -2388,9 +2070,7 @@ def _validate_compatibility_report(
         "gates": normalized_gates,
     }
     if normalized != report:
-        raise LaunchRehearsalError(
-            "compatibility launch-rehearsal report is not normalized"
-        )
+        raise LaunchRehearsalError("compatibility launch-rehearsal report is not normalized")
     return normalized
 
 
@@ -2438,9 +2118,7 @@ def build_reports(
     """Derive detailed and deployment-compatible reports from signed receipts."""
 
     if set(receipts) != set(ALL_GATES):
-        raise LaunchRehearsalError(
-            "signed receipt set must contain every required launch gate"
-        )
+        raise LaunchRehearsalError("signed receipt set must contain every required launch gate")
     if now.tzinfo is None or now.utcoffset() is None:
         raise LaunchRehearsalError("report generation time must include timezone")
     now = now.astimezone(timezone.utc)
@@ -2462,9 +2140,7 @@ def build_reports(
         release_commit=source.release["commit"],
     )
     if source.execution["repository"] != normalized_producer["repository"]:
-        raise LaunchRehearsalError(
-            "gate execution and evidence producer repositories differ"
-        )
+        raise LaunchRehearsalError("gate execution and evidence producer repositories differ")
     report_gates: dict[str, Any] = {}
     for gate_name in sorted(ALL_GATES):
         result = _validate_gate_receipt(
@@ -2485,13 +2161,8 @@ def build_reports(
             result["completedAt"],
             f"{gate_name} completedAt",
         )
-        if (
-            gate_started < terminal_started
-            or gate_completed > terminal_completed
-        ):
-            raise LaunchRehearsalError(
-                f"{gate_name} command receipt is outside the terminal run"
-            )
+        if gate_started < terminal_started or gate_completed > terminal_completed:
+            raise LaunchRehearsalError(f"{gate_name} command receipt is outside the terminal run")
         pair = source.gates[gate_name]
         report_gates[gate_name] = {
             "status": "PASS",
@@ -2525,9 +2196,7 @@ def build_reports(
                 "status": "PASS",
                 "environment": "production",
                 "completedAt": report_gates[gate_name]["completedAt"],
-                "evidenceId": _evidence_id(
-                    source.gates[gate_name].artifact
-                ),
+                "evidenceId": _evidence_id(source.gates[gate_name].artifact),
             }
             for gate_name in sorted(CORE_GATES)
         },
@@ -2577,13 +2246,9 @@ def _aws_json(arguments: Sequence[str]) -> dict[str, Any]:
             parse_constant=_reject_constant,
         )
     except (json.JSONDecodeError, LaunchRehearsalError) as exc:
-        raise LaunchRehearsalError(
-            "AWS evidence response is not strict JSON"
-        ) from exc
+        raise LaunchRehearsalError("AWS evidence response is not strict JSON") from exc
     if not isinstance(value, dict):
-        raise LaunchRehearsalError(
-            "AWS evidence response must be a JSON object"
-        )
+        raise LaunchRehearsalError("AWS evidence response must be a JSON object")
     return value
 
 
@@ -2611,9 +2276,7 @@ def _validate_download_metadata(
         or retained_until <= now
         or not retained_text
     ):
-        raise LaunchRehearsalError(
-            "S3 object is not the required immutable COMPLIANCE version"
-        )
+        raise LaunchRehearsalError("S3 object is not the required immutable COMPLIANCE version")
 
 
 def _fetch_immutable_reference(
@@ -2647,9 +2310,7 @@ def _fetch_immutable_reference(
         now=now,
     )
     if _hash_file(destination) != reference.sha256:
-        raise LaunchRehearsalError(
-            "downloaded S3 object does not match its SHA-256 binding"
-        )
+        raise LaunchRehearsalError("downloaded S3 object does not match its SHA-256 binding")
 
 
 def _verify_kms_signature(
@@ -2662,9 +2323,7 @@ def _verify_kms_signature(
 
         verify_artifact(artifact, signature, signing_key_arn)
     except (ImportError, KmsEvidenceError) as exc:
-        raise LaunchRehearsalError(
-            "KMS signature verification failed"
-        ) from exc
+        raise LaunchRehearsalError("KMS signature verification failed") from exc
 
 
 def produce_reports(
@@ -2700,18 +2359,14 @@ def produce_reports(
         location="evidence signing KMS key",
     )
     if storage_key == signing_key:
-        raise LaunchRehearsalError(
-            "storage and asymmetric signing KMS keys must be distinct"
-        )
+        raise LaunchRehearsalError("storage and asymmetric signing KMS keys must be distinct")
     normalized_producer = _validate_producer(producer)
     current_time = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     fetch = fetcher or _fetch_immutable_reference
     verify_signature = signature_verifier or _verify_kms_signature
     check_script = script_checker or _verify_script_at_commit
 
-    with tempfile.TemporaryDirectory(
-        prefix="axonllm-launch-rehearsal-"
-    ) as directory:
+    with tempfile.TemporaryDirectory(prefix="axonllm-launch-rehearsal-") as directory:
         temporary = Path(directory)
         source_path = temporary / "gate-set.json"
         source_signature_path = temporary / "gate-set-kms-signature.json"
@@ -2740,15 +2395,11 @@ def produce_reports(
             for reference in (pair.artifact, pair.signature):
                 identity = (reference.uri, reference.version_id)
                 if identity in identities:
-                    raise LaunchRehearsalError(
-                        "launch evidence reuses an immutable object version"
-                    )
+                    raise LaunchRehearsalError("launch evidence reuses an immutable object version")
                 identities.add(identity)
 
         terminal_path = temporary / "attempt-terminal.json"
-        terminal_signature_path = (
-            temporary / "attempt-terminal-kms-signature.json"
-        )
+        terminal_signature_path = temporary / "attempt-terminal-kms-signature.json"
         fetch(
             source.terminal.artifact,
             terminal_path,
@@ -2788,13 +2439,9 @@ def produce_reports(
             ):
                 identity = (reference.uri, reference.version_id)
                 if identity in identities:
-                    raise LaunchRehearsalError(
-                        "launch command outputs reuse an immutable object version"
-                    )
+                    raise LaunchRehearsalError("launch command outputs reuse an immutable object version")
                 identities.add(identity)
-                output_path = (
-                    temporary / f"{gate_name}-{index + 1}-{stream}.bin"
-                )
+                output_path = temporary / f"{gate_name}-{index + 1}-{stream}.bin"
                 fetch(reference, output_path, storage_key, current_time)
                 command_outputs[(gate_name, index, stream)] = _read_regular(
                     output_path,
@@ -2860,10 +2507,7 @@ def _common_expected(parser: argparse.ArgumentParser) -> None:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description=(
-            "Produce or verify signed, immutable AgentCore launch-rehearsal "
-            "evidence"
-        )
+        description=("Produce or verify signed, immutable AgentCore launch-rehearsal evidence")
     )
     commands = parser.add_subparsers(dest="command", required=True)
 
@@ -2921,10 +2565,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 evidence_bucket=args.evidence_bucket,
                 evidence_prefix=prefix,
             )
-            print(
-                "detailed launch-rehearsal evidence verified: "
-                f"{args.report}"
-            )
+            print(f"detailed launch-rehearsal evidence verified: {args.report}")
         elif args.command == "produce":
             producer = _producer_from_args(args)
             source_pair = ArtifactPair(

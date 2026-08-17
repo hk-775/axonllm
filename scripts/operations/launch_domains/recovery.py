@@ -97,9 +97,7 @@ def _resource_binding(
             }
         )
         != 1
-        or not restored.group("name").startswith(
-            f"{primary.group('name')}-restore-validation-"
-        )
+        or not restored.group("name").startswith(f"{primary.group('name')}-restore-validation-")
     ):
         raise worker.HandlerContractError from None
     return {
@@ -280,11 +278,7 @@ def _describe_table(
         {"TableName": name},
     )
     table = response.get("Table")
-    if (
-        not isinstance(table, Mapping)
-        or table.get("TableName") != name
-        or table.get("TableArn") != arn
-    ):
+    if not isinstance(table, Mapping) or table.get("TableName") != name or table.get("TableArn") != arn:
         raise worker.DomainTaskFailure("RecoveryTableBindingMismatch")
     return table
 
@@ -293,7 +287,6 @@ def _validate_restored_table(
     context: worker.HandlerContext,
     *,
     resources: Mapping[str, str],
-    data_key_arn: str,
 ) -> None:
     table = _describe_table(
         context,
@@ -308,11 +301,7 @@ def _validate_restored_table(
     ]:
         raise worker.DomainTaskFailure("RecoveryRestoreSchemaMismatch")
     encryption = table.get("SSEDescription")
-    if (
-        not isinstance(encryption, Mapping)
-        or encryption.get("Status") != "ENABLED"
-        or encryption.get("KMSMasterKeyArn") != data_key_arn
-    ):
+    if not isinstance(encryption, Mapping) or encryption.get("Status") != "ENABLED":
         raise worker.DomainTaskFailure("RecoveryRestoreEncryptionMismatch")
     backups = _call(
         context,
@@ -321,11 +310,7 @@ def _validate_restored_table(
         {"TableName": resources["restoredTableName"]},
     )
     pitr = backups.get("ContinuousBackupsDescription")
-    pitr = (
-        pitr.get("PointInTimeRecoveryDescription")
-        if isinstance(pitr, Mapping)
-        else None
-    )
+    pitr = pitr.get("PointInTimeRecoveryDescription") if isinstance(pitr, Mapping) else None
     if not isinstance(pitr, Mapping) or pitr.get("PointInTimeRecoveryStatus") != "ENABLED":
         _call(
             context,
@@ -333,9 +318,7 @@ def _validate_restored_table(
             "update_continuous_backups",
             {
                 "TableName": resources["restoredTableName"],
-                "PointInTimeRecoverySpecification": {
-                    "PointInTimeRecoveryEnabled": True
-                },
+                "PointInTimeRecoverySpecification": {"PointInTimeRecoveryEnabled": True},
             },
         )
         raise worker.DomainTaskFailure("RecoveryRestoreProtectionInProgress", retryable=True)
@@ -458,7 +441,6 @@ def _baseline(
     _required_outputs(
         agent,
         {
-            "DataKeyArn",
             "RecoveryApprovalId",
             "RecoveryCutoverMode",
             "RuntimeArn",
@@ -520,7 +502,6 @@ def _baseline(
         "agentcoreStackArn": resources["agentcoreStackArn"],
         "controlPlaneStackArn": resources["controlPlaneStackArn"],
         "runtimeArn": resources["runtimeArn"],
-        "dataKeyArn": agent["DataKeyArn"],
         "approvalBefore": agent["RecoveryApprovalId"],
         "approvalId": f"launch/{task.owner_id}",
         "authorizationOwnerId": task.owner_id,
@@ -530,9 +511,7 @@ def _baseline(
         "desiredCount": desired,
         "minCapacity": minimum,
         "maxCapacity": maximum,
-        "suspendedState": {
-            key: suspended.get(key) is True for key in _SUSPENSION_KEYS
-        },
+        "suspendedState": {key: suspended.get(key) is True for key in _SUSPENSION_KEYS},
     }
 
 
@@ -554,9 +533,7 @@ def _set_scaling(
             "MinCapacity": 0 if quiesced else baseline["minCapacity"],
             "MaxCapacity": baseline["maxCapacity"],
             "SuspendedState": (
-                {key: True for key in _SUSPENSION_KEYS}
-                if quiesced
-                else dict(baseline["suspendedState"])
+                {key: True for key in _SUSPENSION_KEYS} if quiesced else dict(baseline["suspendedState"])
             ),
         },
     )
@@ -616,10 +593,7 @@ def _resume(
     target_matches = (
         target.get("MinCapacity") == baseline["minCapacity"]
         and target.get("MaxCapacity") == baseline["maxCapacity"]
-        and all(
-            suspended.get(key) is baseline["suspendedState"][key]
-            for key in _SUSPENSION_KEYS
-        )
+        and all(suspended.get(key) is baseline["suspendedState"][key] for key in _SUSPENSION_KEYS)
     )
     if _service_stable(service, desired) and target_matches:
         return desired, service["runningCount"]
@@ -700,12 +674,8 @@ def _drive_selector(
             selected_table=control["SelectedRuntimeStateTableName"],
             primary_table=primary_table,
         )
-    if (
-        agent.get("RecoveryCutoverMode") == "normal"
-        and (
-            agent.get("SelectedRuntimeStateTableName") != target_table
-            or control.get("RecoveryCutoverMode") == "quiesced"
-        )
+    if agent.get("RecoveryCutoverMode") == "normal" and (
+        agent.get("SelectedRuntimeStateTableName") != target_table or control.get("RecoveryCutoverMode") == "quiesced"
     ):
         _update_selector(
             context,
@@ -766,10 +736,7 @@ def _drive_selector(
             primary_table=primary_table,
         )
         agent, control = _selector_state(context, state)
-    if (
-        agent.get("RecoveryCutoverMode") != "normal"
-        or agent.get("SelectedRuntimeStateTableName") != target_table
-    ):
+    if agent.get("RecoveryCutoverMode") != "normal" or agent.get("SelectedRuntimeStateTableName") != target_table:
         raise worker.DomainTaskFailure("RecoverySelectorConvergenceFailed", retryable=True)
     _endpoint_ready(context, state["runtimeArn"], "production")
     _update_selector(
@@ -847,7 +814,6 @@ class RecoveryDomain:
             _validate_restored_table(
                 context,
                 resources=resources,
-                data_key_arn=baseline["dataKeyArn"],
             )
             next_ownership = common.copied_ownership(ownership)
             next_ownership["fixtureIds"] = [fixture_id]
@@ -876,7 +842,6 @@ class RecoveryDomain:
         _validate_restored_table(
             context,
             resources=resources,
-            data_key_arn=state["dataKeyArn"],
         )
         phases = ["quiesced", "selected", "validation", "normal"]
         if operation == "cutover-restored-state":

@@ -57,7 +57,6 @@ def _managed_config() -> AgentCoreSetupConfig:
             },
             "managed_cognito": {
                 "hosted_ui_domain_prefix": "axonllm-123456789012",
-                "oauth_callback_urls": ["https://app.example.com/oauth/callback"],
             },
             "control_plane": {
                 "domain_name": "axon.example.com",
@@ -178,10 +177,7 @@ def _assert_role_trust_domain(
     qualifier: str,
 ) -> None:
     roles = _resources(template, "AWS::IAM::Role")
-    boundary_name = (
-        "AxonLLMAgentCoreServiceBoundary-"
-        f"{qualifier}-us-east-1"
-    )
+    boundary_name = f"AxonLLMAgentCoreServiceBoundary-{qualifier}-us-east-1"
     for logical_id, role in (
         (logical_id, resource)
         for logical_id, resource in template["Resources"].items()
@@ -200,10 +196,7 @@ def _assert_role_trust_domain(
                 )
             )
             continue
-        tags = {
-            tag["Key"]: tag["Value"]
-            for tag in properties["Tags"]
-        }
+        tags = {tag["Key"]: tag["Value"] for tag in properties["Tags"]}
         assert tags["Application"] == "AxonLLM"
         assert tags["AxonLLMTrustDomain"] == qualifier
 
@@ -350,9 +343,7 @@ def test_namespaced_runtime_commands_receive_exact_rehearsal_parameter(
     )
     assert not any("RehearsalControlTableArn" in argument for argument in identity_command)
     assert ("AxonLLMIdentityStack-managed:ControlPlaneDomainName=managed.axon.example.com") in identity_command
-    assert (
-        "AxonLLMIdentityStack-managed:OAuthCallbackUrls=https://managed.axon.example.com/oauth/callback"
-    ) in identity_command
+    assert not any("OAuthCallbackUrls" in argument for argument in identity_command)
     control_command = commands[-1][0]
     assert ("AxonLLMControlPlaneStack-managed:IdentityStackName=AxonLLMIdentityStack-managed") in control_command
 
@@ -363,10 +354,7 @@ def test_production_cdk_commands_remain_without_rehearsal_parameter(
     config = _managed_config()
     identity = IdentityValues(
         issuer="https://issuer.example.com",
-        discovery_url=(
-            "https://issuer.example.com/.well-known/"
-            "openid-configuration"
-        ),
+        discovery_url=("https://issuer.example.com/.well-known/openid-configuration"),
         client_id="client-id",
         audience="api://axonllm",
         tenant_claim="tenant",
@@ -393,20 +381,9 @@ def test_production_cdk_commands_remain_without_rehearsal_parameter(
         ),
     )
 
-    assert all(
-        not any(
-            "RehearsalControlTableArn" in argument
-            for argument in command
-        )
-        for command in commands
-    )
-    assert (
-        "AxonLLMIdentityStack:ControlPlaneDomainName=axon.example.com"
-    ) in commands[0]
-    assert (
-        "AxonLLMIdentityStack:OAuthCallbackUrls="
-        "https://app.example.com/oauth/callback"
-    ) in commands[0]
+    assert all(not any("RehearsalControlTableArn" in argument for argument in command) for command in commands)
+    assert ("AxonLLMIdentityStack:ControlPlaneDomainName=axon.example.com") in commands[0]
+    assert not any("OAuthCallbackUrls" in argument for argument in commands[0])
 
 
 def test_namespaced_control_plane_domain_enforces_dns_bounds() -> None:
@@ -472,16 +449,9 @@ def test_namespaced_agentcore_physical_names_are_isolated(tmp_path) -> None:
     assert any("external-oidc" in json.dumps(role_name) for role_name in role_names)
     _assert_fully_destroyable(template)
     assert table["DeletionProtectionEnabled"] is False
-    backup_vault = _resources(
-        template,
-        "AWS::Backup::BackupVault",
-    )[0]["Properties"]
-    assert "LockConfiguration" not in backup_vault
-    aliases = {resource["Properties"]["AliasName"] for resource in _resources(template, "AWS::KMS::Alias")}
-    assert {
-        "alias/axonllm/agentcore-data-external-oidc",
-        "alias/axonllm/agentcore-backups-external-oidc",
-    } <= aliases
+    assert not any(resource["Type"].startswith("AWS::Backup::") for resource in template["Resources"].values())
+    assert _resources(template, "AWS::KMS::Key") == []
+    assert _resources(template, "AWS::KMS::Alias") == []
     assert _resources(template, "AWS::IAM::Role")
     _assert_role_trust_domain(template, qualifier="axext")
 
@@ -518,7 +488,7 @@ def test_namespaced_identity_and_control_plane_are_isolated(
 
     assert pool["UserPoolName"] == "axonllm-agentcore-users-managed"
     assert client_names == {
-        "axonllm-agentcore-pkce-managed",
+        "axonllm-agentcore-audience-managed",
         "axonllm-agentcore-certification-managed",
         "axonllm-control-plane-alb-managed",
     }
@@ -541,35 +511,23 @@ def test_namespaced_identity_and_control_plane_are_isolated(
     )[0]["Properties"]
     attributes = {item["Key"]: item["Value"] for item in load_balancer["LoadBalancerAttributes"]}
     assert attributes["deletion_protection.enabled"] == "false"
-    assert len(
-        _resources(control, "Custom::S3AutoDeleteObjects")
-    ) == 1
+    assert len(_resources(control, "Custom::S3AutoDeleteObjects")) == 1
     outputs = control["Outputs"]
     cluster_logical_id = next(
-        logical_id
-        for logical_id, resource in control["Resources"].items()
-        if resource["Type"] == "AWS::ECS::Cluster"
+        logical_id for logical_id, resource in control["Resources"].items() if resource["Type"] == "AWS::ECS::Cluster"
     )
     task_security_group_logical_id = next(
         logical_id
         for logical_id, resource in control["Resources"].items()
         if resource["Type"] == "AWS::EC2::SecurityGroup"
-        and resource["Properties"]["GroupDescription"]
-        == "AxonLLM control-plane tasks"
+        and resource["Properties"]["GroupDescription"] == "AxonLLM control-plane tasks"
     )
-    assert outputs["ClusterArn"]["Value"] == {
-        "Fn::GetAtt": [cluster_logical_id, "Arn"]
-    }
-    assert outputs["TaskSecurityGroupId"]["Value"] == {
-        "Fn::GetAtt": [task_security_group_logical_id, "GroupId"]
-    }
+    assert outputs["ClusterArn"]["Value"] == {"Fn::GetAtt": [cluster_logical_id, "Arn"]}
+    assert outputs["TaskSecurityGroupId"]["Value"] == {"Fn::GetAtt": [task_security_group_logical_id, "GroupId"]}
     subnet_join = outputs["SubnetIds"]["Value"]["Fn::Join"]
     assert subnet_join[0] == ","
     assert len(subnet_join[1]) == 2
-    assert all(
-        isinstance(item, dict) and set(item) == {"Ref"}
-        for item in subnet_join[1]
-    )
+    assert all(isinstance(item, dict) and set(item) == {"Ref"} for item in subnet_join[1])
     certification = next(
         resource["Properties"]
         for resource in _resources(
@@ -587,7 +545,7 @@ def test_namespaced_identity_and_control_plane_are_isolated(
         "RefreshToken": "minutes",
     }
     for client_name in (
-        "axonllm-agentcore-pkce-managed",
+        "axonllm-agentcore-audience-managed",
         "axonllm-control-plane-alb-managed",
     ):
         client = next(
@@ -654,9 +612,7 @@ def test_namespaced_control_plane_wires_ledger_without_process_exit(
     runtime_actions = {"dynamodb:GetItem", "dynamodb:PutItem"}
     assert sum(_actions(statement) == runtime_actions for statement in statements) == 2
     task_role_statement = next(
-        statement
-        for statement in statements
-        if statement.get("Sid") == "UseLaunchRehearsalControlLedger"
+        statement for statement in statements if statement.get("Sid") == "UseLaunchRehearsalControlLedger"
     )
     assert _actions(task_role_statement) == runtime_actions
     launch_worker_actions = {
@@ -702,21 +658,16 @@ def test_default_templates_have_no_rehearsal_wiring(
         for logical_id, resource in template["Resources"].items()
         if resource.get("DeletionPolicy") == "Retain" and resource.get("UpdateReplacePolicy") == "Retain"
     }
-    assert len(retained) == (13 if target == "agentcore" else 5)
+    assert len(retained) == (10 if target == "agentcore" else 5)
     if target == "agentcore":
         table = _resources(
             template,
             "AWS::DynamoDB::Table",
         )[0]["Properties"]
         assert table["DeletionProtectionEnabled"] is True
-        backup_vault = _resources(
-            template,
-            "AWS::Backup::BackupVault",
-        )[0]["Properties"]
-        assert backup_vault["LockConfiguration"] == {
-            "MinRetentionDays": 30,
-            "MaxRetentionDays": 365,
-        }
+        assert not any(resource["Type"].startswith("AWS::Backup::") for resource in template["Resources"].values())
+        assert _resources(template, "AWS::KMS::Key") == []
+        assert _resources(template, "AWS::KMS::Alias") == []
     else:
         load_balancer = _resources(
             template,

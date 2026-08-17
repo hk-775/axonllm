@@ -12,7 +12,12 @@ import launch_activity_worker as worker
 from launch_domains.common import LaunchSession, copied_ownership, owned_id
 
 
-OPERATIONS = framework.DOMAIN_OPERATIONS["query"]
+OPERATIONS = (
+    "reject-query-boundaries",
+    "interrupt-query",
+    "verify-terminal-reconciliation",
+    "verify-deferred-accounting",
+)
 CONTROL_GATE = "queryBoundaryLimitsAndReconciliation"
 CONTROL_NAME = "query-after-reservation"
 

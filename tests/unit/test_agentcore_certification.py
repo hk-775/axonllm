@@ -6,6 +6,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 import pytest
+from botocore.credentials import Credentials
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -51,19 +52,6 @@ def _configuration() -> dict:
             {"provider": "openai", "model": "openai-certification"},
             {"provider": "bedrock", "model": "bedrock-certification"},
         ],
-        "query": {
-            "catalog": "AwsDataCatalog",
-            "database": "default",
-            "datasourceId": "launch-data",
-            "region": "us-east-1",
-            "roleArn": (
-                "arn:aws:iam::123456789012:"
-                "role/axon-athena-certification"
-            ),
-            "sql": "SELECT 1 AS ready",
-            "maxRows": 10,
-            "workgroup": "axon_read_only",
-        },
     }
 
 
@@ -73,10 +61,7 @@ def _production_configuration(
 ) -> dict:
     raw = _configuration()
     raw["profile"] = certification.PRODUCTION_LAUNCH_PROFILE
-    providers = (
-        set(certification.PRODUCTION_LAUNCH_PROVIDERS)
-        | set(optional_providers)
-    )
+    providers = set(certification.PRODUCTION_LAUNCH_PROVIDERS) | set(optional_providers)
     raw["providers"] = [
         {
             "provider": provider,
@@ -143,9 +128,7 @@ def _tool_body(
                         "type": "function",
                         "function": {
                             "name": certification._TOOL_NAME,
-                            "arguments": json.dumps(
-                                {"token": certification._TOOL_VALUE}
-                            ),
+                            "arguments": json.dumps({"token": certification._TOOL_VALUE}),
                         },
                     }
                 ],
@@ -240,10 +223,7 @@ def _tool_stream_body(
         },
         {"data": "[DONE]"},
     ]
-    return b"".join(
-        ("data: " + json.dumps(event, separators=(",", ":")) + "\n\n").encode()
-        for event in events
-    )
+    return b"".join(("data: " + json.dumps(event, separators=(",", ":")) + "\n\n").encode() for event in events)
 
 
 class _Transport:
@@ -370,9 +350,7 @@ class _Transport:
             return _observation(200, self._tenant_config())
         if payload["action"] == "chat":
             provider = payload["provider"]
-            assert provider == payload["model"].removesuffix(
-                "-certification"
-            )
+            assert provider == payload["model"].removesuffix("-certification")
             if payload["stream"]:
                 if payload.get("tools"):
                     return _observation(
@@ -386,10 +364,7 @@ class _Transport:
                     "text/event-stream",
                 )
             if payload.get("tools"):
-                if any(
-                    message.get("role") == "tool"
-                    for message in payload["messages"]
-                ):
+                if any(message.get("role") == "tool" for message in payload["messages"]):
                     return _observation(
                         200,
                         _completion_body(
@@ -403,21 +378,13 @@ class _Transport:
                         200,
                         _completion_body(provider, payload["model"]),
                     )
-                if (
-                    provider == "cohere"
-                    and payload.get("tool_choice") == "required"
-                ):
+                if provider == "cohere" and payload.get("tool_choice") == "required":
                     return _observation(
                         400,
                         {
                             "detail": {
-                                "code": (
-                                    certification
-                                    ._UNSUPPORTED_PROVIDER_FEATURE
-                                ),
-                                "message": (
-                                    "Required tool selection is unsupported."
-                                ),
+                                "code": (certification._UNSUPPORTED_PROVIDER_FEATURE),
+                                "message": ("Required tool selection is unsupported."),
                             }
                         },
                     )
@@ -429,27 +396,7 @@ class _Transport:
                 200,
                 _completion_body(provider, payload["model"]),
             )
-        assert payload["action"] == "query"
-        if payload["sql"].startswith("DELETE"):
-            return _observation(400, {"error": "select only"})
-        return _observation(
-            200,
-            {
-                "request_id": payload["request_id"],
-                "datasource_id": payload["datasource_id"],
-                "project_id": "project-a",
-                "query_execution_id": "execution-1",
-                "columns": [{"name": "ready", "type": "integer"}],
-                "rows": [["1"]],
-                "row_count": 1,
-                "truncated": False,
-                "statistics": {
-                    "data_scanned_bytes": 0,
-                    "engine_execution_ms": 1,
-                    "result_bytes": 1,
-                },
-            },
-        )
+        raise AssertionError(payload)
 
 
 def _endpoint() -> dict[str, str]:
@@ -467,7 +414,7 @@ def _endpoint() -> dict[str, str]:
     }
 
 
-def test_full_certification_covers_agentcore_rbac_providers_stream_and_query() -> None:
+def test_full_certification_covers_agentcore_rbac_providers_and_streaming() -> None:
     config = certification.parse_config(_configuration())
     transport = _Transport()
 
@@ -480,8 +427,8 @@ def test_full_certification_covers_agentcore_rbac_providers_stream_and_query() -
 
     assert report["overallStatus"] == "PASS"
     assert report["summary"] == {
-        "checkCount": 24,
-        "passed": 24,
+        "checkCount": 22,
+        "passed": 22,
         "failed": 0,
         "providerCount": 2,
         "profile": "enabled-providers",
@@ -489,11 +436,11 @@ def test_full_certification_covers_agentcore_rbac_providers_stream_and_query() -
             "bedrock": ["completion", "stream"],
             "openai": ["completion", "stream"],
         },
-        "queryBackendExercised": True,
         "tenantConfigRbacExercised": True,
         "agentcoreHttpsInvoked": True,
+        "ingressMode": "direct-jwt",
     }
-    assert len(transport.requests) == 24
+    assert len(transport.requests) == 22
     assert transport.config_name == "Production"
     assert transport.config_revision == 5
     chat_payloads = [
@@ -502,22 +449,8 @@ def test_full_certification_covers_agentcore_rbac_providers_stream_and_query() -
         if json.loads(request.payload).get("action") == "chat"
     ]
     assert chat_payloads
-    assert all(
-        payload["provider"]
-        == payload["model"].removesuffix("-certification")
-        for payload in chat_payloads
-    )
-    query_requests = [
-        request
-        for request in transport.requests
-        if json.loads(request.payload).get("action") == "query"
-    ]
-    assert query_requests
-    assert all(
-        request.headers["Authorization"]
-        == f"Bearer {TOKENS['VIEWER_TOKEN']}"
-        for request in query_requests
-    )
+    assert all(payload["provider"] == payload["model"].removesuffix("-certification") for payload in chat_payloads)
+    assert all(json.loads(request.payload).get("action") != "query" for request in transport.requests)
     assert {check["category"] for check in report["checks"]} >= {
         "missing_jwt_denied",
         "invalid_jwt_denied",
@@ -528,8 +461,6 @@ def test_full_certification_covers_agentcore_rbac_providers_stream_and_query() -
         "dependency_readiness",
         "provider_completion",
         "provider_stream",
-        "query_select",
-        "query_mutation_denied",
         "admin_tenant_config_read",
         "viewer_tenant_config_read",
         "viewer_tenant_config_mutation_denied",
@@ -563,9 +494,7 @@ def test_provider_tool_contract_is_exercised_end_to_end() -> None:
     )
 
     tool_checks = {
-        check["category"]: check
-        for check in report["checks"]
-        if check["category"].startswith("provider_tool_")
+        check["category"]: check for check in report["checks"] if check["category"].startswith("provider_tool_")
     }
     assert report["overallStatus"] == "PASS"
     assert set(tool_checks) == {
@@ -596,9 +525,7 @@ def test_cohere_tool_certification_proves_supported_and_rejected_controls() -> N
     )
 
     tool_checks = {
-        check["category"]: check
-        for check in report["checks"]
-        if check["category"].startswith("provider_tool_")
+        check["category"]: check for check in report["checks"] if check["category"].startswith("provider_tool_")
     }
     assert report["overallStatus"] == "PASS"
     assert set(tool_checks) == {
@@ -609,10 +536,7 @@ def test_cohere_tool_certification_proves_supported_and_rejected_controls() -> N
         "provider_tool_stream",
     }
     assert tool_checks["provider_tool_required"]["statusCode"] == 400
-    assert (
-        tool_checks["provider_tool_required"]["validation"]
-        == "required_tool_selection_explicitly_unsupported"
-    )
+    assert tool_checks["provider_tool_required"]["validation"] == "required_tool_selection_explicitly_unsupported"
     assert all(check["passed"] is True for check in tool_checks.values())
 
 
@@ -621,18 +545,10 @@ def test_production_launch_profile_requires_the_mandatory_provider_baseline() ->
     parsed = certification.parse_config(raw)
 
     assert parsed.profile == certification.PRODUCTION_LAUNCH_PROFILE
-    assert {
-        case.provider for case in parsed.providers
-    } == certification.PRODUCTION_LAUNCH_PROVIDERS
-    features = {
-        case.provider: case.features for case in parsed.providers
-    }
-    assert features["fireworks"] == (
-        certification.PRODUCTION_REQUIRED_PROVIDER_FEATURES
-    )
-    assert features["anthropic"] == (
-        certification.SUPPORTED_PROVIDER_FEATURES
-    )
+    assert {case.provider for case in parsed.providers} == certification.PRODUCTION_LAUNCH_PROVIDERS
+    features = {case.provider: case.features for case in parsed.providers}
+    assert features["fireworks"] == (certification.PRODUCTION_REQUIRED_PROVIDER_FEATURES)
+    assert features["anthropic"] == (certification.SUPPORTED_PROVIDER_FEATURES)
 
 
 @pytest.mark.parametrize(
@@ -642,15 +558,10 @@ def test_production_launch_profile_requires_the_mandatory_provider_baseline() ->
 def test_production_launch_profile_accepts_optional_provider(
     optional_provider: str,
 ) -> None:
-    parsed = certification.parse_config(
-        _production_configuration(
-            optional_providers=frozenset({optional_provider})
-        )
-    )
+    parsed = certification.parse_config(_production_configuration(optional_providers=frozenset({optional_provider})))
 
     assert {case.provider for case in parsed.providers} == (
-        certification.PRODUCTION_LAUNCH_PROVIDERS
-        | {optional_provider}
+        certification.PRODUCTION_LAUNCH_PROVIDERS | {optional_provider}
     )
 
 
@@ -669,11 +580,7 @@ def test_production_launch_profile_still_accepts_external_identity_contract() ->
 
 def test_production_launch_profile_rejects_a_missing_mandatory_provider() -> None:
     raw = _production_configuration()
-    raw["providers"] = [
-        case
-        for case in raw["providers"]
-        if case["provider"] != "xai"
-    ]
+    raw["providers"] = [case for case in raw["providers"] if case["provider"] != "xai"]
 
     with pytest.raises(
         certification.CertificationError,
@@ -712,38 +619,24 @@ def test_production_launch_profile_requires_completion_and_stream() -> None:
 
 def test_production_launch_profile_requires_tools_when_supported() -> None:
     raw = _production_configuration()
-    openai = next(
-        case
-        for case in raw["providers"]
-        if case["provider"] == "openai"
-    )
+    openai = next(case for case in raw["providers"] if case["provider"] == "openai")
     openai["features"].remove("tool_calling")
 
     with pytest.raises(
         certification.CertificationError,
-        match=(
-            "must exactly match the production launch contract for "
-            "openai"
-        ),
+        match=("must exactly match the production launch contract for openai"),
     ):
         certification.parse_config(raw)
 
 
 def test_production_launch_profile_rejects_unavailable_fireworks_tools() -> None:
     raw = _production_configuration()
-    fireworks = next(
-        case
-        for case in raw["providers"]
-        if case["provider"] == "fireworks"
-    )
+    fireworks = next(case for case in raw["providers"] if case["provider"] == "fireworks")
     fireworks["features"].append("tool_calling")
 
     with pytest.raises(
         certification.CertificationError,
-        match=(
-            "must exactly match the production launch contract for "
-            "fireworks"
-        ),
+        match=("must exactly match the production launch contract for fireworks"),
     ):
         certification.parse_config(raw)
 
@@ -956,27 +849,21 @@ def test_stream_canary_requires_exact_unambiguous_semantics(mutate) -> None:
     "mutate",
     [
         pytest.param(
-            lambda events: events[1]["data"]["choices"][0].update(
-                finish_reason="stop"
-            ),
+            lambda events: events[1]["data"]["choices"][0].update(finish_reason="stop"),
             id="wrong-finish-reason",
         ),
         pytest.param(
-            lambda events: events[1]["data"]["choices"][0]["delta"][
-                "tool_calls"
-            ][0]["function"].update(arguments='{"token":"WRONG"}'),
+            lambda events: events[1]["data"]["choices"][0]["delta"]["tool_calls"][0]["function"].update(
+                arguments='{"token":"WRONG"}'
+            ),
             id="wrong-arguments",
         ),
         pytest.param(
-            lambda events: events[0]["data"]["choices"][0]["delta"].update(
-                content="unexpected"
-            ),
+            lambda events: events[0]["data"]["choices"][0]["delta"].update(content="unexpected"),
             id="unexpected-content",
         ),
         pytest.param(
-            lambda events: events[1]["data"]["choices"][0]["delta"][
-                "tool_calls"
-            ].append(
+            lambda events: events[1]["data"]["choices"][0]["delta"]["tool_calls"].append(
                 {
                     "index": 1,
                     "id": "call-second",
@@ -1055,6 +942,98 @@ def test_invocation_url_encodes_the_full_arn_and_uses_endpoint_qualifier() -> No
     assert url.endswith("/invocations?qualifier=production")
 
 
+def test_iam_facade_transport_signs_forwarded_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw = _configuration()
+    raw["ingressMode"] = certification.IAM_FACADE_INGRESS
+    config = certification.parse_config(raw)
+    captured: dict[str, certification.InvocationRequest] = {}
+
+    class _Session:
+        @staticmethod
+        def get_credentials() -> Credentials:
+            return Credentials(
+                "AKIDEXAMPLE",
+                "secret-example",
+                "session-example",
+            )
+
+    def _capture(
+        request: certification.InvocationRequest,
+        timeout_seconds: float,
+        max_response_bytes: int,
+    ) -> certification.InvocationObservation:
+        assert timeout_seconds == 30
+        assert max_response_bytes == 1024 * 1024
+        captured["request"] = request
+        return _observation(200, {"ok": True})
+
+    monkeypatch.setattr(certification, "urllib_transport", _capture)
+    transport = certification.IamFacadeTransport(
+        config,
+        session=_Session(),
+    )
+    observation = transport(
+        certification._request(
+            config,
+            {"action": "list_models"},
+            token=TOKENS["ACTIVE_TOKEN"],
+        ),
+        config.timeout_seconds,
+        config.max_response_bytes,
+    )
+
+    assert observation.status_code == 200
+    headers = captured["request"].headers
+    assert headers[certification._FACADE_IDENTITY_HEADER] == f"Bearer {TOKENS['ACTIVE_TOKEN']}"
+    authorization = headers["Authorization"]
+    assert authorization.startswith("AWS4-HMAC-SHA256 ")
+    assert TOKENS["ACTIVE_TOKEN"] not in authorization
+    assert certification._FACADE_IDENTITY_HEADER.casefold() in authorization.casefold()
+
+
+def test_iam_facade_transport_preserves_missing_identity_denial_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw = _configuration()
+    raw["ingressMode"] = certification.IAM_FACADE_INGRESS
+    config = certification.parse_config(raw)
+    captured: dict[str, certification.InvocationRequest] = {}
+
+    class _Session:
+        @staticmethod
+        def get_credentials() -> Credentials:
+            return Credentials("AKIDEXAMPLE", "secret-example")
+
+    def _capture(
+        request: certification.InvocationRequest,
+        _timeout_seconds: float,
+        _max_response_bytes: int,
+    ) -> certification.InvocationObservation:
+        captured["request"] = request
+        return _observation(401, {"error": "identity required"})
+
+    monkeypatch.setattr(certification, "urllib_transport", _capture)
+    observation = certification.IamFacadeTransport(
+        config,
+        session=_Session(),
+    )(
+        certification._request(
+            config,
+            {"action": "list_models"},
+            token=None,
+        ),
+        config.timeout_seconds,
+        config.max_response_bytes,
+    )
+
+    assert observation.status_code == 401
+    headers = captured["request"].headers
+    assert certification._FACADE_IDENTITY_HEADER not in headers
+    assert headers["Authorization"].startswith("AWS4-HMAC-SHA256 ")
+
+
 def test_endpoint_metadata_requires_ready_stable_exact_runtime() -> None:
     class _Control:
         def get_agent_runtime_endpoint(self, **kwargs):
@@ -1084,11 +1063,12 @@ def test_endpoint_metadata_requires_ready_stable_exact_runtime() -> None:
     [
         lambda value: value.update(runtimeArn="arn:aws:other"),
         lambda value: value["providers"].append({"provider": "openai", "model": "duplicate"}),
-        lambda value: value["query"].update(sql="DELETE FROM users"),
+        lambda value: value.update(query={"sql": "SELECT 1"}),
         lambda value: value["identities"].update(activeCredentialEnv="literal-secret-value"),
         lambda value: value["identities"].pop("viewerCredentialEnv"),
         lambda value: value.pop("tenantConfig"),
         lambda value: value["tenantConfig"].update(tenantId="tenant other"),
+        lambda value: value.update(ingressMode="public-iam"),
         lambda value: value.update(apiKey="must-not-appear"),
     ],
 )

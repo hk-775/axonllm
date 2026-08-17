@@ -9,8 +9,8 @@ separate path, so the failure looked like "OpenAI is broken" rather than
 "no keys were loaded".
 
 This is deliberately *not* a general config mechanism. In production, secrets
-arrive from the platform (ECS task definitions, Secrets Manager, App Runner
-env), and a file that quietly shadowed those would be close to undebuggable:
+    arrive from the platform (ECS task definitions and Secrets Manager), and a
+    file that quietly shadowed those would be close to undebuggable:
 the process would authenticate as something other than what the deploy
 declared, with nothing in the logs to say so. Two properties keep that from
 happening, and the second matters more than the first:

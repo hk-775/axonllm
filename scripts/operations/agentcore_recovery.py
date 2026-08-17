@@ -42,14 +42,10 @@ def _describe_stack(aws: AwsCli, stack_name: str) -> dict[str, Any]:
         stack_name,
     ).get("Stacks")
     if not isinstance(stacks, list) or len(stacks) != 1:
-        raise AgentCoreRecoveryError(
-            f"could not resolve exactly one stack named {stack_name}"
-        )
+        raise AgentCoreRecoveryError(f"could not resolve exactly one stack named {stack_name}")
     stack = stacks[0]
     if not isinstance(stack, dict):
-        raise AgentCoreRecoveryError(
-            f"CloudFormation returned a malformed {stack_name} stack"
-        )
+        raise AgentCoreRecoveryError(f"CloudFormation returned a malformed {stack_name} stack")
     return stack
 
 
@@ -85,7 +81,6 @@ def _runtime_outputs(
     stack = _describe_stack(aws, stack_name)
     outputs = _outputs(stack)
     required = {
-        "DataKeyArn",
         "RecoveryApprovalId",
         "RecoveryCutoverMode",
         "RecoveryMinimumQuiescenceSeconds",
@@ -96,10 +91,7 @@ def _runtime_outputs(
     }
     missing = sorted(required.difference(outputs))
     if missing:
-        raise AgentCoreRecoveryError(
-            "AgentCore stack does not contain the recovery selector: "
-            + ", ".join(missing)
-        )
+        raise AgentCoreRecoveryError("AgentCore stack does not contain the recovery selector: " + ", ".join(missing))
     return stack, outputs
 
 
@@ -122,9 +114,7 @@ def _control_plane_runtime_outputs(
     missing = sorted(required.difference(outputs))
     if missing:
         raise AgentCoreRecoveryError(
-            "control-plane stack does not contain the coordinated recovery "
-            "selector: "
-            + ", ".join(missing)
+            "control-plane stack does not contain the coordinated recovery selector: " + ", ".join(missing)
         )
     return stack, outputs
 
@@ -136,8 +126,7 @@ def _stack_parameters(stack: dict[str, Any]) -> set[str]:
     names = {
         item.get("ParameterKey")
         for item in parameters
-        if isinstance(item, dict)
-        and isinstance(item.get("ParameterKey"), str)
+        if isinstance(item, dict) and isinstance(item.get("ParameterKey"), str)
     }
     return {name for name in names if isinstance(name, str)}
 
@@ -168,18 +157,11 @@ def _wait_for_stack_update(
             observed_update = True
         elif status == _SUCCESS_STATUS and (changed or observed_update):
             return stack
-        elif (
-            isinstance(status, str)
-            and status.endswith(("_FAILED", "_ROLLBACK_COMPLETE"))
-        ):
+        elif isinstance(status, str) and status.endswith(("_FAILED", "_ROLLBACK_COMPLETE")):
             reason = stack.get("StackStatusReason", "no reason returned")
-            raise AgentCoreRecoveryError(
-                f"{stack_name} update failed in {status}: {reason}"
-            )
+            raise AgentCoreRecoveryError(f"{stack_name} update failed in {status}: {reason}")
         sleep(poll_interval)
-    raise AgentCoreRecoveryError(
-        f"{stack_name} did not complete its update in time"
-    )
+    raise AgentCoreRecoveryError(f"{stack_name} did not complete its update in time")
 
 
 def _update_selector(
@@ -208,10 +190,7 @@ def _update_selector(
     }
     missing = sorted(set(changes).difference(parameter_names))
     if missing:
-        raise AgentCoreRecoveryError(
-            f"deployed {stack_name} template lacks recovery parameters: "
-            + ", ".join(missing)
-        )
+        raise AgentCoreRecoveryError(f"deployed {stack_name} template lacks recovery parameters: " + ", ".join(missing))
     parameters = [
         (
             {"ParameterKey": name, "ParameterValue": changes[name]}
@@ -261,32 +240,18 @@ def _scalable_target(
         "ecs:service:DesiredCount",
     ).get("ScalableTargets")
     if not isinstance(targets, list) or len(targets) != 1:
-        raise AgentCoreRecoveryError(
-            "recovery requires exactly one control-plane scalable target"
-        )
+        raise AgentCoreRecoveryError("recovery requires exactly one control-plane scalable target")
     target = targets[0]
     if not isinstance(target, dict):
-        raise AgentCoreRecoveryError(
-            "control-plane scalable target is malformed"
-        )
+        raise AgentCoreRecoveryError("control-plane scalable target is malformed")
     for field in ("MinCapacity", "MaxCapacity"):
         value = target.get(field)
-        if (
-            not isinstance(value, int)
-            or isinstance(value, bool)
-            or value < 0
-        ):
-            raise AgentCoreRecoveryError(
-                f"control-plane scalable target has invalid {field}"
-            )
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise AgentCoreRecoveryError(f"control-plane scalable target has invalid {field}")
     suspended = target.get("SuspendedState") or {}
     if not isinstance(suspended, dict):
-        raise AgentCoreRecoveryError(
-            "control-plane suspension state is malformed"
-        )
-    target["SuspendedState"] = {
-        key: suspended.get(key) is True for key in _SUSPENSION_KEYS
-    }
+        raise AgentCoreRecoveryError("control-plane suspension state is malformed")
+    target["SuspendedState"] = {key: suspended.get(key) is True for key in _SUSPENSION_KEYS}
     return target
 
 
@@ -311,20 +276,12 @@ def _service(
         or len(services) != 1
         or not isinstance(services[0], dict)
     ):
-        raise AgentCoreRecoveryError(
-            "could not resolve exactly one control-plane service"
-        )
+        raise AgentCoreRecoveryError("could not resolve exactly one control-plane service")
     service = services[0]
     for field in ("desiredCount", "pendingCount", "runningCount"):
         value = service.get(field)
-        if (
-            not isinstance(value, int)
-            or isinstance(value, bool)
-            or value < 0
-        ):
-            raise AgentCoreRecoveryError(
-                f"control-plane service has invalid {field}"
-            )
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise AgentCoreRecoveryError(f"control-plane service has invalid {field}")
     return service
 
 
@@ -368,16 +325,11 @@ def _wait_service(
         if _service_stable(service, desired):
             return service
         sleep(poll_interval)
-    raise AgentCoreRecoveryError(
-        f"control plane did not stabilize at {desired} tasks"
-    )
+    raise AgentCoreRecoveryError(f"control plane did not stabilize at {desired} tasks")
 
 
 def _suspension_argument(state: dict[str, bool]) -> str:
-    return ",".join(
-        f"{key}={'true' if state.get(key) is True else 'false'}"
-        for key in _SUSPENSION_KEYS
-    )
+    return ",".join(f"{key}={'true' if state.get(key) is True else 'false'}" for key in _SUSPENSION_KEYS)
 
 
 def _register_scalable_target(
@@ -503,20 +455,14 @@ def _assert_control_plane_quiesced(
 ) -> dict[str, Any] | None:
     if snapshot is None:
         if _optional_stack(aws, _CONTROL_PLANE_STACK) is not None:
-            raise AgentCoreRecoveryError(
-                "a control-plane stack appeared after recovery began"
-            )
+            raise AgentCoreRecoveryError("a control-plane stack appeared after recovery began")
         return None
     current = _control_plane_snapshot(aws)
     if current is None:
-        raise AgentCoreRecoveryError(
-            "the recorded control-plane stack disappeared"
-        )
+        raise AgentCoreRecoveryError("the recorded control-plane stack disappeared")
     for field in ("stackId", "clusterName", "serviceName", "resourceId"):
         if current.get(field) != snapshot.get(field):
-            raise AgentCoreRecoveryError(
-                "control plane no longer matches recovery evidence"
-            )
+            raise AgentCoreRecoveryError("control plane no longer matches recovery evidence")
     if (
         current["desiredCount"] != 0
         or current["pendingCount"] != 0
@@ -524,9 +470,7 @@ def _assert_control_plane_quiesced(
         or current["minCapacity"] != 0
         or not all(current["suspendedState"].values())
     ):
-        raise AgentCoreRecoveryError(
-            "control plane must remain stopped with scaling suspended"
-        )
+        raise AgentCoreRecoveryError("control plane must remain stopped with scaling suspended")
     return current
 
 
@@ -553,8 +497,7 @@ def _assert_control_plane_selector(
     actual = {name: current.get(name) for name in expected}
     if actual != expected:
         raise AgentCoreRecoveryError(
-            "control-plane recovery selector does not match AgentCore: "
-            f"expected {expected}, found {actual}"
+            f"control-plane recovery selector does not match AgentCore: expected {expected}, found {actual}"
         )
     return current
 
@@ -573,9 +516,7 @@ def _write_state(
             json.dump(state, handle, indent=2, sort_keys=True)
             handle.write("\n")
     except FileExistsError as exc:
-        raise AgentCoreRecoveryError(
-            f"recovery state file already exists: {path}"
-        ) from exc
+        raise AgentCoreRecoveryError(f"recovery state file already exists: {path}") from exc
 
 
 def _load_state(
@@ -587,19 +528,13 @@ def _load_state(
     try:
         state = json.loads(path.read_text(encoding="utf-8"))
     except OSError as exc:
-        raise AgentCoreRecoveryError(
-            f"could not read recovery state file: {path}"
-        ) from exc
+        raise AgentCoreRecoveryError(f"could not read recovery state file: {path}") from exc
     except json.JSONDecodeError as exc:
-        raise AgentCoreRecoveryError(
-            "recovery state file is invalid JSON"
-        ) from exc
-    if not isinstance(state, dict) or state.get("schemaVersion") != 2:
+        raise AgentCoreRecoveryError("recovery state file is invalid JSON") from exc
+    if not isinstance(state, dict) or state.get("schemaVersion") != 3:
         raise AgentCoreRecoveryError("unsupported recovery state file")
     if state.get("region") != region or state.get("stackName") != stack_name:
-        raise AgentCoreRecoveryError(
-            "recovery state file does not match the selected stack and region"
-        )
+        raise AgentCoreRecoveryError("recovery state file does not match the selected stack and region")
     return state
 
 
@@ -612,11 +547,8 @@ def _assert_runtime_ownership(
         state.get("stackId") != stack.get("StackId")
         or state.get("runtimeArn") != outputs["RuntimeArn"]
         or state.get("primaryTable") != outputs["StateTableName"]
-        or state.get("dataKeyArn") != outputs["DataKeyArn"]
     ):
-        raise AgentCoreRecoveryError(
-            "recovery evidence does not match the deployed AgentCore runtime"
-        )
+        raise AgentCoreRecoveryError("recovery evidence does not match the deployed AgentCore runtime")
 
 
 def _validate_table(
@@ -624,15 +556,10 @@ def _validate_table(
     *,
     primary_table: str,
     table_name: str,
-    data_key_arn: str,
 ) -> None:
     expected_prefix = f"{primary_table}-restore-validation-"
-    if table_name != primary_table and not table_name.startswith(
-        expected_prefix
-    ):
-        raise AgentCoreRecoveryError(
-            "target table is outside the AgentCore restore-validation namespace"
-        )
+    if table_name != primary_table and not table_name.startswith(expected_prefix):
+        raise AgentCoreRecoveryError("target table is outside the AgentCore restore-validation namespace")
     response = aws.json(
         "dynamodb",
         "describe-table",
@@ -645,25 +572,15 @@ def _validate_table(
     if table.get("TableStatus") != "ACTIVE":
         raise AgentCoreRecoveryError("target DynamoDB table is not ACTIVE")
     if table.get("DeletionProtectionEnabled") is not True:
-        raise AgentCoreRecoveryError(
-            "target DynamoDB table lacks deletion protection"
-        )
+        raise AgentCoreRecoveryError("target DynamoDB table lacks deletion protection")
     encryption = table.get("SSEDescription", {})
     if encryption.get("Status") != "ENABLED":
-        raise AgentCoreRecoveryError(
-            "target DynamoDB table encryption is not enabled"
-        )
-    if encryption.get("KMSMasterKeyArn") != data_key_arn:
-        raise AgentCoreRecoveryError(
-            "target DynamoDB table is not encrypted by the AgentCore data key"
-        )
+        raise AgentCoreRecoveryError("target DynamoDB table encryption is not enabled")
     if table.get("KeySchema") != [
         {"AttributeName": "PK", "KeyType": "HASH"},
         {"AttributeName": "SK", "KeyType": "RANGE"},
     ]:
-        raise AgentCoreRecoveryError(
-            "target DynamoDB table has an unexpected key schema"
-        )
+        raise AgentCoreRecoveryError("target DynamoDB table has an unexpected key schema")
     backups = aws.json(
         "dynamodb",
         "describe-continuous-backups",
@@ -676,22 +593,15 @@ def _validate_table(
         .get("PointInTimeRecoveryStatus")
     )
     if pitr != "ENABLED":
-        raise AgentCoreRecoveryError(
-            "target DynamoDB table lacks point-in-time recovery"
-        )
+        raise AgentCoreRecoveryError("target DynamoDB table lacks point-in-time recovery")
     ttl = aws.json(
         "dynamodb",
         "describe-time-to-live",
         "--table-name",
         table_name,
     ).get("TimeToLiveDescription", {})
-    if (
-        ttl.get("TimeToLiveStatus") != "ENABLED"
-        or ttl.get("AttributeName") != "expires_at"
-    ):
-        raise AgentCoreRecoveryError(
-            "target DynamoDB table lacks expires_at TTL"
-        )
+    if ttl.get("TimeToLiveStatus") != "ENABLED" or ttl.get("AttributeName") != "expires_at":
+        raise AgentCoreRecoveryError("target DynamoDB table lacks expires_at TTL")
 
 
 def _target_parameter(primary_table: str, table_name: str) -> str:
@@ -723,16 +633,9 @@ def _ready_endpoint(
         endpoint_name,
     )
     if endpoint.get("status") != "READY":
-        raise AgentCoreRecoveryError(
-            f"AgentCore {endpoint_name} endpoint is not READY"
-        )
-    if (
-        not endpoint.get("liveVersion")
-        or endpoint.get("liveVersion") != endpoint.get("targetVersion")
-    ):
-        raise AgentCoreRecoveryError(
-            f"AgentCore {endpoint_name} endpoint version is not stable"
-        )
+        raise AgentCoreRecoveryError(f"AgentCore {endpoint_name} endpoint is not READY")
+    if not endpoint.get("liveVersion") or endpoint.get("liveVersion") != endpoint.get("targetVersion"):
+        raise AgentCoreRecoveryError(f"AgentCore {endpoint_name} endpoint version is not stable")
     return endpoint
 
 
@@ -761,13 +664,9 @@ def quiesce(
             "control-plane-quiesced",
             "quiesced",
         }:
-            raise AgentCoreRecoveryError(
-                "existing recovery state is not a retryable quiesce"
-            )
+            raise AgentCoreRecoveryError("existing recovery state is not a retryable quiesce")
         if state.get("approvalId") != approval_id:
-            raise AgentCoreRecoveryError(
-                "quiesce retry must use the recorded approval ID"
-            )
+            raise AgentCoreRecoveryError("quiesce retry must use the recorded approval ID")
         _assert_runtime_ownership(state, stack, outputs)
         expected_runtime_approval = {
             "normal": state.get("approvalBefore"),
@@ -775,31 +674,21 @@ def quiesce(
         }.get(outputs["RecoveryCutoverMode"])
         if (
             expected_runtime_approval is None
-            or outputs["SelectedRuntimeStateTableName"]
-            != state.get("selectedTableBefore")
-            or outputs["RecoveryApprovalId"]
-            != expected_runtime_approval
+            or outputs["SelectedRuntimeStateTableName"] != state.get("selectedTableBefore")
+            or outputs["RecoveryApprovalId"] != expected_runtime_approval
         ):
-            raise AgentCoreRecoveryError(
-                "deployed quiesce state does not match recovery evidence"
-            )
+            raise AgentCoreRecoveryError("deployed quiesce state does not match recovery evidence")
         control_plane = state.get("controlPlane")
         if control_plane is not None and not isinstance(
             control_plane,
             dict,
         ):
-            raise AgentCoreRecoveryError(
-                "recorded control-plane recovery state is malformed"
-            )
+            raise AgentCoreRecoveryError("recorded control-plane recovery state is malformed")
     else:
         if outputs["RecoveryCutoverMode"] != "normal":
-            raise AgentCoreRecoveryError(
-                "AgentCore must be normal before quiesce"
-            )
+            raise AgentCoreRecoveryError("AgentCore must be normal before quiesce")
         if approval_id == outputs["RecoveryApprovalId"]:
-            raise AgentCoreRecoveryError(
-                "quiesce requires a new approval ID"
-            )
+            raise AgentCoreRecoveryError("quiesce requires a new approval ID")
         control_plane = _control_plane_snapshot(aws)
         if control_plane is not None:
             expected_control = {
@@ -809,10 +698,7 @@ def quiesce(
                 "recoveryMode": "normal",
                 "approvalId": outputs["RecoveryApprovalId"],
             }
-            actual_control = {
-                name: control_plane.get(name)
-                for name in expected_control
-            }
+            actual_control = {name: control_plane.get(name) for name in expected_control}
             if actual_control != expected_control:
                 raise AgentCoreRecoveryError(
                     "control plane is not normal on the AgentCore-selected "
@@ -820,17 +706,14 @@ def quiesce(
                     f"{actual_control}"
                 )
         state = {
-            "schemaVersion": 2,
+            "schemaVersion": 3,
             "createdAt": datetime.now(timezone.utc).isoformat(),
             "region": region,
             "stackName": stack_name,
             "stackId": stack.get("StackId"),
             "runtimeArn": outputs["RuntimeArn"],
             "primaryTable": outputs["StateTableName"],
-            "dataKeyArn": outputs["DataKeyArn"],
-            "selectedTableBefore": outputs[
-                "SelectedRuntimeStateTableName"
-            ],
+            "selectedTableBefore": outputs["SelectedRuntimeStateTableName"],
             "approvalBefore": outputs["RecoveryApprovalId"],
             "approvalId": approval_id,
             "phase": "quiescing",
@@ -851,9 +734,7 @@ def quiesce(
             control_plane,
         )
         if control_current is None:  # pragma: no cover - guarded above
-            raise AgentCoreRecoveryError(
-                "the recorded control-plane stack disappeared"
-            )
+            raise AgentCoreRecoveryError("the recorded control-plane stack disappeared")
         expected_control_approval = {
             "normal": state.get("approvalBefore"),
             "quiesced": approval_id,
@@ -861,16 +742,11 @@ def quiesce(
         if (
             control_current["agentCoreStackName"] != stack_name
             or control_current["primaryTable"] != state.get("primaryTable")
-            or control_current["selectedTable"]
-            != state.get("selectedTableBefore")
+            or control_current["selectedTable"] != state.get("selectedTableBefore")
             or expected_control_approval is None
-            or control_current["approvalId"]
-            != expected_control_approval
+            or control_current["approvalId"] != expected_control_approval
         ):
-            raise AgentCoreRecoveryError(
-                "deployed control-plane quiesce state does not match "
-                "recovery evidence"
-            )
+            raise AgentCoreRecoveryError("deployed control-plane quiesce state does not match recovery evidence")
         if control_current["recoveryMode"] == "normal":
             _, control_updated = _update_selector(
                 aws,
@@ -887,13 +763,10 @@ def quiesce(
             )
             if (
                 control_updated.get("RecoveryCutoverMode") != "quiesced"
-                or control_updated.get("SelectedRuntimeStateTableName")
-                != state.get("selectedTableBefore")
+                or control_updated.get("SelectedRuntimeStateTableName") != state.get("selectedTableBefore")
                 or control_updated.get("RecoveryApprovalId") != approval_id
             ):
-                raise AgentCoreRecoveryError(
-                    "control plane did not enter the expected quiesced state"
-                )
+                raise AgentCoreRecoveryError("control plane did not enter the expected quiesced state")
         _assert_control_plane_selector(
             aws,
             control_plane,
@@ -914,14 +787,10 @@ def quiesce(
     }.get(current_outputs["RecoveryCutoverMode"])
     if (
         expected_runtime_approval is None
-        or current_outputs["SelectedRuntimeStateTableName"]
-        != state.get("selectedTableBefore")
-        or current_outputs["RecoveryApprovalId"]
-        != expected_runtime_approval
+        or current_outputs["SelectedRuntimeStateTableName"] != state.get("selectedTableBefore")
+        or current_outputs["RecoveryApprovalId"] != expected_runtime_approval
     ):
-        raise AgentCoreRecoveryError(
-            "deployed quiesce state does not match recovery evidence"
-        )
+        raise AgentCoreRecoveryError("deployed quiesce state does not match recovery evidence")
     if current_outputs["RecoveryCutoverMode"] == "normal":
         _, updated = _update_selector(
             aws,
@@ -940,21 +809,16 @@ def quiesce(
         updated = current_outputs
     if (
         updated.get("RecoveryCutoverMode") != "quiesced"
-        or updated.get("SelectedRuntimeStateTableName")
-        != state.get("selectedTableBefore")
+        or updated.get("SelectedRuntimeStateTableName") != state.get("selectedTableBefore")
         or updated.get("RecoveryApprovalId") != approval_id
         or updated.get("RuntimeEndpointArn")
         or updated.get("RecoveryRuntimeEndpointArn")
     ):
-        raise AgentCoreRecoveryError(
-            "AgentCore did not enter the expected quiesced state"
-        )
+        raise AgentCoreRecoveryError("AgentCore did not enter the expected quiesced state")
     state.update(
         phase="quiesced",
         quiescedAt=updated["RecoveryQuiescedAt"],
-        minimumQuiescenceSeconds=int(
-            updated["RecoveryMinimumQuiescenceSeconds"]
-        ),
+        minimumQuiescenceSeconds=int(updated["RecoveryMinimumQuiescenceSeconds"]),
     )
     _write_state(state_file, state, exclusive=False)
     return {
@@ -990,23 +854,11 @@ def select(
         "selecting",
         "control-plane-selected",
     }:
-        raise AgentCoreRecoveryError(
-            "select requires a completed quiesce or retryable selection phase"
-        )
-    if (
-        phase == "quiesced"
-        and expected_table == state.get("selectedTableBefore")
-    ):
-        raise AgentCoreRecoveryError(
-            "recovery target must differ from the currently selected table"
-        )
-    if (
-        phase != "quiesced"
-        and state.get("targetTable") != expected_table
-    ):
-        raise AgentCoreRecoveryError(
-            "select retry does not match the recorded recovery table"
-        )
+        raise AgentCoreRecoveryError("select requires a completed quiesce or retryable selection phase")
+    if phase == "quiesced" and expected_table == state.get("selectedTableBefore"):
+        raise AgentCoreRecoveryError("recovery target must differ from the currently selected table")
+    if phase != "quiesced" and state.get("targetTable") != expected_table:
+        raise AgentCoreRecoveryError("select retry does not match the recorded recovery table")
     stack, outputs = _runtime_outputs(aws, stack_name)
     _assert_runtime_ownership(state, stack, outputs)
     runtime_mode = outputs["RecoveryCutoverMode"]
@@ -1020,14 +872,11 @@ def select(
         or runtime_selected != expected_runtime_table
         or outputs["RecoveryApprovalId"] != state.get("approvalId")
     ):
-        raise AgentCoreRecoveryError(
-            "deployed recovery selection does not match recovery evidence"
-        )
+        raise AgentCoreRecoveryError("deployed recovery selection does not match recovery evidence")
     _validate_table(
         aws,
         primary_table=outputs["StateTableName"],
         table_name=expected_table,
-        data_key_arn=outputs["DataKeyArn"],
     )
     if phase == "quiesced":
         state.update(
@@ -1052,20 +901,10 @@ def select(
             or expected_control_table is None
             or control_plane["selectedTable"] != expected_control_table
         ):
-            raise AgentCoreRecoveryError(
-                "control-plane selection does not match recovery evidence"
-            )
-        if (
-            runtime_mode == "selected"
-            and control_plane["recoveryMode"] != "selected"
-        ):
-            raise AgentCoreRecoveryError(
-                "AgentCore cannot be selected before the control plane"
-            )
-    if (
-        control_plane is not None
-        and control_plane["recoveryMode"] == "quiesced"
-    ):
+            raise AgentCoreRecoveryError("control-plane selection does not match recovery evidence")
+        if runtime_mode == "selected" and control_plane["recoveryMode"] != "selected":
+            raise AgentCoreRecoveryError("AgentCore cannot be selected before the control plane")
+    if control_plane is not None and control_plane["recoveryMode"] == "quiesced":
         _, control_updated = _update_selector(
             aws,
             stack_name=_CONTROL_PLANE_STACK,
@@ -1081,14 +920,10 @@ def select(
         )
         if (
             control_updated.get("RecoveryCutoverMode") != "selected"
-            or control_updated.get("SelectedRuntimeStateTableName")
-            != expected_table
-            or control_updated.get("RecoveryApprovalId")
-            != state["approvalId"]
+            or control_updated.get("SelectedRuntimeStateTableName") != expected_table
+            or control_updated.get("RecoveryApprovalId") != state["approvalId"]
         ):
-            raise AgentCoreRecoveryError(
-                "control plane did not enter the expected selected state"
-            )
+            raise AgentCoreRecoveryError("control plane did not enter the expected selected state")
         control_plane = _assert_control_plane_selector(
             aws,
             state["controlPlane"],
@@ -1100,9 +935,7 @@ def select(
         )
         state.update(
             phase="control-plane-selected",
-            controlPlaneSelectedAt=(
-                datetime.now(timezone.utc).isoformat()
-            ),
+            controlPlaneSelectedAt=(datetime.now(timezone.utc).isoformat()),
         )
         _write_state(state_file, state, exclusive=False)
     if runtime_mode == "quiesced":
@@ -1127,9 +960,7 @@ def select(
         or updated.get("RuntimeEndpointArn")
         or updated.get("RecoveryRuntimeEndpointArn")
     ):
-        raise AgentCoreRecoveryError(
-            "AgentCore did not enter the expected selected state"
-        )
+        raise AgentCoreRecoveryError("AgentCore did not enter the expected selected state")
     state.update(
         phase="selected",
         selectedAt=datetime.now(timezone.utc).isoformat(),
@@ -1161,13 +992,8 @@ def start(
         region=region,
         stack_name=stack_name,
     )
-    if (
-        state.get("phase") not in {"selected", "starting-validation"}
-        or state.get("targetTable") != expected_table
-    ):
-        raise AgentCoreRecoveryError(
-            "start requires the recorded selected or retryable recovery table"
-        )
+    if state.get("phase") not in {"selected", "starting-validation"} or state.get("targetTable") != expected_table:
+        raise AgentCoreRecoveryError("start requires the recorded selected or retryable recovery table")
     stack, outputs = _runtime_outputs(aws, stack_name)
     _assert_runtime_ownership(state, stack, outputs)
     _assert_control_plane_selector(
@@ -1185,9 +1011,7 @@ def start(
         or outputs["SelectedRuntimeStateTableName"] != expected_table
         or outputs["RecoveryApprovalId"] != state.get("approvalId")
     ):
-        raise AgentCoreRecoveryError(
-            "deployed selected state does not match recovery evidence"
-        )
+        raise AgentCoreRecoveryError("deployed selected state does not match recovery evidence")
     if runtime_mode == "selected":
         state.update(
             phase="starting-validation",
@@ -1215,9 +1039,7 @@ def start(
         or not updated.get("RecoveryRuntimeEndpointArn")
         or updated.get("RuntimeEndpointArn")
     ):
-        raise AgentCoreRecoveryError(
-            "AgentCore did not enter recovery validation mode"
-        )
+        raise AgentCoreRecoveryError("AgentCore did not enter recovery validation mode")
     endpoint = _ready_endpoint(
         aws,
         runtime_arn=updated["RuntimeArn"],
@@ -1256,13 +1078,8 @@ def promote(
         region=region,
         stack_name=stack_name,
     )
-    if (
-        state.get("phase") not in {"validation", "promoting"}
-        or state.get("targetTable") != expected_table
-    ):
-        raise AgentCoreRecoveryError(
-            "promote requires the recorded validated or retryable table"
-        )
+    if state.get("phase") not in {"validation", "promoting"} or state.get("targetTable") != expected_table:
+        raise AgentCoreRecoveryError("promote requires the recorded validated or retryable table")
     stack, outputs = _runtime_outputs(aws, stack_name)
     _assert_runtime_ownership(state, stack, outputs)
     _assert_control_plane_selector(
@@ -1280,9 +1097,7 @@ def promote(
         or outputs["SelectedRuntimeStateTableName"] != expected_table
         or outputs["RecoveryApprovalId"] != state.get("approvalId")
     ):
-        raise AgentCoreRecoveryError(
-            "deployed validation state does not match recovery evidence"
-        )
+        raise AgentCoreRecoveryError("deployed validation state does not match recovery evidence")
     if runtime_mode == "validation":
         _ready_endpoint(
             aws,
@@ -1315,9 +1130,7 @@ def promote(
         or not updated.get("RuntimeEndpointArn")
         or updated.get("RecoveryRuntimeEndpointArn")
     ):
-        raise AgentCoreRecoveryError(
-            "AgentCore did not promote the selected table"
-        )
+        raise AgentCoreRecoveryError("AgentCore did not promote the selected table")
     endpoint = _ready_endpoint(
         aws,
         runtime_arn=updated["RuntimeArn"],
@@ -1365,9 +1178,7 @@ def abort(
         "selected",
         "starting-validation",
     }:
-        raise AgentCoreRecoveryError(
-            "abort is allowed only before validation starts"
-        )
+        raise AgentCoreRecoveryError("abort is allowed only before validation starts")
     if state_phase in {"quiescing", "control-plane-quiesced"}:
         _quiesce_control_plane(
             aws,
@@ -1386,25 +1197,15 @@ def abort(
         "quiesced": selected_before,
         "selected": target_table,
     }.get(runtime_mode)
-    expected_runtime_approval = (
-        state["approvalBefore"]
-        if runtime_mode == "normal"
-        else state["approvalId"]
-    )
+    expected_runtime_approval = state["approvalBefore"] if runtime_mode == "normal" else state["approvalId"]
     if (
         expected_runtime_table is None
-        or outputs["SelectedRuntimeStateTableName"]
-        != expected_runtime_table
-        or outputs["RecoveryApprovalId"]
-        != expected_runtime_approval
+        or outputs["SelectedRuntimeStateTableName"] != expected_runtime_table
+        or outputs["RecoveryApprovalId"] != expected_runtime_approval
     ):
         if runtime_mode == "validation":
-            raise AgentCoreRecoveryError(
-                "validation already started; use the full rollback flow"
-            )
-        raise AgentCoreRecoveryError(
-            "deployed pre-validation state does not match recovery evidence"
-        )
+            raise AgentCoreRecoveryError("validation already started; use the full rollback flow")
+        raise AgentCoreRecoveryError("deployed pre-validation state does not match recovery evidence")
 
     control_plane = _assert_control_plane_quiesced(
         aws,
@@ -1417,22 +1218,16 @@ def abort(
             "selected": target_table,
         }.get(control_plane["recoveryMode"])
         expected_control_approval = (
-            state["approvalBefore"]
-            if control_plane["recoveryMode"] == "normal"
-            else state["approvalId"]
+            state["approvalBefore"] if control_plane["recoveryMode"] == "normal" else state["approvalId"]
         )
         if (
             control_plane["agentCoreStackName"] != stack_name
             or control_plane["primaryTable"] != outputs["StateTableName"]
             or expected_control_table is None
             or control_plane["selectedTable"] != expected_control_table
-            or control_plane["approvalId"]
-            != expected_control_approval
+            or control_plane["approvalId"] != expected_control_approval
         ):
-            raise AgentCoreRecoveryError(
-                "control-plane pre-validation state does not match recovery "
-                "evidence"
-            )
+            raise AgentCoreRecoveryError("control-plane pre-validation state does not match recovery evidence")
         safe_orderings = {
             ("normal", "normal"),
             ("normal", "quiesced"),
@@ -1444,9 +1239,7 @@ def abort(
             runtime_mode,
             control_plane["recoveryMode"],
         ) not in safe_orderings:
-            raise AgentCoreRecoveryError(
-                "the two planes are in an unsafe recovery phase ordering"
-            )
+            raise AgentCoreRecoveryError("the two planes are in an unsafe recovery phase ordering")
 
     if runtime_mode == "selected":
         _, outputs = _update_selector(
@@ -1464,22 +1257,16 @@ def abort(
         )
         if (
             outputs.get("RecoveryCutoverMode") != "quiesced"
-            or outputs.get("SelectedRuntimeStateTableName")
-            != selected_before
+            or outputs.get("SelectedRuntimeStateTableName") != selected_before
         ):
-            raise AgentCoreRecoveryError(
-                "AgentCore did not reverse its selected table while blocked"
-            )
+            raise AgentCoreRecoveryError("AgentCore did not reverse its selected table while blocked")
         runtime_mode = "quiesced"
 
     control_plane = _assert_control_plane_quiesced(
         aws,
         state.get("controlPlane"),
     )
-    if (
-        control_plane is not None
-        and control_plane["recoveryMode"] == "selected"
-    ):
+    if control_plane is not None and control_plane["recoveryMode"] == "selected":
         _, control_updated = _update_selector(
             aws,
             stack_name=_CONTROL_PLANE_STACK,
@@ -1495,13 +1282,9 @@ def abort(
         )
         if (
             control_updated.get("RecoveryCutoverMode") != "quiesced"
-            or control_updated.get("SelectedRuntimeStateTableName")
-            != selected_before
+            or control_updated.get("SelectedRuntimeStateTableName") != selected_before
         ):
-            raise AgentCoreRecoveryError(
-                "control plane did not reverse its selected table while "
-                "blocked"
-            )
+            raise AgentCoreRecoveryError("control plane did not reverse its selected table while blocked")
 
     if runtime_mode == "quiesced":
         _, updated = _update_selector(
@@ -1521,12 +1304,9 @@ def abort(
         updated = outputs
     if (
         updated.get("RecoveryCutoverMode") != "normal"
-        or updated.get("SelectedRuntimeStateTableName")
-        != selected_before
+        or updated.get("SelectedRuntimeStateTableName") != selected_before
     ):
-        raise AgentCoreRecoveryError(
-            "AgentCore did not return to its pre-recovery selector"
-        )
+        raise AgentCoreRecoveryError("AgentCore did not return to its pre-recovery selector")
     state.update(
         phase="aborted",
         abortedAt=datetime.now(timezone.utc).isoformat(),
@@ -1556,15 +1336,11 @@ def resume_control_plane(
         stack_name=stack_name,
     )
     if state.get("phase") not in {"promoted", "aborted"}:
-        raise AgentCoreRecoveryError(
-            "control plane may resume only after promote or abort completes"
-        )
+        raise AgentCoreRecoveryError("control plane may resume only after promote or abort completes")
     stack, outputs = _runtime_outputs(aws, stack_name)
     _assert_runtime_ownership(state, stack, outputs)
     if outputs["RecoveryCutoverMode"] != "normal":
-        raise AgentCoreRecoveryError(
-            "control plane may resume only after AgentCore is normal"
-        )
+        raise AgentCoreRecoveryError("control plane may resume only after AgentCore is normal")
     snapshot = state.get("controlPlane")
     if snapshot is None:
         return {
@@ -1573,45 +1349,26 @@ def resume_control_plane(
         }
     current = _control_plane_snapshot(aws)
     if current is None:
-        raise AgentCoreRecoveryError(
-            "the recorded control-plane stack disappeared"
-        )
+        raise AgentCoreRecoveryError("the recorded control-plane stack disappeared")
     for field in ("stackId", "clusterName", "serviceName", "resourceId"):
         if current.get(field) != snapshot.get(field):
-            raise AgentCoreRecoveryError(
-                "control plane no longer matches recovery evidence"
-            )
+            raise AgentCoreRecoveryError("control plane no longer matches recovery evidence")
     if (
         current["agentCoreStackName"] != stack_name
         or current["primaryTable"] != outputs["StateTableName"]
-        or current["selectedTable"]
-        != outputs["SelectedRuntimeStateTableName"]
-        or current["recoveryMode"]
-        not in {"normal", "quiesced", "selected"}
+        or current["selectedTable"] != outputs["SelectedRuntimeStateTableName"]
+        or current["recoveryMode"] not in {"normal", "quiesced", "selected"}
     ):
         raise AgentCoreRecoveryError(
-            "both planes must use the same selected table and ownership "
-            "before the control plane resumes"
+            "both planes must use the same selected table and ownership before the control plane resumes"
         )
-    if (
-        current["recoveryMode"] in {"normal", "selected"}
-        and current["approvalId"] != outputs["RecoveryApprovalId"]
-    ):
-        raise AgentCoreRecoveryError(
-            "AgentCore and control plane have different "
-            "recovery approvals"
-        )
+    if current["recoveryMode"] in {"normal", "selected"} and current["approvalId"] != outputs["RecoveryApprovalId"]:
+        raise AgentCoreRecoveryError("AgentCore and control plane have different recovery approvals")
     if current["recoveryMode"] in {"quiesced", "selected"}:
         _assert_control_plane_quiesced(aws, snapshot)
     desired = snapshot.get("desiredCount")
-    if (
-        not isinstance(desired, int)
-        or isinstance(desired, bool)
-        or desired < 1
-    ):
-        raise AgentCoreRecoveryError(
-            "recorded control-plane desired count is invalid"
-        )
+    if not isinstance(desired, int) or isinstance(desired, bool) or desired < 1:
+        raise AgentCoreRecoveryError("recorded control-plane desired count is invalid")
     if current["recoveryMode"] != "normal":
         _, control_updated = _update_selector(
             aws,
@@ -1628,14 +1385,10 @@ def resume_control_plane(
         )
         if (
             control_updated.get("RecoveryCutoverMode") != "normal"
-            or control_updated.get("SelectedRuntimeStateTableName")
-            != outputs["SelectedRuntimeStateTableName"]
-            or control_updated.get("RecoveryApprovalId")
-            != outputs["RecoveryApprovalId"]
+            or control_updated.get("SelectedRuntimeStateTableName") != outputs["SelectedRuntimeStateTableName"]
+            or control_updated.get("RecoveryApprovalId") != outputs["RecoveryApprovalId"]
         ):
-            raise AgentCoreRecoveryError(
-                "control plane did not resume on the AgentCore-selected table"
-            )
+            raise AgentCoreRecoveryError("control plane did not resume on the AgentCore-selected table")
     _update_desired_count(
         aws,
         cluster_name=snapshot["clusterName"],
@@ -1699,9 +1452,7 @@ def status(
         "primaryTable": outputs["StateTableName"],
         "selectedTable": outputs["SelectedRuntimeStateTableName"],
         "quiescedAt": outputs["RecoveryQuiescedAt"],
-        "minimumQuiescenceSeconds": int(
-            outputs["RecoveryMinimumQuiescenceSeconds"]
-        ),
+        "minimumQuiescenceSeconds": int(outputs["RecoveryMinimumQuiescenceSeconds"]),
         "endpoint": (
             None
             if endpoint is None
@@ -1728,45 +1479,28 @@ def cleanup_restore(
     _, outputs = _runtime_outputs(aws, stack_name)
     prefix = f"{outputs['StateTableName']}-restore-validation-"
     if not table_name.startswith(prefix):
-        raise AgentCoreRecoveryError(
-            "cleanup target is outside the AgentCore restore namespace"
-        )
+        raise AgentCoreRecoveryError("cleanup target is outside the AgentCore restore namespace")
     if outputs["SelectedRuntimeStateTableName"] == table_name:
-        raise AgentCoreRecoveryError(
-            "cannot delete the table currently selected by AgentCore"
-        )
+        raise AgentCoreRecoveryError("cannot delete the table currently selected by AgentCore")
     if outputs["RecoveryCutoverMode"] != "normal":
-        raise AgentCoreRecoveryError(
-            "cleanup requires AgentCore normal mode"
-        )
+        raise AgentCoreRecoveryError("cleanup requires AgentCore normal mode")
     control_plane = _control_plane_snapshot(aws)
     if control_plane is not None:
         if control_plane["selectedTable"] == table_name:
-            raise AgentCoreRecoveryError(
-                "cannot delete the table selected by the control plane"
-            )
+            raise AgentCoreRecoveryError("cannot delete the table selected by the control plane")
         if (
             control_plane["recoveryMode"] != "normal"
-            or control_plane["selectedTable"]
-            != outputs["SelectedRuntimeStateTableName"]
+            or control_plane["selectedTable"] != outputs["SelectedRuntimeStateTableName"]
         ):
-            raise AgentCoreRecoveryError(
-                "cleanup requires both planes normal on the same table"
-            )
+            raise AgentCoreRecoveryError("cleanup requires both planes normal on the same table")
     table = aws.json(
         "dynamodb",
         "describe-table",
         "--table-name",
         table_name,
     ).get("Table")
-    if (
-        not isinstance(table, dict)
-        or table.get("TableName") != table_name
-        or table.get("TableStatus") != "ACTIVE"
-    ):
-        raise AgentCoreRecoveryError(
-            "cleanup target is not the expected ACTIVE table"
-        )
+    if not isinstance(table, dict) or table.get("TableName") != table_name or table.get("TableStatus") != "ACTIVE":
+        raise AgentCoreRecoveryError("cleanup target is not the expected ACTIVE table")
     if table.get("DeletionProtectionEnabled") is True:
         aws.json(
             "dynamodb",
@@ -1791,9 +1525,7 @@ def cleanup_restore(
                 break
             sleep(poll_interval)
         else:
-            raise AgentCoreRecoveryError(
-                "restore table did not disable deletion protection"
-            )
+            raise AgentCoreRecoveryError("restore table did not disable deletion protection")
     aws.json(
         "dynamodb",
         "delete-table",
@@ -1864,9 +1596,7 @@ def main() -> int:
     parser = _parser()
     args = parser.parse_args()
     if args.timeout_seconds < 1 or args.poll_interval < 0:
-        parser.error(
-            "timeout must be positive and poll interval non-negative"
-        )
+        parser.error("timeout must be positive and poll interval non-negative")
     aws = AwsCli(args.region)
     common = {
         "region": args.region,

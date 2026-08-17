@@ -23,7 +23,6 @@ from aws_cdk import (
     aws_ecs as ecs,
     aws_elasticloadbalancingv2 as elbv2,
     aws_iam as iam,
-    aws_kms as kms,
     aws_lambda as lambda_,
     aws_logs as logs,
     aws_route53 as route53,
@@ -34,11 +33,6 @@ from aws_cdk import (
     aws_wafv2 as wafv2,
 )
 from constructs import Construct
-
-if __package__:
-    from .agentcore_stack import load_athena_infrastructure_config
-else:
-    from agentcore_stack import load_athena_infrastructure_config
 
 
 _DYNAMODB_STANDARD_ACTIONS = [
@@ -397,7 +391,6 @@ class AxonLLMControlPlaneStack(Stack):
         deletion_protection = not bool(deployment_namespace)
         agentcore_stack_default = f"AxonLLMAgentCoreStack{physical_suffix}"
         identity_stack_default = f"AxonLLMIdentityStack{physical_suffix}"
-        query_config = load_athena_infrastructure_config(self)
         rehearsal_control_table_arn = (
             CfnParameter(
                 self,
@@ -440,10 +433,7 @@ class AxonLLMControlPlaneStack(Stack):
             type="String",
             default="custom-domain",
             allowed_values=["custom-domain", "cloudfront"],
-            description=(
-                "Control-plane endpoint architecture. Existing deployments "
-                "default to custom-domain."
-            ),
+            description=("Control-plane endpoint architecture. Existing deployments default to custom-domain."),
         )
         custom_domain_mode = CfnCondition(
             self,
@@ -502,14 +492,10 @@ class AxonLLMControlPlaneStack(Stack):
                 r"^(?:|(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}"
                 r"[a-z0-9])?\.)+[a-z]{2,63})$"
             ),
-            constraint_description=(
-                "must be empty or a lowercase fully qualified DNS hostname"
-            ),
+            constraint_description=("must be empty or a lowercase fully qualified DNS hostname"),
             description="Stable custom-domain control-plane hostname",
         )
-        control_plane_domain_input.override_logical_id(
-            "ControlPlaneDomainName"
-        )
+        control_plane_domain_input.override_logical_id("ControlPlaneDomainName")
         approved_ingress_prefix_list_id = CfnParameter(
             self,
             "ApprovedIngressPrefixListId",
@@ -709,11 +695,6 @@ class AxonLLMControlPlaneStack(Stack):
             resource="table",
             resource_name=selected_state_table_name,
         )
-        data_key = kms.Key.from_key_arn(
-            self,
-            "AgentCoreDataKey",
-            imported(agentcore_stack_name, "DataKeyArn"),
-        )
         scim_tenants_secret = (
             secretsmanager.Secret.from_secret_complete_arn(
                 self,
@@ -734,7 +715,6 @@ class AxonLLMControlPlaneStack(Stack):
                 agentcore_stack_name,
                 "SecurityEventOutboxQueueUrl",
             ),
-            key_arn=data_key.key_arn,
             fifo=True,
         )
         security_event_topic = sns.Topic.from_topic_arn(
@@ -753,6 +733,10 @@ class AxonLLMControlPlaneStack(Stack):
             self,
             "AgentCoreSecurityEventLogGroup",
             security_event_log_group_arn,
+        )
+        runtime_arn = imported(
+            agentcore_stack_name,
+            "RuntimeArn",
         )
 
         user_pool = cognito.UserPool.from_user_pool_arn(
@@ -864,9 +848,7 @@ class AxonLLMControlPlaneStack(Stack):
             ip_protocol="tcp",
             from_port=443,
             to_port=443,
-            source_prefix_list_id=(
-                approved_ingress_prefix_list_id.value_as_string
-            ),
+            source_prefix_list_id=(approved_ingress_prefix_list_id.value_as_string),
             description="HTTPS from approved control-plane clients",
         )
         custom_domain_ingress.cfn_options.condition = custom_domain_mode
@@ -878,9 +860,7 @@ class AxonLLMControlPlaneStack(Stack):
             from_port=80,
             to_port=80,
             cidr_ip=vpc.vpc_cidr_block,
-            description=(
-                "HTTP from CloudFront VPC-origin interfaces in the dedicated VPC"
-            ),
+            description=("HTTP from CloudFront VPC-origin interfaces in the dedicated VPC"),
         )
         cloudfront_origin_ingress.cfn_options.condition = cloudfront_mode
         alb_security_group.add_egress_rule(
@@ -1017,18 +997,22 @@ class AxonLLMControlPlaneStack(Stack):
             security_groups=[endpoint_security_group],
             subnets=private_subnets,
         )
+        agentcore_endpoint = vpc.add_interface_endpoint(
+            "AgentCoreEndpoint",
+            service=ec2.InterfaceVpcEndpointAwsService.BEDROCK_AGENTCORE,
+            open=False,
+            private_dns_enabled=True,
+            security_groups=[endpoint_security_group],
+            subnets=private_subnets,
+        )
         launch_worker_endpoints: dict[str, ec2.InterfaceVpcEndpoint] = {}
         if deployment_namespace:
+            launch_worker_endpoints["agentcore"] = agentcore_endpoint
             for construct_id, name, endpoint_service in (
                 (
                     "LaunchWorkerStepFunctionsEndpoint",
                     "states",
                     ec2.InterfaceVpcEndpointAwsService.STEP_FUNCTIONS,
-                ),
-                (
-                    "LaunchWorkerAgentCoreEndpoint",
-                    "agentcore",
-                    ec2.InterfaceVpcEndpointAwsService.BEDROCK_AGENTCORE,
                 ),
                 (
                     "LaunchWorkerCloudFormationEndpoint",
@@ -1273,22 +1257,9 @@ class AxonLLMControlPlaneStack(Stack):
         )
         task_role.add_to_principal_policy(
             iam.PolicyStatement(
-                sid="UseSecurityEventOutboxKey",
-                actions=["kms:Decrypt", "kms:GenerateDataKey*"],
-                resources=[data_key.key_arn],
-                conditions={
-                    "StringEquals": {
-                        "kms:CallerAccount": self.account,
-                        "kms:ViaService": (f"sqs.{self.region}.{self.url_suffix}"),
-                    }
-                },
-            )
-        )
-        task_role.add_to_principal_policy(
-            iam.PolicyStatement(
                 sid="UseSecurityEventTopicKey",
                 actions=["kms:Decrypt", "kms:GenerateDataKey*"],
-                resources=[data_key.key_arn],
+                resources=["*"],
                 conditions={
                     "StringEquals": {
                         "kms:CallerAccount": self.account,
@@ -1296,6 +1267,16 @@ class AxonLLMControlPlaneStack(Stack):
                         "kms:EncryptionContext:aws:sns:topicArn": (security_event_topic.topic_arn),
                     }
                 },
+            )
+        )
+        task_role.add_to_principal_policy(
+            iam.PolicyStatement(
+                sid="InvokeAgentCoreRuntime",
+                actions=["bedrock-agentcore:InvokeAgentRuntime"],
+                resources=[
+                    runtime_arn,
+                    f"{runtime_arn}/runtime-endpoint/production",
+                ],
             )
         )
         security_event_log_group.grant_write(task_role)
@@ -1314,7 +1295,6 @@ class AxonLLMControlPlaneStack(Stack):
         application_logs = logs.LogGroup(
             self,
             "ApplicationLogs",
-            encryption_key=data_key,
             retention=logs.RetentionDays.ONE_YEAR,
             removal_policy=removal_policy,
         )
@@ -1352,7 +1332,6 @@ class AxonLLMControlPlaneStack(Stack):
             ),
             environment={
                 "AWS_DEFAULT_REGION": self.region,
-                "AWS_STS_REGIONAL_ENDPOINTS": "regional",
                 "AXON_AWS_ACCOUNT_ID": self.account,
                 "LLM_ROUTER_DYNAMODB_ENABLED": "true",
                 "AXON_DYNAMODB_TABLE": selected_state_table_name,
@@ -1361,15 +1340,17 @@ class AxonLLMControlPlaneStack(Stack):
                 "AXON_SECURITY_EVENT_LOG_GROUP_ARN": (security_event_log_group_arn),
                 "AXON_AUTH_MODE": "ENFORCE",
                 "AXON_DEPLOYMENT_PROFILE": "production",
+                "AXON_EXPERIENCE_OWNER": "axonllm",
+                "AXON_EXECUTION_TARGET": "agentcore",
                 "AXON_LOAD_DEMO_DATA": "false",
                 "AXON_OIDC_ISSUER": oidc_issuer,
                 "AXON_OIDC_TENANT_CLAIM": tenant_claim,
                 "AXON_OIDC_PROJECT_CLAIM": project_claim,
-                "AXON_CONTROL_PLANE_ENDPOINT_MODE": (
-                    endpoint_mode.value_as_string
-                ),
+                "AXON_CONTROL_PLANE_ENDPOINT_MODE": (endpoint_mode.value_as_string),
                 "AXON_REQUIRE_CANONICAL_IDENTITY": "true",
                 "AXON_CONTROL_PLANE_ONLY": "true",
+                "AXON_AGENTCORE_RUNTIME_ARN": runtime_arn,
+                "AXON_AGENTCORE_RUNTIME_QUALIFIER": "production",
                 "AXON_SAML_FEDERATION_MODE": "managed-cognito",
                 "AXON_SAML_LOGIN_PATH": (saml_login_path.value_as_string),
                 "AXON_ENABLED_PROVIDERS": "bedrock",
@@ -1382,7 +1363,6 @@ class AxonLLMControlPlaneStack(Stack):
                     if rehearsal_control_table_arn is not None
                     else {}
                 ),
-                **query_config.environment(),
             },
             secrets=container_secrets,
             health_check=ecs.HealthCheck(
@@ -1528,9 +1508,7 @@ class AxonLLMControlPlaneStack(Stack):
                 "UserPoolDomain": hosted_ui_domain_name,
                 "OnUnauthenticatedRequest": "authenticate",
                 "Scope": "openid email profile",
-                "SessionCookieName": (
-                    f"AxonLLMControlPlaneSession{physical_suffix}"
-                ),
+                "SessionCookieName": (f"AxonLLMControlPlaneSession{physical_suffix}"),
                 "SessionTimeout": "3600",
             },
         }
@@ -1628,9 +1606,7 @@ class AxonLLMControlPlaneStack(Stack):
             addresses=allowed_viewer_cidrs.value_as_list,
             ip_address_version="IPV4",
             scope="CLOUDFRONT",
-            description=(
-                "Reviewed viewer networks for the generated AxonLLM endpoint"
-            ),
+            description=("Reviewed viewer networks for the generated AxonLLM endpoint"),
         )
         viewer_ip_set.cfn_options.condition = cloudfront_mode
         web_acl = wafv2.CfnWebACL(
@@ -1642,9 +1618,7 @@ class AxonLLMControlPlaneStack(Stack):
             scope="CLOUDFRONT",
             visibility_config=wafv2.CfnWebACL.VisibilityConfigProperty(
                 cloud_watch_metrics_enabled=True,
-                metric_name=(
-                    f"AxonLLMControlPlane{physical_suffix.replace('-', '')}"
-                ),
+                metric_name=(f"AxonLLMControlPlane{physical_suffix.replace('-', '')}"),
                 sampled_requests_enabled=False,
             ),
             rules=[
@@ -1665,10 +1639,7 @@ class AxonLLMControlPlaneStack(Stack):
                     visibility_config=(
                         wafv2.CfnWebACL.VisibilityConfigProperty(
                             cloud_watch_metrics_enabled=True,
-                            metric_name=(
-                                "AxonLLMControlPlaneRateLimit"
-                                f"{physical_suffix.replace('-', '')}"
-                            ),
+                            metric_name=(f"AxonLLMControlPlaneRateLimit{physical_suffix.replace('-', '')}"),
                             sampled_requests_enabled=False,
                         )
                     ),
@@ -1689,10 +1660,7 @@ class AxonLLMControlPlaneStack(Stack):
                     visibility_config=(
                         wafv2.CfnWebACL.VisibilityConfigProperty(
                             cloud_watch_metrics_enabled=True,
-                            metric_name=(
-                                "AxonLLMControlPlaneAllowedViewers"
-                                f"{physical_suffix.replace('-', '')}"
-                            ),
+                            metric_name=(f"AxonLLMControlPlaneAllowedViewers{physical_suffix.replace('-', '')}"),
                             sampled_requests_enabled=False,
                         )
                     ),
@@ -1714,14 +1682,9 @@ class AxonLLMControlPlaneStack(Stack):
 """
             ),
             runtime=cloudfront.FunctionRuntime.JS_2_0,
-            comment=(
-                "Remove viewer-supplied ALB identity headers before the "
-                "private origin"
-            ),
+            comment=("Remove viewer-supplied ALB identity headers before the private origin"),
         )
-        cfn_strip_untrusted_identity = (
-            strip_untrusted_identity.node.default_child
-        )
+        cfn_strip_untrusted_identity = strip_untrusted_identity.node.default_child
         if not isinstance(
             cfn_strip_untrusted_identity,
             cloudfront.CfnFunction,
@@ -1741,29 +1704,18 @@ class AxonLLMControlPlaneStack(Stack):
             default_behavior=cloudfront.BehaviorOptions(
                 origin=cloudfront_origin,
                 allowed_methods=cloudfront.AllowedMethods.ALLOW_ALL,
-                cached_methods=(
-                    cloudfront.CachedMethods.CACHE_GET_HEAD_OPTIONS
-                ),
+                cached_methods=(cloudfront.CachedMethods.CACHE_GET_HEAD_OPTIONS),
                 cache_policy=cloudfront.CachePolicy.CACHING_DISABLED,
-                origin_request_policy=(
-                    cloudfront.OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER
-                ),
-                viewer_protocol_policy=(
-                    cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS
-                ),
+                origin_request_policy=(cloudfront.OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER),
+                viewer_protocol_policy=(cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS),
                 function_associations=[
                     cloudfront.FunctionAssociation(
-                        event_type=(
-                            cloudfront.FunctionEventType.VIEWER_REQUEST
-                        ),
+                        event_type=(cloudfront.FunctionEventType.VIEWER_REQUEST),
                         function=strip_untrusted_identity,
                     )
                 ],
             ),
-            comment=(
-                "Generated AxonLLM control-plane endpoint"
-                f"{physical_suffix}"
-            ),
+            comment=(f"Generated AxonLLM control-plane endpoint{physical_suffix}"),
             enable_ipv6=False,
             http_version=cloudfront.HttpVersion.HTTP2_AND_3,
             price_class=cloudfront.PriceClass.PRICE_CLASS_100,
@@ -1774,9 +1726,7 @@ class AxonLLMControlPlaneStack(Stack):
             raise RuntimeError("CloudFront distribution did not synthesize")
         cfn_distribution.cfn_options.condition = cloudfront_mode
         cfn_vpc_origins = [
-            construct
-            for construct in self.node.find_all()
-            if isinstance(construct, cloudfront.CfnVpcOrigin)
+            construct for construct in self.node.find_all() if isinstance(construct, cloudfront.CfnVpcOrigin)
         ]
         if len(cfn_vpc_origins) != 1:
             raise RuntimeError("CloudFront VPC origin did not synthesize once")
@@ -1815,9 +1765,7 @@ class AxonLLMControlPlaneStack(Stack):
         )
         browser_client = user_pool.add_client(
             "CloudFrontBrowserClient",
-            user_pool_client_name=(
-                f"axonllm-control-plane-cloudfront{physical_suffix}"
-            ),
+            user_pool_client_name=(f"axonllm-control-plane-cloudfront{physical_suffix}"),
             generate_secret=False,
             prevent_user_existence_errors=True,
             enable_token_revocation=True,
@@ -1834,9 +1782,7 @@ class AxonLLMControlPlaneStack(Stack):
                 )
                 .with_custom_attributes("tenant_id", "project_id")
             ),
-            supported_identity_providers=[
-                cognito.UserPoolClientIdentityProvider.COGNITO
-            ],
+            supported_identity_providers=[cognito.UserPoolClientIdentityProvider.COGNITO],
             o_auth=cognito.OAuthSettings(
                 callback_urls=[browser_callback_url],
                 logout_urls=[browser_signed_out_url],
@@ -1886,10 +1832,7 @@ class AxonLLMControlPlaneStack(Stack):
             "AXON_ALB_ISSUER",
             endpoint_value(
                 "",
-                (
-                    "https://public-keys.auth.elb."
-                    f"{self.region}.amazonaws.com"
-                ),
+                (f"https://public-keys.auth.elb.{self.region}.amazonaws.com"),
             ),
         )
         container.add_environment(
@@ -1906,15 +1849,11 @@ class AxonLLMControlPlaneStack(Stack):
         )
         container.add_environment(
             "AXON_BROWSER_AUTH_AUTHORIZATION_ENDPOINT",
-            endpoint_value(
-                Fn.join("", [hosted_ui_base, "/oauth2/authorize"])
-            ),
+            endpoint_value(Fn.join("", [hosted_ui_base, "/oauth2/authorize"])),
         )
         container.add_environment(
             "AXON_BROWSER_AUTH_OAUTH_EXCHANGE_URL",
-            endpoint_value(
-                Fn.join("", [hosted_ui_base, "/oauth2/token"])
-            ),
+            endpoint_value(Fn.join("", [hosted_ui_base, "/oauth2/token"])),
         )
         container.add_environment(
             "AXON_BROWSER_AUTH_LOGOUT_ENDPOINT",
@@ -1957,7 +1896,6 @@ class AxonLLMControlPlaneStack(Stack):
         recovery_guard_handler_logs = logs.LogGroup(
             self,
             "RecoveryGuardHandlerLogs",
-            encryption_key=data_key,
             retention=logs.RetentionDays.ONE_YEAR,
             removal_policy=removal_policy,
         )
@@ -2015,7 +1953,6 @@ class AxonLLMControlPlaneStack(Stack):
         recovery_guard_provider_logs = logs.LogGroup(
             self,
             "RecoveryGuardProviderLogs",
-            encryption_key=data_key,
             retention=logs.RetentionDays.ONE_YEAR,
             removal_policy=removal_policy,
         )
@@ -2172,6 +2109,16 @@ class AxonLLMControlPlaneStack(Stack):
                     f"{application_logs.log_group_arn}:*",
                     security_event_log_group_arn,
                     f"{security_event_log_group_arn}:*",
+                ],
+            )
+        )
+        agentcore_endpoint.add_to_policy(
+            iam.PolicyStatement(
+                principals=[task_role],
+                actions=["bedrock-agentcore:InvokeAgentRuntime"],
+                resources=[
+                    runtime_arn,
+                    f"{runtime_arn}/runtime-endpoint/production",
                 ],
             )
         )
@@ -2596,11 +2543,6 @@ class AxonLLMControlPlaneStack(Stack):
             self,
             "TaskDefinitionArn",
             value=task_definition.task_definition_arn,
-        )
-        CfnOutput(
-            self,
-            "QueryPlaneEnabled",
-            value="true" if query_config.enabled else "false",
         )
         if scim_tenants_secret is not None:
             CfnOutput(

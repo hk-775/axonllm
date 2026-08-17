@@ -1054,13 +1054,6 @@ jobs:
                   "production certification must cover the exact "
                   "provider-specific launch feature matrix"
               )
-          athena = runtime.get("athena_query")
-          if (
-              not isinstance(athena, dict)
-              or not isinstance(athena.get("role_arns"), list)
-              or not athena["role_arns"]
-          ):
-              raise SystemExit("production launch requires Athena query configuration")
           runtime["verified_image_uri"] = sys.argv[4]
           control["verified_image_uri"] = sys.argv[5]
           temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
@@ -1563,7 +1556,7 @@ jobs:
           fi
           ./deploy-agentcore.sh "${arguments[@]}"
 
-      - name: Start deployment backup and validate state protection
+      - name: Exercise PITR and validate state protection
         env:
           RECOVERY_REPORT: ${{ runner.temp }}/recovery-validation.json
         run: |
@@ -1572,8 +1565,7 @@ jobs:
             scripts/operations/validate_state_recovery.py \
             --region "${AWS_REGION}" \
             --stack-name AxonLLMAgentCoreStack \
-            --require-vault-lock \
-            --start-backup >"${RECOVERY_REPORT}"
+            --exercise-restore >"${RECOVERY_REPORT}"
 
       - name: Bind candidate certification configuration
         run: |
@@ -1596,6 +1588,7 @@ jobs:
               raise SystemExit("certification configuration is malformed")
           value["runtimeArn"] = sys.argv[2]
           value["qualifier"] = sys.argv[3]
+          value["ingressMode"] = "iam-facade"
           temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
           temporary.write_text(
               json.dumps(value, indent=2, sort_keys=True) + "\n",
@@ -1874,7 +1867,6 @@ jobs:
             --arg image "${{ inputs.control_plane_image_reference }}" '
             .AxonLLMControlPlaneStack as $control
             | $control.ControlPlaneImageUri == $image
-            and $control.QueryPlaneEnabled == "true"
             and ($control.EndpointMode
               | . == "custom-domain" or . == "cloudfront")
             and ($control.ControlPlaneUrl

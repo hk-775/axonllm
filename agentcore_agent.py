@@ -2,6 +2,7 @@
 
 import contextlib
 import logging
+import os
 from typing import Any
 
 from starlette.exceptions import HTTPException
@@ -13,7 +14,22 @@ from src.gateway.agentcore.runtime import RuntimeProvider
 from src.gateway.agentcore.sdk_compat import BedrockAgentCoreApp
 
 logger = logging.getLogger(__name__)
-_adapter = AgentCoreAdapter(RuntimeProvider())
+
+
+def _facade_identity_enabled() -> bool:
+    value = os.environ.get(
+        "AXON_AGENTCORE_FACADE_IDENTITY_ALLOWED",
+        "false",
+    )
+    if value not in {"true", "false"}:
+        raise RuntimeError("AXON_AGENTCORE_FACADE_IDENTITY_ALLOWED must be 'true' or 'false'")
+    return value == "true"
+
+
+_adapter = AgentCoreAdapter(
+    RuntimeProvider(),
+    allow_facade_identity=_facade_identity_enabled(),
+)
 
 
 @contextlib.asynccontextmanager

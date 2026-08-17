@@ -314,10 +314,10 @@ def _cleanup_task_for(state: dict[str, Any]) -> worker.ActionTask:
     )
 
 
-def test_registry_has_exact_seven_domain_and_29_operation_coverage() -> None:
+def test_registry_has_exact_six_domain_and_25_operation_coverage() -> None:
     assert tuple(domains.DOMAIN_OPERATIONS) == domains.DOMAIN_ORDER
-    assert len(domains.DOMAIN_ORDER) == 7
-    assert len(domains.OPERATION_TO_DOMAIN) == 29
+    assert len(domains.DOMAIN_ORDER) == 6
+    assert len(domains.OPERATION_TO_DOMAIN) == 25
     assert set(domains.OPERATION_TO_DOMAIN) == set(worker.ACTION_OPERATIONS)
     assert domains.CLEANUP_ORDER == tuple(reversed(domains.DOMAIN_ORDER))
 
@@ -343,17 +343,17 @@ def test_every_operation_dispatches_to_exact_injected_domain(
 
 def test_injected_registry_must_be_exact_and_callable() -> None:
     implementations, _ = _implementations()
-    implementations.pop("query")
+    implementations.pop("security")
     with pytest.raises(worker.ConfigurationError):
         domains.LaunchActivityDomains(implementations)
 
     implementations, _ = _implementations()
-    implementations["unknown"] = implementations["query"]
+    implementations["unknown"] = implementations["security"]
     with pytest.raises(worker.ConfigurationError):
         domains.LaunchActivityDomains(implementations)
 
     implementations, _ = _implementations()
-    implementations["query"] = object()
+    implementations["security"] = object()
     with pytest.raises(worker.ConfigurationError):
         domains.LaunchActivityDomains(implementations)
 
@@ -363,7 +363,7 @@ def test_injected_registry_must_be_exact_and_callable() -> None:
     [
         lambda state: state.update({"schema": "wrong"}),
         lambda state: state.update({"unknown": True}),
-        lambda state: state["domains"].pop("query"),
+        lambda state: state["domains"].pop("security"),
         lambda state: state["ownership"]["faultIds"].append(f"{OWNER}:unattributed"),
         lambda state: state["cleanup"].update({"completedDomains": ["initialization"]}),
     ],
@@ -464,7 +464,7 @@ def test_cleanup_is_reverse_order_verified_and_terminal_only() -> None:
         task,
         _context(_owner_state(state, revision=1)),
     )
-    assert calls[-7:] == [f"cleanup:{name}" for name in domains.CLEANUP_ORDER]
+    assert calls[-len(domains.CLEANUP_ORDER) :] == [f"cleanup:{name}" for name in domains.CLEANUP_ORDER]
     assert outcome.state is not None
     assert outcome.state["cleanup"]["status"] == "COMPLETE"
     assert outcome.state["ownership"] == _owner_ownership()

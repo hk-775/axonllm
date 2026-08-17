@@ -6,17 +6,19 @@ Modules import from this file instead of hardcoding values.
 
 from __future__ import annotations
 
-import math
 import re
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
+from src.gateway.deployment.topology import DeploymentTopology
 
-_MAX_ATHENA_QUERY_BINDINGS_CHARACTERS = 2_048
-CONTROL_PLANE_ENDPOINT_MODES = frozenset(
-    {"custom-domain", "cloudfront"}
-)
+
+CONTROL_PLANE_ENDPOINT_MODES = frozenset({"custom-domain", "cloudfront"})
 MAX_BROWSER_SESSION_SECONDS = 8 * 60 * 60
+_AGENTCORE_RUNTIME_ARN_PATTERN = re.compile(
+    r"^arn:(?:aws|aws-us-gov|aws-cn):bedrock-agentcore:"
+    r"[a-z0-9-]+:[0-9]{12}:runtime/[A-Za-z0-9_-]+$"
+)
 
 
 def _normalized_https_origin(value: str, field_name: str) -> str:
@@ -38,10 +40,7 @@ def _normalized_https_origin(value: str, field_name: str) -> str:
         or parsed.fragment
         or port == 0
         or len(value.encode("utf-8")) > 2048
-        or any(
-            not character.isprintable() or character.isspace()
-            for character in value
-        )
+        or any(not character.isprintable() or character.isspace() for character in value)
     ):
         raise ValueError(f"{field_name} must be an HTTPS origin")
     return value.rstrip("/")
@@ -54,15 +53,11 @@ def _normalized_https_endpoint(
 ) -> str:
     """Return a fixed HTTPS endpoint with no query or fragment."""
     if not isinstance(value, str) or value != value.strip():
-        raise ValueError(
-            f"{field_name} must be an HTTPS URL ending in {expected_path}"
-        )
+        raise ValueError(f"{field_name} must be an HTTPS URL ending in {expected_path}")
     try:
         parsed = urlsplit(value)
     except (UnicodeError, ValueError) as exc:
-        raise ValueError(
-            f"{field_name} must be an HTTPS URL ending in {expected_path}"
-        ) from exc
+        raise ValueError(f"{field_name} must be an HTTPS URL ending in {expected_path}") from exc
     if (
         parsed.scheme != "https"
         or not parsed.hostname
@@ -73,9 +68,7 @@ def _normalized_https_endpoint(
         or parsed.fragment
         or len(value.encode("utf-8")) > 2048
     ):
-        raise ValueError(
-            f"{field_name} must be an HTTPS URL ending in {expected_path}"
-        )
+        raise ValueError(f"{field_name} must be an HTTPS URL ending in {expected_path}")
     return value
 
 
@@ -110,6 +103,7 @@ def _is_cognito_issuer(value: str, region: str) -> bool:
 # Retry / Fallback
 # ---------------------------------------------------------------------------
 
+
 @dataclass(frozen=True)
 class RetryConfig:
     """Configuration for retry and fallback behaviour in the Router."""
@@ -129,6 +123,7 @@ class RetryConfig:
 # Rate Limiting
 # ---------------------------------------------------------------------------
 
+
 @dataclass(frozen=True)
 class RateLimitDefaults:
     """Default rate-limit values used when no per-project override exists."""
@@ -142,6 +137,7 @@ class RateLimitDefaults:
 # Cache
 # ---------------------------------------------------------------------------
 
+
 @dataclass(frozen=True)
 class CacheDefaults:
     """Default cache settings."""
@@ -152,6 +148,7 @@ class CacheDefaults:
 # ---------------------------------------------------------------------------
 # Cost / Token Estimation
 # ---------------------------------------------------------------------------
+
 
 @dataclass(frozen=True)
 class TokenEstimationConfig:
@@ -164,6 +161,7 @@ class TokenEstimationConfig:
 # Adapters
 # ---------------------------------------------------------------------------
 
+
 @dataclass(frozen=True)
 class AdapterDefaults:
     """Shared defaults across provider adapters."""
@@ -175,26 +173,29 @@ class AdapterDefaults:
 # Providers
 # ---------------------------------------------------------------------------
 
-VALID_PROVIDERS: frozenset[str] = frozenset({
-    "openai",
-    "anthropic",
-    "bedrock",
-    "bedrock-mantle",
-    "azure_openai",
-    "vertex_ai",
-    "google_ai",
-    "cohere",
-    "xai",
-    "groq",
-    "together",
-    "fireworks",
-    "ai21",
-})
+VALID_PROVIDERS: frozenset[str] = frozenset(
+    {
+        "openai",
+        "anthropic",
+        "bedrock",
+        "bedrock-mantle",
+        "azure_openai",
+        "vertex_ai",
+        "google_ai",
+        "cohere",
+        "xai",
+        "groq",
+        "together",
+        "fireworks",
+        "ai21",
+    }
+)
 
 
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
+
 
 @dataclass(frozen=True)
 class LoggingDefaults:
@@ -207,6 +208,7 @@ class LoggingDefaults:
 # ---------------------------------------------------------------------------
 # Composite gateway config
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class GatewayConfig:
@@ -229,11 +231,14 @@ DEFAULT_CONFIG = GatewayConfig()
 # Application Config (env-var driven)
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class AppConfig:
     """Runtime application settings loaded from environment variables."""
 
     deployment_profile: str = "development"
+    experience_owner: str = "axonllm"
+    execution_target: str = "container"
     aws_region: str = "us-east-1"
     bedrock_region: str = "us-east-1"
     server_host: str = "0.0.0.0"
@@ -284,38 +289,32 @@ class AppConfig:
     # None means "use semantic_cache.DEFAULT_SIMILARITY_THRESHOLD". Not 0.0,
     # which would make every comparison a hit.
     semantic_cache_threshold: float | None = None
-    # Athena query-plane settings. Query execution and datasource routes are
-    # absent unless explicitly enabled.
-    athena_query_enabled: bool = False
-    athena_query_bindings: str = ""
-    athena_query_timeout_seconds: float = 30.0
-    athena_query_max_rows: int = 1000
-    athena_query_max_result_bytes: int = 1024 * 1024
-    athena_query_max_bytes_scanned: int = 1024 * 1024 * 1024
-    athena_query_poll_interval_seconds: float = 0.25
-    athena_query_project_rpm: int = 30
-    athena_query_principal_rpm: int = 10
-    athena_query_project_concurrency: int = 5
-    athena_query_principal_concurrency: int = 2
-    athena_query_project_scan_bytes_per_minute: int = (
-        5 * 1024 * 1024 * 1024
-    )
-    athena_query_principal_scan_bytes_per_minute: int = (
-        2 * 1024 * 1024 * 1024
-    )
-    athena_query_max_datasources_per_tenant: int = 500
     # A dedicated control-plane process serves health and administration only.
     control_plane_only: bool = False
+    # The private Runtime used by an AgentCore-backed AxonLLM facade.
+    agentcore_runtime_arn: str = ""
+    agentcore_runtime_qualifier: str = "production"
 
     def __post_init__(self) -> None:
-        if (
-            self.control_plane_endpoint_mode
-            not in CONTROL_PLANE_ENDPOINT_MODES
-        ):
-            raise ValueError(
-                "control_plane_endpoint_mode must be 'custom-domain' "
-                "or 'cloudfront'"
+        try:
+            DeploymentTopology(
+                experience=self.experience_owner,
+                execution=self.execution_target,
             )
+        except ValueError as exc:
+            raise ValueError(
+                "experience_owner and execution_target do not form a supported deployment profile"
+            ) from exc
+        if self.control_plane_endpoint_mode not in CONTROL_PLANE_ENDPOINT_MODES:
+            raise ValueError("control_plane_endpoint_mode must be 'custom-domain' or 'cloudfront'")
+        if self.agentcore_runtime_qualifier != "production":
+            raise ValueError("agentcore_runtime_qualifier must be 'production'")
+        if (
+            self.execution_target == "agentcore"
+            and self.control_plane_only
+            and _AGENTCORE_RUNTIME_ARN_PATTERN.fullmatch(self.agentcore_runtime_arn) is None
+        ):
+            raise RuntimeError("AgentCore facade deployments require AXON_AGENTCORE_RUNTIME_ARN")
         for field_name, value, minimum, maximum in (
             (
                 "browser_session_max_seconds",
@@ -330,46 +329,26 @@ class AppConfig:
                 900,
             ),
         ):
-            if (
-                isinstance(value, bool)
-                or not isinstance(value, int)
-                or not minimum <= value <= maximum
-            ):
-                raise ValueError(
-                    f"{field_name} must be between {minimum} and {maximum}"
-                )
+            if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
+                raise ValueError(f"{field_name} must be between {minimum} and {maximum}")
 
         if not self.browser_auth_client_id:
             self.browser_auth_client_id = self.oidc_audience
         if self.control_plane_endpoint_mode == "cloudfront":
             if self.browser_auth_mode not in ("", "oidc-session"):
-                raise RuntimeError(
-                    "CloudFront browser authentication requires "
-                    "AXON_BROWSER_AUTH_MODE=oidc-session"
-                )
+                raise RuntimeError("CloudFront browser authentication requires AXON_BROWSER_AUTH_MODE=oidc-session")
             self.browser_auth_mode = "oidc-session"
             if not _is_cognito_issuer(
                 self.oidc_issuer,
                 self.aws_region,
             ):
                 raise RuntimeError(
-                    "CloudFront browser authentication requires a Cognito "
-                    "OIDC issuer in AWS_DEFAULT_REGION"
+                    "CloudFront browser authentication requires a Cognito OIDC issuer in AWS_DEFAULT_REGION"
                 )
-            if (
-                not self.control_plane_public_url
-                and self.browser_auth_redirect_uri
-            ):
-                self.control_plane_public_url = _url_origin(
-                    self.browser_auth_redirect_uri
-                )
-            if (
-                not self.cognito_hosted_ui_url
-                and self.browser_auth_authorization_endpoint
-            ):
-                self.cognito_hosted_ui_url = _url_origin(
-                    self.browser_auth_authorization_endpoint
-                )
+            if not self.control_plane_public_url and self.browser_auth_redirect_uri:
+                self.control_plane_public_url = _url_origin(self.browser_auth_redirect_uri)
+            if not self.cognito_hosted_ui_url and self.browser_auth_authorization_endpoint:
+                self.cognito_hosted_ui_url = _url_origin(self.browser_auth_authorization_endpoint)
             self.control_plane_public_url = _normalized_https_origin(
                 self.control_plane_public_url,
                 "control_plane_public_url",
@@ -379,26 +358,14 @@ class AppConfig:
                 "cognito_hosted_ui_url",
             )
             endpoint_defaults = {
-                "browser_auth_authorization_endpoint": (
-                    f"{self.cognito_hosted_ui_url}/oauth2/authorize"
-                ),
-                "browser_auth_token_endpoint": (
-                    f"{self.cognito_hosted_ui_url}/oauth2/token"
-                ),
-                "browser_auth_logout_endpoint": (
-                    f"{self.cognito_hosted_ui_url}/logout"
-                ),
-                "browser_auth_redirect_uri": (
-                    f"{self.control_plane_public_url}/auth/callback"
-                ),
-                "browser_auth_signed_out_uri": (
-                    f"{self.control_plane_public_url}/auth/signed-out"
-                ),
+                "browser_auth_authorization_endpoint": (f"{self.cognito_hosted_ui_url}/oauth2/authorize"),
+                "browser_auth_token_endpoint": (f"{self.cognito_hosted_ui_url}/oauth2/token"),
+                "browser_auth_logout_endpoint": (f"{self.cognito_hosted_ui_url}/logout"),
+                "browser_auth_redirect_uri": (f"{self.control_plane_public_url}/auth/callback"),
+                "browser_auth_signed_out_uri": (f"{self.control_plane_public_url}/auth/signed-out"),
             }
             endpoint_paths = {
-                "browser_auth_authorization_endpoint": (
-                    "/oauth2/authorize"
-                ),
+                "browser_auth_authorization_endpoint": ("/oauth2/authorize"),
                 "browser_auth_token_endpoint": "/oauth2/token",
                 "browser_auth_logout_endpoint": "/logout",
                 "browser_auth_redirect_uri": "/auth/callback",
@@ -412,18 +379,11 @@ class AppConfig:
                     endpoint_paths[field_name],
                 )
                 if normalized != default:
-                    raise RuntimeError(
-                        f"{field_name} does not match its configured origin"
-                    )
+                    raise RuntimeError(f"{field_name} does not match its configured origin")
                 setattr(self, field_name, normalized)
-            if (
-                not self.browser_auth_client_id
-                or self.browser_auth_client_id
-                != self.oidc_audience
-            ):
+            if not self.browser_auth_client_id or self.browser_auth_client_id != self.oidc_audience:
                 raise RuntimeError(
-                    "CloudFront browser authentication requires a public "
-                    "client ID matching AXON_OIDC_AUDIENCE"
+                    "CloudFront browser authentication requires a public client ID matching AXON_OIDC_AUDIENCE"
                 )
             if (
                 self.auth_mode != "ENFORCE"
@@ -447,173 +407,30 @@ class AppConfig:
                 or len(claim_name) > 256
                 or any(character.isspace() for character in claim_name)
             ):
-                raise ValueError(
-                    f"{field_name} must be a non-empty claim name without "
-                    "whitespace"
-                )
+                raise ValueError(f"{field_name} must be a non-empty claim name without whitespace")
         if self.enabled_providers is not None:
             if not self.enabled_providers:
                 raise ValueError("enabled_providers must not be empty")
             unknown = self.enabled_providers.difference(VALID_PROVIDERS)
             if unknown:
-                raise ValueError(
-                    "enabled_providers contains unknown providers: "
-                    + ", ".join(sorted(unknown))
-                )
+                raise ValueError("enabled_providers contains unknown providers: " + ", ".join(sorted(unknown)))
         if self.deployment_profile not in {"development", "production"}:
-            raise ValueError(
-                "deployment_profile must be 'development' or 'production'"
-            )
-        if not isinstance(self.athena_query_bindings, str):
-            raise ValueError("athena_query_bindings must be JSON text")
-        if (
-            len(self.athena_query_bindings)
-            > _MAX_ATHENA_QUERY_BINDINGS_CHARACTERS
-        ):
-            raise ValueError(
-                "athena_query_bindings must not exceed the AgentCore "
-                "2,048-character environment value limit"
-            )
-        if (
-            isinstance(self.athena_query_timeout_seconds, bool)
-            or not isinstance(
-                self.athena_query_timeout_seconds,
-                (int, float),
-            )
-            or not math.isfinite(self.athena_query_timeout_seconds)
-            or not 0 < self.athena_query_timeout_seconds <= 300
-        ):
-            raise ValueError(
-                "athena_query_timeout_seconds must be between 0 and 300"
-            )
-        if (
-            isinstance(self.athena_query_max_rows, bool)
-            or not isinstance(self.athena_query_max_rows, int)
-            or not 1 <= self.athena_query_max_rows <= 10_000
-        ):
-            raise ValueError(
-                "athena_query_max_rows must be between 1 and 10000"
-            )
-        if (
-            isinstance(self.athena_query_max_result_bytes, bool)
-            or not isinstance(self.athena_query_max_result_bytes, int)
-            or not 1024
-            <= self.athena_query_max_result_bytes
-            <= 16 * 1024 * 1024
-        ):
-            raise ValueError(
-                "athena_query_max_result_bytes must be between 1 KiB "
-                "and 16 MiB"
-            )
-        if (
-            isinstance(self.athena_query_max_bytes_scanned, bool)
-            or not isinstance(self.athena_query_max_bytes_scanned, int)
-            or self.athena_query_max_bytes_scanned <= 0
-        ):
-            raise ValueError(
-                "athena_query_max_bytes_scanned must be positive"
-            )
-        if (
-            isinstance(
-                self.athena_query_poll_interval_seconds,
-                bool,
-            )
-            or not isinstance(
-                self.athena_query_poll_interval_seconds,
-                (int, float),
-            )
-            or not math.isfinite(
-                self.athena_query_poll_interval_seconds
-            )
-            or not 0.05
-            <= self.athena_query_poll_interval_seconds
-            <= 5
-        ):
-            raise ValueError(
-                "athena_query_poll_interval_seconds must be between "
-                "0.05 and 5"
-            )
-        admission_limits = (
-            "athena_query_project_rpm",
-            "athena_query_principal_rpm",
-            "athena_query_project_concurrency",
-            "athena_query_principal_concurrency",
-            "athena_query_project_scan_bytes_per_minute",
-            "athena_query_principal_scan_bytes_per_minute",
-            "athena_query_max_datasources_per_tenant",
-        )
-        for field_name in admission_limits:
-            value = getattr(self, field_name)
-            if (
-                isinstance(value, bool)
-                or not isinstance(value, int)
-                or value < 1
-            ):
-                raise ValueError(
-                    f"{field_name} must be a positive integer"
-                )
-        if self.athena_query_max_datasources_per_tenant > 10_000:
-            raise ValueError(
-                "athena_query_max_datasources_per_tenant must not exceed "
-                "10000"
-            )
-        if (
-            self.athena_query_principal_rpm
-            > self.athena_query_project_rpm
-        ):
-            raise ValueError(
-                "athena_query_principal_rpm must not exceed "
-                "athena_query_project_rpm"
-            )
-        if (
-            self.athena_query_principal_concurrency
-            > self.athena_query_project_concurrency
-        ):
-            raise ValueError(
-                "athena_query_principal_concurrency must not exceed "
-                "athena_query_project_concurrency"
-            )
-        if (
-            self.athena_query_principal_scan_bytes_per_minute
-            > self.athena_query_project_scan_bytes_per_minute
-        ):
-            raise ValueError(
-                "principal query scan budget must not exceed the project "
-                "query scan budget"
-            )
-        if (
-            self.athena_query_max_bytes_scanned
-            > self.athena_query_principal_scan_bytes_per_minute
-        ):
-            raise ValueError(
-                "athena_query_max_bytes_scanned must fit within the "
-                "principal aggregate scan budget"
-            )
-        if self.athena_query_enabled and (
-            self.auth_mode != "ENFORCE"
-            or not self.canonical_identity_required
-            or not self.durable_persistence_enabled
-        ):
-            raise RuntimeError(
-                "Athena queries require enforced canonical identity and "
-                "durable DynamoDB persistence"
-            )
+            raise ValueError("deployment_profile must be 'development' or 'production'")
         if self.deployment_profile != "production":
             return
         if self.auth_mode != "ENFORCE":
-            raise RuntimeError(
-                "production profile requires AXON_AUTH_MODE=ENFORCE"
-            )
+            raise RuntimeError("production profile requires AXON_AUTH_MODE=ENFORCE")
         if not self.canonical_identity_required:
-            raise RuntimeError(
-                "production profile requires "
-                "AXON_REQUIRE_CANONICAL_IDENTITY=true"
-            )
+            raise RuntimeError("production profile requires AXON_REQUIRE_CANONICAL_IDENTITY=true")
         if not self.durable_persistence_enabled:
-            raise RuntimeError(
-                "production profile requires "
-                "LLM_ROUTER_DYNAMODB_ENABLED=true"
-            )
+            raise RuntimeError("production profile requires LLM_ROUTER_DYNAMODB_ENABLED=true")
+
+    @property
+    def topology_profile(self) -> str:
+        return DeploymentTopology(
+            experience=self.experience_owner,
+            execution=self.execution_target,
+        ).profile
 
     @property
     def browser_auth_enabled(self) -> bool:

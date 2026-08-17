@@ -29,14 +29,8 @@ class AxonLLMIdentityStack(Stack):
         **kwargs,
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
-        physical_suffix = (
-            f"-{deployment_namespace}" if deployment_namespace else ""
-        )
-        removal_policy = (
-            RemovalPolicy.DESTROY
-            if deployment_namespace
-            else RemovalPolicy.RETAIN
-        )
+        physical_suffix = f"-{deployment_namespace}" if deployment_namespace else ""
+        removal_policy = RemovalPolicy.DESTROY if deployment_namespace else RemovalPolicy.RETAIN
         deletion_protection = not bool(deployment_namespace)
 
         endpoint_mode = CfnParameter(
@@ -45,10 +39,7 @@ class AxonLLMIdentityStack(Stack):
             type="String",
             default="custom-domain",
             allowed_values=["custom-domain", "cloudfront"],
-            description=(
-                "Control-plane endpoint architecture. Existing deployments "
-                "default to custom-domain."
-            ),
+            description=("Control-plane endpoint architecture. Existing deployments default to custom-domain."),
         )
         custom_domain_mode = CfnCondition(
             self,
@@ -66,25 +57,9 @@ class AxonLLMIdentityStack(Stack):
             max_length=63,
             allowed_pattern=r"^[a-z0-9](?:[a-z0-9-]{1,61}[a-z0-9])$",
             constraint_description=(
-                "must be 3-63 lowercase letters, numbers, or hyphens, "
-                "starting and ending with a letter or number"
+                "must be 3-63 lowercase letters, numbers, or hyphens, starting and ending with a letter or number"
             ),
-            description=(
-                "Globally unique Cognito managed-login domain prefix"
-            ),
-        )
-        oauth_callback_urls = CfnParameter(
-            self,
-            "OAuthCallbackUrls",
-            type="CommaDelimitedList",
-            allowed_pattern=r"^https://[^,\s#]+$",
-            constraint_description=(
-                "each callback must be an HTTPS URL without whitespace, "
-                "commas, or fragments"
-            ),
-            description=(
-                "Comma-separated OAuth authorization-code callback URLs"
-            ),
+            description=("Globally unique Cognito managed-login domain prefix"),
         )
         control_plane_domain_name = CfnParameter(
             self,
@@ -96,16 +71,10 @@ class AxonLLMIdentityStack(Stack):
                 r"^(?:|(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}"
                 r"[a-z0-9])?\.)+[a-z]{2,63})$"
             ),
-            constraint_description=(
-                "must be empty or a lowercase fully qualified DNS hostname"
-            ),
-            description=(
-                "Stable control-plane hostname used for the ALB OAuth callback"
-            ),
+            constraint_description=("must be empty or a lowercase fully qualified DNS hostname"),
+            description=("Stable control-plane hostname used for the ALB OAuth callback"),
         )
-        control_plane_domain_name.override_logical_id(
-            "ControlPlaneDomainName"
-        )
+        control_plane_domain_name.override_logical_id("ControlPlaneDomainName")
         control_plane_callback_url = Fn.join(
             "",
             [
@@ -124,28 +93,26 @@ class AxonLLMIdentityStack(Stack):
                 r"^[^@\s]+@(?:[a-z0-9](?:[a-z0-9-]{0,61}"
                 r"[a-z0-9])?\.)+[a-z]{2,63}$"
             ),
-            constraint_description=(
-                "must be a verified SES email address with a lowercase "
-                "fully qualified domain"
-            ),
-            description=(
-                "Verified SES sender used for Cognito invitations and recovery"
-            ),
+            constraint_description=("must be a verified SES email address with a lowercase fully qualified domain"),
+            description=("Verified SES sender used for Cognito invitations and recovery"),
         )
-        ses_verified_domain = CfnParameter(
+        # The logical ID is retained for setup-file compatibility. The value can
+        # be either a verified domain or the exact verified sender address.
+        ses_source_identity = CfnParameter(
             self,
             "SesVerifiedDomain",
             type="String",
             min_length=4,
-            max_length=253,
+            max_length=320,
             allowed_pattern=(
-                r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}"
+                r"^(?:[^@\s]+@)?(?:[a-z0-9](?:[a-z0-9-]{0,61}"
                 r"[a-z0-9])?\.)+[a-z]{2,63}$"
             ),
             constraint_description=(
-                "must be the lowercase SES-verified domain of SesFromEmail"
+                "must be either SesFromEmail exactly or its lowercase "
+                "SES-verified domain"
             ),
-            description="SES-verified domain used by the Cognito user pool",
+            description="SES-verified source identity used by the Cognito user pool",
         )
 
         user_pool = cognito.UserPool(
@@ -208,7 +175,7 @@ class AxonLLMIdentityStack(Stack):
             self.format_arn(
                 service="ses",
                 resource="identity",
-                resource_name=ses_verified_domain.value_as_string,
+                resource_name=ses_source_identity.value_as_string,
             ),
         )
 
@@ -220,19 +187,16 @@ class AxonLLMIdentityStack(Stack):
             )
             .with_custom_attributes("tenant_id", "project_id")
         )
-        writable_attributes = (
-            cognito.ClientAttributes().with_standard_attributes(email=True)
-        )
+        writable_attributes = cognito.ClientAttributes().with_standard_attributes(email=True)
         app_client = user_pool.add_client(
-            "PublicPkceClient",
-            user_pool_client_name=(
-                f"axonllm-agentcore-pkce{physical_suffix}"
-            ),
+            "RuntimeAudienceClient",
+            user_pool_client_name=(f"axonllm-agentcore-audience{physical_suffix}"),
             generate_secret=False,
             prevent_user_existence_errors=True,
             enable_token_revocation=True,
-            # The public client authenticates through authorization code plus
-            # S256 PKCE. Direct password and SRP flows stay disabled.
+            disable_o_auth=True,
+            # The public AxonLLM URL owns browser authentication. This client
+            # exists only as a stable Cognito audience for runtime checks.
             auth_flows=cognito.AuthFlow(),
             access_token_validity=Duration.minutes(15),
             id_token_validity=Duration.minutes(15),
@@ -240,29 +204,11 @@ class AxonLLMIdentityStack(Stack):
             refresh_token_rotation_grace_period=Duration.seconds(0),
             read_attributes=readable_attributes,
             write_attributes=writable_attributes,
-            supported_identity_providers=[
-                cognito.UserPoolClientIdentityProvider.COGNITO
-            ],
-            o_auth=cognito.OAuthSettings(
-                callback_urls=oauth_callback_urls.value_as_list,
-                flows=cognito.OAuthFlows(
-                    authorization_code_grant=True,
-                    implicit_code_grant=False,
-                    client_credentials=False,
-                ),
-                scopes=[
-                    cognito.OAuthScope.OPENID,
-                    cognito.OAuthScope.EMAIL,
-                    cognito.OAuthScope.PROFILE,
-                ],
-            ),
         )
         app_client.apply_removal_policy(removal_policy)
         certification_client = user_pool.add_client(
             "ConfidentialCertificationClient",
-            user_pool_client_name=(
-                f"axonllm-agentcore-certification{physical_suffix}"
-            ),
+            user_pool_client_name=(f"axonllm-agentcore-certification{physical_suffix}"),
             generate_secret=True,
             prevent_user_existence_errors=True,
             enable_token_revocation=True,
@@ -272,29 +218,15 @@ class AxonLLMIdentityStack(Stack):
             auth_flows=cognito.AuthFlow(
                 admin_user_password=True,
             ),
-            access_token_validity=(
-                Duration.hours(6)
-                if deployment_namespace
-                else Duration.minutes(15)
-            ),
-            id_token_validity=(
-                Duration.hours(6)
-                if deployment_namespace
-                else Duration.minutes(15)
-            ),
-            refresh_token_validity=(
-                Duration.hours(6)
-                if deployment_namespace
-                else Duration.hours(1)
-            ),
+            access_token_validity=(Duration.hours(6) if deployment_namespace else Duration.minutes(15)),
+            id_token_validity=(Duration.hours(6) if deployment_namespace else Duration.minutes(15)),
+            refresh_token_validity=(Duration.hours(6) if deployment_namespace else Duration.hours(1)),
             read_attributes=readable_attributes,
         )
         certification_client.apply_removal_policy(removal_policy)
         alb_client = user_pool.add_client(
             "ConfidentialAlbClient",
-            user_pool_client_name=(
-                f"axonllm-control-plane-alb{physical_suffix}"
-            ),
+            user_pool_client_name=(f"axonllm-control-plane-alb{physical_suffix}"),
             generate_secret=True,
             prevent_user_existence_errors=True,
             enable_token_revocation=True,
@@ -306,9 +238,7 @@ class AxonLLMIdentityStack(Stack):
             refresh_token_validity=Duration.hours(8),
             refresh_token_rotation_grace_period=Duration.seconds(0),
             read_attributes=readable_attributes,
-            supported_identity_providers=[
-                cognito.UserPoolClientIdentityProvider.COGNITO
-            ],
+            supported_identity_providers=[cognito.UserPoolClientIdentityProvider.COGNITO],
             o_auth=cognito.OAuthSettings(
                 callback_urls=[control_plane_callback_url],
                 flows=cognito.OAuthFlows(
@@ -334,9 +264,7 @@ class AxonLLMIdentityStack(Stack):
             cognito_domain=cognito.CognitoDomainOptions(
                 domain_prefix=hosted_ui_domain_prefix.value_as_string,
             ),
-            managed_login_version=(
-                cognito.ManagedLoginVersion.CLASSIC_HOSTED_UI
-            ),
+            managed_login_version=(cognito.ManagedLoginVersion.CLASSIC_HOSTED_UI),
         )
         hosted_ui_domain.apply_removal_policy(removal_policy)
 
@@ -392,7 +320,7 @@ class AxonLLMIdentityStack(Stack):
             self,
             "OidcClientId",
             value=app_client.user_pool_client_id,
-            description="Public authorization-code/PKCE client ID",
+            description="Cognito audience client ID used by AgentCore",
         )
         CfnOutput(
             self,
@@ -403,15 +331,9 @@ class AxonLLMIdentityStack(Stack):
         CfnOutput(
             self,
             "AlbClientId",
-            value=Fn.condition_if(
-                custom_domain_mode.logical_id,
-                alb_client.user_pool_client_id,
-                "",
-            ).to_string(),
-            description=(
-                "Confidential authorization-code client used by the "
-                "control-plane ALB"
-            ),
+            value=alb_client.user_pool_client_id,
+            condition=custom_domain_mode,
+            description=("Confidential authorization-code client used by the control-plane ALB"),
             export_name=Fn.join(
                 ":",
                 [self.stack_name, "AlbClientId"],
@@ -421,22 +343,14 @@ class AxonLLMIdentityStack(Stack):
             self,
             "CertificationClientId",
             value=certification_client.user_pool_client_id,
-            description=(
-                "Confidential client used only for fresh launch-certification "
-                "tokens"
-            ),
+            description=("Confidential client used only for fresh launch-certification tokens"),
         )
         CfnOutput(
             self,
             "ControlPlaneDomainName",
-            value=Fn.condition_if(
-                custom_domain_mode.logical_id,
-                control_plane_domain_name.value_as_string,
-                "",
-            ).to_string(),
-            description=(
-                "Stable hostname configured on the confidential ALB client"
-            ),
+            value=control_plane_domain_name.value_as_string,
+            condition=custom_domain_mode,
+            description=("Stable hostname configured on the confidential ALB client"),
             export_name=Fn.join(
                 ":",
                 [self.stack_name, "ControlPlaneDomainName"],
