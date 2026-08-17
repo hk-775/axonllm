@@ -68,6 +68,14 @@ def test_foundation_deployment_requires_exact_bounded_bootstrap():
         maxsplit=1,
     )[0]
     assert 'contains("hnb659fds")' in hardened_template_check
+    assert (
+        'infra_cfn_lint="${RUNNER_TEMP}/foundation-infra-venv/bin/cfn-lint"'
+        in hardened_template_check
+    )
+    assert '"${infra_cfn_lint}" -i W3005 -t "${template}"' in (
+        hardened_template_check
+    )
+    assert "-m cfnlint" not in hardened_template_check
 
 
 def test_foundation_deployment_preserves_every_live_parameter():
