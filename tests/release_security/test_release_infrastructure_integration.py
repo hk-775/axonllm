@@ -103,7 +103,7 @@ def test_runtime_dockerfiles_use_architecture_specific_digest_pins() -> None:
 
     assert (
         "FROM docker.io/library/python:3.12-slim@sha256:"
-        "d657ab0ade19f404a6ccc883ab399540de667aff751748ce23c07330c5a89e64"
+        "876416ecde9aca2bcc90e1fb0c7a9500bbf749f5788b70f82d4c5a5c2357f8b4"
     ) in fargate
     assert (
         "COPY --from=ghcr.io/astral-sh/uv:0.10.7@sha256:"
@@ -128,6 +128,9 @@ def test_runtime_dockerfiles_use_architecture_specific_digest_pins() -> None:
         external_sources = [source for source in image_sources if "/" in source]
         assert external_sources
         assert all("@sha256:" in source for source in external_sources)
+
+    assert "apt-get upgrade -y --no-install-recommends" in fargate
+    assert "rm -rf /var/lib/apt/lists/*" in fargate
 
 
 def test_release_builds_scans_kms_signs_and_stores_both_images() -> None:
