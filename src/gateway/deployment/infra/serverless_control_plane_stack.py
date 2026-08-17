@@ -339,12 +339,27 @@ class AxonLLMServerlessControlPlaneStack(Stack):
             encryption_key=artifact_key,
         )
 
+        site_key = kms.Key(
+            self,
+            "StaticSiteKey",
+            alias=(
+                f"alias/axonllm/serverless-static-site{physical_suffix}"
+            ),
+            description=(
+                "Encrypts AxonLLM serverless static-site objects"
+            ),
+            enable_key_rotation=True,
+            removal_policy=removal_policy,
+            pending_window=Duration.days(30),
+        )
         site_bucket = s3.Bucket(
             self,
             "StaticSiteBucket",
             auto_delete_objects=bool(deployment_namespace),
             block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
-            encryption=s3.BucketEncryption.S3_MANAGED,
+            bucket_key_enabled=True,
+            encryption=s3.BucketEncryption.KMS,
+            encryption_key=site_key,
             enforce_ssl=True,
             object_ownership=s3.ObjectOwnership.BUCKET_OWNER_ENFORCED,
             removal_policy=removal_policy,
@@ -889,6 +904,7 @@ class AxonLLMServerlessControlPlaneStack(Stack):
             )
         )
         artifact_key.grant_decrypt(static_deployer)
+        site_key.grant_encrypt_decrypt(static_deployer)
         static_deployer.add_to_role_policy(
             iam.PolicyStatement(
                 sid="ListPrivateStaticSite",

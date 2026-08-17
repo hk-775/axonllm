@@ -284,6 +284,59 @@ def test_private_site_bucket_is_readable_only_by_exact_distribution(
     assert distribution_id in json.dumps(statement["Condition"])
 
 
+def test_static_site_uses_a_rotating_customer_managed_key(
+    serverless_control_template,
+) -> None:
+    site_bucket_id, site_bucket = next(
+        item
+        for item in _resources(
+            serverless_control_template,
+            "AWS::S3::Bucket",
+        )
+        if item[0].startswith("StaticSiteBucket")
+    )
+    key_id, key = _one(
+        serverless_control_template,
+        "AWS::KMS::Key",
+    )
+    encryption = site_bucket["Properties"]["BucketEncryption"][
+        "ServerSideEncryptionConfiguration"
+    ]
+
+    assert encryption == [
+        {
+            "BucketKeyEnabled": True,
+            "ServerSideEncryptionByDefault": {
+                "KMSMasterKeyID": {
+                    "Fn::GetAtt": [
+                        key_id,
+                        "Arn",
+                    ]
+                },
+                "SSEAlgorithm": "aws:kms",
+            },
+        }
+    ]
+    assert key["Properties"]["Description"] == (
+        "Encrypts AxonLLM serverless static-site objects"
+    )
+    assert key["Properties"]["EnableKeyRotation"] is True
+    cloudfront_decrypt = next(
+        statement
+        for statement in key["Properties"]["KeyPolicy"]["Statement"]
+        if statement.get("Principal") == {
+            "Service": "cloudfront.amazonaws.com"
+        }
+    )
+    source_arn = cloudfront_decrypt["Condition"]["ArnLike"][
+        "AWS:SourceArn"
+    ]["Fn::Join"][1]
+    assert cloudfront_decrypt["Action"] == "kms:Decrypt"
+    assert {"Ref": "AWS::AccountId"} in source_arn
+    assert source_arn[-1] == ":distribution/*"
+    assert site_bucket_id
+
+
 def test_external_state_is_parameterized_without_imports_or_state_ownership(
     serverless_control_template,
 ) -> None:
@@ -292,7 +345,6 @@ def test_external_state_is_parameterized_without_imports_or_state_ownership(
         "AWS::Backup::BackupPlan",
         "AWS::Backup::BackupVault",
         "AWS::DynamoDB::Table",
-        "AWS::KMS::Key",
         "AWS::SNS::Topic",
         "AWS::SQS::Queue",
     }

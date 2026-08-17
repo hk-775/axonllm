@@ -269,6 +269,7 @@ def test_trivy_exception_is_narrow_and_expires() -> None:
                 "id": "AWS-0013",
                 "paths": [
                     "AxonLLMControlPlaneStack.template.json",
+                    "AxonLLMServerlessControlPlaneStack.template.json",
                 ],
                 "statement": (
                     "The AWS-managed cloudfront.net certificate does not "

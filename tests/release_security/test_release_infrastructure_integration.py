@@ -143,6 +143,10 @@ def test_runtime_dockerfiles_use_architecture_specific_digest_pins() -> None:
         assert external_sources
         assert all("@sha256:" in source for source in external_sources)
 
+    for dockerfile in (fargate, agentcore, standalone):
+        assert "apt-get upgrade -y --no-install-recommends" in dockerfile
+        assert "rm -rf /var/lib/apt/lists/*" in dockerfile
+
 
 def test_standalone_image_defaults_are_fail_closed() -> None:
     dockerfiles = (
