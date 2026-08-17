@@ -420,7 +420,8 @@ jobs:
           receipt="${SERVERLESS_ARTIFACT_DIR}/serverless-control-artifacts.json"
           control_name=$(jq -er '.artifacts.controlApi.fileName' "${receipt}")
           static_name=$(jq -er '.artifacts.staticAssets.fileName' "${receipt}")
-          mkdir -m 0700 -p \
+          mkdir -m 0700 "${SERVERLESS_SCAN_DIR}"
+          mkdir -m 0700 \
             "${SERVERLESS_SCAN_DIR}/control" \
             "${SERVERLESS_SCAN_DIR}/static"
           unzip -q \

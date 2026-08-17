@@ -252,12 +252,14 @@ jobs:
           [[ "${agentcore_digest}" =~ ^sha256:[0-9a-f]{64}$ ]]
           [[ "${standalone_amd64_digest}" == "${fargate_digest}" ]]
           [[ "${standalone_arm64_digest}" =~ ^sha256:[0-9a-f]{64}$ ]]
-          printf 'fargate_digest=%s\n' "${fargate_digest}" >>"${GITHUB_OUTPUT}"
-          printf 'agentcore_digest=%s\n' "${agentcore_digest}" >>"${GITHUB_OUTPUT}"
-          printf 'standalone_amd64_digest=%s\n' \
-            "${standalone_amd64_digest}" >>"${GITHUB_OUTPUT}"
-          printf 'standalone_arm64_digest=%s\n' \
-            "${standalone_arm64_digest}" >>"${GITHUB_OUTPUT}"
+          {
+            printf 'fargate_digest=%s\n' "${fargate_digest}"
+            printf 'agentcore_digest=%s\n' "${agentcore_digest}"
+            printf 'standalone_amd64_digest=%s\n' \
+              "${standalone_amd64_digest}"
+            printf 'standalone_arm64_digest=%s\n' \
+              "${standalone_arm64_digest}"
+          } >>"${GITHUB_OUTPUT}"
 
       - name: Configure release-signing AWS credentials
         uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3

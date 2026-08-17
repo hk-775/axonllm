@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.7@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e
-FROM docker.io/library/python:3.12-slim@sha256:adbc7c33e0abc183557d1d14ce5eb5d261aaadff5451c81a8db636b3ebefcdf6 AS builder
+FROM docker.io/library/python:3.12-slim@sha256:0568e6111802e74c03e8dda76565cdf4b88881d77de0d9b769846e9dfcb8d80a AS builder
 
 COPY --from=ghcr.io/astral-sh/uv:0.10.7@sha256:5fe7b2b0499a485ee86e1e0d2154e1556a08dffeb5f72b204895af5212a2069c /uv /uvx /bin/
 
