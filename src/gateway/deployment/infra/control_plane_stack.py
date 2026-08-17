@@ -745,11 +745,18 @@ class AxonLLMControlPlaneStack(Stack):
             self,
             "DeploymentTransitionId",
             type="String",
-            default="",
+            default="unbound",
             max_length=64,
-            allowed_pattern=r"^$|^[0-9a-f]{64}$",
-            constraint_description=("must be blank or the signed 64-character deployment transition identifier"),
-            description=("Signed production transition that owns this exact control-plane deployment"),
+            allowed_pattern=r"^(?:unbound|[0-9a-f]{64})$",
+            constraint_description=(
+                "must be 'unbound' or the signed 64-character deployment "
+                "transition identifier"
+            ),
+            description=(
+                "Signed production transition that owns this control-plane "
+                "deployment, or 'unbound' for a reviewed first deployment "
+                "outside the protected promotion workflow"
+            ),
         )
         Tags.of(self).add(
             "AxonLLMDeploymentTransitionId",
