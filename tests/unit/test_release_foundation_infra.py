@@ -2152,7 +2152,7 @@ def test_foundation_uses_dedicated_bounded_cdk_domain(
     assert len(inspect_resources) == 5
 
 
-def test_foundation_deployer_describes_only_reviewed_change_sets(
+def test_foundation_deployer_describes_change_sets_only_on_foundation_stack(
     synthesized_template,
 ):
     deployer = _role_statements(
@@ -2174,11 +2174,7 @@ def test_foundation_deployer_describes_only_reviewed_change_sets(
     assert _literal_parts(resources[0]).endswith(
         ":stack/AxonLLMReleaseFoundationStack/*"
     )
-    assert inspect["Condition"] == {
-        "StringLike": {
-            "cloudformation:ChangeSetName": "AxonLLMReleaseFoundation-*",
-        }
-    }
+    assert "Condition" not in inspect
 
 
 def test_foundation_outputs_all_operator_inputs(synthesized_template):
