@@ -912,6 +912,26 @@ class AxonLLMReleaseFoundationStack(Stack):
         )
         role.add_to_policy(
             iam.PolicyStatement(
+                sid="InspectReviewedReleaseFoundationChangeSet",
+                actions=["cloudformation:DescribeChangeSet"],
+                resources=[
+                    self.format_arn(
+                        service="cloudformation",
+                        resource="stack",
+                        resource_name="AxonLLMReleaseFoundationStack/*",
+                    )
+                ],
+                conditions={
+                    "StringLike": {
+                        "cloudformation:ChangeSetName": (
+                            "AxonLLMReleaseFoundation-*"
+                        )
+                    }
+                },
+            )
+        )
+        role.add_to_policy(
+            iam.PolicyStatement(
                 sid="ReadReleaseFoundationBootstrapVersion",
                 actions=["ssm:GetParameter"],
                 resources=[
