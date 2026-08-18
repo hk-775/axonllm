@@ -18,6 +18,10 @@ _PACKAGED_INFRA = _REPO / "src" / "gateway" / "deployment" / "infra"
 _STACK = _REPO / "src" / "gateway" / "deployment" / "infra" / "agentcore_stack.py"
 _INFRA_PYTHON = _INFRA / ".venv" / "bin" / "python"
 _DOCKERFILE = _INFRA / "agentcore-image" / "Dockerfile"
+_SUPPORTED_AZS = (
+    _PACKAGED_INFRA
+    / "agentcore-supported-availability-zones-v1.json"
+)
 _REQUIRED_PARAMETERS = {
     "AlarmNotificationEmail",
     "CandidateEndpointName",
@@ -206,6 +210,42 @@ def _synthesize_external_template(
     return json.loads((out_dir / "AxonLLMAgentCoreStack-external.template.json").read_text(encoding="utf-8"))
 
 
+def _synthesize_agentcore_with_zone_ids(
+    *,
+    work_dir: Path,
+    zone_ids: list[str],
+) -> tuple[subprocess.CompletedProcess[str], Path]:
+    out_dir = work_dir / "cdk.out"
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "CDK_CONTEXT_JSON": json.dumps(
+                {
+                    "agentcore_availability_zone_ids": zone_ids,
+                    "deployment_target": "agentcore",
+                    "region": "us-east-1",
+                }
+            ),
+            "CDK_OUTDIR": str(out_dir),
+            "JSII_RUNTIME_PACKAGE_CACHE_ROOT": str(
+                work_dir / "jsii-cache"
+            ),
+            "PYTHONPYCACHEPREFIX": str(work_dir / "pycache"),
+        }
+    )
+    completed = subprocess.run(
+        [str(_INFRA_PYTHON), "app.py"],
+        cwd=_INFRA,
+        env=environment,
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        timeout=120,
+    )
+    return completed, out_dir
+
+
 @pytest.fixture(scope="module")
 def external_synthesized_template(
     tmp_path_factory: pytest.TempPathFactory,
@@ -296,9 +336,30 @@ def test_runtime_uses_two_private_azs_and_explicit_security_groups(
     synthesized_template,
 ):
     assert len(_resources(synthesized_template, "AWS::EC2::NatGateway")) == 2
-    subnets = _resources(synthesized_template, "AWS::EC2::Subnet")
+    subnets_by_id = {
+        logical_id: resource
+        for logical_id, resource in synthesized_template[
+            "Resources"
+        ].items()
+        if resource["Type"] == "AWS::EC2::Subnet"
+    }
+    assert set(subnets_by_id) == {
+        "VpcPublicSubnet1Subnet5C2D37C4",
+        "VpcPublicSubnet2Subnet691E08A3",
+        "VpcRuntimeSubnet1SubnetE207618E",
+        "VpcRuntimeSubnet2Subnet0DEB747D",
+    }
+    subnets = list(subnets_by_id.values())
     assert len(subnets) == 4
     assert all(subnet["Properties"]["MapPublicIpOnLaunch"] is False for subnet in subnets)
+    assert all("AvailabilityZone" not in subnet["Properties"] for subnet in subnets)
+    zone_ids = [
+        subnet["Properties"]["AvailabilityZoneId"]
+        for subnet in subnets
+    ]
+    assert set(zone_ids) == {"use1-az1", "use1-az2"}
+    assert zone_ids.count("use1-az1") == 2
+    assert zone_ids.count("use1-az2") == 2
 
     runtime = _one_resource(
         synthesized_template,
@@ -311,6 +372,61 @@ def test_runtime_uses_two_private_azs_and_explicit_security_groups(
     assert config["SecurityGroups"][0]["Fn::GetAtt"][0].startswith("RuntimeSecurityGroup")
     assert len(config["Subnets"]) == 2
     assert all(subnet["Ref"].startswith("VpcRuntimeSubnet") for subnet in config["Subnets"])
+
+
+def test_agentcore_supported_availability_zone_document_is_versioned():
+    document = json.loads(_SUPPORTED_AZS.read_text(encoding="utf-8"))
+    assert document["schema"] == (
+        "axonllm.agentcore-supported-availability-zones/v1"
+    )
+    assert document["regions"]["us-east-1"] == [
+        "use1-az1",
+        "use1-az2",
+        "use1-az4",
+    ]
+
+
+def test_agentcore_availability_zone_context_override(
+    tmp_path,
+):
+    if not _INFRA_PYTHON.is_file():
+        pytest.skip("infra/.venv is required for CDK synthesis tests")
+
+    completed, out_dir = _synthesize_agentcore_with_zone_ids(
+        work_dir=tmp_path,
+        zone_ids=["use1-az4", "use1-az1"],
+    )
+    assert completed.returncode == 0, completed.stdout
+    template = json.loads(
+        (
+            out_dir / "AxonLLMAgentCoreStack.template.json"
+        ).read_text(encoding="utf-8")
+    )
+    subnets = _resources(template, "AWS::EC2::Subnet")
+    zone_ids = [
+        subnet["Properties"]["AvailabilityZoneId"]
+        for subnet in subnets
+    ]
+    assert set(zone_ids) == {"use1-az4", "use1-az1"}
+    assert zone_ids.count("use1-az4") == 2
+    assert zone_ids.count("use1-az1") == 2
+
+
+def test_agentcore_rejects_unsupported_availability_zone_id(
+    tmp_path,
+):
+    if not _INFRA_PYTHON.is_file():
+        pytest.skip("infra/.venv is required for CDK synthesis tests")
+
+    completed, _ = _synthesize_agentcore_with_zone_ids(
+        work_dir=tmp_path,
+        zone_ids=["use1-az4", "use1-az6"],
+    )
+    assert completed.returncode != 0
+    assert (
+        "unsupported AgentCore Availability Zone IDs: use1-az6"
+        in completed.stdout
+    )
 
 
 def test_endpoint_ingress_is_only_from_the_runtime_security_group(

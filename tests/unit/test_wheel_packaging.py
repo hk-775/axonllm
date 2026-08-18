@@ -114,6 +114,10 @@ def test_clean_wheel_launchers_and_assets_work_outside_repository(tmp_path):
         "src/gateway/admin/static/index.html",
         "src/gateway/chat/static/index.html",
         "src/gateway/deployment/infra/app.py",
+        (
+            "src/gateway/deployment/infra/"
+            "agentcore-supported-availability-zones-v1.json"
+        ),
         "src/gateway/deployment/infra/cdk.json",
         "src/gateway/deployment/infra/requirements.txt",
     }

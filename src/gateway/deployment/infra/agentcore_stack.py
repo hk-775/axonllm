@@ -1,6 +1,7 @@
 """Production Bedrock AgentCore deployment for the AxonLLM agent entrypoint."""
 
 import json
+from pathlib import Path
 import re
 
 from aws_cdk import (
@@ -33,6 +34,9 @@ from constructs import Construct
 
 
 _AGENTCORE_MAX_SESSION_SECONDS = 4 * 60 * 60
+_AGENTCORE_AVAILABILITY_ZONE_IDS_CONTEXT = "agentcore_availability_zone_ids"
+_AGENTCORE_SUPPORTED_AZS_FILE = "agentcore-supported-availability-zones-v1.json"
+_AGENTCORE_VPC_ZONE_COUNT = 2
 _FACADE_IDENTITY_HEADER = "X-Amzn-Bedrock-AgentCore-Runtime-Custom-Identity-Token"
 _RECOVERY_PROPAGATION_MARGIN_SECONDS = 5 * 60
 _RECOVERY_MIN_QUIESCENCE_SECONDS = _AGENTCORE_MAX_SESSION_SECONDS + _RECOVERY_PROPAGATION_MARGIN_SECONDS
@@ -726,10 +730,11 @@ class AxonLLMAgentCoreStack(Stack):
             resource_name=image_repository_name,
         )
 
+        availability_zone_ids = _agentcore_availability_zone_ids(self)
         vpc = ec2.Vpc(
             self,
             "Vpc",
-            max_azs=2,
+            max_azs=_AGENTCORE_VPC_ZONE_COUNT,
             nat_gateways=2,
             restrict_default_security_group=True,
             subnet_configuration=[
@@ -745,6 +750,10 @@ class AxonLLMAgentCoreStack(Stack):
                     cidr_mask=24,
                 ),
             ],
+        )
+        _pin_vpc_subnets_to_availability_zone_ids(
+            vpc,
+            availability_zone_ids,
         )
         runtime_security_group = ec2.SecurityGroup(
             self,
@@ -2001,3 +2010,80 @@ class AxonLLMAgentCoreStack(Stack):
             "RuntimeImageUri",
             value=verified_image_uri.value_as_string,
         )
+
+
+def _agentcore_availability_zone_ids(
+    scope: Construct,
+) -> tuple[str, ...]:
+    document = json.loads(
+        Path(__file__)
+        .with_name(_AGENTCORE_SUPPORTED_AZS_FILE)
+        .read_text(encoding="utf-8")
+    )
+    supported = document.get("regions", {}).get(Stack.of(scope).region)
+    if (
+        not isinstance(supported, list)
+        or len(supported) < _AGENTCORE_VPC_ZONE_COUNT
+        or any(not isinstance(item, str) or not item for item in supported)
+        or len(set(supported)) != len(supported)
+    ):
+        raise ValueError(
+            "AgentCore VPC networking is not supported in "
+            f"{Stack.of(scope).region}"
+        )
+
+    configured = scope.node.try_get_context(
+        _AGENTCORE_AVAILABILITY_ZONE_IDS_CONTEXT
+    )
+    if configured is None:
+        selected = supported[:_AGENTCORE_VPC_ZONE_COUNT]
+    else:
+        if (
+            not isinstance(configured, list)
+            or len(configured) != _AGENTCORE_VPC_ZONE_COUNT
+            or any(
+                not isinstance(item, str) or not item
+                for item in configured
+            )
+            or len(set(configured)) != len(configured)
+        ):
+            raise ValueError(
+                "agentcore_availability_zone_ids must contain exactly "
+                "two distinct Availability Zone IDs"
+            )
+        selected = configured
+
+    unsupported = sorted(set(selected).difference(supported))
+    if unsupported:
+        raise ValueError(
+            "agentcore_availability_zone_ids contains unsupported "
+            "AgentCore Availability Zone IDs: "
+            + ", ".join(unsupported)
+        )
+    return tuple(selected)
+
+
+def _pin_vpc_subnets_to_availability_zone_ids(
+    vpc: ec2.Vpc,
+    availability_zone_ids: tuple[str, ...],
+) -> None:
+    for subnets in (vpc.public_subnets, vpc.private_subnets):
+        if len(subnets) != len(availability_zone_ids):
+            raise ValueError(
+                "AgentCore VPC subnet count must match the selected "
+                "Availability Zone IDs"
+            )
+        for subnet, availability_zone_id in zip(
+            subnets,
+            availability_zone_ids,
+            strict=True,
+        ):
+            cfn_subnet = subnet.node.default_child
+            if not isinstance(cfn_subnet, ec2.CfnSubnet):
+                raise TypeError(
+                    "AgentCore VPC subnet must use AWS::EC2::Subnet"
+                )
+            # CDK's Vpc L2 selects account-local AZ names. AgentCore validates
+            # the globally stable AZ ID instead, so pin the underlying subnet.
+            cfn_subnet.availability_zone = None
+            cfn_subnet.availability_zone_id = availability_zone_id
