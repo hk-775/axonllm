@@ -200,6 +200,35 @@ def test_trivy_exception_is_narrow_and_expires() -> None:
                 "expired_at": "2027-08-07T00:00:00Z",
             },
             {
+                "id": "AWS-0095",
+                "paths": [
+                    "AxonLLMStack.template.json",
+                    "AxonLLMAgentCoreStack.template.json",
+                ],
+                "statement": (
+                    "CloudWatch alarm delivery to an encrypted SNS topic "
+                    "requires a customer-managed KMS key; this facade profile "
+                    "intentionally forbids customer-managed runtime KMS keys, "
+                    "and the topic policy restricts publishing to "
+                    "same-account CloudWatch alarms."
+                ),
+                "expired_at": "2027-08-18T00:00:00Z",
+            },
+            {
+                "id": "AWS-0096",
+                "paths": [
+                    "AxonLLMStack.template.json",
+                    "AxonLLMAgentCoreStack.template.json",
+                ],
+                "statement": (
+                    "Trivy 0.72 does not recognize the CloudFormation "
+                    "SqsManagedSseEnabled property; synthesis tests require it "
+                    "to be true for both queues and forbid customer-managed "
+                    "queue keys."
+                ),
+                "expired_at": "2027-02-18T00:00:00Z",
+            },
+            {
                 "id": "AWS-0035",
                 "paths": [
                     "AxonLLMStack.template.json",
