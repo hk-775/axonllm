@@ -1723,6 +1723,63 @@ def test_bootstrap_execution_policy_parts_fit_iam_limit_and_preserve_actions(
     assert sum(len(part["Statement"]) for part in parts) == (len(complete["Statement"]) + 1)
 
 
+@pytest.mark.parametrize(
+    ("qualifier", "stack_names"),
+    (
+        (
+            "axprod",
+            (
+                "AxonLLMAgentCoreStack",
+                "AxonLLMControlPlaneStack",
+            ),
+        ),
+        (
+            "axqual",
+            (
+                "AxonLLMAgentCoreStack-managed",
+                "AxonLLMControlPlaneStack-managed",
+            ),
+        ),
+        (
+            "axext",
+            (
+                "AxonLLMAgentCoreStack-external",
+                "AxonLLMAgentCoreStack-external-oidc",
+            ),
+        ),
+    ),
+)
+def test_bootstrap_custom_resource_invocation_is_stack_and_region_bounded(
+    qualifier,
+    stack_names,
+):
+    document = bootstrap_policy.policy_document(
+        partition="aws",
+        account_id="123456789012",
+        region="us-east-1",
+        qualifier=qualifier,
+    )
+    statement = next(item for item in document["Statement"] if item["Sid"] == "ManageBoundedCdkProviderRoles")
+
+    assert set(statement["Action"]) == {
+        "iam:PutRolePolicy",
+        "iam:TagRole",
+        "iam:UntagRole",
+        "iam:UpdateRole",
+        "iam:UpdateRoleDescription",
+        "lambda:InvokeFunction",
+    }
+    function_resources = [
+        resource for resource in statement["Resource"] if ":lambda:" in resource
+    ]
+    assert function_resources == [
+        f"arn:aws:lambda:us-east-1:123456789012:function:{stack_name}-*"
+        for stack_name in stack_names
+    ]
+    assert all(resource != "*" for resource in statement["Resource"])
+    assert "Condition" not in statement
+
+
 def test_bootstrap_trust_domains_have_distinct_qualifiers_and_boundaries():
     assert bootstrap_policy.qualifier_for_namespace(None) == "axprod"
     assert bootstrap_policy.qualifier_for_namespace("") == "axprod"

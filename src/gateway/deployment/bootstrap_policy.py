@@ -487,6 +487,34 @@ def _untagged_cdk_provider_role_resources(
     return sorted({(f"arn:{partition}:iam::{account_id}:role/{stack_name[:25]}-Custom*") for stack_name in stack_names})
 
 
+def _cdk_custom_resource_function_resources(
+    *,
+    partition: str,
+    account_id: str,
+    region: str,
+    qualifier: str,
+) -> list[str]:
+    if qualifier == PRODUCTION_QUALIFIER:
+        stack_names = (
+            "AxonLLMAgentCoreStack",
+            "AxonLLMControlPlaneStack",
+        )
+    elif qualifier == EXTERNAL_QUALIFIER:
+        stack_names = (
+            "AxonLLMAgentCoreStack-external",
+            "AxonLLMAgentCoreStack-external-oidc",
+        )
+    else:
+        stack_names = (
+            "AxonLLMAgentCoreStack-managed",
+            "AxonLLMControlPlaneStack-managed",
+        )
+    return [
+        f"arn:{partition}:lambda:{region}:{account_id}:function:{stack_name}-*"
+        for stack_name in stack_names
+    ]
+
+
 def boundary_document(
     *,
     partition: str,
@@ -688,6 +716,12 @@ def policy_document(
         account_id=account_id,
         qualifier=qualifier,
     )
+    custom_resource_functions = _cdk_custom_resource_function_resources(
+        partition=partition,
+        account_id=account_id,
+        region=region,
+        qualifier=qualifier,
+    )
     role_lifecycle_resources = role_resources
     approved_managed_policy = f"arn:{partition}:iam::aws:{_APPROVED_MANAGED_ROLE_POLICY}"
     return {
@@ -801,8 +835,14 @@ def policy_document(
             {
                 "Sid": "ManageBoundedCdkProviderRoles",
                 "Effect": "Allow",
-                "Action": list(_IAM_ROLE_MANAGEMENT_ACTIONS),
-                "Resource": untagged_provider_roles,
+                "Action": [
+                    *_IAM_ROLE_MANAGEMENT_ACTIONS,
+                    "lambda:InvokeFunction",
+                ],
+                "Resource": [
+                    *untagged_provider_roles,
+                    *custom_resource_functions,
+                ],
             },
             {
                 "Sid": "DenyChangingApplicationTag",
