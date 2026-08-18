@@ -452,6 +452,7 @@ _TRANSITION_RUN_PATTERN = re.compile(r"^[1-9][0-9]*$")
 _TRANSITION_COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 _TRANSITION_CHANGE_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{2,127}$")
 _TRANSITION_ID_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+_UNBOUND_DEPLOYMENT_TRANSITION_ID = "unbound"
 CommandRunner = Callable[[list[str], Path], None]
 
 
@@ -1972,7 +1973,7 @@ def _control_plane_parameters(
     primary_state_table_name: str,
     runtime_state_table_name: str = "",
     recovery_approval_id: str = "",
-    deployment_transition_id: str = "",
+    deployment_transition_id: str = _UNBOUND_DEPLOYMENT_TRANSITION_ID,
     deployment_namespace: str | None = None,
     rehearsal_control_table_arn: str | None = None,
 ) -> dict[str, str]:
@@ -2040,7 +2041,7 @@ def control_plane_deploy_command(
     assume_yes: bool,
     runtime_state_table_name: str = "",
     recovery_approval_id: str = "",
-    deployment_transition_id: str = "",
+    deployment_transition_id: str = _UNBOUND_DEPLOYMENT_TRANSITION_ID,
     deployment_namespace: str | None = None,
     rehearsal_control_table_arn: str | None = None,
 ) -> list[str]:
@@ -4130,13 +4131,21 @@ def deploy_control_plane(
         or _production_runtime_version(runtime_outputs) != metadata["candidateRuntimeVersion"]
     ):
         raise AgentCoreDeploymentError("production runtime does not match the prepared transition")
-    transition = metadata.get("transition")
-    deployment_transition_id = transition.get("transitionId") if isinstance(transition, dict) else ""
-    if metadata.get("schemaVersion") == 3 and (
-        not isinstance(deployment_transition_id, str)
-        or _TRANSITION_ID_PATTERN.fullmatch(deployment_transition_id) is None
-    ):
-        raise AgentCoreDeploymentError("promotion metadata has no valid deployment transition owner")
+    deployment_transition_id = _UNBOUND_DEPLOYMENT_TRANSITION_ID
+    if metadata.get("schemaVersion") == 3:
+        transition = metadata.get("transition")
+        deployment_transition_id = (
+            transition.get("transitionId")
+            if isinstance(transition, dict)
+            else None
+        )
+        if (
+            not isinstance(deployment_transition_id, str)
+            or _TRANSITION_ID_PATTERN.fullmatch(deployment_transition_id) is None
+        ):
+            raise AgentCoreDeploymentError(
+                "promotion metadata has no valid deployment transition owner"
+            )
     command_inputs = _control_plane_command_inputs(
         config,
         runtime_outputs,
