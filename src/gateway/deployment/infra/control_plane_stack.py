@@ -2051,45 +2051,57 @@ class AxonLLMControlPlaneStack(Stack):
         cfn_recovery_deny_policy.add_dependency(recovery_guard_resource)
         cfn_recovery_transaction_deny_policy.add_dependency(recovery_guard_resource)
 
+        launch_task_role_arns: list[str] = []
         launch_task_principals: list[iam.IPrincipal] = []
         launch_execution_principal: iam.IPrincipal | None = None
         if deployment_namespace:
 
-            def role_principal(role_name: str) -> iam.ArnPrincipal:
-                return iam.ArnPrincipal(
-                    self.format_arn(
-                        service="iam",
-                        region="",
-                        resource="role",
-                        resource_name=role_name,
-                    )
+            def role_arn(role_name: str) -> str:
+                return self.format_arn(
+                    service="iam",
+                    region="",
+                    resource="role",
+                    resource_name=role_name,
                 )
 
+            launch_task_role_arns = [
+                role_arn(_LAUNCH_ACTION_ROLE_NAME),
+                role_arn(_LAUNCH_CLEANUP_ROLE_NAME),
+            ]
             launch_task_principals = [
-                role_principal(_LAUNCH_ACTION_ROLE_NAME),
-                role_principal(_LAUNCH_CLEANUP_ROLE_NAME),
+                iam.ArnPrincipal(arn) for arn in launch_task_role_arns
             ]
             launch_execution_principal = launch_worker_execution_role
 
         dynamodb_endpoint.add_to_policy(
             iam.PolicyStatement(
-                principals=[task_role],
+                principals=[iam.AnyPrincipal()],
                 actions=_DYNAMODB_ACTIONS,
                 resources=[
                     selected_state_table_arn,
                     f"{selected_state_table_arn}/index/*",
                 ],
+                conditions={
+                    "ArnEquals": {
+                        "aws:PrincipalArn": task_role.role_arn,
+                    }
+                },
             )
         )
         if rehearsal_control_table_arn is not None:
             dynamodb_endpoint.add_to_policy(
                 iam.PolicyStatement(
-                    principals=[task_role],
+                    principals=[iam.AnyPrincipal()],
                     actions=[
                         "dynamodb:GetItem",
                         "dynamodb:PutItem",
                     ],
                     resources=[rehearsal_control_table_arn.value_as_string],
+                    conditions={
+                        "ArnEquals": {
+                            "aws:PrincipalArn": task_role.role_arn,
+                        }
+                    },
                 )
             )
         s3_endpoint.add_to_policy(
@@ -2224,7 +2236,7 @@ class AxonLLMControlPlaneStack(Stack):
 
             dynamodb_endpoint.add_to_policy(
                 iam.PolicyStatement(
-                    principals=launch_task_principals,
+                    principals=[iam.AnyPrincipal()],
                     actions=_LAUNCH_WORKER_DYNAMODB_ACTIONS,
                     resources=[
                         launch_state_table_arn,
@@ -2234,6 +2246,11 @@ class AxonLLMControlPlaneStack(Stack):
                         launch_lease_table_arn,
                         rehearsal_control_table_arn.value_as_string,
                     ],
+                    conditions={
+                        "ArnEquals": {
+                            "aws:PrincipalArn": launch_task_role_arns,
+                        }
+                    },
                 )
             )
             sqs_endpoint.add_to_policy(

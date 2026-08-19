@@ -85,6 +85,18 @@ def _assert_ecr_layer_endpoint_policy(template: dict) -> None:
     assert "prod-us-east-1-starport-layer-bucket/*" in json.dumps(statement["Resource"])
 
 
+def _assert_role_bound_gateway_statement(
+    statement: dict,
+    expected_principal_arns: list[object],
+) -> None:
+    assert statement["Effect"] == "Allow"
+    assert statement["Principal"] == {"AWS": "*"}
+    principal_arns = statement["Condition"]["ArnEquals"]["aws:PrincipalArn"]
+    if not isinstance(principal_arns, list):
+        principal_arns = [principal_arns]
+    assert principal_arns == expected_principal_arns
+
+
 def _stack_output_import(stack_parameter: str, output_name: str) -> dict:
     return {
         "Fn::ImportValue": {
@@ -509,8 +521,19 @@ def test_control_plane_recovery_selector_is_fail_closed(
         if endpoint["Properties"]["VpcEndpointType"] == "Gateway"
         and "dynamodb:GetItem" in json.dumps(endpoint["Properties"]["PolicyDocument"])
     )
-    endpoint_resources = dynamodb_endpoint["PolicyDocument"]["Statement"][0]["Resource"]
+    endpoint_statement = dynamodb_endpoint["PolicyDocument"]["Statement"][0]
+    endpoint_resources = endpoint_statement["Resource"]
     assert "UseRecoveredState" in json.dumps(endpoint_resources)
+    task_role_id = next(
+        logical_id
+        for logical_id, resource in template["Resources"].items()
+        if logical_id.startswith("TaskRole")
+        and resource["Type"] == "AWS::IAM::Role"
+    )
+    _assert_role_bound_gateway_statement(
+        endpoint_statement,
+        [{"Fn::GetAtt": [task_role_id, "Arn"]}],
+    )
 
     outputs = template["Outputs"]
     assert outputs["PrimaryStateTableName"]["Value"] == {"Ref": "PrimaryStateTableName"}
@@ -1139,24 +1162,32 @@ def test_managed_control_plane_authorizes_exact_launch_worker_principals(
             .get("Statement", [])
         )
         for statement in statements:
-            principal_text = json.dumps(statement.get("Principal", {}))
+            statement_text = json.dumps(statement)
             names = {
                 role_name
                 for role_name in (
                     *task_roles,
                     execution_role_marker,
                 )
-                if role_name in principal_text
+                if role_name in statement_text
             }
             if not names:
                 continue
             worker_statements.append(statement)
             assert statement["Effect"] == "Allow"
-            assert statement["Principal"]["AWS"] != "*"
             if execution_role_marker in names:
                 assert names == {execution_role_marker}
+                assert statement["Principal"]["AWS"] != "*"
             else:
                 assert names == task_roles
+                if "aws:PrincipalArn" in statement_text:
+                    assert statement["Principal"] == {"AWS": "*"}
+                    condition_text = json.dumps(
+                        statement["Condition"]["ArnEquals"]["aws:PrincipalArn"]
+                    )
+                    assert all(role_name in condition_text for role_name in task_roles)
+                else:
+                    assert statement["Principal"]["AWS"] != "*"
 
     assert worker_statements
     worker_policy = json.dumps(worker_statements)
@@ -1245,10 +1276,23 @@ def test_managed_launch_worker_private_paths_match_domain_calls(
         worker_statements = [
             statement
             for statement in endpoint["PolicyDocument"]["Statement"]
-            if task_role_marker in json.dumps(statement.get("Principal", {}))
+            if task_role_marker in json.dumps(statement)
         ]
         assert worker_statements
         assert {action for statement in worker_statements for action in _actions(statement)} == actions
+        if service_suffix == ".dynamodb":
+            for statement in worker_statements:
+                assert statement["Principal"] == {"AWS": "*"}
+                condition_text = json.dumps(
+                    statement["Condition"]["ArnEquals"]["aws:PrincipalArn"]
+                )
+                assert task_role_marker in condition_text
+                assert "AxonLLMLaunchCleanupWorkerRole" in condition_text
+        else:
+            assert all(
+                statement["Principal"]["AWS"] != "*"
+                for statement in worker_statements
+            )
 
     serialized = json.dumps(
         [
@@ -1258,7 +1302,7 @@ def test_managed_launch_worker_private_paths_match_domain_calls(
                 "AWS::EC2::VPCEndpoint",
             )
             for statement in endpoint["Properties"].get("PolicyDocument", {}).get("Statement", [])
-            if task_role_marker in json.dumps(statement.get("Principal", {}))
+            if task_role_marker in json.dumps(statement)
         ]
     )
     for resource_fragment in (
