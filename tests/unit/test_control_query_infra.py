@@ -74,6 +74,20 @@ def _service_endpoint(template: dict, service_suffix: str) -> dict:
     return matches[0]
 
 
+def _stack_output_import(stack_parameter: str, output_name: str) -> dict:
+    return {
+        "Fn::ImportValue": {
+            "Fn::Join": [
+                ":",
+                [
+                    {"Ref": stack_parameter},
+                    output_name,
+                ],
+            ]
+        }
+    }
+
+
 def _run_app(
     *,
     target: str,
@@ -272,17 +286,7 @@ def test_control_plane_imports_state_and_never_creates_another_table(
         assert login_path_pattern.fullmatch(unsafe_path) is None
     assert not any(name.startswith("AXON_ATHENA_") for name in environment)
     assert "AWS_STS_REGIONAL_ENDPOINTS" not in environment
-    alb_client_import = {
-        "Fn::ImportValue": {
-            "Fn::Join": [
-                ":",
-                [
-                    {"Ref": "IdentityStackName"},
-                    "AlbClientId",
-                ],
-            ]
-        }
-    }
+    alb_client_import = _stack_output_import("IdentityStackName", "AlbClientId")
     assert environment["AXON_ALB_CLIENT_ID"]["Fn::If"] == [
         "CloudFrontEndpoint",
         "",
@@ -293,6 +297,29 @@ def test_control_plane_imports_state_and_never_creates_another_table(
         "oidc-session",
         "",
     ]
+    hosted_ui_domain_import = _stack_output_import(
+        "IdentityStackName",
+        "HostedUiDomainName",
+    )
+    for name, path in (
+        ("AXON_BROWSER_AUTH_AUTHORIZATION_ENDPOINT", "/oauth2/authorize"),
+        ("AXON_BROWSER_AUTH_OAUTH_EXCHANGE_URL", "/oauth2/token"),
+        ("AXON_BROWSER_AUTH_LOGOUT_ENDPOINT", "/logout"),
+    ):
+        assert environment[name]["Fn::If"] == [
+            "CloudFrontEndpoint",
+            {
+                "Fn::Join": [
+                    "",
+                    [
+                        "https://",
+                        hosted_ui_domain_import,
+                        f".auth.us-east-1.amazoncognito.com{path}",
+                    ],
+                ]
+            },
+            "",
+        ]
     assert environment["AXON_CONTROL_PLANE_ENDPOINT_MODE"] == {"Ref": "EndpointMode"}
     assert container["ReadonlyRootFilesystem"] is True
     assert container["LinuxParameters"]["Capabilities"]["Drop"] == ["ALL"]
@@ -724,7 +751,10 @@ def test_control_tasks_are_private_and_alb_requires_https_cognito(
     authentication = custom_actions[0]["AuthenticateCognitoConfig"]
     assert authentication["OnUnauthenticatedRequest"] == "authenticate"
     assert "AlbClientId" in json.dumps(authentication["UserPoolClientId"])
-    assert "HostedUiDomainName" in json.dumps(authentication["UserPoolDomain"])
+    assert authentication["UserPoolDomain"] == _stack_output_import(
+        "IdentityStackName",
+        "HostedUiDomainName",
+    )
     listener_rule_resource = _one_resource(
         template,
         "AWS::ElasticLoadBalancingV2::ListenerRule",

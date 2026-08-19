@@ -756,7 +756,7 @@ class AxonLLMControlPlaneStack(Stack):
             "IdentityAlbClient",
             imported(identity_stack_name, "AlbClientId"),
         )
-        hosted_ui_domain_name = imported(
+        hosted_ui_domain_prefix = imported(
             identity_stack_name,
             "HostedUiDomainName",
         )
@@ -1512,7 +1512,7 @@ class AxonLLMControlPlaneStack(Stack):
             "AuthenticateCognitoConfig": {
                 "UserPoolArn": user_pool.user_pool_arn,
                 "UserPoolClientId": alb_client.user_pool_client_id,
-                "UserPoolDomain": hosted_ui_domain_name,
+                "UserPoolDomain": hosted_ui_domain_prefix,
                 "OnUnauthenticatedRequest": "authenticate",
                 "Scope": "openid email profile",
                 "SessionCookieName": (f"AxonLLMControlPlaneSession{physical_suffix}"),
@@ -1823,7 +1823,16 @@ class AxonLLMControlPlaneStack(Stack):
                 )
             )
 
-        hosted_ui_base = Fn.join("", ["https://", hosted_ui_domain_name])
+        hosted_ui_base = Fn.join(
+            "",
+            [
+                "https://",
+                hosted_ui_domain_prefix,
+                ".auth.",
+                self.region,
+                ".amazoncognito.com",
+            ],
+        )
         container.add_environment(
             "AXON_OIDC_AUDIENCE",
             endpoint_value(
