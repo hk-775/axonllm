@@ -74,6 +74,17 @@ def _service_endpoint(template: dict, service_suffix: str) -> dict:
     return matches[0]
 
 
+def _assert_ecr_layer_endpoint_policy(template: dict) -> None:
+    endpoint = _service_endpoint(template, ".s3")
+    statements = endpoint["PolicyDocument"]["Statement"]
+    assert len(statements) == 1
+    statement = statements[0]
+    assert statement["Effect"] == "Allow"
+    assert statement["Principal"] == {"AWS": "*"}
+    assert _actions(statement) == {"s3:GetObject"}
+    assert "prod-us-east-1-starport-layer-bucket/*" in json.dumps(statement["Resource"])
+
+
 def _stack_output_import(stack_parameter: str, output_name: str) -> dict:
     return {
         "Fn::ImportValue": {
@@ -984,6 +995,12 @@ def test_control_plane_has_no_customer_query_authority(
     assert "*" not in transaction["Resource"]
 
 
+def test_control_plane_allows_ecr_presigned_layer_downloads(
+    query_templates,
+):
+    _assert_ecr_layer_endpoint_policy(query_templates["control-plane"])
+
+
 def test_control_plane_scim_secret_is_exact_and_private(
     control_template_with_scim_secret,
 ):
@@ -1284,7 +1301,6 @@ def test_managed_worker_execution_role_has_private_image_and_log_paths(
             "logs:CreateLogStream",
             "logs:PutLogEvents",
         },
-        ".s3": {"s3:GetObject"},
     }
     statements: list[dict] = []
     for service_suffix, actions in expected_actions.items():
@@ -1300,9 +1316,9 @@ def test_managed_worker_execution_role_has_private_image_and_log_paths(
 
     serialized = json.dumps(statements)
     assert "repository/axonllm/fargate" in serialized
-    assert "prod-us-east-1-starport-layer-bucket/*" in serialized
     assert ("/aws/ecs/axonllm/launch-workers/action-managed:log-stream:*") in serialized
     assert ("/aws/ecs/axonllm/launch-workers/cleanup-managed:log-stream:*") in serialized
+    _assert_ecr_layer_endpoint_policy(template)
 
     execution_role_id, execution_role = next(
         (logical_id, role["Properties"])

@@ -2094,7 +2094,7 @@ class AxonLLMControlPlaneStack(Stack):
             )
         s3_endpoint.add_to_policy(
             iam.PolicyStatement(
-                principals=[execution_role],
+                principals=[iam.AnyPrincipal()],
                 actions=["s3:GetObject"],
                 resources=[(f"arn:{self.partition}:s3:::prod-{self.region}-starport-layer-bucket/*")],
             )
@@ -2390,13 +2390,6 @@ class AxonLLMControlPlaneStack(Stack):
                     principals=[launch_execution_principal],
                     actions=["ecr:GetAuthorizationToken"],
                     resources=["*"],
-                )
-            )
-            s3_endpoint.add_to_policy(
-                iam.PolicyStatement(
-                    principals=[launch_execution_principal],
-                    actions=["s3:GetObject"],
-                    resources=[(f"arn:{self.partition}:s3:::prod-{self.region}-starport-layer-bucket/*")],
                 )
             )
         endpoint_mode_output = CfnOutput(
