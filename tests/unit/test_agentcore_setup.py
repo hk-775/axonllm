@@ -1660,7 +1660,7 @@ def test_bootstrap_policy_uses_valid_bounded_lifecycle_and_pass_role_actions():
     }
     assert statements["CreateRequiredServiceLinkedRoles"]["Condition"]["StringEquals"]["iam:AWSServiceName"] == [
         "bedrock-agentcore.amazonaws.com",
-        "cloudfront.amazonaws.com",
+        "vpcorigin.cloudfront.amazonaws.com",
         "ecs.amazonaws.com",
         "ecs.application-autoscaling.amazonaws.com",
         "email.cognito-idp.amazonaws.com",

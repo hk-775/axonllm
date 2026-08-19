@@ -912,7 +912,7 @@ def policy_document(
                     "StringEquals": {
                         "iam:AWSServiceName": [
                             "bedrock-agentcore.amazonaws.com",
-                            "cloudfront.amazonaws.com",
+                            "vpcorigin.cloudfront.amazonaws.com",
                             "ecs.amazonaws.com",
                             "ecs.application-autoscaling.amazonaws.com",
                             "email.cognito-idp.amazonaws.com",
