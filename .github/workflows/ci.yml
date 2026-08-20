@@ -453,7 +453,10 @@ jobs:
           .
 
       - name: Verify image contents and runtime constraints
-        run: python scripts/ci/verify_image.py axonllm-ci:verify
+        run: >-
+          python scripts/ci/verify_image.py
+          axonllm-ci:verify
+          --verify-startup
 
       - name: Scan production image
         run: >-

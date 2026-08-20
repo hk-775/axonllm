@@ -1396,12 +1396,84 @@ def test_bootstrap_policy_uses_valid_bounded_lifecycle_and_pass_role_actions():
     }
     assert statements["CreateRequiredServiceLinkedRoles"]["Condition"]["StringEquals"]["iam:AWSServiceName"] == [
         "bedrock-agentcore.amazonaws.com",
-        "cloudfront.amazonaws.com",
+        "vpcorigin.cloudfront.amazonaws.com",
         "ecs.amazonaws.com",
         "ecs.application-autoscaling.amazonaws.com",
         "email.cognito-idp.amazonaws.com",
         "elasticloadbalancing.amazonaws.com",
     ]
+
+
+@pytest.mark.parametrize(
+    ("qualifier", "stack_names"),
+    (
+        (
+            "axprod",
+            (
+                "AxonLLMAgentCoreStack",
+                "AxonLLMControlPlaneStack",
+            ),
+        ),
+        (
+            "axqual",
+            (
+                "AxonLLMAgentCoreStack-managed",
+                "AxonLLMControlPlaneStack-managed",
+            ),
+        ),
+        (
+            "axext",
+            (
+                "AxonLLMAgentCoreStack-external",
+                "AxonLLMAgentCoreStack-external-oidc",
+            ),
+        ),
+    ),
+)
+def test_bootstrap_custom_resource_invocation_is_stack_and_region_bounded(
+    qualifier,
+    stack_names,
+):
+    document = bootstrap_policy.policy_document(
+        partition="aws",
+        account_id="123456789012",
+        region="us-east-1",
+        qualifier=qualifier,
+    )
+    statement = next(
+        item
+        for item in document["Statement"]
+        if item["Sid"] == "ManageBoundedCdkProviderRoles"
+    )
+
+    assert set(statement["Action"]) == {
+        "iam:DeleteRole",
+        "iam:DeleteRolePolicy",
+        "iam:GetRole",
+        "iam:GetRolePolicy",
+        "iam:ListAttachedRolePolicies",
+        "iam:ListRolePolicies",
+        "iam:PutRolePolicy",
+        "iam:TagRole",
+        "iam:UntagRole",
+        "iam:UpdateRole",
+        "iam:UpdateRoleDescription",
+        "lambda:InvokeFunction",
+    }
+    function_resources = [
+        resource
+        for resource in statement["Resource"]
+        if ":lambda:" in resource
+    ]
+    assert function_resources == [
+        (
+            "arn:aws:lambda:us-east-1:123456789012:"
+            f"function:{stack_name}-*"
+        )
+        for stack_name in stack_names
+    ]
+    assert all(resource != "*" for resource in statement["Resource"])
+    assert "Condition" not in statement
 
 
 @pytest.mark.parametrize("qualifier", ("axprod", "axqual", "axext"))
