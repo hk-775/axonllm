@@ -75,7 +75,10 @@ def test_image_verifier_starts_two_isolated_replicas() -> None:
     assert '"AWS_ACCESS_KEY_ID=ci-fake-access-key"' in verifier
     assert "_verify_two_replica_startup(image)" in verifier
     assert "timeout_seconds: float = 30.0" in verifier
-    assert '"--rm"' not in verifier.split("def _verify_two_replica_startup", 1)[1].split(
+    startup_verifier = verifier.split("def _verify_two_replica_startup", 1)[1].split(
         "def verify_image",
         1,
     )[0]
+    assert '"--rm"' not in startup_verifier
+    assert '"--publish"' not in startup_verifier
+    assert '"docker", "exec", name, "python", "-c", _READINESS_PROBE' in verifier

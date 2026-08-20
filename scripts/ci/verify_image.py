@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import http.client
 import json
 import os
 import re
@@ -20,28 +19,32 @@ def _run(*command: str) -> subprocess.CompletedProcess[str]:
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
+)
+
+
+_READINESS_PROBE = """
+import http.client
+
+connection = http.client.HTTPConnection("127.0.0.1", 8000, timeout=1.0)
+try:
+    connection.request("GET", "/ready")
+    status = connection.getresponse().status
+except (OSError, http.client.HTTPException):
+    status = 0
+finally:
+    connection.close()
+raise SystemExit(0 if status == 200 else 1)
+"""
+
+
+def _replica_ready(name: str) -> bool:
+    result = subprocess.run(
+        ("docker", "exec", name, "python", "-c", _READINESS_PROBE),
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
     )
-
-
-def _container_port(name: str) -> int:
-    mapping = _run("docker", "port", name, "8000/tcp").stdout.strip()
-    if not mapping:
-        raise RuntimeError(f"container {name} has no published port 8000")
-    try:
-        return int(mapping.rsplit(":", 1)[1])
-    except (IndexError, ValueError) as exc:
-        raise RuntimeError(f"unexpected Docker port mapping: {mapping!r}") from exc
-
-
-def _replica_ready(port: int) -> bool:
-    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=1.0)
-    try:
-        connection.request("GET", "/ready")
-        return connection.getresponse().status == 200
-    except (OSError, http.client.HTTPException):
-        return False
-    finally:
-        connection.close()
+    return result.returncode == 0
 
 
 def _replica_logs(name: str) -> str:
@@ -74,8 +77,6 @@ def _verify_two_replica_startup(image: str, timeout_seconds: float = 30.0) -> No
                 name,
                 "--network",
                 network,
-                "--publish",
-                "127.0.0.1::8000",
                 "--read-only",
                 "--cap-drop",
                 "ALL",
@@ -115,7 +116,6 @@ def _verify_two_replica_startup(image: str, timeout_seconds: float = 30.0) -> No
             )
             started.append(name)
 
-        ports = {name: _container_port(name) for name in names}
         deadline = started_at + timeout_seconds
         pending = set(names)
         while pending and time.monotonic() < deadline:
@@ -131,7 +131,7 @@ def _verify_two_replica_startup(image: str, timeout_seconds: float = 30.0) -> No
                     raise RuntimeError(
                         f"replica {name} exited before readiness:\n{_replica_logs(name)}"
                     )
-                if _replica_ready(ports[name]):
+                if _replica_ready(name):
                     pending.remove(name)
             if pending:
                 time.sleep(0.25)
