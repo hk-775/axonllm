@@ -62,6 +62,9 @@ def test_workflow_enforces_each_release_gate() -> None:
 
     missing = [command for command in required_commands if command not in workflow]
     assert missing == []
+    verifier = (ROOT / "scripts/ci/verify_image.py").read_text(encoding="utf-8")
+    assert "_verify_two_replica_startup(image)" in verifier
+    assert '"docker", "network", "create", "--internal"' in verifier
     assert "--extra agentcore" in workflow
     assert '"${CDK_CI_OUTDIR}/fargate/AxonLLMStack.template.json"' in workflow
     assert '"${CDK_CI_OUTDIR}/agentcore/AxonLLMAgentCoreStack.template.json"' in workflow

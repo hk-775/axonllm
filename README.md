@@ -2263,8 +2263,9 @@ Three things worth knowing before you rely on it:
 - **Nothing is enforced.** No check can refuse a boot or reject a request. An
   operator who has read a warning and decided to ship is making a call the
   gateway is not positioned to overrule, and a readiness page that can take down
-  a deployment is one nobody enables. Failures print a startup banner; warnings
-  stay quiet, since a banner on every healthy boot is one nobody reads.
+  a deployment is one nobody enables. The checklist runs only when an
+  authenticated operator opens the admin page; it never runs before the server
+  binds or delays `/ready`.
 - **It is hidden in demo mode.** A demo deliberately runs with no credentials,
   `LOG_ONLY` auth and seeded data — exactly the configuration this checklist
   exists to fail. Rendering it there would show a wall of red that is correct for

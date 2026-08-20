@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
-"""Inspect and smoke-test the production image without credentials or networking."""
+"""Inspect the production image and prove two replicas start without egress."""
 
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
+import os
 import re
 import subprocess
 import sys
+import time
 
 
 def _run(*command: str) -> subprocess.CompletedProcess[str]:
@@ -18,6 +21,147 @@ def _run(*command: str) -> subprocess.CompletedProcess[str]:
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
     )
+
+
+def _container_port(name: str) -> int:
+    mapping = _run("docker", "port", name, "8000/tcp").stdout.strip()
+    if not mapping:
+        raise RuntimeError(f"container {name} has no published port 8000")
+    try:
+        return int(mapping.rsplit(":", 1)[1])
+    except (IndexError, ValueError) as exc:
+        raise RuntimeError(f"unexpected Docker port mapping: {mapping!r}") from exc
+
+
+def _replica_ready(port: int) -> bool:
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=1.0)
+    try:
+        connection.request("GET", "/ready")
+        return connection.getresponse().status == 200
+    except (OSError, http.client.HTTPException):
+        return False
+    finally:
+        connection.close()
+
+
+def _replica_logs(name: str) -> str:
+    result = subprocess.run(
+        ("docker", "logs", "--tail", "80", name),
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+    return result.stdout
+
+
+def _verify_two_replica_startup(image: str, timeout_seconds: float = 30.0) -> None:
+    """Both replicas must bind while every external network route is blocked."""
+    suffix = f"{os.getpid()}-{time.time_ns()}"
+    network = f"axonllm-ci-{suffix}"
+    names = [f"axonllm-ci-a-{suffix}", f"axonllm-ci-b-{suffix}"]
+    started: list[str] = []
+
+    _run("docker", "network", "create", "--internal", network)
+    try:
+        started_at = time.monotonic()
+        for name in names:
+            _run(
+                "docker",
+                "run",
+                "--detach",
+                "--name",
+                name,
+                "--network",
+                network,
+                "--publish",
+                "127.0.0.1::8000",
+                "--read-only",
+                "--cap-drop",
+                "ALL",
+                "--security-opt",
+                "no-new-privileges",
+                "--tmpfs",
+                "/tmp:rw,noexec,nosuid,size=64m",
+                "--env",
+                "AXON_AUTH_MODE=LOG_ONLY",
+                "--env",
+                "AXON_DEPLOYMENT_PROFILE=development",
+                "--env",
+                "AXON_REQUIRE_CANONICAL_IDENTITY=false",
+                "--env",
+                "AXON_LOAD_DEMO_DATA=false",
+                "--env",
+                "AXON_CHECK_MODEL_AVAILABILITY=true",
+                "--env",
+                "LLM_ROUTER_DYNAMODB_ENABLED=false",
+                "--env",
+                "AXON_NO_BROWSER=true",
+                "--env",
+                "AXON_SERVER_HOST=0.0.0.0",
+                "--env",
+                "AXON_SERVER_PORT=8000",
+                "--env",
+                "AWS_DEFAULT_REGION=us-east-1",
+                "--env",
+                "AWS_ACCESS_KEY_ID=ci-fake-access-key",
+                "--env",
+                "AWS_SECRET_ACCESS_KEY=ci-fake-secret-key",
+                "--env",
+                "AWS_EC2_METADATA_DISABLED=true",
+                "--env",
+                "HOME=/tmp",
+                image,
+            )
+            started.append(name)
+
+        ports = {name: _container_port(name) for name in names}
+        deadline = started_at + timeout_seconds
+        pending = set(names)
+        while pending and time.monotonic() < deadline:
+            for name in tuple(pending):
+                running = _run(
+                    "docker",
+                    "inspect",
+                    "--format",
+                    "{{.State.Running}}",
+                    name,
+                ).stdout.strip()
+                if running != "true":
+                    raise RuntimeError(
+                        f"replica {name} exited before readiness:\n{_replica_logs(name)}"
+                    )
+                if _replica_ready(ports[name]):
+                    pending.remove(name)
+            if pending:
+                time.sleep(0.25)
+
+        if pending:
+            details = "\n".join(
+                f"--- {name} ---\n{_replica_logs(name)}" for name in sorted(pending)
+            )
+            raise RuntimeError(
+                "two-replica startup exceeded "
+                f"{timeout_seconds:.0f}s for {sorted(pending)}:\n{details}"
+            )
+        print(
+            "two-replica startup verified in "
+            f"{time.monotonic() - started_at:.2f}s"
+        )
+    finally:
+        if started:
+            subprocess.run(
+                ("docker", "rm", "--force", *started),
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        subprocess.run(
+            ("docker", "network", "rm", network),
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
 
 
 def verify_image(image: str) -> None:
@@ -105,6 +249,7 @@ import src.gateway  # noqa: F401
         "-c",
         "test ! -e /root/.cache/uv",
     )
+    _verify_two_replica_startup(image)
 
 
 def main() -> int:
