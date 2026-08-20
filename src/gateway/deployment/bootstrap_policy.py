@@ -484,6 +484,37 @@ def _untagged_cdk_provider_role_resources(
     ]
 
 
+def _cdk_custom_resource_function_resources(
+    *,
+    partition: str,
+    account_id: str,
+    region: str,
+    qualifier: str,
+) -> list[str]:
+    if qualifier == PRODUCTION_QUALIFIER:
+        stack_names = (
+            "AxonLLMAgentCoreStack",
+            "AxonLLMControlPlaneStack",
+        )
+    elif qualifier == EXTERNAL_QUALIFIER:
+        stack_names = (
+            "AxonLLMAgentCoreStack-external",
+            "AxonLLMAgentCoreStack-external-oidc",
+        )
+    else:
+        stack_names = (
+            "AxonLLMAgentCoreStack-managed",
+            "AxonLLMControlPlaneStack-managed",
+        )
+    return [
+        (
+            f"arn:{partition}:lambda:{region}:{account_id}:"
+            f"function:{stack_name}-*"
+        )
+        for stack_name in stack_names
+    ]
+
+
 def boundary_document(
     *,
     partition: str,
@@ -686,6 +717,12 @@ def policy_document(
         account_id=account_id,
         qualifier=qualifier,
     )
+    custom_resource_functions = _cdk_custom_resource_function_resources(
+        partition=partition,
+        account_id=account_id,
+        region=region,
+        qualifier=qualifier,
+    )
     return {
         "Version": "2012-10-17",
         "Statement": [
@@ -767,8 +804,14 @@ def policy_document(
             {
                 "Sid": "ManageBoundedCdkProviderRoles",
                 "Effect": "Allow",
-                "Action": list(_IAM_ROLE_MANAGEMENT_ACTIONS),
-                "Resource": untagged_provider_roles,
+                "Action": [
+                    *_IAM_ROLE_MANAGEMENT_ACTIONS,
+                    "lambda:InvokeFunction",
+                ],
+                "Resource": [
+                    *untagged_provider_roles,
+                    *custom_resource_functions,
+                ],
             },
             {
                 "Sid": "DenyChangingApplicationTag",
@@ -844,7 +887,7 @@ def policy_document(
                     "StringEquals": {
                         "iam:AWSServiceName": [
                             "bedrock-agentcore.amazonaws.com",
-                            "cloudfront.amazonaws.com",
+                            "vpcorigin.cloudfront.amazonaws.com",
                             "ecs.amazonaws.com",
                             "ecs.application-autoscaling.amazonaws.com",
                             "email.cognito-idp.amazonaws.com",

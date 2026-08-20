@@ -4,7 +4,6 @@ Run: AXON_LOAD_DEMO_DATA=true python serve_dashboard.py
 Then open: http://localhost:8000/admin/dashboard
 """
 
-import asyncio
 import os
 import sys
 import threading
@@ -13,17 +12,10 @@ import webbrowser
 import uvicorn
 
 from src.gateway.admin.pricing_drift import audit_pricing, format_startup_notice
-from src.gateway.admin.production_checklist import (
-    format_startup_notice as checklist_notice,
-    run_checklist,
-)
 from src.gateway.bootstrap import build_starlette_app
 from src.gateway.config_loader import load_app_config, load_pricing_config
 from src.gateway.dev_env import load_dev_env_file
-from src.gateway.health_check_task import HealthCheckTask
-from src.gateway.health_tracker import ProviderHealthTracker
 from src.gateway.model_registry import ModelRegistry
-from src.gateway.provider_loader import load_provider_configs
 
 
 def build_app() -> tuple:
@@ -57,30 +49,12 @@ def build_app() -> tuple:
     return app, app_config
 
 
-if __name__ == "__main__":
+def main() -> None:
+    """Start the dashboard without making external calls before binding."""
     app, app_config = build_app()
 
-    # --- Start background health check task ---
     registry = ModelRegistry()
     registry.load(app_config.models_config_path)
-    providers: set[str] = set()
-    for model_cfg in registry.models.values():
-        for pm in model_cfg.providers:
-            providers.add(pm.provider)
-
-    health_tracker = ProviderHealthTracker()
-
-    async def _default_check_fn(provider: str) -> bool:
-        """Placeholder health check — always returns True."""
-        return True
-
-    health_task = HealthCheckTask(
-        health_tracker=health_tracker,
-        providers=sorted(providers),
-        check_fn=_default_check_fn,
-    )
-
-    asyncio.run(health_task.start())
 
     base = f"http://localhost:{app_config.server_port}"
     print(f"\n  Dashboard: {base}/admin/dashboard")
@@ -122,34 +96,11 @@ if __name__ == "__main__":
     elif drift.total_mappings:
         print(f"  ✓ All {drift.total_mappings} provider mappings are priced.\n")
 
-    # --- Production readiness ---
-    # Only outside demo mode. In a demo every check fails correctly and none of
-    # it means anything, and the live provider calls should not happen at all.
+    # Live provider and AWS catalogue diagnostics belong behind the
+    # authenticated admin route. They must never delay the server from accepting
+    # health checks when an external service is slow or unavailable.
     if not app_config.load_demo_data:
-        checklist_url = f"{base}/admin/production-checklist"
-        try:
-            checklist = asyncio.run(
-                run_checklist(
-                    app_config=app_config,
-                    model_registry=registry,
-                    pricing_config=load_pricing_config(app_config.pricing_config_path),
-                    provider_configs=load_provider_configs(app_config.providers_config_path),
-                )
-            )
-        except Exception as exc:
-            # Never fatal. A readiness report that can stop a boot is strictly
-            # worse than one that fails to print: the gateway serves correctly
-            # either way, and an operator locked out by their own checklist has
-            # no way to read what it found.
-            print(f"  ⚠  Readiness checklist could not run ({type(exc).__name__}).\n")
-        else:
-            notice = checklist_notice(checklist, checklist_url)
-            if notice:
-                print(notice + "\n")
-            elif checklist.unresolved:
-                print(f"  Readiness: {checklist.unresolved} item(s) to review — {checklist_url}\n")
-            else:
-                print("  ✓ Production readiness: all checks pass.\n")
+        print(f"  Readiness: {base}/admin/production-checklist\n")
 
     # Flush before handing off to uvicorn, which reconfigures logging and can
     # otherwise interleave its own output through the banner above. The gap is
@@ -158,3 +109,7 @@ if __name__ == "__main__":
     # than one that bills at zero.
     sys.stdout.flush()
     uvicorn.run(app, host=app_config.server_host, port=app_config.server_port)
+
+
+if __name__ == "__main__":
+    main()

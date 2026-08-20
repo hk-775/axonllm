@@ -956,7 +956,7 @@ class AxonLLMControlPlaneStack(Stack):
             "IdentityAlbClient",
             imported(identity_stack_name, "AlbClientId"),
         )
-        hosted_ui_domain_name = imported(
+        hosted_ui_domain_prefix = imported(
             identity_stack_name,
             "HostedUiDomainName",
         )
@@ -1735,7 +1735,7 @@ class AxonLLMControlPlaneStack(Stack):
             "AuthenticateCognitoConfig": {
                 "UserPoolArn": user_pool.user_pool_arn,
                 "UserPoolClientId": alb_client.user_pool_client_id,
-                "UserPoolDomain": hosted_ui_domain_name,
+                "UserPoolDomain": hosted_ui_domain_prefix,
                 "OnUnauthenticatedRequest": "authenticate",
                 "Scope": "openid email profile",
                 "SessionCookieName": (
@@ -2230,7 +2230,16 @@ function handler(event) {
                 )
             )
 
-        hosted_ui_base = Fn.join("", ["https://", hosted_ui_domain_name])
+        hosted_ui_base = Fn.join(
+            "",
+            [
+                "https://",
+                hosted_ui_domain_prefix,
+                ".auth.",
+                self.region,
+                ".amazoncognito.com",
+            ],
+        )
         container.add_environment(
             "AXON_OIDC_AUDIENCE",
             endpoint_value(
@@ -2458,34 +2467,41 @@ function handler(event) {
         cfn_recovery_deny_policy.add_dependency(recovery_guard_resource)
         cfn_recovery_transaction_deny_policy.add_dependency(recovery_guard_resource)
 
+        launch_task_role_arns: list[str] = []
         launch_task_principals: list[iam.IPrincipal] = []
         launch_execution_principal: iam.IPrincipal | None = None
         if deployment_namespace:
 
-            def role_principal(role_name: str) -> iam.ArnPrincipal:
-                return iam.ArnPrincipal(
-                    self.format_arn(
-                        service="iam",
-                        region="",
-                        resource="role",
-                        resource_name=role_name,
-                    )
+            def role_arn(role_name: str) -> str:
+                return self.format_arn(
+                    service="iam",
+                    region="",
+                    resource="role",
+                    resource_name=role_name,
                 )
 
+            launch_task_role_arns = [
+                role_arn(_LAUNCH_ACTION_ROLE_NAME),
+                role_arn(_LAUNCH_CLEANUP_ROLE_NAME),
+            ]
             launch_task_principals = [
-                role_principal(_LAUNCH_ACTION_ROLE_NAME),
-                role_principal(_LAUNCH_CLEANUP_ROLE_NAME),
+                iam.ArnPrincipal(arn) for arn in launch_task_role_arns
             ]
             launch_execution_principal = launch_worker_execution_role
 
         dynamodb_endpoint.add_to_policy(
             iam.PolicyStatement(
-                principals=[task_role],
+                principals=[iam.AnyPrincipal()],
                 actions=_DYNAMODB_ACTIONS,
                 resources=[
                     selected_state_table_arn,
                     f"{selected_state_table_arn}/index/*",
                 ],
+                conditions={
+                    "ArnEquals": {
+                        "aws:PrincipalArn": task_role.role_arn,
+                    }
+                },
             )
         )
         kms_endpoint.add_to_policy(
@@ -2498,19 +2514,29 @@ function handler(event) {
         if rehearsal_control_table_arn is not None:
             dynamodb_endpoint.add_to_policy(
                 iam.PolicyStatement(
-                    principals=[task_role],
+                    principals=[iam.AnyPrincipal()],
                     actions=[
                         "dynamodb:GetItem",
                         "dynamodb:PutItem",
                     ],
                     resources=[rehearsal_control_table_arn.value_as_string],
+                    conditions={
+                        "ArnEquals": {
+                            "aws:PrincipalArn": task_role.role_arn,
+                        }
+                    },
                 )
             )
         s3_endpoint.add_to_policy(
             iam.PolicyStatement(
-                principals=[execution_role],
+                principals=[iam.AnyPrincipal()],
                 actions=["s3:GetObject"],
-                resources=[(f"arn:{self.partition}:s3:::prod-{self.region}-starport-layer-bucket/*")],
+                resources=[
+                    (
+                        f"arn:{self.partition}:s3:::"
+                        f"prod-{self.region}-starport-layer-bucket/*"
+                    )
+                ],
             )
         )
         sqs_endpoint.add_to_policy(
@@ -2628,7 +2654,7 @@ function handler(event) {
 
             dynamodb_endpoint.add_to_policy(
                 iam.PolicyStatement(
-                    principals=launch_task_principals,
+                    principals=[iam.AnyPrincipal()],
                     actions=_LAUNCH_WORKER_DYNAMODB_ACTIONS,
                     resources=[
                         launch_state_table_arn,
@@ -2638,6 +2664,11 @@ function handler(event) {
                         launch_lease_table_arn,
                         rehearsal_control_table_arn.value_as_string,
                     ],
+                    conditions={
+                        "ArnEquals": {
+                            "aws:PrincipalArn": launch_task_role_arns,
+                        }
+                    },
                 )
             )
             sqs_endpoint.add_to_policy(
@@ -2794,13 +2825,6 @@ function handler(event) {
                     principals=[launch_execution_principal],
                     actions=["ecr:GetAuthorizationToken"],
                     resources=["*"],
-                )
-            )
-            s3_endpoint.add_to_policy(
-                iam.PolicyStatement(
-                    principals=[launch_execution_principal],
-                    actions=["s3:GetObject"],
-                    resources=[(f"arn:{self.partition}:s3:::prod-{self.region}-starport-layer-bucket/*")],
                 )
             )
         endpoint_mode_output = CfnOutput(

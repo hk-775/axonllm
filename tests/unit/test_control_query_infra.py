@@ -134,6 +134,47 @@ def _service_endpoint(template: dict, service_suffix: str) -> dict:
     return matches[0]
 
 
+def _assert_ecr_layer_endpoint_policy(template: dict) -> None:
+    endpoint = _service_endpoint(template, ".s3")
+    statements = endpoint["PolicyDocument"]["Statement"]
+    assert len(statements) == 1
+    statement = statements[0]
+    assert statement["Effect"] == "Allow"
+    assert statement["Principal"] == {"AWS": "*"}
+    assert _actions(statement) == {"s3:GetObject"}
+    assert "prod-us-east-1-starport-layer-bucket/*" in json.dumps(
+        statement["Resource"]
+    )
+
+
+def _assert_role_bound_gateway_statement(
+    statement: dict,
+    expected_principal_arns: list[object],
+) -> None:
+    assert statement["Effect"] == "Allow"
+    assert statement["Principal"] == {"AWS": "*"}
+    principal_arns = statement["Condition"]["ArnEquals"][
+        "aws:PrincipalArn"
+    ]
+    if not isinstance(principal_arns, list):
+        principal_arns = [principal_arns]
+    assert principal_arns == expected_principal_arns
+
+
+def _stack_output_import(stack_parameter: str, output_name: str) -> dict:
+    return {
+        "Fn::ImportValue": {
+            "Fn::Join": [
+                ":",
+                [
+                    {"Ref": stack_parameter},
+                    output_name,
+                ],
+            ]
+        }
+    }
+
+
 def _bindings_with_json_length(target_length: int) -> list[dict[str, str]]:
     bindings = [
         {
@@ -457,17 +498,10 @@ def test_control_plane_imports_state_and_never_creates_another_table(
         assert login_path_pattern.fullmatch(unsafe_path) is None
     for name, value in _QUERY_ENVIRONMENT.items():
         assert environment[name] == value
-    alb_client_import = {
-        "Fn::ImportValue": {
-            "Fn::Join": [
-                ":",
-                [
-                    {"Ref": "IdentityStackName"},
-                    "AlbClientId",
-                ],
-            ]
-        }
-    }
+    alb_client_import = _stack_output_import(
+        "IdentityStackName",
+        "AlbClientId",
+    )
     assert environment["AXON_ALB_CLIENT_ID"]["Fn::If"] == [
         "CloudFrontEndpoint",
         "",
@@ -478,6 +512,29 @@ def test_control_plane_imports_state_and_never_creates_another_table(
         "oidc-session",
         "",
     ]
+    hosted_ui_domain_import = _stack_output_import(
+        "IdentityStackName",
+        "HostedUiDomainName",
+    )
+    for name, path in (
+        ("AXON_BROWSER_AUTH_AUTHORIZATION_ENDPOINT", "/oauth2/authorize"),
+        ("AXON_BROWSER_AUTH_OAUTH_EXCHANGE_URL", "/oauth2/token"),
+        ("AXON_BROWSER_AUTH_LOGOUT_ENDPOINT", "/logout"),
+    ):
+        assert environment[name]["Fn::If"] == [
+            "CloudFrontEndpoint",
+            {
+                "Fn::Join": [
+                    "",
+                    [
+                        "https://",
+                        hosted_ui_domain_import,
+                        f".auth.us-east-1.amazoncognito.com{path}",
+                    ],
+                ]
+            },
+            "",
+        ]
     assert environment["AXON_CONTROL_PLANE_ENDPOINT_MODE"] == {
         "Ref": "EndpointMode"
     }
@@ -750,10 +807,19 @@ def test_control_plane_recovery_selector_is_fail_closed(
             endpoint["Properties"]["PolicyDocument"]
         )
     )
-    endpoint_resources = dynamodb_endpoint["PolicyDocument"][
-        "Statement"
-    ][0]["Resource"]
+    endpoint_statement = dynamodb_endpoint["PolicyDocument"]["Statement"][0]
+    endpoint_resources = endpoint_statement["Resource"]
     assert "UseRecoveredState" in json.dumps(endpoint_resources)
+    task_role_id = next(
+        logical_id
+        for logical_id, resource in template["Resources"].items()
+        if logical_id.startswith("TaskRole")
+        and resource["Type"] == "AWS::IAM::Role"
+    )
+    _assert_role_bound_gateway_statement(
+        endpoint_statement,
+        [{"Fn::GetAtt": [task_role_id, "Arn"]}],
+    )
 
     outputs = template["Outputs"]
     assert outputs["PrimaryStateTableName"]["Value"] == {
@@ -1294,6 +1360,12 @@ def test_control_plane_retains_bindings_but_has_no_query_execution_authority(
     assert "*" not in transaction["Resource"]
 
 
+def test_control_plane_allows_ecr_presigned_layer_downloads(
+    query_templates,
+):
+    _assert_ecr_layer_endpoint_policy(query_templates["control-plane"])
+
+
 def test_control_plane_scim_secret_is_exact_and_private(
     control_template_with_scim_secret,
 ):
@@ -1448,21 +1520,26 @@ def test_managed_control_plane_authorizes_exact_launch_worker_principals(
             {},
         ).get("Statement", [])
         for statement in statements:
-            principal_text = json.dumps(statement.get("Principal", {}))
+            statement_text = json.dumps(statement)
             names = {
                 role_name
                 for role_name in (
                     *task_roles,
                     execution_role_marker,
                 )
-                if role_name in principal_text
+                if role_name in statement_text
             }
             if not names:
                 continue
             worker_statements.append(statement)
             assert statement["Effect"] == "Allow"
-            assert statement["Principal"]["AWS"] != "*"
-            if execution_role_marker in names:
+            if statement["Principal"]["AWS"] == "*":
+                assert names == task_roles
+                condition_text = json.dumps(statement["Condition"])
+                assert all(
+                    role_name in condition_text for role_name in task_roles
+                )
+            elif execution_role_marker in names:
                 assert names == {execution_role_marker}
             else:
                 assert names == task_roles
@@ -1556,7 +1633,7 @@ def test_managed_launch_worker_private_paths_match_domain_calls(
             statement
             for statement in endpoint["PolicyDocument"]["Statement"]
             if task_role_marker
-            in json.dumps(statement.get("Principal", {}))
+            in json.dumps(statement)
         ]
         assert worker_statements
         assert {
@@ -1576,7 +1653,7 @@ def test_managed_launch_worker_private_paths_match_domain_calls(
             .get("PolicyDocument", {})
             .get("Statement", [])
             if task_role_marker
-            in json.dumps(statement.get("Principal", {}))
+            in json.dumps(statement)
         ]
     )
     for resource_fragment in (
@@ -1619,7 +1696,6 @@ def test_managed_worker_execution_role_has_private_image_and_log_paths(
             "logs:CreateLogStream",
             "logs:PutLogEvents",
         },
-        ".s3": {"s3:GetObject"},
     }
     statements: list[dict] = []
     for service_suffix, actions in expected_actions.items():
@@ -1640,7 +1716,6 @@ def test_managed_worker_execution_role_has_private_image_and_log_paths(
 
     serialized = json.dumps(statements)
     assert "repository/axonllm/fargate" in serialized
-    assert "prod-us-east-1-starport-layer-bucket/*" in serialized
     assert (
         "/aws/ecs/axonllm/launch-workers/action-managed:"
         "log-stream:*"
@@ -1649,6 +1724,7 @@ def test_managed_worker_execution_role_has_private_image_and_log_paths(
         "/aws/ecs/axonllm/launch-workers/cleanup-managed:"
         "log-stream:*"
     ) in serialized
+    _assert_ecr_layer_endpoint_policy(template)
 
     execution_role_id, execution_role = next(
         (logical_id, role["Properties"])
