@@ -307,8 +307,20 @@ jobs:
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: axonllm-release-evidence-${{ github.sha }}
-          path: ${{ env.EVIDENCE_DIR }}
+          path: |
+            ${{ env.EVIDENCE_DIR }}/*.json
+            ${{ env.EVIDENCE_DIR }}/axonllm-source.tar.gz
           if-no-files-found: error
           compression-level: 0
           retention-days: 90
+          include-hidden-files: false
+
+      - name: Store short-lived release payload
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: axonllm-release-payload-${{ github.sha }}
+          path: ${{ env.EVIDENCE_DIR }}/*.oci.tar
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
           include-hidden-files: false

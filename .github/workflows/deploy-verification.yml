@@ -130,6 +130,7 @@ jobs:
             --repository "${EXPECTED_REPOSITORY}" \
             --commit "${EXPECTED_COMMIT}" \
             --image-digest "${EXPECTED_DIGEST}" \
+            --allow-missing-image-archives \
             --signing-account-id "${EXPECTED_SIGNING_ACCOUNT_ID}" \
             --require-release-tag \
             --target "${DEPLOY_TARGET}" \

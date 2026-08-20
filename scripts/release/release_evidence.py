@@ -130,6 +130,9 @@ def _target_artifacts(
 
 TARGET_ARTIFACTS = _target_artifacts(TARGETS)
 INPUT_ARTIFACTS = SOURCE_ARTIFACTS + TARGET_ARTIFACTS
+IMAGE_ARCHIVES = tuple(
+    dict.fromkeys(target.archive for target in TARGETS.values())
+)
 
 
 class EvidenceError(RuntimeError):
@@ -392,13 +395,18 @@ def verify_oci_archive(archive: Path, digest: str, platform: str) -> None:
         raise EvidenceError(f"cannot inspect OCI archive: {archive}") from exc
 
 
-def _image_digest(directory: Path, target: TargetSpec) -> str:
+def _metadata_image_digest(directory: Path, target: TargetSpec) -> str:
     metadata = _read_json(directory / target.metadata)
     if not isinstance(metadata, dict):
         raise EvidenceError("BuildKit metadata must be an object")
     digest = metadata.get("containerimage.digest")
     if not isinstance(digest, str) or not SHA256.fullmatch(digest):
         raise EvidenceError("BuildKit metadata lacks containerimage.digest")
+    return digest
+
+
+def _image_digest(directory: Path, target: TargetSpec) -> str:
+    digest = _metadata_image_digest(directory, target)
     verify_oci_archive(directory / target.archive, digest, target.platform)
     return digest
 
@@ -598,7 +606,15 @@ def verify_evidence(
     signing_account_id: str | None = None,
     target: str = "fargate",
     expected_run_id: str | None = None,
+    allow_missing_image_archives: bool = False,
 ) -> dict[str, Any]:
+    if allow_missing_image_archives and (
+        image_digest is None or not require_release_tag
+    ):
+        raise EvidenceError(
+            "archive-free verification requires an exact image digest "
+            "and tagged release"
+        )
     manifest_path = directory / MANIFEST
     if not manifest_path.is_file() or manifest_path.is_symlink():
         raise EvidenceError("release manifest is missing or unsafe")
@@ -611,6 +627,10 @@ def verify_evidence(
     schema = manifest["schema"]
     target_specs = TARGETS_V3 if schema == SCHEMA_V3 else TARGETS
     input_artifacts = SOURCE_ARTIFACTS + _target_artifacts(target_specs)
+    image_archives = {
+        spec.archive
+        for spec in target_specs.values()
+    }
     build_type = BUILD_TYPE_V3 if schema == SCHEMA_V3 else BUILD_TYPE
     if target not in target_specs:
         raise EvidenceError(f"unknown deployment target: {target}")
@@ -699,7 +719,15 @@ def verify_evidence(
         ):
             raise EvidenceError(f"malformed artifact record: {name}")
         path = directory / name
-        if not path.is_file() or path.is_symlink():
+        if path.is_symlink():
+            raise EvidenceError(f"missing signed artifact: {name}")
+        if not path.is_file():
+            if (
+                allow_missing_image_archives
+                and name in image_archives
+                and not path.exists()
+            ):
+                continue
             raise EvidenceError(f"missing signed artifact: {name}")
         digest, size = _hash(path)
         if record != {"sha256": digest, "size": size}:
@@ -708,9 +736,16 @@ def verify_evidence(
     _assert_clean_scan(directory / SOURCE_SCAN)
     for name, spec in target_specs.items():
         _assert_clean_scan(directory / spec.scan)
-        metadata_digest = _image_digest(directory, spec)
+        metadata_digest = _metadata_image_digest(directory, spec)
         if metadata_digest != target_digests[name]:
             raise EvidenceError(f"OCI digest differs from release manifest: {name}")
+        archive = directory / spec.archive
+        if archive.is_file():
+            verify_oci_archive(
+                archive,
+                metadata_digest,
+                spec.platform,
+            )
 
     provenance = _read_json(directory / PROVENANCE)
     if not isinstance(provenance, dict):
@@ -789,6 +824,7 @@ def _verify_command(args: argparse.Namespace) -> int:
         signing_account_id=args.signing_account_id,
         target=args.target,
         expected_run_id=args.run_id,
+        allow_missing_image_archives=args.allow_missing_image_archives,
     )
     if args.github_output:
         _write_github_output(
@@ -829,6 +865,10 @@ def _parser() -> argparse.ArgumentParser:
     signing_trust.add_argument("--signing-account-id")
     verify.add_argument("--target", choices=tuple(TARGETS), default="fargate")
     verify.add_argument("--run-id")
+    verify.add_argument(
+        "--allow-missing-image-archives",
+        action="store_true",
+    )
     verify.add_argument("--github-output", type=Path)
     verify.set_defaults(handler=_verify_command)
     return parser

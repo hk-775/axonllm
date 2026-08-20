@@ -51,6 +51,14 @@ def test_production_workflow_uses_oidc_environment_and_signed_targets() -> None:
     assert "aws-access-key-id" not in credential_step["with"]
 
 
+def test_production_workflow_reverifies_compact_release_evidence() -> None:
+    workflow_text = WORKFLOW.read_text(encoding="utf-8")
+
+    assert workflow_text.count("--allow-missing-image-archives") == 2
+    assert workflow_text.count("release_evidence.py verify") == 2
+    assert workflow_text.count("--require-release-tag") == 2
+
+
 def test_workflow_gates_deployment_before_signed_promotion() -> None:
     workflow = _workflow()
     steps = workflow["jobs"]["deploy"]["steps"]

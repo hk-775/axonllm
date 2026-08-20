@@ -198,6 +198,7 @@ def test_serverless_artifacts_use_frozen_arm64_build_and_verification() -> None:
 
 def test_release_builds_scans_kms_signs_and_stores_both_images() -> None:
     workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+    parsed = yaml.safe_load(workflow)
 
     assert "--platform linux/amd64" in workflow
     assert "--platform linux/arm64" in workflow
@@ -245,7 +246,21 @@ def test_release_builds_scans_kms_signs_and_stores_both_images() -> None:
     assert "Condition" not in signing_statements[0]
 
     assert "axonllm-release-evidence-${{ github.sha }}" in workflow
+    assert "axonllm-release-payload-${{ github.sha }}" in workflow
     assert "actions/upload-artifact@" in workflow
+    upload_steps = {
+        step["name"]: step
+        for step in parsed["jobs"]["evidence"]["steps"]
+        if str(step.get("uses", "")).startswith("actions/upload-artifact@")
+    }
+    evidence_upload = upload_steps["Store private release evidence"]["with"]
+    payload_upload = upload_steps["Store short-lived release payload"]["with"]
+    assert evidence_upload["retention-days"] == 90
+    assert "*.json" in evidence_upload["path"]
+    assert "axonllm-source.tar.gz" in evidence_upload["path"]
+    assert ".oci.tar" not in evidence_upload["path"]
+    assert payload_upload["retention-days"] == 7
+    assert payload_upload["path"] == "${{ env.EVIDENCE_DIR }}/*.oci.tar"
     assert "--push" not in workflow
     assert "ghcr.io/" not in workflow
     assert "public.ecr.aws" not in workflow
@@ -262,6 +277,7 @@ def test_deployment_gate_selects_only_signed_target_identity() -> None:
     assert "- standalone-amd64" in workflow
     assert "- standalone-arm64" in workflow
     assert '--target "${DEPLOY_TARGET}"' in workflow
+    assert "--allow-missing-image-archives" in workflow
     assert '--run-id "${EVIDENCE_RUN_ID}"' in workflow
     assert '--github-output "${GITHUB_OUTPUT}"' in workflow
 
@@ -299,6 +315,10 @@ def test_publication_preserves_signed_digests_in_private_ecr() -> None:
     workflow = PUBLISH_WORKFLOW.read_text(encoding="utf-8")
 
     assert "environment: release" in workflow
+    assert "axonllm-release-evidence-${{ inputs.commit_sha }}" in workflow
+    assert "axonllm-release-payload-${{ inputs.commit_sha }}" in workflow
+    assert workflow.count("actions/download-artifact@") == 2
+    assert "--allow-missing-image-archives" not in workflow
     assert "id-token: write" in workflow
     assert "AXON_RELEASE_PUBLISH_ROLE_ARN" in workflow
     assert "AXON_RELEASE_SIGNING_KEY_ARN" not in workflow
