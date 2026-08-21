@@ -9,15 +9,23 @@ The canonical SCIM convergence contract is implemented: tenant user/group
 transactions advance `SCIM#VERSION`, and `DynamoPersistence` provides strongly
 consistent tenant version and snapshot reads.
 
-Focused hardening regressions are green locally. The current source implements
-schema-v4 release evidence with distinct Fargate, AgentCore, standalone AMD64,
-and standalone ARM64 targets. Controlled publication copies verified OCI
-archives into retained immutable private ECR repositories, and deployment
-verification selects the exact target and platform. Schema-v3 verification
-remains supported for historical Fargate and AgentCore releases. No schema-v4
-tag has been published yet. Do not create one until `uv lock && uv lock
---check` succeeds and frozen AMD64/ARM64 container builds pass from the updated
-lockfile.
+The current source implements schema-v4 release evidence with distinct
+Fargate, AgentCore, standalone AMD64, and standalone ARM64 targets. Controlled
+publication copies verified OCI archives into retained immutable private ECR
+repositories, and deployment verification selects the exact target and
+platform. Schema-v3 verification remains supported for historical Fargate and
+AgentCore releases.
+
+`v0.3.0.post1` completed schema-v4 KMS signing and immutable private-ECR
+publication for all four targets; its Fargate deployment-verification gate also
+passed. `v0.3.1` is bound to protected-main commit
+`a7730a516928272c570da53845248f1f61c31f7c`. Release-security run
+`32403283893` built and scanned all four OCI targets and verified both KMS
+signatures, but GitHub rejected the final evidence-artifact upload after the
+repository reached its Actions storage quota. That tag is not promotable until
+the same immutable tagged run succeeds, publication and target verification
+complete, and the protected AWS rehearsal passes. Do not move or recreate the
+tag as a recovery mechanism.
 
 The repository also contains the newer shared HTTP/AgentCore Athena query
 service, credential-free datasource administration, and managed-Cognito
@@ -888,17 +896,22 @@ It:
   Fargate, AgentCore, standalone AMD64, and standalone ARM64 identities;
 - signs both records with the retained asymmetric AWS KMS key and immediately
   verifies the signatures;
-- stores private evidence for 90 days.
+- stores the three OCI publication archives in
+  `axonllm-release-payload-<commit>` for 7 days;
+- stores the deterministic source archive, metadata, scans, SBOMs, manifest,
+  provenance, and signatures in `axonllm-release-evidence-<commit>` for
+  90 days.
 
 `.github/workflows/publish-release.yml` is the controlled publication step. It
 runs only in the protected `release` environment, validates the exact tag,
 commit, release workflow run and attempt, successful CI, signed manifest, all
 target identities, KMS signatures, and fixed account/region repository names.
-It then uses a checksum-pinned ORAS client to copy each signed OCI digest
-without rebuilding, verifies every remote digest, and emits immutable
-`@sha256` references. Standalone tags are platform-qualified. Existing
-immutable tags are accepted only when their digest already matches; AWS lookup
-failures fail closed.
+It downloads both the short-lived payload and long-lived evidence artifacts,
+fully verifies every OCI archive, then uses a checksum-pinned ORAS client to
+copy each signed OCI digest without rebuilding. It verifies every remote digest
+and emits immutable `@sha256` references. Standalone tags are
+platform-qualified. Existing immutable tags are accepted only when their digest
+already matches; AWS lookup failures fail closed.
 
 `.github/workflows/deploy-verification.yml` requires a release tag, successful
 CI for the exact commit, signed evidence, an immutable private ECR digest, and a
@@ -908,7 +921,10 @@ supplied digest to the selected target, source commit, release tag, workflow
 run, platform, manifest, and SLSA provenance. Historical schema-v3 evidence
 continues to support its two legacy targets. The workflow verifies both KMS
 signatures, the selected target's remote private ECR digest, and then rescans
-that exact image.
+that exact image. It consumes compact evidence after publication: only the
+expected OCI archives may be absent, and archive-free verification requires an
+exact tagged digest. All metadata, scans, SBOMs, provenance, manifest entries,
+and signatures remain mandatory.
 
 Publication and deployment take the exact signing key ARN from the manifest,
 not from the current signer variable. They accept it only when its account is
@@ -918,6 +934,29 @@ not from the current signer variable. They accept it only when its account is
 This KMS-backed flow works for a private repository without GitHub's paid
 artifact-attestation API and does not send private release identities or
 artifact hashes to a public transparency log.
+
+### GitHub Artifact Capacity Recovery
+
+Treat an evidence-upload failure as a failed release even when image builds,
+scans, and KMS signature verification succeeded. The signed files must be
+stored successfully before publication or deployment verification.
+
+1. Do not move, delete, or recreate the immutable release tag.
+2. Inventory Actions artifacts and caches before deleting anything. Preserve
+   official release evidence and every artifact needed by a supported release.
+3. Prefer increasing storage. If cleanup is required, delete only explicitly
+   approved superseded prerelease artifacts whose images were already
+   published or whose release was abandoned.
+4. Wait for GitHub's storage meter to recalculate; the documented delay can be
+   6–12 hours.
+5. Rerun the failed job for the same tagged workflow run. Require the run to
+   succeed and confirm that both `axonllm-release-payload-<commit>` and
+   `axonllm-release-evidence-<commit>` exist.
+6. Complete controlled publication within the 7-day payload retention window.
+   If the payload expires, rerun the same immutable tag to regenerate it.
+
+Never mint a replacement tag solely to recover from quota, retention, or
+artifact-upload failure.
 
 Never deploy a mutable tag or bypass a failing CI/evidence check. Record the
 commit, release tag, workflow run, ECR URI and digest, SBOMs, scan results,
@@ -932,8 +971,12 @@ release.
 Dispatch `.github/workflows/launch-agentcore-production.yml` from protected
 `main`; it is the only manual production-launch entry point.
 `deploy-agentcore-production.yml` is `workflow_call` only. Before dispatch,
-pre-stage namespace `managed` with the exact release and setup, certify and
-promote its candidate, deploy its control plane, and collect its exact
+confirm that the release commit, checked-out workflow commit, and current
+protected `main` SHA are identical. Do not merge another commit to `main`
+between tagging and rehearsal. If protected `main` advances, create and verify
+a new release from the new exact commit rather than launching an older tag.
+Then pre-stage namespace `managed` with the exact release and setup, certify
+and promote its candidate, deploy its control plane, and collect its exact
 stack/runtime/resource bindings. An independent reviewer must put those values
 into the schema-v2 gate configuration, upload a versioned copy, and approve a
 review window no longer than 48 hours. Teardown deletes that namespace, so

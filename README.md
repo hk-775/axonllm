@@ -233,18 +233,20 @@ Canonical mode default-denies every unmapped `/api/*` and `/v1/*` route.
 selector aggregates users without a tenant filter and has no canonical action
 mapping.
 
-> **Current release status.** `v0.2.4` completed the schema-v3 KMS signing,
-> immutable private-ECR publication, and current-policy verification flow for
-> both Fargate and AgentCore. Neither image is deployed to a hardened runtime.
-> A real AWS restore/cutover rehearsal, authenticated tenant canaries, load
-> validation, and alarm/event delivery remain unverified. See the
+> **Current release status.** `v0.3.0.post1` completed schema-v4 KMS signing
+> and immutable private-ECR publication for Fargate, AgentCore, standalone
+> AMD64, and standalone ARM64. Its Fargate deployment-verification gate also
+> passed.
+> `v0.3.1` is bound to protected-main commit
+> `a7730a516928272c570da53845248f1f61c31f7c`. Its first release-security run
+> built and scanned all four targets and verified both KMS signatures, but
+> GitHub rejected the final evidence upload after the repository reached its
+> Actions artifact-storage quota. The tag is not promotable until that exact
+> tagged run succeeds, the images are published and target-verified, and the
+> protected AWS rehearsal completes. Do not move or recreate the tag to recover
+> from an artifact-capacity failure. See the
 > [Production Runbook](docs/PRODUCTION_RUNBOOK.md#release-status) and
 > [AgentCore Runbook](docs/AGENTCORE_RUNBOOK.md#current-status).
-> The query and shared control-plane implementation is newer than `v0.2.4`;
-> that release evidence does not certify these additions, and no deployed
-> Athena or shared-control-plane canary has been retained yet.
-> Current source implements schema-v4 evidence for Fargate, AgentCore, and both
-> standalone platforms, but no schema-v4 tag or publication has completed.
 
 For a surface inventory and end-to-end sequences, see
 [Features And Flows](docs/FEATURES_AND_FLOWS.md). `query.mutate` remains an
@@ -2613,6 +2615,17 @@ copies the signed OCI archives into retained KMS-encrypted immutable ECR
 repositories without rebuilding and verifies every remote digest. Historical
 schema-v3 Fargate and AgentCore evidence remains verifiable. These release
 workflows do not deploy a runtime or service.
+
+Release storage is split by lifecycle. The three OCI archives needed only for
+publication are stored as a short-lived payload artifact for 7 days. The
+signed manifest, provenance, SBOMs, scans, build metadata, and deterministic
+source archive are stored as compact evidence for 90 days. Publication
+downloads and fully verifies both artifacts. Deployment verification consumes
+compact evidence and may omit only the OCI archives; it still requires the
+exact tagged digest, every signed metadata file, both KMS signatures, the
+remote ECR identity, and a fresh scan. If the payload expires or an artifact
+upload fails, rerun the same immutable tag rather than creating or moving a
+replacement tag.
 
 `launch-agentcore-production.yml` is the only manual AgentCore production
 entry point. It certifies an isolated external-OIDC runtime, updates an

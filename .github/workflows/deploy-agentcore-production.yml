@@ -470,6 +470,7 @@ jobs:
             --repository "${GITHUB_REPOSITORY}" \
             --commit "${RELEASE_COMMIT}" \
             --image-digest "${agentcore_digest}" \
+            --allow-missing-image-archives \
             --signing-account-id "${{ vars.AXON_AWS_ACCOUNT_ID }}" \
             --require-release-tag \
             --target agentcore \
@@ -480,6 +481,7 @@ jobs:
             --repository "${GITHUB_REPOSITORY}" \
             --commit "${RELEASE_COMMIT}" \
             --image-digest "${fargate_digest}" \
+            --allow-missing-image-archives \
             --signing-account-id "${{ vars.AXON_AWS_ACCOUNT_ID }}" \
             --require-release-tag \
             --target fargate \

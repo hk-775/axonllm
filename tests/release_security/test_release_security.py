@@ -139,6 +139,10 @@ class ReleaseEvidenceTests(unittest.TestCase):
             signing_key_arn=self.signing_key_arn,
         )
 
+    def _remove_image_archives(self) -> None:
+        for archive in release_evidence.IMAGE_ARCHIVES:
+            (self.directory / archive).unlink()
+
     def _downgrade_to_schema_v3(self) -> None:
         manifest_path = self.directory / release_evidence.MANIFEST
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -234,6 +238,93 @@ class ReleaseEvidenceTests(unittest.TestCase):
                 "standalone-arm64",
             },
         )
+
+    def test_compact_evidence_verifies_exact_remote_digest(self) -> None:
+        self._create()
+        self._remove_image_archives()
+
+        manifest = release_evidence.verify_evidence(
+            self.directory,
+            repository=self.repository,
+            commit=self.commit,
+            image_digest=self.agentcore_digest,
+            require_release_tag=True,
+            signing_key_arn=self.signing_key_arn,
+            target="agentcore",
+            allow_missing_image_archives=True,
+        )
+
+        self.assertEqual(
+            manifest["targets"]["agentcore"]["digest"],
+            self.agentcore_digest,
+        )
+
+    def test_compact_evidence_requires_digest_and_tag(self) -> None:
+        self._create()
+        self._remove_image_archives()
+
+        for image_digest, require_release_tag in (
+            (None, True),
+            (self.digest, False),
+        ):
+            with self.subTest(
+                image_digest=image_digest,
+                require_release_tag=require_release_tag,
+            ):
+                with self.assertRaisesRegex(
+                    release_evidence.EvidenceError,
+                    "archive-free verification requires",
+                ):
+                    release_evidence.verify_evidence(
+                        self.directory,
+                        repository=self.repository,
+                        commit=self.commit,
+                        image_digest=image_digest,
+                        require_release_tag=require_release_tag,
+                        signing_key_arn=self.signing_key_arn,
+                        allow_missing_image_archives=True,
+                    )
+
+    def test_compact_evidence_rejects_missing_metadata(self) -> None:
+        self._create()
+        self._remove_image_archives()
+        (self.directory / release_evidence.AGENTCORE_IMAGE_SBOM).unlink()
+
+        with self.assertRaisesRegex(
+            release_evidence.EvidenceError,
+            "missing signed artifact",
+        ):
+            release_evidence.verify_evidence(
+                self.directory,
+                repository=self.repository,
+                commit=self.commit,
+                image_digest=self.agentcore_digest,
+                require_release_tag=True,
+                signing_key_arn=self.signing_key_arn,
+                target="agentcore",
+                allow_missing_image_archives=True,
+            )
+
+    def test_compact_evidence_rejects_tampered_present_archive(self) -> None:
+        self._create()
+        (self.directory / release_evidence.AGENTCORE_IMAGE_ARCHIVE).write_bytes(
+            b"tampered"
+        )
+
+        with self.assertRaisesRegex(
+            release_evidence.EvidenceError,
+            "artifact digest mismatch",
+        ):
+            release_evidence.verify_evidence(
+                self.directory,
+                repository=self.repository,
+                commit=self.commit,
+                image_digest=self.agentcore_digest,
+                require_release_tag=True,
+                signing_key_arn=self.signing_key_arn,
+                target="agentcore",
+                allow_missing_image_archives=True,
+            )
 
     def test_account_trust_accepts_rotated_manifest_key(self) -> None:
         self.signing_key_arn = "arn:aws:kms:us-east-1:123456789012:key/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
@@ -400,6 +491,16 @@ class ReleaseEvidenceTests(unittest.TestCase):
             self.signing_account_id,
         )
         self.assertIsNone(by_account.signing_key_arn)
+
+        compact = parser.parse_args(
+            [
+                *arguments,
+                "--signing-account-id",
+                self.signing_account_id,
+                "--allow-missing-image-archives",
+            ]
+        )
+        self.assertTrue(compact.allow_missing_image_archives)
 
     def test_agentcore_target_selects_its_digest_and_signing_key(self) -> None:
         self._create()

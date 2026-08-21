@@ -80,6 +80,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Split release storage into 7-day OCI publication payloads and 90-day compact
+  signed evidence. Publication still verifies the original archives, while
+  deployment verification accepts archive-free evidence only for exact tagged
+  remote digests.
 - Split server, AgentCore, Bedrock, Google, and AWS control-plane dependencies
   into explicit package extras so the embedded router install remains small.
 - Applied retain/update-retain protection to the security-event topic and

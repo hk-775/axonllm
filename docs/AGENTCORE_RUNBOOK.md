@@ -350,17 +350,20 @@ Cognito ID token in `cloudfront` mode.
 `.github/workflows/release-security.yml` creates the ARM64 image with the
 AgentCore Dockerfile, scans it, emits an image SBOM, captures BuildKit metadata,
 and records its digest in KMS-signed SLSA provenance. Its schema-v4 release
-manifest records all four deployment targets. The AgentCore evidence bundle
-contains:
+manifest records all four deployment targets. The workflow stores two private
+artifacts with different lifetimes:
 
-- `axonllm-agentcore-linux-arm64.oci.tar`;
-- `agentcore-build-metadata.json`;
-- `agentcore-image-security.json`;
-- `agentcore-image.cyclonedx.json`;
-- `provenance.intoto.json`;
-- `provenance-kms-signature.json`;
-- `release-manifest.json`;
-- `manifest-kms-signature.json`.
+- `axonllm-release-payload-<commit>` is retained for 7 days and contains the
+  three OCI archives required by controlled publication, including
+  `axonllm-agentcore-linux-arm64.oci.tar`;
+- `axonllm-release-evidence-<commit>` is retained for 90 days and contains the
+  deterministic source archive, build metadata, scans, SBOMs, signed
+  provenance, signed release manifest, and both KMS signatures.
+
+The compact evidence artifact remains sufficient for post-publication
+deployment verification. Archive-free verification is allowed only for an
+exact tagged digest and may omit only the expected OCI archives. Every
+non-archive evidence file remains mandatory and hash-verified.
 
 `deploy-verification.yml` accepts `target=agentcore`, binds the supplied private
 ECR digest to the AgentCore subject, ARM64 platform, metadata, scan, SBOM, source
@@ -372,13 +375,14 @@ only when it belongs to `AXON_AWS_ACCOUNT_ID` and is the target of a retained
 `alias/axonllm/release-signing-v*` alias. It does not use the signer's current
 `AXON_RELEASE_SIGNING_KEY_ARN` repository variable.
 
-`publish-release.yml` verifies the tagged release lineage and both signed target
-records, then copies the original OCI archives into the release-foundation
-repositories without rebuilding. It verifies the remote digest and target
-evidence before emitting the immutable image references. Deploy only the
-AgentCore reference that subsequently passes `deploy-verification.yml`. The
-`v0.2.4` AgentCore reference completed this flow; repeat it for every promoted
-release and retain the evidence.
+`publish-release.yml` downloads both artifacts, verifies the tagged release
+lineage and all signed target records, then copies the original OCI archives
+into the release-foundation repositories without rebuilding. It verifies each
+archive and remote digest before emitting immutable image references. Deploy
+only the AgentCore reference that subsequently passes
+`deploy-verification.yml`. Complete publication within the 7-day payload
+window. If the payload expires or GitHub rejects an artifact upload, rerun the
+same immutable tag; never move or recreate a release tag to recover storage.
 
 `.github/workflows/deploy-agentcore-production.yml` is the reusable production
 promotion leaf. It is `workflow_call` only and is invoked by
@@ -436,7 +440,11 @@ security boundary.
 point. Dispatch it from protected `main`; do not dispatch a reusable leaf or
 substitute `deploy-agentcore.sh`. The orchestrator binds every reusable workflow
 to the same repository, release commit, parent run, and immutable image
-references. Its sequence is:
+references. The release commit, checked-out workflow commit, and current
+protected `main` SHA must be identical. Do not merge another commit to `main`
+between tagging and rehearsal. If protected `main` advances, create and verify
+a new release from that exact commit instead of launching an older tag. Its
+sequence is:
 
 1. Authorize the protected-main dispatch and independently verify both signed
    private-ECR images.
@@ -500,6 +508,8 @@ review boundary. Complete this pre-stage for every launch:
 6. Dispatch `launch-agentcore-production.yml` with the same release commit,
    images, setup/certification/validation document versions, gate document
    version, hashes, release-evidence run, and approved change id.
+   Immediately before dispatch, re-confirm that the release commit, workflow
+   commit, and protected `main` SHA are still identical.
 7. Repeat the entire pre-stage and review for every later launch. Successful or
    failed orchestration deletes the qualification stacks, so their physical
    identifiers cannot be reused as reviewed bindings.
