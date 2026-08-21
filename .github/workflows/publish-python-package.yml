@@ -1,0 +1,212 @@
+name: Publish Python package
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing annotated release tag to publish or retry
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: publish-python-${{ inputs.release_tag || github.event.release.tag_name }}
+  cancel-in-progress: false
+
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  RELEASE_TAG: ${{ inputs.release_tag || github.event.release.tag_name }}
+  UV_CACHE_DIR: /tmp/axonllm-uv-cache
+  UV_VERSION: "0.10.7"
+
+jobs:
+  build:
+    name: Build verified distributions
+    if: >-
+      (github.event_name == 'release' &&
+      github.event.release.prerelease == false) ||
+      (github.event_name == 'workflow_dispatch' &&
+      github.ref == 'refs/heads/main')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out exact release source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ inputs.release_tag || github.event.release.tag_name }}
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+
+      - name: Install pinned uv
+        run: python -m pip install --no-deps "uv==${UV_VERSION}"
+
+      - name: Verify immutable release lineage
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "${RELEASE_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "$(git cat-file -t "refs/tags/${RELEASE_TAG}")" == "tag" ]]
+
+          commit_sha=$(git rev-list -n 1 "refs/tags/${RELEASE_TAG}")
+          [[ "${commit_sha}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$(git rev-parse HEAD)" == "${commit_sha}" ]]
+
+          version=$(
+            python -c \
+              'import pathlib,tomllib; print(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"])'
+          )
+          [[ "${RELEASE_TAG}" == "v${version}" ]]
+
+          git merge-base --is-ancestor "${commit_sha}" origin/main
+
+          ci_runs="${RUNNER_TEMP}/ci-runs.json"
+          release_record="${RUNNER_TEMP}/github-release.json"
+          release_runs="${RUNNER_TEMP}/release-runs.json"
+          gh api \
+            "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" \
+            >"${release_record}"
+          gh api --method GET \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs" \
+            -f "head_sha=${commit_sha}" \
+            -f status=completed \
+            -f per_page=100 \
+            >"${ci_runs}"
+          gh api --method GET \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/release-security.yml/runs" \
+            -f "head_sha=${commit_sha}" \
+            -f status=completed \
+            -f per_page=100 \
+            >"${release_runs}"
+
+          jq -e --arg tag "${RELEASE_TAG}" \
+            '.tag_name == $tag
+              and .draft == false
+              and .prerelease == false' \
+            "${release_record}"
+          jq -e --arg commit "${commit_sha}" --arg tag "${RELEASE_TAG}" \
+            '[.workflow_runs[] | select(
+              .head_sha == $commit
+              and .head_branch == $tag
+              and .event == "push"
+              and .conclusion == "success"
+            )] | length > 0' \
+            "${ci_runs}"
+          jq -e --arg commit "${commit_sha}" --arg tag "${RELEASE_TAG}" \
+            '[.workflow_runs[] | select(
+              .head_sha == $commit
+              and .head_branch == $tag
+              and .event == "push"
+              and .conclusion == "success"
+            )] | length > 0' \
+            "${release_runs}"
+
+      - name: Build wheel and source distribution
+        run: uv build --wheel --sdist --out-dir dist
+
+      - name: Verify distribution metadata and clean install
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import email
+          import hashlib
+          from pathlib import Path
+          import tarfile
+          import tomllib
+          import zipfile
+
+          version = tomllib.loads(
+              Path("pyproject.toml").read_text(encoding="utf-8")
+          )["project"]["version"]
+          wheel, = Path("dist").glob("*.whl")
+          sdist, = Path("dist").glob("*.tar.gz")
+
+          with zipfile.ZipFile(wheel) as archive:
+              metadata_name, = (
+                  name for name in archive.namelist()
+                  if name.endswith(".dist-info/METADATA")
+              )
+              wheel_metadata = email.message_from_bytes(
+                  archive.read(metadata_name)
+              )
+          with tarfile.open(sdist, "r:gz") as archive:
+              pkg_info_name, = (
+                  name for name in archive.getnames()
+                  if name.endswith("/PKG-INFO")
+              )
+              member = archive.extractfile(pkg_info_name)
+              assert member is not None
+              sdist_metadata = email.message_from_bytes(member.read())
+
+          for metadata in (wheel_metadata, sdist_metadata):
+              assert metadata["Name"] == "axon-llm"
+              assert metadata["Version"] == version
+
+          for distribution in (wheel, sdist):
+              digest = hashlib.sha256(distribution.read_bytes()).hexdigest()
+              print(f"{digest}  {distribution}")
+          PY
+
+          python -m venv "${RUNNER_TEMP}/package-smoke"
+          "${RUNNER_TEMP}/package-smoke/bin/python" -m pip install \
+            --no-index \
+            --no-deps \
+            dist/*.whl
+          "${RUNNER_TEMP}/package-smoke/bin/python" - <<'PY'
+          from importlib.metadata import version
+          from importlib.util import find_spec
+          import pathlib
+          import tomllib
+
+          expected = tomllib.loads(
+              pathlib.Path("pyproject.toml").read_text(encoding="utf-8")
+          )["project"]["version"]
+          assert version("axon-llm") == expected
+          assert find_spec("axonllm") is not None
+          PY
+
+      - name: Upload verified distributions
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: axonllm-python-distributions-${{ env.RELEASE_TAG }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Publish to PyPI
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment:
+      name: pypi
+      url: https://pypi.org/p/axon-llm
+    permissions:
+      actions: read
+      id-token: write
+
+    steps:
+      - name: Download verified distributions
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: axonllm-python-distributions-${{ env.RELEASE_TAG }}
+          path: dist/
+
+      - name: Publish distributions with Trusted Publishing
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          attestations: true
+          packages-dir: dist/
+          print-hash: true
+          skip-existing: false

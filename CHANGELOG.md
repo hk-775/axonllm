@@ -7,8 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-08-21
+
 ### Added
 
+- Added PyPI Trusted Publishing from protected GitHub Releases. The workflow
+  verifies the annotated tag, package version, protected-main ancestry, green
+  CI, and successful KMS-backed release evidence before publishing the wheel
+  and source distribution without a long-lived PyPI token.
 - Accepted the deployment architecture for embedded Ostiari, standalone, and
   AgentCore delivery modes. Added a strict versioned AgentCore deployment
   schema, safe example configurations, and non-mutating validation that

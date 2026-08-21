@@ -422,7 +422,9 @@ launch-rehearsal evidence, and qualification-teardown evidence. The release
 workflow creates evidence but does not publish or deploy. The separate
 protected publication workflow copies the verified OCI archives to immutable
 private ECR without rebuilding. The protected AgentCore launch workflow is the
-only runtime deployment path. `v0.2.4` completed the first tagged
+only runtime deployment path. Python distributions are published separately
+through a protected PyPI Trusted Publisher only after exact-tag CI and signed
+release evidence succeed. `v0.2.4` completed the first tagged
 private-ECR/KMS-signature flow; it does not contain the newer launch evidence. A
 real hardened deployment and AWS restore exercise remain externally unverified.
 

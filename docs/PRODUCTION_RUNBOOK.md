@@ -23,9 +23,10 @@ passed. `v0.3.1` is bound to protected-main commit
 `32403283893` built and scanned all four OCI targets and verified both KMS
 signatures, but GitHub rejected the final evidence-artifact upload after the
 repository reached its Actions storage quota. That tag is not promotable until
-the same immutable tagged run succeeds, publication and target verification
-complete, and the protected AWS rehearsal passes. Do not move or recreate the
-tag as a recovery mechanism.
+the same immutable tagged run succeeds. Releases after it split compact signed
+evidence from short-lived OCI publication payloads, but still require
+successful storage, publication, target verification, and the protected AWS
+rehearsal. Do not move or recreate a tag as a recovery mechanism.
 
 The repository also contains the newer shared HTTP/AgentCore Athena query
 service, credential-free datasource administration, and managed-Cognito
@@ -957,6 +958,41 @@ stored successfully before publication or deployment verification.
 
 Never mint a replacement tag solely to recover from quota, retention, or
 artifact-upload failure.
+
+### Python Package Publication
+
+`.github/workflows/publish-python-package.yml` publishes the `axon-llm` wheel
+and source distribution with PyPI Trusted Publishing. Configure the PyPI
+publisher with these exact values:
+
+- PyPI project: `axon-llm`
+- GitHub owner: `AxonLLM`
+- GitHub repository: `axonllm`
+- Workflow filename: `publish-python-package.yml`
+- GitHub environment: `pypi`
+
+For the first publication, create a pending trusted publisher for the new PyPI
+project before publishing the GitHub Release. Configure the GitHub `pypi`
+environment to accept only version tags and require the intended release
+approval policy. Do not add a PyPI password or API-token secret.
+
+The workflow runs for a stable published GitHub Release. A manual dispatch can
+retry an existing stable tag, but cannot change its source. Before building, it
+requires:
+
+1. a `vMAJOR.MINOR.PATCH` annotated tag;
+2. an exact match between the tag and `pyproject.toml`;
+3. the tag commit to be contained in protected `main`;
+4. successful tag-triggered CI for the exact commit;
+5. successful tag-triggered KMS release-security evidence for the exact
+   commit.
+
+It builds the wheel and source distribution with the pinned `uv` and
+`setuptools` versions, verifies both metadata records, performs a clean
+no-dependency wheel install, and uploads the distributions for one day. The
+protected publish job receives only `id-token: write` plus artifact read
+access, then exchanges GitHub OIDC identity for a short-lived PyPI credential.
+Publication must fail on an existing filename or version.
 
 Never deploy a mutable tag or bypass a failing CI/evidence check. Record the
 commit, release tag, workflow run, ECR URI and digest, SBOMs, scan results,

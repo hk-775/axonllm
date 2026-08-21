@@ -29,6 +29,7 @@ APPROVED_ACTION_PINS = {
     ),
     "docker/setup-buildx-action": "bb05f3f5519dd87d3ba754cc423b652a5edd6d2c",
     "docker/setup-qemu-action": "96fe6ef7f33517b61c61be40b68a1882f3264fb8",
+    "pypa/gh-action-pypi-publish": "dc37677b2e1c63e2034f94d8a5b11f265b73ba33",
 }
 
 
