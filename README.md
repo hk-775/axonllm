@@ -59,6 +59,11 @@ pip install "axon-llm[bedrock]"      # add the Bedrock transport
 pip install "axon-llm[google]"       # add Vertex workload identity
 ```
 
+Beginning with `v0.4.0`, Python distributions are published from an annotated
+GitHub Release only after CI and the KMS-backed release-security workflow pass
+for the exact tag commit. Publication uses PyPI Trusted Publishing rather than
+a stored API token.
+
 ```python
 import asyncio
 
@@ -241,10 +246,12 @@ mapping.
 > `a7730a516928272c570da53845248f1f61c31f7c`. Its first release-security run
 > built and scanned all four targets and verified both KMS signatures, but
 > GitHub rejected the final evidence upload after the repository reached its
-> Actions artifact-storage quota. The tag is not promotable until that exact
-> tagged run succeeds, the images are published and target-verified, and the
-> protected AWS rehearsal completes. Do not move or recreate the tag to recover
-> from an artifact-capacity failure. See the
+> Actions artifact-storage quota. The tag remains unpromotable. Releases after
+> it store compact signed evidence separately from short-lived OCI payloads;
+> they are promotable only after the exact tagged run, immutable image
+> publication, target verification, and protected AWS rehearsal all succeed.
+> Do not move or recreate a tag to recover from an artifact-capacity failure.
+> See the
 > [Production Runbook](docs/PRODUCTION_RUNBOOK.md#release-status) and
 > [AgentCore Runbook](docs/AGENTCORE_RUNBOOK.md#current-status).
 
@@ -2626,6 +2633,13 @@ exact tagged digest, every signed metadata file, both KMS signatures, the
 remote ECR identity, and a fresh scan. If the payload expires or an artifact
 upload fails, rerun the same immutable tag rather than creating or moving a
 replacement tag.
+
+Python package publication is separate from private image publication. A
+stable GitHub Release invokes the protected `pypi` environment, rebuilds the
+wheel and source distribution from the exact annotated tag, verifies that the
+tag is on protected `main`, requires green tag CI and release-security runs,
+and publishes `axon-llm` through GitHub OIDC. Manual dispatch exists only to
+retry the same existing tag; it performs the same lineage checks.
 
 `launch-agentcore-production.yml` is the only manual AgentCore production
 entry point. It certifies an isolated external-OIDC runtime, updates an
