@@ -58,9 +58,11 @@ The published target digests are:
 - AgentCore:
   `sha256:e368b7b4522f4838f3ebb4dcc04967682c73cb73e7e40ce16421a6a1ffda6147`
 
-The GitHub evidence artifact expires on 2026-11-08; retain it in the approved
-evidence system or produce a newer release before relying on it. These runs
-validate the release supply chain, not a runtime deployment.
+The GitHub Actions artifacts were permanently deleted on 2026-08-23 during
+source-organization cleanup. The run records remain historical metadata, but
+their former artifacts are no longer release evidence. Produce a newer complete
+release before promotion. These runs validate the release supply chain, not a
+runtime deployment.
 
 The immutable `v0.2.2` and `v0.2.3` tags are not promotable. For `v0.2.2`,
 GitHub rejected attestation persistence for the private organization plan
@@ -171,8 +173,8 @@ steps in order:
    protected AWS role assumption. Update the PyPI trusted publisher owner to
    `hk-775` before package publication.
 9. Remove `LegacyGitHubOidcSubjectPrefix` in a separate reviewed deployment
-   only after signing, publication, verification, and production workflows
-   have succeeded under `hk-775`.
+   after proving protected AWS role assumption under `hk-775`. Confirm every
+   GitHub OIDC role trusts only the immutable `hk-775` repository identity.
 10. Delete the `AxonLLM` organization only after it has no repositories,
     packages, Pages sites, runners, secrets, variables, webhooks, Apps,
     projects, billing commitments, or external integrations.
@@ -414,10 +416,10 @@ the shared `hnb659fds` roles while other applications, including AgentLasso,
 still use them.
 
 The IAM trust subjects use GitHub's immutable owner and repository IDs, not
-name-only subjects. During the transfer from the `AxonLLM` organization to
-`hk-775`, the foundation temporarily accepts both exact immutable identities.
-It does not accept a wildcard owner or repository. Derive the target prefix
-from verified IDs:
+name-only subjects. The completed transfer from the `AxonLLM` organization to
+`hk-775` uses only the destination's exact immutable identity; the temporary
+legacy trust parameter has been removed. The foundation does not accept a
+wildcard owner or repository. Derive the subject prefix from verified IDs:
 
 ```bash
 owner_id=$(gh api users/hk-775 --jq .id)
@@ -427,10 +429,10 @@ printf 'repo:hk-775@%s/axonllm@%s\n' "${owner_id}" "${repository_id}"
 
 The result must match `GitHubOidcSubjectPrefix` exactly. The OIDC customization
 endpoint reports the subject-template policy, not a rendered token subject.
-After the new owner completes signing, publication, verification, and
-production-role assumption, remove `LegacyGitHubOidcSubjectPrefix` in a
-separate reviewed change. Historical provenance build-type URIs remain stable
-identifiers and are not rewritten.
+The synthesized template and live stack must not contain
+`LegacyGitHubOidcSubjectPrefix` or an `AxonLLM` organization OIDC subject.
+Historical provenance build-type URIs remain stable identifiers and are not
+rewritten.
 
 ### One-Time `axrel` Migration
 
@@ -457,7 +459,7 @@ the previous managed-policy version for rollback. It never changes the shared
 `hnb659fds` toolkit.
 
 Create a non-executing change set with the repository-pinned CLI. Include all
-eleven business parameters and explicitly migrate `BootstrapVersion`:
+ten business parameters and explicitly migrate `BootstrapVersion`:
 
 ```bash
 cd infra
@@ -479,7 +481,6 @@ cd infra
   --parameters AxonLLMReleaseFoundationStack:ExternalOidcProviderSourceSecretArn="$EXTERNAL_PROVIDER_SOURCE_SECRET_ARN" \
   --parameters AxonLLMReleaseFoundationStack:ExternalOidcProviderSourceKmsKeyArn="$EXTERNAL_PROVIDER_SOURCE_KMS_KEY_ARN" \
   --parameters AxonLLMReleaseFoundationStack:GitHubOidcSubjectPrefix="$GITHUB_OIDC_SUBJECT_PREFIX" \
-  --parameters AxonLLMReleaseFoundationStack:LegacyGitHubOidcSubjectPrefix="$LEGACY_GITHUB_OIDC_SUBJECT_PREFIX" \
   --parameters AxonLLMReleaseFoundationStack:LaunchAlarmEmail="$LAUNCH_ALARM_EMAIL" \
   --parameters AxonLLMReleaseFoundationStack:BootstrapVersion=/cdk-bootstrap/axrel/version
 ```

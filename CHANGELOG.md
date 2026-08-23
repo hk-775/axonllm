@@ -9,12 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Prepared the canonical GitHub ownership migration from the `AxonLLM`
-  organization to `hk-775`. Release-foundation IAM temporarily trusts both
-  exact immutable GitHub OIDC identities so the transfer can complete without
-  widening repository trust or locking workflows out of AWS. Production jobs
-  now target repository-accessible self-hosted runner labels instead of an
-  organization-only runner group.
+- Completed the canonical GitHub ownership migration from the `AxonLLM`
+  organization to `hk-775`. Release-foundation IAM now trusts only the exact
+  immutable destination identity; the temporary legacy subject and stack
+  parameter were removed. Production jobs use repository-accessible
+  self-hosted runner labels instead of an organization-only runner group.
 
 ## [0.4.0] - 2026-08-22
 

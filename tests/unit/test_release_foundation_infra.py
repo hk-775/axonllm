@@ -14,7 +14,6 @@ _REPO = Path(__file__).resolve().parents[2]
 _INFRA = _REPO / "infra"
 _INFRA_PYTHON = _INFRA / ".venv" / "bin" / "python"
 _SUBJECT_PREFIX = "repo:hk-775@225056493/axonllm@1276398779"
-_LEGACY_SUBJECT_PREFIX = "repo:AxonLLM@313590914/axonllm@1276398779"
 _REHEARSAL_EVIDENCE_PREFIX = "agentcore-production/rehearsal"
 _QUALIFICATION_TEARDOWN_EVIDENCE_PREFIX = "agentcore-production/qualification-teardown"
 _TRANSITION_EVIDENCE_PREFIX = "agentcore-production/transitions"
@@ -105,10 +104,7 @@ def _github_subject(suffix: str) -> list[dict]:
                 ],
             ]
         }
-        for parameter in (
-            "GitHubOidcSubjectPrefix",
-            "LegacyGitHubOidcSubjectPrefix",
-        )
+        for parameter in ("GitHubOidcSubjectPrefix",)
     ]
 
 
@@ -390,21 +386,14 @@ def test_operations_table_names_are_explicit_parameters(
     }
 
 
-def test_github_oidc_trust_is_exact_and_retained(synthesized_template):
+def test_github_oidc_trust_is_exact_and_single_owner(synthesized_template):
     subject_parameter = synthesized_template["Parameters"]["GitHubOidcSubjectPrefix"]
     assert subject_parameter["Default"] == _SUBJECT_PREFIX
     assert subject_parameter["AllowedPattern"] == (
         r"^repo:[A-Za-z0-9_.-]+@[0-9]+/"
         r"[A-Za-z0-9_.-]+@[0-9]+$"
     )
-    legacy_subject_parameter = synthesized_template["Parameters"][
-        "LegacyGitHubOidcSubjectPrefix"
-    ]
-    assert legacy_subject_parameter["Default"] == _LEGACY_SUBJECT_PREFIX
-    assert legacy_subject_parameter["AllowedPattern"] == (
-        r"^repo:[A-Za-z0-9_.-]+@[0-9]+/"
-        r"[A-Za-z0-9_.-]+@[0-9]+$"
-    )
+    assert "LegacyGitHubOidcSubjectPrefix" not in synthesized_template["Parameters"]
     providers = _resources(
         synthesized_template,
         "AWS::IAM::OIDCProvider",
@@ -419,8 +408,9 @@ def test_github_oidc_trust_is_exact_and_retained(synthesized_template):
     roles = _resources(synthesized_template, "AWS::IAM::Role")
     serialized_roles = json.dumps(roles)
     assert "repo:AxonLLM/axonllm:" not in serialized_roles
+    assert "repo:AxonLLM@" not in serialized_roles
     assert '"GitHubOidcSubjectPrefix"' in serialized_roles
-    assert '"LegacyGitHubOidcSubjectPrefix"' in serialized_roles
+    assert '"LegacyGitHubOidcSubjectPrefix"' not in serialized_roles
     assert len(roles) == 18
     roles_by_name = {role["Properties"]["RoleName"] for role in roles}
     assert roles_by_name == {
