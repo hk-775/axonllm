@@ -36,7 +36,6 @@ from constructs import Construct
 
 _GITHUB_OIDC_ISSUER = "token.actions.githubusercontent.com"
 _DEFAULT_GITHUB_SUBJECT_PREFIX = "repo:hk-775@225056493/axonllm@1276398779"
-_LEGACY_GITHUB_SUBJECT_PREFIX = "repo:AxonLLM@313590914/axonllm@1276398779"
 _GITHUB_SUBJECT_PREFIX_PATTERN = r"^repo:[A-Za-z0-9_.-]+@[0-9]+/[A-Za-z0-9_.-]+@[0-9]+$"
 _SECRET_ARN_PATTERN = (
     r"^arn:aws:secretsmanager:us-east-1:[0-9]{12}:secret:"
@@ -219,27 +218,9 @@ class AxonLLMReleaseFoundationStack(Stack):
                 "GitHub OIDC repository identity in repo:<owner>@<owner-id>/<repository>@<repository-id> form"
             ),
         ).value_as_string
-        legacy_github_subject_prefix = CfnParameter(
-            self,
-            "LegacyGitHubOidcSubjectPrefix",
-            type="String",
-            default=_LEGACY_GITHUB_SUBJECT_PREFIX,
-            allowed_pattern=_GITHUB_SUBJECT_PREFIX_PATTERN,
-            description=(
-                "Temporary exact GitHub OIDC identity retained only for the "
-                "AxonLLM-to-hk-775 ownership migration"
-            ),
-        ).value_as_string
-        github_subject_prefixes = (
-            github_subject_prefix,
-            legacy_github_subject_prefix,
-        )
 
         def github_subject(suffix: str) -> list[str]:
-            return [
-                f"{subject_prefix}{suffix}"
-                for subject_prefix in github_subject_prefixes
-            ]
+            return [f"{github_subject_prefix}{suffix}"]
 
         github_subjects = {
             "signing": github_subject(":ref:refs/tags/v*"),

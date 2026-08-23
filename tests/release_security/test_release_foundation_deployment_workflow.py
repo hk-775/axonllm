@@ -91,14 +91,13 @@ def test_foundation_deployment_requires_exact_bounded_bootstrap():
     assert "-m cfnlint" not in hardened_template_check
 
 
-def test_foundation_deployment_preserves_live_values_and_migrates_oidc_identity():
+def test_foundation_deployment_preserves_live_values_and_removes_legacy_identity():
     workflow = _workflow()
-    assert workflow["env"]["TARGET_GITHUB_OIDC_SUBJECT_PREFIX"] == (
+    assert workflow["env"]["GITHUB_OIDC_SUBJECT_PREFIX"] == (
         "repo:hk-775@225056493/axonllm@1276398779"
     )
-    assert workflow["env"]["LEGACY_GITHUB_OIDC_SUBJECT_PREFIX"] == (
-        "repo:AxonLLM@313590914/axonllm@1276398779"
-    )
+    assert "TARGET_GITHUB_OIDC_SUBJECT_PREFIX" not in workflow["env"]
+    assert "LEGACY_GITHUB_OIDC_SUBJECT_PREFIX" not in workflow["env"]
 
     serialized = WORKFLOW.read_text(encoding="utf-8")
     parameter_names = {
@@ -107,7 +106,6 @@ def test_foundation_deployment_preserves_live_values_and_migrates_oidc_identity(
         "ExternalOidcProviderSourceSecretArn",
         "FargateStateTableName",
         "GitHubOidcSubjectPrefix",
-        "LegacyGitHubOidcSubjectPrefix",
         "LaunchAlarmEmail",
         "ProductionProviderSourceKmsKeyArn",
         "ProductionProviderSourceSecretArn",
@@ -118,17 +116,13 @@ def test_foundation_deployment_preserves_live_values_and_migrates_oidc_identity(
         assert f"AxonLLMReleaseFoundationStack:{name}=" in serialized
     assert "github_subject=$(parameter GitHubOidcSubjectPrefix)" not in serialized
     assert (
-        "legacy_github_subject=$(parameter LegacyGitHubOidcSubjectPrefix)"
-        not in serialized
-    )
-    assert (
         "AxonLLMReleaseFoundationStack:GitHubOidcSubjectPrefix="
-        "${TARGET_GITHUB_OIDC_SUBJECT_PREFIX}"
+        "${GITHUB_OIDC_SUBJECT_PREFIX}"
     ) in serialized
     assert (
         "AxonLLMReleaseFoundationStack:LegacyGitHubOidcSubjectPrefix="
-        "${LEGACY_GITHUB_OIDC_SUBJECT_PREFIX}"
-    ) in serialized
+        not in serialized
+    )
     assert "describe-stacks" in serialized
     assert "UsePreviousValue" not in serialized
     assert "$business_parameter_count == 10" in serialized
@@ -137,7 +131,9 @@ def test_foundation_deployment_preserves_live_values_and_migrates_oidc_identity(
     assert "($values | map(.key)) - $allowed_keys" in serialized
     assert 'select(.key == "LegacyGitHubOidcSubjectPrefix")' in serialized
     assert 'elif .ParameterKey == "GitHubOidcSubjectPrefix"' in serialized
-    assert '"ParameterKey": "LegacyGitHubOidcSubjectPrefix"' in serialized
+    assert '"ParameterKey": "LegacyGitHubOidcSubjectPrefix"' not in serialized
+    assert 'has("LegacyGitHubOidcSubjectPrefix") | not' in serialized
+    assert 'contains("repo:AxonLLM@")' in serialized
     assert (
         "AxonLLMReleaseFoundationStack:BootstrapVersion="
         "/cdk-bootstrap/axrel/version"
