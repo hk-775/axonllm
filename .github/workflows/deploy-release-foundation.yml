@@ -24,14 +24,18 @@ concurrency:
 
 env:
   AWS_REGION: us-east-1
+  LEGACY_GITHUB_OIDC_SUBJECT_PREFIX: "repo:AxonLLM@313590914/axonllm@1276398779"
+  TARGET_GITHUB_OIDC_SUBJECT_PREFIX: "repo:hk-775@225056493/axonllm@1276398779"
   UV_VERSION: "0.10.7"
 
 jobs:
   deploy:
     name: Verify and deploy release foundation
     runs-on:
-      group: axonllm-production
-      labels: axonllm-production-allowlisted
+      - self-hosted
+      - linux
+      - x64
+      - axonllm-production-allowlisted
     timeout-minutes: 60
     environment: release-foundation
     permissions:
@@ -127,9 +131,13 @@ jobs:
           )
           template="${CDK_OUTDIR}/AxonLLMReleaseFoundationStack.template.json"
           test -f "${template}"
-          jq -e '
+          jq -e \
+            --arg legacy "${LEGACY_GITHUB_OIDC_SUBJECT_PREFIX}" \
+            --arg target "${TARGET_GITHUB_OIDC_SUBJECT_PREFIX}" '
             .Parameters.BootstrapVersion.Default
               == "/cdk-bootstrap/axrel/version"
+            and .Parameters.GitHubOidcSubjectPrefix.Default == $target
+            and .Parameters.LegacyGitHubOidcSubjectPrefix.Default == $legacy
             and ([.. | strings | select(contains("hnb659fds"))] | length == 0)
             and ([.Resources[] | select(.Type == "AWS::IAM::Role")] | length == 18)
             and all(
@@ -185,7 +193,37 @@ jobs:
             >"${parameters}"
           jq -e '
             map({key: .ParameterKey, value: .ParameterValue}) as $values
-            | ($values | map(select(.key != "BootstrapVersion")) | length) == 10
+            | [
+                "AgentCoreStateTableName",
+                "BootstrapVersion",
+                "ExternalOidcProviderSourceKmsKeyArn",
+                "ExternalOidcProviderSourceSecretArn",
+                "FargateStateTableName",
+                "GitHubOidcSubjectPrefix",
+                "LegacyGitHubOidcSubjectPrefix",
+                "LaunchAlarmEmail",
+                "ProductionProviderSourceKmsKeyArn",
+                "ProductionProviderSourceSecretArn",
+                "QualificationProviderSourceKmsKeyArn",
+                "QualificationProviderSourceSecretArn"
+              ] as $allowed_keys
+            | (
+                $values
+                | map(select(.key != "BootstrapVersion"))
+                | length
+              ) as $business_parameter_count
+            | (
+                $business_parameter_count == 10
+                or $business_parameter_count == 11
+              )
+            and (
+              ($values | map(.key) | unique | length)
+              == ($values | length)
+            )
+            and (
+              ($values | map(.key)) - $allowed_keys
+              | length
+            ) == 0
             and (
               $values
               | map(select(.key == "BootstrapVersion"))
@@ -207,8 +245,47 @@ jobs:
               - ($values | map(.key))
               | length
             ) == 0
+            and (
+              $values
+              | map(select(.key == "LegacyGitHubOidcSubjectPrefix"))
+              | length
+            ) <= 1
             and all($values[]; (.value | type == "string" and length > 0))
           ' "${parameters}" >/dev/null
+          current_github_subject=$(
+            jq -er '
+              .[]
+              | select(.ParameterKey == "GitHubOidcSubjectPrefix")
+              | .ParameterValue
+            ' "${parameters}"
+          )
+          case "${current_github_subject}" in
+            "${LEGACY_GITHUB_OIDC_SUBJECT_PREFIX}" | "${TARGET_GITHUB_OIDC_SUBJECT_PREFIX}")
+              ;;
+            *)
+              exit 1
+              ;;
+          esac
+          legacy_parameter_count=$(
+            jq -r '
+              [
+                .[]
+                | select(.ParameterKey == "LegacyGitHubOidcSubjectPrefix")
+              ]
+              | length
+            ' "${parameters}"
+          )
+          if [[ "${legacy_parameter_count}" == "1" ]]; then
+            current_legacy_subject=$(
+              jq -er '
+                .[]
+                | select(.ParameterKey == "LegacyGitHubOidcSubjectPrefix")
+                | .ParameterValue
+              ' "${parameters}"
+            )
+            test "${current_legacy_subject}" = \
+              "${LEGACY_GITHUB_OIDC_SUBJECT_PREFIX}"
+          fi
           chmod 0600 "${parameters}"
 
       - name: Prepare commit-bound foundation change set
@@ -232,7 +309,6 @@ jobs:
           qualification_key=$(parameter QualificationProviderSourceKmsKeyArn)
           external_secret=$(parameter ExternalOidcProviderSourceSecretArn)
           external_key=$(parameter ExternalOidcProviderSourceKmsKeyArn)
-          github_subject=$(parameter GitHubOidcSubjectPrefix)
           alarm_email=$(parameter LaunchAlarmEmail)
           (
             cd infra
@@ -252,7 +328,8 @@ jobs:
               --parameters "AxonLLMReleaseFoundationStack:QualificationProviderSourceKmsKeyArn=${qualification_key}" \
               --parameters "AxonLLMReleaseFoundationStack:ExternalOidcProviderSourceSecretArn=${external_secret}" \
               --parameters "AxonLLMReleaseFoundationStack:ExternalOidcProviderSourceKmsKeyArn=${external_key}" \
-              --parameters "AxonLLMReleaseFoundationStack:GitHubOidcSubjectPrefix=${github_subject}" \
+              --parameters "AxonLLMReleaseFoundationStack:GitHubOidcSubjectPrefix=${TARGET_GITHUB_OIDC_SUBJECT_PREFIX}" \
+              --parameters "AxonLLMReleaseFoundationStack:LegacyGitHubOidcSubjectPrefix=${LEGACY_GITHUB_OIDC_SUBJECT_PREFIX}" \
               --parameters "AxonLLMReleaseFoundationStack:LaunchAlarmEmail=${alarm_email}" \
               --parameters "AxonLLMReleaseFoundationStack:BootstrapVersion=/cdk-bootstrap/axrel/version" \
               --require-approval never
@@ -324,7 +401,9 @@ jobs:
           jq -e \
             --slurpfile live "${RUNNER_TEMP}/foundation-parameters.json" \
             --arg name "${change_set}" \
-            --arg role "${expected_role}" '
+            --arg role "${expected_role}" \
+            --arg legacy "${LEGACY_GITHUB_OIDC_SUBJECT_PREFIX}" \
+            --arg target "${TARGET_GITHUB_OIDC_SUBJECT_PREFIX}" '
             .ChangeSetName == $name
             and .StackName == "AxonLLMReleaseFoundationStack"
             and .Status == "CREATE_COMPLETE"
@@ -340,14 +419,28 @@ jobs:
             )
             and (
               (
-                $live[0]
-                | map({ParameterKey, ParameterValue})
-                | map(
-                    if .ParameterKey == "BootstrapVersion"
-                    then .ParameterValue = "/cdk-bootstrap/axrel/version"
-                    else .
-                    end
-                  )
+                (
+                  $live[0]
+                  | map({ParameterKey, ParameterValue})
+                  | map(
+                      if .ParameterKey == "BootstrapVersion"
+                      then .ParameterValue = "/cdk-bootstrap/axrel/version"
+                      elif .ParameterKey == "GitHubOidcSubjectPrefix"
+                      then .ParameterValue = $target
+                      else .
+                      end
+                    )
+                  | map(
+                      select(
+                        .ParameterKey
+                        != "LegacyGitHubOidcSubjectPrefix"
+                      )
+                    )
+                )
+                + [{
+                    "ParameterKey": "LegacyGitHubOidcSubjectPrefix",
+                    "ParameterValue": $legacy
+                  }]
                 | sort_by(.ParameterKey)
               )
               == (
@@ -391,7 +484,9 @@ jobs:
             --output json \
             --no-cli-pager)
           jq -e \
-            --arg role "arn:aws:iam::${AWS_ACCOUNT_ID}:role/cdk-axrel-cfn-exec-role-${AWS_ACCOUNT_ID}-us-east-1" '
+            --arg role "arn:aws:iam::${AWS_ACCOUNT_ID}:role/cdk-axrel-cfn-exec-role-${AWS_ACCOUNT_ID}-us-east-1" \
+            --arg legacy "${LEGACY_GITHUB_OIDC_SUBJECT_PREFIX}" \
+            --arg target "${TARGET_GITHUB_OIDC_SUBJECT_PREFIX}" '
             .Stacks | length == 1
             and .[0].StackStatus == "UPDATE_COMPLETE"
             and .[0].EnableTerminationProtection == true
@@ -403,6 +498,25 @@ jobs:
                 | .ParameterValue
               ]
               == ["/cdk-bootstrap/axrel/version"]
+            )
+            and (
+              [
+                .[0].Parameters[]
+                | select(.ParameterKey == "GitHubOidcSubjectPrefix")
+                | .ParameterValue
+              ]
+              == [$target]
+            )
+            and (
+              [
+                .[0].Parameters[]
+                | select(
+                    .ParameterKey
+                    == "LegacyGitHubOidcSubjectPrefix"
+                  )
+                | .ParameterValue
+              ]
+              == [$legacy]
             )
           ' <<<"${stack}" >/dev/null
           "${INFRA_PYTHON}" -m src.gateway.deployment.release_foundation_bootstrap \

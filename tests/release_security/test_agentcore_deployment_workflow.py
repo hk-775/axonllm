@@ -30,10 +30,12 @@ def test_production_workflow_uses_oidc_environment_and_signed_targets() -> None:
         "id-token": "write",
     }
     assert deploy["environment"] == "agentcore-production-deploy"
-    assert deploy["runs-on"] == {
-        "group": "axonllm-production",
-        "labels": "axonllm-production-allowlisted",
-    }
+    assert deploy["runs-on"] == [
+        "self-hosted",
+        "linux",
+        "x64",
+        "axonllm-production-allowlisted",
+    ]
     assert deploy["permissions"]["id-token"] == "write"
     assert deploy["needs"] == [
         "verify-agentcore",

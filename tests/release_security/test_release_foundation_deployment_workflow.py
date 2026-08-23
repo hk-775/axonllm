@@ -36,10 +36,12 @@ def test_foundation_deployment_is_manual_protected_and_oidc_only():
         "contents": "read",
         "id-token": "write",
     }
-    assert job["runs-on"] == {
-        "group": "axonllm-production",
-        "labels": "axonllm-production-allowlisted",
-    }
+    assert job["runs-on"] == [
+        "self-hosted",
+        "linux",
+        "x64",
+        "axonllm-production-allowlisted",
+    ]
     serialized = WORKFLOW.read_text(encoding="utf-8")
     assert "refs/heads/main" in serialized
     assert "AXON_RELEASE_FOUNDATION_DEPLOY_ROLE_ARN" in serialized
@@ -89,7 +91,15 @@ def test_foundation_deployment_requires_exact_bounded_bootstrap():
     assert "-m cfnlint" not in hardened_template_check
 
 
-def test_foundation_deployment_preserves_every_live_parameter():
+def test_foundation_deployment_preserves_live_values_and_migrates_oidc_identity():
+    workflow = _workflow()
+    assert workflow["env"]["TARGET_GITHUB_OIDC_SUBJECT_PREFIX"] == (
+        "repo:hk-775@225056493/axonllm@1276398779"
+    )
+    assert workflow["env"]["LEGACY_GITHUB_OIDC_SUBJECT_PREFIX"] == (
+        "repo:AxonLLM@313590914/axonllm@1276398779"
+    )
+
     serialized = WORKFLOW.read_text(encoding="utf-8")
     parameter_names = {
         "AgentCoreStateTableName",
@@ -97,6 +107,7 @@ def test_foundation_deployment_preserves_every_live_parameter():
         "ExternalOidcProviderSourceSecretArn",
         "FargateStateTableName",
         "GitHubOidcSubjectPrefix",
+        "LegacyGitHubOidcSubjectPrefix",
         "LaunchAlarmEmail",
         "ProductionProviderSourceKmsKeyArn",
         "ProductionProviderSourceSecretArn",
@@ -105,9 +116,28 @@ def test_foundation_deployment_preserves_every_live_parameter():
     }
     for name in parameter_names:
         assert f"AxonLLMReleaseFoundationStack:{name}=" in serialized
+    assert "github_subject=$(parameter GitHubOidcSubjectPrefix)" not in serialized
+    assert (
+        "legacy_github_subject=$(parameter LegacyGitHubOidcSubjectPrefix)"
+        not in serialized
+    )
+    assert (
+        "AxonLLMReleaseFoundationStack:GitHubOidcSubjectPrefix="
+        "${TARGET_GITHUB_OIDC_SUBJECT_PREFIX}"
+    ) in serialized
+    assert (
+        "AxonLLMReleaseFoundationStack:LegacyGitHubOidcSubjectPrefix="
+        "${LEGACY_GITHUB_OIDC_SUBJECT_PREFIX}"
+    ) in serialized
     assert "describe-stacks" in serialized
     assert "UsePreviousValue" not in serialized
-    assert 'select(.key != "BootstrapVersion")' in serialized
+    assert "$business_parameter_count == 10" in serialized
+    assert "$business_parameter_count == 11" in serialized
+    assert "map(.key) | unique | length" in serialized
+    assert "($values | map(.key)) - $allowed_keys" in serialized
+    assert 'select(.key == "LegacyGitHubOidcSubjectPrefix")' in serialized
+    assert 'elif .ParameterKey == "GitHubOidcSubjectPrefix"' in serialized
+    assert '"ParameterKey": "LegacyGitHubOidcSubjectPrefix"' in serialized
     assert (
         "AxonLLMReleaseFoundationStack:BootstrapVersion="
         "/cdk-bootstrap/axrel/version"

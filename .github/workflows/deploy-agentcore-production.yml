@@ -169,8 +169,10 @@ jobs:
       - verify-agentcore
       - verify-control-plane
     runs-on:
-      group: axonllm-production
-      labels: axonllm-production-allowlisted
+      - self-hosted
+      - linux
+      - x64
+      - axonllm-production-allowlisted
     timeout-minutes: 180
     environment: agentcore-production-deploy
     permissions:

@@ -44,13 +44,13 @@ deployment evidence under S3 Object Lock. This implemented path still requires
 a successful target-account run for the exact release before launch.
 
 `v0.2.4` is the first completed KMS-backed release. Release evidence
-[run 31434900128](https://github.com/AxonLLM/axonllm/actions/runs/31434900128)
+[run 31434900128](https://github.com/hk-775/axonllm/actions/runs/31434900128)
 and publication
-[run 31435171504](https://github.com/AxonLLM/axonllm/actions/runs/31435171504)
+[run 31435171504](https://github.com/hk-775/axonllm/actions/runs/31435171504)
 succeeded for commit `2dcee34619b22a8288d734993eb3005757bda52c`.
 Current-policy verification also succeeded for
-[Fargate](https://github.com/AxonLLM/axonllm/actions/runs/31435684849) and
-[AgentCore](https://github.com/AxonLLM/axonllm/actions/runs/31435686001).
+[Fargate](https://github.com/hk-775/axonllm/actions/runs/31435684849) and
+[AgentCore](https://github.com/hk-775/axonllm/actions/runs/31435686001).
 The published target digests are:
 
 - Fargate:
@@ -114,6 +114,68 @@ workable for a single-maintainer preproduction flow, but it is not independent
 enterprise separation of duties. Upgrade the plan and add an independent
 release approver before granting write access to additional maintainers or
 claiming multi-writer release governance.
+
+## Repository Ownership Transfer
+
+Move the repository from `AxonLLM` to `hk-775` only after completing these
+steps in order:
+
+1. Confirm the destination account's plan retains every required private-repo
+   control. A transfer must not silently remove required branch/ruleset,
+   environment, Actions, Pages, or security features.
+2. Verify the immutable identities used by the migration:
+
+   ```bash
+   test "$(gh api users/hk-775 --jq .id)" = "225056493"
+   test "$(gh api orgs/AxonLLM --jq .id)" = "313590914"
+   test "$(gh api repos/AxonLLM/axonllm --jq .id)" = "1276398779"
+   gh api repos/AxonLLM/axonllm/actions/oidc/customization/sub
+   ```
+
+   The OIDC response must show the expected default/customization policy. It
+   does not replace checking the owner and repository database IDs.
+3. Inventory the repository environments, secret and variable names, rulesets,
+   webhooks, deploy keys, installed Apps, self-hosted runners, Pages settings,
+   releases, packages, Actions caches, and Actions artifacts. Never export
+   secret values. Resolve the artifact-storage overage or fund sufficient
+   destination storage; do not assume an ownership transfer clears usage.
+4. Merge this migration change while the organization-owned repository can
+   still assume the existing AWS role. Run `deploy-release-foundation.yml`
+   with `operation=prepare`, review the change set, and abort on any resource
+   replacement or deletion. Then run `operation=execute`. Confirm the live
+   stack contains the exact `hk-775` target and `AxonLLM` legacy subject
+   parameters.
+5. Ensure a repository-accessible self-hosted Linux x64 runner can be
+   registered under the destination with
+   `axonllm-production-allowlisted` and, where required,
+   `axonllm-agentcore-allowlisted`.
+6. Transfer only after the dual AWS trust is live:
+
+   ```bash
+   gh api --method POST repos/AxonLLM/axonllm/transfer \
+     -f new_owner=hk-775
+   ```
+
+7. After GitHub reports the transfer complete, update the local remote and
+   verify that the repository ID did not change:
+
+   ```bash
+   git remote set-url github https://github.com/hk-775/axonllm.git
+   test "$(gh api repos/hk-775/axonllm --jq .id)" = "1276398779"
+   gh api repos/hk-775/axonllm --jq '{full_name,visibility,default_branch}'
+   gh api repos/hk-775/axonllm/actions/oidc/customization/sub
+   ```
+
+8. Recheck every inventoried repository control, register the destination
+   runners, run required CI, and prove the new OIDC subject by completing a
+   protected AWS role assumption. Update the PyPI trusted publisher owner to
+   `hk-775` before package publication.
+9. Remove `LegacyGitHubOidcSubjectPrefix` in a separate reviewed deployment
+   only after signing, publication, verification, and production workflows
+   have succeeded under `hk-775`.
+10. Delete the `AxonLLM` organization only after it has no repositories,
+    packages, Pages sites, runners, secrets, variables, webhooks, Apps,
+    projects, billing commitments, or external integrations.
 
 ## Operating Modes
 
@@ -351,15 +413,24 @@ a separate boundary on all foundation service roles. Do not remove or modify
 the shared `hnb659fds` roles while other applications, including AgentLasso,
 still use them.
 
-The IAM trust subjects use GitHub's immutable organization and repository IDs,
-not rename-sensitive names. Before deploying after a repository transfer,
-compare `_GITHUB_SUBJECT_PREFIX` with:
+The IAM trust subjects use GitHub's immutable owner and repository IDs, not
+name-only subjects. During the transfer from the `AxonLLM` organization to
+`hk-775`, the foundation temporarily accepts both exact immutable identities.
+It does not accept a wildcard owner or repository. Derive the target prefix
+from verified IDs:
 
 ```bash
-gh api repos/AxonLLM/axonllm/actions/oidc/customization/sub
+owner_id=$(gh api users/hk-775 --jq .id)
+repository_id=$(gh api repos/hk-775/axonllm --jq .id)
+printf 'repo:hk-775@%s/axonllm@%s\n' "${owner_id}" "${repository_id}"
 ```
 
-The returned `sub_claim_prefix` must match exactly.
+The result must match `GitHubOidcSubjectPrefix` exactly. The OIDC customization
+endpoint reports the subject-template policy, not a rendered token subject.
+After the new owner completes signing, publication, verification, and
+production-role assumption, remove `LegacyGitHubOidcSubjectPrefix` in a
+separate reviewed change. Historical provenance build-type URIs remain stable
+identifiers and are not rewritten.
 
 ### One-Time `axrel` Migration
 
@@ -386,7 +457,7 @@ the previous managed-policy version for rollback. It never changes the shared
 `hnb659fds` toolkit.
 
 Create a non-executing change set with the repository-pinned CLI. Include all
-ten business parameters and explicitly migrate `BootstrapVersion`:
+eleven business parameters and explicitly migrate `BootstrapVersion`:
 
 ```bash
 cd infra
@@ -408,6 +479,7 @@ cd infra
   --parameters AxonLLMReleaseFoundationStack:ExternalOidcProviderSourceSecretArn="$EXTERNAL_PROVIDER_SOURCE_SECRET_ARN" \
   --parameters AxonLLMReleaseFoundationStack:ExternalOidcProviderSourceKmsKeyArn="$EXTERNAL_PROVIDER_SOURCE_KMS_KEY_ARN" \
   --parameters AxonLLMReleaseFoundationStack:GitHubOidcSubjectPrefix="$GITHUB_OIDC_SUBJECT_PREFIX" \
+  --parameters AxonLLMReleaseFoundationStack:LegacyGitHubOidcSubjectPrefix="$LEGACY_GITHUB_OIDC_SUBJECT_PREFIX" \
   --parameters AxonLLMReleaseFoundationStack:LaunchAlarmEmail="$LAUNCH_ALARM_EMAIL" \
   --parameters AxonLLMReleaseFoundationStack:BootstrapVersion=/cdk-bootstrap/axrel/version
 ```
@@ -966,7 +1038,7 @@ and source distribution with PyPI Trusted Publishing. Configure the PyPI
 publisher with these exact values:
 
 - PyPI project: `axon-llm`
-- GitHub owner: `AxonLLM`
+- GitHub owner: `hk-775`
 - GitHub repository: `axonllm`
 - Workflow filename: `publish-python-package.yml`
 - GitHub environment: `pypi`

@@ -144,8 +144,10 @@ jobs:
       - verify-agentcore
       - verify-control-plane
     runs-on:
-      group: axonllm-production
-      labels: axonllm-production-allowlisted
+      - self-hosted
+      - linux
+      - x64
+      - axonllm-production-allowlisted
     timeout-minutes: 180
     environment: agentcore-qualification
     permissions:
@@ -1485,8 +1487,10 @@ jobs:
         && needs.stage-managed.result != 'skipped'
       }}
     runs-on:
-      group: axonllm-production
-      labels: axonllm-production-allowlisted
+      - self-hosted
+      - linux
+      - x64
+      - axonllm-production-allowlisted
     timeout-minutes: 120
     environment: agentcore-qualification
     permissions:
@@ -1908,8 +1912,10 @@ jobs:
         && needs.teardown.outputs.succeeded == 'true'
       }}
     runs-on:
-      group: axonllm-production
-      labels: axonllm-production-allowlisted
+      - self-hosted
+      - linux
+      - x64
+      - axonllm-production-allowlisted
     timeout-minutes: 30
     environment: agentcore-production-evidence
     permissions:

@@ -38,10 +38,12 @@ def test_workflow_is_manual_protected_and_uses_allowlisted_runner() -> None:
     assert set(workflow["on"]) == {"workflow_call"}
     job = workflow["jobs"]["produce"]
     assert job["environment"] == "agentcore-production-evidence"
-    assert job["runs-on"] == {
-        "group": "axonllm-production",
-        "labels": "axonllm-production-allowlisted",
-    }
+    assert job["runs-on"] == [
+        "self-hosted",
+        "linux",
+        "x64",
+        "axonllm-production-allowlisted",
+    ]
     assert job["permissions"] == {
         "contents": "read",
         "id-token": "write",

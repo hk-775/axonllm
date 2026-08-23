@@ -68,11 +68,11 @@ PROJECT_CLAIM = "https://axonllm.example/project"
 NOW = 2_000_000_000
 EXTERNAL_STACK = "AxonLLMAgentCoreStack-external"
 WORKFLOW_REF = (
-    "AxonLLM/axonllm/.github/workflows/"
+    "hk-775/axonllm/.github/workflows/"
     "certify-agentcore-external-oidc.yml@refs/heads/main"
 )
 PARENT_WORKFLOW_REF = (
-    "AxonLLM/axonllm/.github/workflows/"
+    "hk-775/axonllm/.github/workflows/"
     "launch-agentcore-production.yml@refs/heads/main"
 )
 
@@ -1650,7 +1650,7 @@ def test_runtime_stack_name_is_strictly_validated(stack_name: str) -> None:
         match="runtime stack name",
     ):
         external_certification._source_binding(
-            repository="AxonLLM/axonllm",
+            repository="hk-775/axonllm",
             workflow_ref=WORKFLOW_REF,
             parent_workflow_ref=PARENT_WORKFLOW_REF,
             run_id="123",
@@ -1692,7 +1692,7 @@ def test_hand_authored_pass_report_is_rejected_before_live_binding(
     tmp_path: Path,
 ) -> None:
     source = external_certification._source_binding(
-        repository="AxonLLM/axonllm",
+        repository="hk-775/axonllm",
         workflow_ref=WORKFLOW_REF,
         parent_workflow_ref=PARENT_WORKFLOW_REF,
         run_id="123",

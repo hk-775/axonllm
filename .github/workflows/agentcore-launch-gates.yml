@@ -89,8 +89,10 @@ jobs:
   launch-gates:
     name: Exercise production and publish immutable gate receipts
     runs-on:
-      group: axonllm-production
-      labels: axonllm-production-allowlisted
+      - self-hosted
+      - linux
+      - x64
+      - axonllm-production-allowlisted
     environment: agentcore-production-launch-gates
     timeout-minutes: 170
     permissions:
