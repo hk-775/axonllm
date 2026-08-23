@@ -1,0 +1,63 @@
+name: Escape Lab containment gate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: escape-lab-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  containment:
+    name: Agent containment regression
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out AxonLLM
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - name: Check out Escape Lab
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          repository: hk-775/OstiariEscapeLab
+          ref: 506c32f785793e51204d9bcde9b41c89ea2ac0f3
+          path: escape-lab
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+
+      - name: Install AxonLLM and Escape Lab
+        run: python -m pip install . ./escape-lab
+
+      - name: Run containment gate
+        run: |
+          python -m escape_lab \
+            --artifacts-root artifacts \
+            --agent axonllm \
+            --axonllm-mode fixture \
+            --axonllm-src . \
+            gate \
+            --baseline escape-lab/baselines/first-product.json \
+            --output-dir artifacts/gate
+
+      - name: Upload containment evidence
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: escape-lab-containment-evidence
+          path: artifacts
+          if-no-files-found: error
+          retention-days: 14
