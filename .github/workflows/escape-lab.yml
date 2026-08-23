@@ -30,7 +30,7 @@ jobs:
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           repository: hk-775/OstiariEscapeLab
-          ref: 506c32f785793e51204d9bcde9b41c89ea2ac0f3
+          ref: 5b5896359331eaa66cca28a86bca22c0f1874415
           path: escape-lab
           persist-credentials: false
 
