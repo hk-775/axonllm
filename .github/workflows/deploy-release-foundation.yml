@@ -259,10 +259,13 @@ jobs:
               | .ParameterValue
             ' "${parameters}"
           )
-          [[
-            "${current_github_subject}" == "${LEGACY_GITHUB_OIDC_SUBJECT_PREFIX}"
-            || "${current_github_subject}" == "${TARGET_GITHUB_OIDC_SUBJECT_PREFIX}"
-          ]]
+          case "${current_github_subject}" in
+            "${LEGACY_GITHUB_OIDC_SUBJECT_PREFIX}" | "${TARGET_GITHUB_OIDC_SUBJECT_PREFIX}")
+              ;;
+            *)
+              exit 1
+              ;;
+          esac
           legacy_parameter_count=$(
             jq -r '
               [
@@ -280,10 +283,8 @@ jobs:
                 | .ParameterValue
               ' "${parameters}"
             )
-            [[
-              "${current_legacy_subject}"
-              == "${LEGACY_GITHUB_OIDC_SUBJECT_PREFIX}"
-            ]]
+            test "${current_legacy_subject}" = \
+              "${LEGACY_GITHUB_OIDC_SUBJECT_PREFIX}"
           fi
           chmod 0600 "${parameters}"
 
