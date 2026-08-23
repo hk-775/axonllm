@@ -43,10 +43,12 @@ def test_workflow_is_manual_protected_and_policy_compliant() -> None:
     }
     assert job["environment"] == "agentcore-production-launch-gates"
     assert job["timeout-minutes"] == 170
-    assert job["runs-on"] == {
-        "group": "axonllm-production",
-        "labels": "axonllm-production-allowlisted",
-    }
+    assert job["runs-on"] == [
+        "self-hosted",
+        "linux",
+        "x64",
+        "axonllm-production-allowlisted",
+    ]
     assert job["permissions"] == {
         "contents": "read",
         "id-token": "write",

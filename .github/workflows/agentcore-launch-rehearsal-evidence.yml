@@ -83,8 +83,10 @@ jobs:
   produce:
     name: Verify gates and publish immutable evidence
     runs-on:
-      group: axonllm-production
-      labels: axonllm-production-allowlisted
+      - self-hosted
+      - linux
+      - x64
+      - axonllm-production-allowlisted
     environment: agentcore-production-evidence
     timeout-minutes: 120
     permissions:

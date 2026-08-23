@@ -31,6 +31,13 @@ def _workflow_step(job_name: str, step_name: str) -> dict[str, Any]:
     return next(step for step in steps if step.get("name") == step_name)
 
 
+def test_codeowners_resolves_after_personal_account_transfer() -> None:
+    codeowners = (ROOT / "CODEOWNERS").read_text(encoding="utf-8")
+
+    assert codeowners.count("@hk-775") == 4
+    assert "@axonllm/" not in codeowners.lower()
+
+
 def test_workflow_actions_are_commit_pinned_and_read_only() -> None:
     workflow = WORKFLOW.read_text(encoding="utf-8")
     action_refs = re.findall(r"^\s*uses:\s*([^#\s]+)", workflow, flags=re.MULTILINE)

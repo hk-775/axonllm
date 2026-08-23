@@ -527,15 +527,16 @@ records with a separate terminal-only key. It has no CloudFormation,
 `iam:PassRole`, or load-balancer mutation permission. Enable and authorize the
 watchdog before the first production promotion.
 
-The production and rehearsal jobs require a self-hosted Linux x64 runner in
-group `axonllm-production` with label
-`axonllm-production-allowlisted`. The external-OIDC job requires
-`self-hosted`, `linux`, `x64`, and `axonllm-agentcore-allowlisted`. The runner
-must provide the AWS CLI, Git, GitHub CLI, `jq`, `sha256sum`, Node.js/npm
-support, and the native libraries required by headless Chromium. The production
-workflow installs the pinned Python/Node dependencies and Chromium itself; it
-does not install Chromium's operating-system packages. Rebuild and test the
-runner image when Playwright or its Chromium revision changes.
+The production and rehearsal jobs require a repository-accessible self-hosted
+Linux x64 runner with label `axonllm-production-allowlisted`. Do not depend on
+an organization runner group: personal repositories cannot inherit that group
+during an ownership transfer. The external-OIDC job requires `self-hosted`,
+`linux`, `x64`, and `axonllm-agentcore-allowlisted`. The runner must provide
+the AWS CLI, Git, GitHub CLI, `jq`, `sha256sum`, Node.js/npm support, and the
+native libraries required by headless Chromium. The production workflow
+installs the pinned Python/Node dependencies and Chromium itself; it does not
+install Chromium's operating-system packages. Rebuild and test the runner
+image when Playwright or its Chromium revision changes.
 
 Runner egress must permit GitHub Actions/API/artifact endpoints, the pinned
 Python and npm registries/tool downloads, AWS APIs in the launch region, the

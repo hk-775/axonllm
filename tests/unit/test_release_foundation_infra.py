@@ -13,7 +13,8 @@ import pytest
 _REPO = Path(__file__).resolve().parents[2]
 _INFRA = _REPO / "infra"
 _INFRA_PYTHON = _INFRA / ".venv" / "bin" / "python"
-_SUBJECT_PREFIX = "repo:AxonLLM@313590914/axonllm@1276398779"
+_SUBJECT_PREFIX = "repo:hk-775@225056493/axonllm@1276398779"
+_LEGACY_SUBJECT_PREFIX = "repo:AxonLLM@313590914/axonllm@1276398779"
 _REHEARSAL_EVIDENCE_PREFIX = "agentcore-production/rehearsal"
 _QUALIFICATION_TEARDOWN_EVIDENCE_PREFIX = "agentcore-production/qualification-teardown"
 _TRANSITION_EVIDENCE_PREFIX = "agentcore-production/transitions"
@@ -93,16 +94,22 @@ def _literal_parts(value: object) -> str:
     return ""
 
 
-def _github_subject(suffix: str) -> dict:
-    return {
-        "Fn::Join": [
-            "",
-            [
-                {"Ref": "GitHubOidcSubjectPrefix"},
-                suffix,
-            ],
-        ]
-    }
+def _github_subject(suffix: str) -> list[dict]:
+    return [
+        {
+            "Fn::Join": [
+                "",
+                [
+                    {"Ref": parameter},
+                    suffix,
+                ],
+            ]
+        }
+        for parameter in (
+            "GitHubOidcSubjectPrefix",
+            "LegacyGitHubOidcSubjectPrefix",
+        )
+    ]
 
 
 def _role_logical_id(template: dict, role_name: str) -> str:
@@ -390,6 +397,14 @@ def test_github_oidc_trust_is_exact_and_retained(synthesized_template):
         r"^repo:[A-Za-z0-9_.-]+@[0-9]+/"
         r"[A-Za-z0-9_.-]+@[0-9]+$"
     )
+    legacy_subject_parameter = synthesized_template["Parameters"][
+        "LegacyGitHubOidcSubjectPrefix"
+    ]
+    assert legacy_subject_parameter["Default"] == _LEGACY_SUBJECT_PREFIX
+    assert legacy_subject_parameter["AllowedPattern"] == (
+        r"^repo:[A-Za-z0-9_.-]+@[0-9]+/"
+        r"[A-Za-z0-9_.-]+@[0-9]+$"
+    )
     providers = _resources(
         synthesized_template,
         "AWS::IAM::OIDCProvider",
@@ -402,7 +417,10 @@ def test_github_oidc_trust_is_exact_and_retained(synthesized_template):
     assert provider["UpdateReplacePolicy"] == "Retain"
 
     roles = _resources(synthesized_template, "AWS::IAM::Role")
-    assert "repo:AxonLLM/axonllm:" not in json.dumps(roles)
+    serialized_roles = json.dumps(roles)
+    assert "repo:AxonLLM/axonllm:" not in serialized_roles
+    assert '"GitHubOidcSubjectPrefix"' in serialized_roles
+    assert '"LegacyGitHubOidcSubjectPrefix"' in serialized_roles
     assert len(roles) == 18
     roles_by_name = {role["Properties"]["RoleName"] for role in roles}
     assert roles_by_name == {

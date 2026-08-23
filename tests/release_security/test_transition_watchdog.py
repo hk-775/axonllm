@@ -205,10 +205,12 @@ def test_watchdog_workflow_remains_protected_and_serialized() -> None:
         "contents": "read",
         "id-token": "write",
     }
-    assert job["runs-on"] == {
-        "group": "axonllm-production",
-        "labels": "axonllm-production-allowlisted",
-    }
+    assert job["runs-on"] == [
+        "self-hosted",
+        "linux",
+        "x64",
+        "axonllm-production-allowlisted",
+    ]
     credential_step = next(
         step
         for step in job["steps"]

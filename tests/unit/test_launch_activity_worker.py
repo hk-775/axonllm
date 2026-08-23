@@ -68,8 +68,8 @@ _RELEASE_IDENTITY = {
     "controlPlaneImage": CONTROL_IMAGE,
 }
 _EXECUTION_IDENTITY = {
-    "repository": "AxonLLM/axonllm",
-    "workflowRef": ("AxonLLM/axonllm/.github/workflows/agentcore-launch-gates.yml@refs/heads/main"),
+    "repository": "hk-775/axonllm",
+    "workflowRef": ("hk-775/axonllm/.github/workflows/agentcore-launch-gates.yml@refs/heads/main"),
     "workflowCommit": WORKFLOW_COMMIT,
     "checkedOutCommit": COMMIT,
     "runId": "41",
@@ -286,7 +286,7 @@ def _action_payload(
         "operation": operation,
         "owner": {
             "id": OWNER,
-            "repository": "AxonLLM/axonllm",
+            "repository": "hk-775/axonllm",
             "workflowCommit": WORKFLOW_COMMIT,
             "runId": "41",
             "runAttempt": "2",

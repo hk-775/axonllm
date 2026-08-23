@@ -29,8 +29,10 @@ jobs:
   reconcile:
     name: Reconcile signed nonterminal transition
     runs-on:
-      group: axonllm-production
-      labels: axonllm-production-allowlisted
+      - self-hosted
+      - linux
+      - x64
+      - axonllm-production-allowlisted
     timeout-minutes: 30
     environment: agentcore-production-watchdog
     permissions:

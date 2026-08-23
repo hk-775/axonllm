@@ -1,7 +1,7 @@
 # Default owners for everything in the repo
-* @axonllm/maintainers
+* @hk-775
 
 # Security-critical paths require security review
-/src/gateway/security/ @axonllm/maintainers
-/src/gateway/auth/ @axonllm/maintainers
-/src/gateway/middleware/auth.py @axonllm/maintainers
+/src/gateway/security/ @hk-775
+/src/gateway/auth/ @hk-775
+/src/gateway/middleware/auth.py @hk-775

@@ -35,7 +35,8 @@ from constructs import Construct
 
 
 _GITHUB_OIDC_ISSUER = "token.actions.githubusercontent.com"
-_DEFAULT_GITHUB_SUBJECT_PREFIX = "repo:AxonLLM@313590914/axonllm@1276398779"
+_DEFAULT_GITHUB_SUBJECT_PREFIX = "repo:hk-775@225056493/axonllm@1276398779"
+_LEGACY_GITHUB_SUBJECT_PREFIX = "repo:AxonLLM@313590914/axonllm@1276398779"
 _GITHUB_SUBJECT_PREFIX_PATTERN = r"^repo:[A-Za-z0-9_.-]+@[0-9]+/[A-Za-z0-9_.-]+@[0-9]+$"
 _SECRET_ARN_PATTERN = (
     r"^arn:aws:secretsmanager:us-east-1:[0-9]{12}:secret:"
@@ -218,19 +219,53 @@ class AxonLLMReleaseFoundationStack(Stack):
                 "GitHub OIDC repository identity in repo:<owner>@<owner-id>/<repository>@<repository-id> form"
             ),
         ).value_as_string
-        github_subjects = {
-            "signing": f"{github_subject_prefix}:ref:refs/tags/v*",
-            "release": f"{github_subject_prefix}:environment:release",
-            "foundation": (
-                f"{github_subject_prefix}:environment:release-foundation"
+        legacy_github_subject_prefix = CfnParameter(
+            self,
+            "LegacyGitHubOidcSubjectPrefix",
+            type="String",
+            default=_LEGACY_GITHUB_SUBJECT_PREFIX,
+            allowed_pattern=_GITHUB_SUBJECT_PREFIX_PATTERN,
+            description=(
+                "Temporary exact GitHub OIDC identity retained only for the "
+                "AxonLLM-to-hk-775 ownership migration"
             ),
-            "production": (f"{github_subject_prefix}:environment:production"),
-            "deploy": (f"{github_subject_prefix}:environment:agentcore-production-deploy"),
-            "evidence": (f"{github_subject_prefix}:environment:agentcore-production-evidence"),
-            "watchdog": (f"{github_subject_prefix}:environment:agentcore-production-watchdog"),
-            "launch_gates": (f"{github_subject_prefix}:environment:agentcore-production-launch-gates"),
-            "external": (f"{github_subject_prefix}:environment:agentcore-external-oidc-production-like"),
-            "qualification": (f"{github_subject_prefix}:environment:agentcore-qualification"),
+        ).value_as_string
+        github_subject_prefixes = (
+            github_subject_prefix,
+            legacy_github_subject_prefix,
+        )
+
+        def github_subject(suffix: str) -> list[str]:
+            return [
+                f"{subject_prefix}{suffix}"
+                for subject_prefix in github_subject_prefixes
+            ]
+
+        github_subjects = {
+            "signing": github_subject(":ref:refs/tags/v*"),
+            "release": github_subject(":environment:release"),
+            "foundation": github_subject(
+                ":environment:release-foundation"
+            ),
+            "production": github_subject(":environment:production"),
+            "deploy": github_subject(
+                ":environment:agentcore-production-deploy"
+            ),
+            "evidence": github_subject(
+                ":environment:agentcore-production-evidence"
+            ),
+            "watchdog": github_subject(
+                ":environment:agentcore-production-watchdog"
+            ),
+            "launch_gates": github_subject(
+                ":environment:agentcore-production-launch-gates"
+            ),
+            "external": github_subject(
+                ":environment:agentcore-external-oidc-production-like"
+            ),
+            "qualification": github_subject(
+                ":environment:agentcore-qualification"
+            ),
         }
         provider_source_parameters = {
             namespace: (
@@ -1199,7 +1234,7 @@ class AxonLLMReleaseFoundationStack(Stack):
         repositories: dict[str, ecr.Repository],
         runtime_identity_secret: secretsmanager.CfnSecret,
         coordinator_key: kms.IKey,
-        github_subjects: dict[str, str],
+        github_subjects: dict[str, list[str]],
         provider_source_parameters: dict[str, tuple[str, str]],
     ) -> _LaunchAuthorities:
         deploy_role = self._github_role(
@@ -1362,7 +1397,7 @@ class AxonLLMReleaseFoundationStack(Stack):
         role_name: str,
         description: str,
         provider: iam.IOidcProvider,
-        subject: str,
+        subject: list[str],
         duration: Duration,
     ) -> iam.Role:
         return iam.Role(
@@ -2114,7 +2149,7 @@ class AxonLLMReleaseFoundationStack(Stack):
         self,
         *,
         github_provider: iam.IOidcProvider,
-        launch_gates_subject: str,
+        launch_gates_subject: list[str],
         launch_alarm_email: str,
         state_table_names: tuple[str, str],
     ) -> _LaunchCoordinator:
@@ -4124,7 +4159,7 @@ class AxonLLMReleaseFoundationStack(Stack):
     def _github_principal(
         provider: iam.IOidcProvider,
         *,
-        subject: str,
+        subject: list[str],
     ) -> iam.OpenIdConnectPrincipal:
         return iam.OpenIdConnectPrincipal(
             provider,
@@ -4140,7 +4175,7 @@ class AxonLLMReleaseFoundationStack(Stack):
     def _github_signing_principal(
         provider: iam.IOidcProvider,
         *,
-        subject: str,
+        subject: list[str],
     ) -> iam.OpenIdConnectPrincipal:
         return iam.OpenIdConnectPrincipal(
             provider,

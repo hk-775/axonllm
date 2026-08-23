@@ -115,7 +115,7 @@ class ReleaseEvidenceTests(unittest.TestCase):
                 '{"Results": []}\n',
                 encoding="utf-8",
             )
-        self.repository = "AxonLLM/axonllm"
+        self.repository = "hk-775/axonllm"
         self.commit = "a" * 40
         self.ref = "refs/tags/v1.2.3"
         self.workflow_ref = f"{self.repository}/{release_evidence.WORKFLOW_PATH}@{self.ref}"
