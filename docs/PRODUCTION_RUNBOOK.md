@@ -44,13 +44,13 @@ deployment evidence under S3 Object Lock. This implemented path still requires
 a successful target-account run for the exact release before launch.
 
 `v0.2.4` is the first completed KMS-backed release. Release evidence
-[run 31434900128](https://github.com/hk-775/axonllm-internal/actions/runs/31434900128)
+[run 31434900128](https://github.com/hk-775/axonllm/actions/runs/31434900128)
 and publication
-[run 31435171504](https://github.com/hk-775/axonllm-internal/actions/runs/31435171504)
+[run 31435171504](https://github.com/hk-775/axonllm/actions/runs/31435171504)
 succeeded for commit `2dcee34619b22a8288d734993eb3005757bda52c`.
 Current-policy verification also succeeded for
-[Fargate](https://github.com/hk-775/axonllm-internal/actions/runs/31435684849) and
-[AgentCore](https://github.com/hk-775/axonllm-internal/actions/runs/31435686001).
+[Fargate](https://github.com/hk-775/axonllm/actions/runs/31435684849) and
+[AgentCore](https://github.com/hk-775/axonllm/actions/runs/31435686001).
 The published target digests are:
 
 - Fargate:
@@ -162,10 +162,10 @@ steps in order:
    verify that the repository ID did not change:
 
    ```bash
-   git remote set-url github https://github.com/hk-775/axonllm-internal.git
-   test "$(gh api repos/hk-775/axonllm-internal --jq .id)" = "1276398779"
-   gh api repos/hk-775/axonllm-internal --jq '{full_name,visibility,default_branch}'
-   gh api repos/hk-775/axonllm-internal/actions/oidc/customization/sub
+   git remote set-url github https://github.com/hk-775/axonllm.git
+   test "$(gh api repos/hk-775/axonllm --jq .id)" = "1276398779"
+   gh api repos/hk-775/axonllm --jq '{full_name,visibility,default_branch}'
+   gh api repos/hk-775/axonllm/actions/oidc/customization/sub
    ```
 
 8. Recheck every inventoried repository control, register the destination
@@ -417,16 +417,14 @@ still use them.
 
 The IAM trust subjects use GitHub's immutable owner and repository IDs, not
 name-only subjects. The completed transfer from the `AxonLLM` organization to
-`hk-775`, followed by the rename to `hk-775/axonllm-internal`, uses only the
-private repository's exact immutable identity; the public
-`hk-775/axonllm` repository has a distinct repository ID. The temporary legacy
-trust parameter has been removed. The foundation does not accept a wildcard
-owner or repository. Derive the subject prefix from verified IDs:
+`hk-775` uses only the destination's exact immutable identity; the temporary
+legacy trust parameter has been removed. The foundation does not accept a
+wildcard owner or repository. Derive the subject prefix from verified IDs:
 
 ```bash
 owner_id=$(gh api users/hk-775 --jq .id)
-repository_id=$(gh api repos/hk-775/axonllm-internal --jq .id)
-printf 'repo:hk-775@%s/axonllm-internal@%s\n' "${owner_id}" "${repository_id}"
+repository_id=$(gh api repos/hk-775/axonllm --jq .id)
+printf 'repo:hk-775@%s/axonllm@%s\n' "${owner_id}" "${repository_id}"
 ```
 
 The result must match `GitHubOidcSubjectPrefix` exactly. The OIDC customization

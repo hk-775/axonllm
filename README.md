@@ -1,6 +1,6 @@
 # AxonLLM
 
-[![CI](https://github.com/hk-775/axonllm-internal/actions/workflows/ci.yml/badge.svg)](https://github.com/hk-775/axonllm-internal/actions/workflows/ci.yml)
+[![CI](https://github.com/hk-775/axonllm/actions/workflows/ci.yml/badge.svg)](https://github.com/hk-775/axonllm/actions/workflows/ci.yml)
 [![License: MIT-0](https://img.shields.io/badge/License-MIT--0-blue.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
 

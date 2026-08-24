@@ -24,7 +24,7 @@ concurrency:
 
 env:
   AWS_REGION: us-east-1
-  GITHUB_OIDC_SUBJECT_PREFIX: "repo:hk-775@225056493/axonllm-internal@1276398779"
+  GITHUB_OIDC_SUBJECT_PREFIX: "repo:hk-775@225056493/axonllm@1276398779"
   UV_VERSION: "0.10.7"
 
 jobs:
