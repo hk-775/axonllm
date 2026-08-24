@@ -94,7 +94,7 @@ def test_foundation_deployment_requires_exact_bounded_bootstrap():
 def test_foundation_deployment_preserves_live_values_and_removes_legacy_identity():
     workflow = _workflow()
     assert workflow["env"]["GITHUB_OIDC_SUBJECT_PREFIX"] == (
-        "repo:hk-775@225056493/axonllm-internal@1276398779"
+        "repo:hk-775@225056493/axonllm@1276398779"
     )
     assert "TARGET_GITHUB_OIDC_SUBJECT_PREFIX" not in workflow["env"]
     assert "LEGACY_GITHUB_OIDC_SUBJECT_PREFIX" not in workflow["env"]
