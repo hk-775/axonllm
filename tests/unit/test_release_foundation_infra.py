@@ -13,7 +13,7 @@ import pytest
 _REPO = Path(__file__).resolve().parents[2]
 _INFRA = _REPO / "infra"
 _INFRA_PYTHON = _INFRA / ".venv" / "bin" / "python"
-_SUBJECT_PREFIX = "repo:hk-775@225056493/axonllm@1276398779"
+_SUBJECT_PREFIX = "repo:hk-775@225056493/axonllm-internal@1276398779"
 _REHEARSAL_EVIDENCE_PREFIX = "agentcore-production/rehearsal"
 _QUALIFICATION_TEARDOWN_EVIDENCE_PREFIX = "agentcore-production/qualification-teardown"
 _TRANSITION_EVIDENCE_PREFIX = "agentcore-production/transitions"

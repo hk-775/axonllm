@@ -35,7 +35,9 @@ from constructs import Construct
 
 
 _GITHUB_OIDC_ISSUER = "token.actions.githubusercontent.com"
-_DEFAULT_GITHUB_SUBJECT_PREFIX = "repo:hk-775@225056493/axonllm@1276398779"
+_DEFAULT_GITHUB_SUBJECT_PREFIX = (
+    "repo:hk-775@225056493/axonllm-internal@1276398779"
+)
 _GITHUB_SUBJECT_PREFIX_PATTERN = r"^repo:[A-Za-z0-9_.-]+@[0-9]+/[A-Za-z0-9_.-]+@[0-9]+$"
 _SECRET_ARN_PATTERN = (
     r"^arn:aws:secretsmanager:us-east-1:[0-9]{12}:secret:"
