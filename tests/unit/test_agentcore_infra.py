@@ -1812,7 +1812,7 @@ def test_encrypted_logs_and_alarm_delivery_have_service_permissions(
         )
         if log_group["DeletionPolicy"] == "Retain"
     ]
-    assert len(retained_logs) == 7
+    assert len(retained_logs) == 11
     assert all(
         log_group["Properties"]["RetentionInDays"] == 365
         for log_group in retained_logs
@@ -1821,6 +1821,140 @@ def test_encrypted_logs_and_alarm_delivery_have_service_permissions(
         "KmsKeyId" in log_group["Properties"]
         for log_group in retained_logs
     )
+    endpoint_logs = {
+        logical_id: resource
+        for logical_id, resource in synthesized_template[
+            "Resources"
+        ].items()
+        if resource["Type"] == "AWS::Logs::LogGroup"
+        and "/aws/bedrock-agentcore/runtimes/"
+        in json.dumps(resource["Properties"].get("LogGroupName"))
+    }
+    assert len(endpoint_logs) == 3
+    assert {
+        resource["Condition"] for resource in endpoint_logs.values()
+    } == {
+        "CandidateEndpointEnabled",
+        "ProductionEndpointEnabled",
+        "RecoveryValidation",
+    }
+    endpoint_log_names = json.dumps(
+        [
+            resource["Properties"]["LogGroupName"]
+            for resource in endpoint_logs.values()
+        ],
+        sort_keys=True,
+    )
+    assert '"-production"' in endpoint_log_names
+    assert '"-recovery"' in endpoint_log_names
+    assert '"CandidateEndpointName"' in endpoint_log_names
+
+    default_log_controls = {
+        logical_id: resource
+        for logical_id, resource in synthesized_template[
+            "Resources"
+        ].items()
+        if resource["Type"] == "Custom::AWS"
+        and any(
+            logical_id.startswith(prefix)
+            for prefix in (
+                "EnsureDefaultRuntimeLogs",
+                "EncryptDefaultRuntimeLogs",
+                "RetainDefaultRuntimeLogs",
+            )
+        )
+    }
+    assert len(default_log_controls) == 3
+    control_payloads = {
+        prefix: json.dumps(
+            next(
+                resource
+                for logical_id, resource
+                in default_log_controls.items()
+                if logical_id.startswith(prefix)
+            )["Properties"],
+            sort_keys=True,
+        )
+        for prefix in (
+            "EnsureDefaultRuntimeLogs",
+            "EncryptDefaultRuntimeLogs",
+            "RetainDefaultRuntimeLogs",
+        )
+    }
+    assert "createLogGroup" in control_payloads[
+        "EnsureDefaultRuntimeLogs"
+    ]
+    assert "associateKmsKey" in control_payloads[
+        "EncryptDefaultRuntimeLogs"
+    ]
+    assert "putRetentionPolicy" in control_payloads[
+        "RetainDefaultRuntimeLogs"
+    ]
+    assert all(
+        "/aws/bedrock-agentcore/runtimes/" in payload
+        and "-DEFAULT" in payload
+        for payload in control_payloads.values()
+    )
+
+    default_log_policies = [
+        resource
+        for logical_id, resource in synthesized_template[
+            "Resources"
+        ].items()
+        if resource["Type"] == "AWS::IAM::Policy"
+        and "DefaultRuntimeLogsCustomResourcePolicy"
+        in logical_id
+    ]
+    assert len(default_log_policies) == 3
+    log_actions = {
+        tuple(
+            statement["Action"]
+            if isinstance(statement["Action"], list)
+            else [statement["Action"]]
+        )
+        for policy in default_log_policies
+        for statement in policy["Properties"]["PolicyDocument"][
+            "Statement"
+        ]
+        if statement.get("Sid")
+        == "ManageExactAgentCoreDefaultLogGroup"
+    }
+    assert log_actions == {
+        ("logs:AssociateKmsKey",),
+        ("logs:CreateLogGroup",),
+        ("logs:PutRetentionPolicy",),
+    }
+    serialized_default_log_policies = json.dumps(
+        default_log_policies,
+        sort_keys=True,
+    )
+    assert ":log-group:/aws/bedrock-agentcore/runtimes/" in (
+        serialized_default_log_policies
+    )
+    assert "log-group//aws/" not in serialized_default_log_policies
+
+    endpoints = [
+        resource
+        for resource in _resources(
+            synthesized_template,
+            "AWS::BedrockAgentCore::RuntimeEndpoint",
+        )
+    ]
+    for logical_id, log_group in endpoint_logs.items():
+        matching_endpoint = next(
+            endpoint
+            for endpoint in endpoints
+            if endpoint["Condition"] == log_group["Condition"]
+        )
+        dependencies = matching_endpoint.get("DependsOn", [])
+        if isinstance(dependencies, str):
+            dependencies = [dependencies]
+        assert logical_id in dependencies
+        assert any(
+            dependency.startswith("RetainDefaultRuntimeLogs")
+            for dependency in dependencies
+        )
+
     delivery_types = {
         resource["Properties"]["LogType"]
         for resource in _resources(
