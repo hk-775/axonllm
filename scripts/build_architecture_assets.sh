@@ -4,9 +4,10 @@
 #
 #   ./scripts/build_architecture_assets.sh
 #
-# docs/architecture.drawio is the single source. Everything this writes into
-# site/ is derived from it and committed anyway, because site/ is uploaded to S3
-# verbatim (see site/infra/stack.py) and there is no build step in the deploy.
+# docs/architecture.drawio is the source for the marketing and dashboard
+# diagrams. The two single-page README diagrams live beside it and export to
+# docs/images/. Generated assets are committed because neither the site upload
+# nor GitHub's README renderer has an architecture build step.
 #
 # Run this after editing the diagram, and commit the results together.
 set -euo pipefail
@@ -49,6 +50,31 @@ for entry in "${PAGES[@]}"; do
     fi
 done
 
+# README architecture diagrams are separate single-page draw.io sources so they
+# remain legible when GitHub scales them to the repository content width.
+README_DIAGRAMS=(architecture-overview aws-services-architecture)
+
+for name in "${README_DIAGRAMS[@]}"; do
+    readme_src="docs/${name}.drawio"
+    readme_out="docs/images/${name}.png"
+
+    if [[ ! -f "$readme_src" ]]; then
+        echo "error: $readme_src not found" >&2
+        exit 1
+    fi
+
+    echo "==> $readme_src -> $readme_out"
+    drawio -x -f png \
+        --scale 1.5 \
+        --border 24 \
+        -o "$readme_out" "$readme_src" >/dev/null
+
+    if [[ ! -s "$readme_out" ]]; then
+        echo "error: $readme_out is empty — export failed" >&2
+        exit 1
+    fi
+done
+
 # The download link on the page offers the editable original.
 echo "==> $SRC -> site/architecture.drawio"
 cp "$SRC" site/architecture.drawio
@@ -60,4 +86,4 @@ cp site/architecture-infrastructure.svg docs/architecture.svg
 
 echo
 echo "==> done. Commit site/architecture-*.svg, site/architecture.drawio and"
-echo "    docs/architecture.svg along with the .drawio change."
+echo "    docs/architecture.svg, docs/images/*.png, and their .drawio sources."
