@@ -27,6 +27,36 @@ networking, and the serverless AgentCore control plane, is recorded in the
 describes a target state; the production runbooks remain authoritative until
 the migration is complete.
 
+## Architecture
+
+AxonLLM has one routing core shared by three delivery modes: the embedded
+Python/Ostiari adapter, the standalone gateway, and the Amazon Bedrock
+AgentCore Runtime adapter. Identity, policy enforcement, routing, provider
+translation, usage accounting, audit, and telemetry therefore behave
+consistently regardless of how a request enters the system.
+
+[![AxonLLM logical architecture](docs/images/architecture-overview.png)](docs/images/architecture-overview.png)
+
+Editable source: [architecture-overview.drawio](docs/architecture-overview.drawio)
+
+### AWS services architecture
+
+The accepted AgentCore target uses CloudFront and WAF at the edge, a private S3
+bucket for the dashboard, and API Gateway with Lambda for the serverless
+control API. Application traffic invokes the AxonLLM runtime on AgentCore
+directly. DynamoDB, Secrets Manager, KMS, SQS, EventBridge, Lambda workers, S3,
+SNS, and CloudWatch provide retained state, credentials, asynchronous work,
+exports, notifications, and operations. The default web path does not require
+an ALB, ECS/Fargate UI service, UI VPC, or NAT gateway.
+
+[![AxonLLM AWS services architecture](docs/images/aws-services-architecture.png)](docs/images/aws-services-architecture.png)
+
+Editable source: [aws-services-architecture.drawio](docs/aws-services-architecture.drawio)
+
+This is the accepted post-beta target architecture and its migration is still
+in progress. Until cutover, use the production runbooks as the source of truth
+for deployed topology.
+
 The first deployment-planning slice is available locally and cannot mutate
 AWS:
 
@@ -1875,7 +1905,7 @@ Notes that matter in practice:
 | Pricing Coverage | `/admin/pricing-drift` | Which models have no price, and what that costs you |
 | Production Readiness | `/admin/production-checklist` | What is misconfigured in ways no request would reveal (production only) |
 
-## Architecture
+## Detailed Request Pipeline
 
 ```
 Request → Auth (OIDC/API Key) → Tenant Project Resolution → Tenant RBAC

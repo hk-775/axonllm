@@ -1,0 +1,140 @@
+<mxfile host="Electron" modified="2026-08-26T00:00:00.000Z" agent="Mozilla/5.0" version="29.7.9" type="device">
+  <diagram id="axonllm-architecture" name="AxonLLM Architecture">
+    <mxGraphModel dx="1800" dy="1000" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1800" pageHeight="1000" math="0" shadow="0" background="#FFFFFF">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+        <mxCell id="title" value="AxonLLM Architecture" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;fontSize=34;fontStyle=1;fontColor=#0F172A;" vertex="1" parent="1">
+          <mxGeometry x="40" y="25" width="1720" height="45" as="geometry"/>
+        </mxCell>
+        <mxCell id="subtitle" value="One routing core · three delivery adapters · shared governance and provider execution" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;fontSize=17;fontColor=#475569;" vertex="1" parent="1">
+          <mxGeometry x="40" y="72" width="1720" height="32" as="geometry"/>
+        </mxCell>
+        <mxCell id="requestLegend" value="&lt;b&gt;Solid blue&lt;/b&gt; = request/response path" style="rounded=1;whiteSpace=wrap;html=1;strokeColor=#93C5FD;fillColor=#EFF6FF;fontColor=#1E3A8A;fontSize=13;align=center;" vertex="1" parent="1">
+          <mxGeometry x="1260" y="42" width="235" height="42" as="geometry"/>
+        </mxCell>
+        <mxCell id="controlLegend" value="&lt;b&gt;Dashed teal&lt;/b&gt; = configuration, state, telemetry" style="rounded=1;whiteSpace=wrap;html=1;strokeColor=#5EEAD4;fillColor=#F0FDFA;fontColor=#134E4A;fontSize=13;align=center;" vertex="1" parent="1">
+          <mxGeometry x="1510" y="42" width="250" height="42" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="callersGroup" value="CALLERS" style="swimlane;html=1;rounded=1;startSize=48;horizontal=1;fillColor=#F8FAFC;swimlaneFillColor=#E2E8F0;strokeColor=#CBD5E1;fontColor=#334155;fontStyle=1;fontSize=15;spacingLeft=16;align=left;shadow=0;" vertex="1" parent="1">
+          <mxGeometry x="40" y="135" width="260" height="710" as="geometry"/>
+        </mxCell>
+        <mxCell id="pythonCaller" value="&lt;b&gt;Python applications&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#64748B&quot;&gt;and Ostiari hosts&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;strokeColor=#CBD5E1;fillColor=#FFFFFF;fontColor=#0F172A;fontSize=15;spacing=12;shadow=1;" vertex="1" parent="1">
+          <mxGeometry x="70" y="225" width="200" height="86" as="geometry"/>
+        </mxCell>
+        <mxCell id="openaiCaller" value="&lt;b&gt;OpenAI-compatible&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#64748B&quot;&gt;SDKs and applications&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;strokeColor=#CBD5E1;fillColor=#FFFFFF;fontColor=#0F172A;fontSize=15;spacing=12;shadow=1;" vertex="1" parent="1">
+          <mxGeometry x="70" y="365" width="200" height="86" as="geometry"/>
+        </mxCell>
+        <mxCell id="agentCaller" value="&lt;b&gt;Agent callers&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#64748B&quot;&gt;AgentCore-compatible clients&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;strokeColor=#CBD5E1;fillColor=#FFFFFF;fontColor=#0F172A;fontSize=15;spacing=12;shadow=1;" vertex="1" parent="1">
+          <mxGeometry x="70" y="505" width="200" height="86" as="geometry"/>
+        </mxCell>
+        <mxCell id="adminCaller" value="&lt;b&gt;Administrators&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#64748B&quot;&gt;dashboard and control API&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;strokeColor=#CBD5E1;fillColor=#FFFFFF;fontColor=#0F172A;fontSize=15;spacing=12;shadow=1;" vertex="1" parent="1">
+          <mxGeometry x="70" y="645" width="200" height="86" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="adaptersGroup" value="DELIVERY ADAPTERS" style="swimlane;html=1;rounded=1;startSize=48;horizontal=1;fillColor=#F8FAFC;swimlaneFillColor=#DBEAFE;strokeColor=#93C5FD;fontColor=#1E3A8A;fontStyle=1;fontSize=15;spacingLeft=16;align=left;shadow=0;" vertex="1" parent="1">
+          <mxGeometry x="340" y="135" width="340" height="710" as="geometry"/>
+        </mxCell>
+        <mxCell id="embeddedAdapter" value="&lt;b&gt;Embedded Python&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#475569&quot;&gt;AsyncRouter&lt;br&gt;OstiariRouterAdapter&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;strokeColor=#60A5FA;fillColor=#EFF6FF;fontColor=#172554;fontSize=16;spacing=12;shadow=1;" vertex="1" parent="1">
+          <mxGeometry x="380" y="215" width="260" height="110" as="geometry"/>
+        </mxCell>
+        <mxCell id="standaloneAdapter" value="&lt;b&gt;Standalone Gateway&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#475569&quot;&gt;OpenAI + native APIs&lt;br&gt;dashboard and control API&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;strokeColor=#60A5FA;fillColor=#EFF6FF;fontColor=#172554;fontSize=16;spacing=12;shadow=1;" vertex="1" parent="1">
+          <mxGeometry x="380" y="370" width="260" height="110" as="geometry"/>
+        </mxCell>
+        <mxCell id="agentcoreAdapter" value="&lt;b&gt;AgentCore Runtime&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#475569&quot;&gt;managed runtime adapter&lt;br&gt;streaming invocation contract&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;strokeColor=#60A5FA;fillColor=#EFF6FF;fontColor=#172554;fontSize=16;spacing=12;shadow=1;" vertex="1" parent="1">
+          <mxGeometry x="380" y="525" width="260" height="110" as="geometry"/>
+        </mxCell>
+        <mxCell id="adapterContract" value="Each adapter establishes canonical identity and converts its transport into the same internal request contract." style="rounded=1;whiteSpace=wrap;html=1;strokeColor=#BFDBFE;fillColor=#FFFFFF;fontColor=#475569;fontSize=13;spacing=12;dashed=1;dashPattern=4 4;" vertex="1" parent="1">
+          <mxGeometry x="380" y="690" width="260" height="95" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="coreGroup" value="SHARED ROUTING CORE" style="swimlane;html=1;rounded=1;startSize=48;horizontal=1;fillColor=#F0FDFA;swimlaneFillColor=#CCFBF1;strokeColor=#5EEAD4;fontColor=#134E4A;fontStyle=1;fontSize=15;spacingLeft=16;align=left;shadow=0;" vertex="1" parent="1">
+          <mxGeometry x="730" y="135" width="520" height="710" as="geometry"/>
+        </mxCell>
+        <mxCell id="identityCore" value="&lt;b&gt;Identity + context&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#64748B&quot;&gt;tenant · project · user · environment&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;strokeColor=#2DD4BF;fillColor=#FFFFFF;fontColor=#0F172A;fontSize=14;spacing=10;" vertex="1" parent="1">
+          <mxGeometry x="765" y="210" width="215" height="90" as="geometry"/>
+        </mxCell>
+        <mxCell id="policyCore" value="&lt;b&gt;Policies + safeguards&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#64748B&quot;&gt;RBAC · quotas · budgets · guardrails&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;strokeColor=#2DD4BF;fillColor=#FFFFFF;fontColor=#0F172A;fontSize=14;spacing=10;" vertex="1" parent="1">
+          <mxGeometry x="1000" y="210" width="215" height="90" as="geometry"/>
+        </mxCell>
+        <mxCell id="routingCore" value="&lt;b&gt;Smart routing&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#64748B&quot;&gt;selection · retry · fallback · regions&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;strokeColor=#2DD4BF;fillColor=#FFFFFF;fontColor=#0F172A;fontSize=14;spacing=10;" vertex="1" parent="1">
+          <mxGeometry x="765" y="325" width="215" height="90" as="geometry"/>
+        </mxCell>
+        <mxCell id="translationCore" value="&lt;b&gt;Provider translation&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#64748B&quot;&gt;native protocols · normalized streaming&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;strokeColor=#2DD4BF;fillColor=#FFFFFF;fontColor=#0F172A;fontSize=14;spacing=10;" vertex="1" parent="1">
+          <mxGeometry x="1000" y="325" width="215" height="90" as="geometry"/>
+        </mxCell>
+        <mxCell id="usageCore" value="&lt;b&gt;Usage + cost&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#64748B&quot;&gt;metering · reservations · analytics&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;strokeColor=#2DD4BF;fillColor=#FFFFFF;fontColor=#0F172A;fontSize=14;spacing=10;" vertex="1" parent="1">
+          <mxGeometry x="765" y="440" width="215" height="90" as="geometry"/>
+        </mxCell>
+        <mxCell id="telemetryCore" value="&lt;b&gt;Cache + evidence&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#64748B&quot;&gt;audit · events · telemetry · sessions&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;strokeColor=#2DD4BF;fillColor=#FFFFFF;fontColor=#0F172A;fontSize=14;spacing=10;" vertex="1" parent="1">
+          <mxGeometry x="1000" y="440" width="215" height="90" as="geometry"/>
+        </mxCell>
+        <mxCell id="controlPlane" value="&lt;b&gt;Mandatory control plane&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#475569&quot;&gt;configuration · virtual keys · policies · budgets · signed snapshots&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;strokeColor=#14B8A6;fillColor=#ECFDF5;fontColor=#134E4A;fontSize=14;spacing=11;" vertex="1" parent="1">
+          <mxGeometry x="765" y="575" width="450" height="82" as="geometry"/>
+        </mxCell>
+        <mxCell id="canonicalState" value="&lt;b&gt;Canonical state and event destinations&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#475569&quot;&gt;DynamoDB or host-provided state · durable outbound delivery&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;strokeColor=#14B8A6;fillColor=#ECFDF5;fontColor=#134E4A;fontSize=14;spacing=11;" vertex="1" parent="1">
+          <mxGeometry x="765" y="680" width="450" height="82" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="providersGroup" value="PROVIDERS &amp; DESTINATIONS" style="swimlane;html=1;rounded=1;startSize=48;horizontal=1;fillColor=#FFFBEB;swimlaneFillColor=#FEF3C7;strokeColor=#FCD34D;fontColor=#78350F;fontStyle=1;fontSize=15;spacingLeft=16;align=left;shadow=0;" vertex="1" parent="1">
+          <mxGeometry x="1290" y="135" width="470" height="710" as="geometry"/>
+        </mxCell>
+        <mxCell id="bedrockProvider" value="&lt;b&gt;Amazon Bedrock&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#64748B&quot;&gt;Converse / InvokeModel&lt;br&gt;Mantle access paths&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;strokeColor=#F59E0B;fillColor=#FFFFFF;fontColor=#451A03;fontSize=16;spacing=12;shadow=1;" vertex="1" parent="1">
+          <mxGeometry x="1340" y="220" width="370" height="110" as="geometry"/>
+        </mxCell>
+        <mxCell id="externalProviders" value="&lt;b&gt;Configured model providers&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#64748B&quot;&gt;Anthropic · OpenAI · Azure · Vertex&lt;br&gt;Cohere · Groq · Together · xAI · more&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;strokeColor=#F59E0B;fillColor=#FFFFFF;fontColor=#451A03;fontSize=16;spacing=12;shadow=1;" vertex="1" parent="1">
+          <mxGeometry x="1340" y="385" width="370" height="125" as="geometry"/>
+        </mxCell>
+        <mxCell id="eventDestinations" value="&lt;b&gt;Observability and events&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#64748B&quot;&gt;CloudWatch · SNS · webhooks&lt;br&gt;OpenTelemetry-compatible sinks&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;strokeColor=#F59E0B;fillColor=#FFFFFF;fontColor=#451A03;fontSize=16;spacing=12;shadow=1;" vertex="1" parent="1">
+          <mxGeometry x="1340" y="565" width="370" height="110" as="geometry"/>
+        </mxCell>
+        <mxCell id="responseNote" value="Normalized responses return through the same adapter, preserving each caller's protocol and streaming contract." style="rounded=1;whiteSpace=wrap;html=1;strokeColor=#FDE68A;fillColor=#FFFBEB;fontColor=#78350F;fontSize=13;spacing=12;dashed=1;dashPattern=4 4;" vertex="1" parent="1">
+          <mxGeometry x="1340" y="710" width="370" height="75" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="ePythonEmbedded" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=2;strokeColor=#2563EB;" edge="1" parent="1" source="pythonCaller" target="embeddedAdapter">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="eOpenAIStandalone" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=2;strokeColor=#2563EB;" edge="1" parent="1" source="openaiCaller" target="standaloneAdapter">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="eAgentAgentCore" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=2;strokeColor=#2563EB;" edge="1" parent="1" source="agentCaller" target="agentcoreAdapter">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="eAdminStandalone" value="control" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=2;strokeColor=#2563EB;fontSize=12;fontColor=#1E3A8A;labelBackgroundColor=#FFFFFF;" edge="1" parent="1" source="adminCaller" target="standaloneAdapter">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="320" y="688"/>
+              <mxPoint x="320" y="425"/>
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="eEmbeddedCore" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=2.5;strokeColor=#2563EB;" edge="1" parent="1" source="embeddedAdapter" target="identityCore">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="eStandaloneCore" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=2.5;strokeColor=#2563EB;" edge="1" parent="1" source="standaloneAdapter" target="routingCore">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="eAgentCoreCore" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=2.5;strokeColor=#2563EB;" edge="1" parent="1" source="agentcoreAdapter" target="usageCore">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="eTranslationBedrock" value="native request" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=2.5;strokeColor=#2563EB;fontSize=12;fontColor=#1E3A8A;labelBackgroundColor=#FFFFFF;" edge="1" parent="1" source="translationCore" target="bedrockProvider">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="eTranslationExternal" value="native request" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=2.5;strokeColor=#2563EB;fontSize=12;fontColor=#1E3A8A;labelBackgroundColor=#FFFFFF;" edge="1" parent="1" source="translationCore" target="externalProviders">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="eTelemetryDest" value="audit + telemetry" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=2;strokeColor=#0F766E;dashed=1;dashPattern=6 4;fontSize=12;fontColor=#115E59;labelBackgroundColor=#FFFFFF;" edge="1" parent="1" source="telemetryCore" target="eventDestinations">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="eControlPolicy" value="signed configuration" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=2;strokeColor=#0F766E;dashed=1;dashPattern=6 4;fontSize=12;fontColor=#115E59;labelBackgroundColor=#FFFFFF;" edge="1" parent="1" source="controlPlane" target="policyCore">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="eStateUsage" value="state + events" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=2;strokeColor=#0F766E;dashed=1;dashPattern=6 4;fontSize=12;fontColor=#115E59;labelBackgroundColor=#FFFFFF;" edge="1" parent="1" source="canonicalState" target="usageCore">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
