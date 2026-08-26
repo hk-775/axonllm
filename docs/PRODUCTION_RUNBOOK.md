@@ -1195,20 +1195,23 @@ configured and tested receivers before launch.
 
 ## Backup And Restore
 
-Both AWS stacks enable DynamoDB PITR, daily AWS Backup, and governance-mode
-Vault Lock with a 30-day minimum and 365-day maximum retention.
-`.github/workflows/operations-security.yml` uses a Fargate/AgentCore matrix for
-the daily metadata audit and monthly PITR restore exercise, with separate
-least-privilege audit and recovery roles. Configure
-`AXON_OPERATIONS_AUDIT_ROLE_ARN`, `AXON_OPERATIONS_RECOVERY_ROLE_ARN`,
-`AXON_AWS_ACCOUNT_ID`, `AXON_DATA_KMS_KEY_ARN`, and
-`AXON_AGENTCORE_DATA_KMS_KEY_ARN` in the protected production environment.
-Set `AXON_FARGATE_STATE_TABLE_NAME` and
+Each deployed AWS stack enables DynamoDB PITR, daily AWS Backup, and
+governance-mode Vault Lock with a 30-day minimum and 365-day maximum
+retention. `.github/workflows/operations-security.yml` always validates the
+AgentCore target and enables the Fargate target only when the protected
+production environment sets `AXON_FARGATE_RECOVERY_ENABLED=true`. A disabled
+Fargate target does not request AWS credentials or construct a session policy.
+
+Configure `AXON_OPERATIONS_AUDIT_ROLE_ARN`,
+`AXON_OPERATIONS_RECOVERY_ROLE_ARN`, `AXON_AWS_ACCOUNT_ID`, and
+`AXON_AGENTCORE_DATA_KMS_KEY_ARN` in the protected production environment. If
+Fargate recovery validation is enabled, also configure
+`AXON_DATA_KMS_KEY_ARN`. Set `AXON_FARGATE_STATE_TABLE_NAME` and
 `AXON_AGENTCORE_STATE_TABLE_NAME` when either physical name differs from its
-documented default. The two KMS variables must contain the data-key ARN for
-their respective stack. With `--require-vault-lock`, the validator checks the
-exact 30-day minimum, 365-day maximum, and governance mode rather than accepting
-an arbitrary locked vault.
+documented default. Each enabled KMS variable must contain the exact data-key
+ARN for its respective stack; do not use an alias or placeholder ARN. With
+`--require-vault-lock`, the validator checks the exact 30-day minimum, 365-day
+maximum, and governance mode rather than accepting an arbitrary locked vault.
 
 Validate Fargate:
 
