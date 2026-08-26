@@ -7,6 +7,7 @@ import re
 from dataclasses import dataclass
 
 from aws_cdk import (
+    ArnFormat,
     CfnCondition,
     CfnOutput,
     CfnParameter,
@@ -2406,6 +2407,265 @@ class AxonLLMAgentCoreStack(Stack):
         cfn_runtime.add_dependency(recovery_guard_resource)
         cfn_runtime.add_dependency(routing_seed_resource)
 
+        default_runtime_log_group_name = Fn.join(
+            "",
+            [
+                "/aws/bedrock-agentcore/runtimes/",
+                runtime.agent_runtime_id,
+                "-DEFAULT",
+            ],
+        )
+        default_runtime_log_group_arn = self.format_arn(
+            service="logs",
+            resource="log-group",
+            resource_name=default_runtime_log_group_name,
+            arn_format=ArnFormat.COLON_RESOURCE_NAME,
+        )
+        default_log_group_manager_logs = logs.LogGroup(
+            self,
+            "DefaultRuntimeLogGroupManagerLogs",
+            encryption_key=data_key,
+            retention=logs.RetentionDays.ONE_YEAR,
+            removal_policy=removal_policy,
+        )
+
+        def default_log_group_policy(
+            *log_actions: str,
+            use_kms: bool,
+        ) -> cr.AwsCustomResourcePolicy:
+            statements = [
+                iam.PolicyStatement(
+                    sid="ManageExactAgentCoreDefaultLogGroup",
+                    actions=list(log_actions),
+                    resources=[default_runtime_log_group_arn],
+                )
+            ]
+            if use_kms:
+                statements.extend(
+                    [
+                        iam.PolicyStatement(
+                            sid="DescribeAgentCoreLogKey",
+                            actions=["kms:DescribeKey"],
+                            resources=[data_key.key_arn],
+                            conditions={
+                                "StringEquals": {
+                                    "kms:ViaService": (
+                                        f"logs.{self.region}."
+                                        f"{self.url_suffix}"
+                                    )
+                                }
+                            },
+                        ),
+                        iam.PolicyStatement(
+                            sid="UseAgentCoreLogKey",
+                            actions=[
+                                "kms:Decrypt",
+                                "kms:Encrypt",
+                                "kms:GenerateDataKey*",
+                                "kms:ReEncrypt*",
+                            ],
+                            resources=[data_key.key_arn],
+                            conditions={
+                                "ArnEquals": {
+                                    "kms:EncryptionContext:aws:logs:arn": (
+                                        default_runtime_log_group_arn
+                                    )
+                                },
+                                "StringEquals": {
+                                    "kms:ViaService": (
+                                        f"logs.{self.region}."
+                                        f"{self.url_suffix}"
+                                    )
+                                },
+                            },
+                        ),
+                    ]
+                )
+            return cr.AwsCustomResourcePolicy.from_statements(
+                statements
+            )
+
+        default_log_group_physical_id = cr.PhysicalResourceId.of(
+            Fn.join(
+                ":",
+                [
+                    "axonllm-agentcore-default-log-group",
+                    runtime.agent_runtime_id,
+                ],
+            )
+        )
+
+        def default_log_group_call(
+            action: str,
+            parameters: dict[str, object],
+            *,
+            ignore_error_codes_matching: str | None = None,
+        ) -> cr.AwsSdkCall:
+            return cr.AwsSdkCall(
+                service="CloudWatchLogs",
+                action=action,
+                parameters=parameters,
+                ignore_error_codes_matching=(
+                    ignore_error_codes_matching
+                ),
+                physical_resource_id=default_log_group_physical_id,
+            )
+
+        create_default_log_group_parameters = {
+            "logGroupName": default_runtime_log_group_name,
+            "kmsKeyId": data_key.key_arn,
+            "logGroupClass": "STANDARD",
+        }
+        ensure_default_runtime_logs = cr.AwsCustomResource(
+            self,
+            "EnsureDefaultRuntimeLogs",
+            on_create=default_log_group_call(
+                "createLogGroup",
+                create_default_log_group_parameters,
+                ignore_error_codes_matching=(
+                    "ResourceAlreadyExistsException"
+                ),
+            ),
+            on_update=default_log_group_call(
+                "createLogGroup",
+                create_default_log_group_parameters,
+                ignore_error_codes_matching=(
+                    "ResourceAlreadyExistsException"
+                ),
+            ),
+            on_delete=(
+                default_log_group_call(
+                    "deleteLogGroup",
+                    {
+                        "logGroupName": (
+                            default_runtime_log_group_name
+                        )
+                    },
+                    ignore_error_codes_matching=(
+                        "ResourceNotFoundException"
+                    ),
+                )
+                if deployment_namespace
+                else None
+            ),
+            policy=default_log_group_policy(
+                "logs:CreateLogGroup",
+                *(
+                    ("logs:DeleteLogGroup",)
+                    if deployment_namespace
+                    else ()
+                ),
+                use_kms=True,
+            ),
+            install_latest_aws_sdk=False,
+            log_group=default_log_group_manager_logs,
+            removal_policy=removal_policy,
+            timeout=Duration.minutes(2),
+        )
+        encrypt_default_runtime_logs = cr.AwsCustomResource(
+            self,
+            "EncryptDefaultRuntimeLogs",
+            on_create=default_log_group_call(
+                "associateKmsKey",
+                {
+                    "logGroupName": default_runtime_log_group_name,
+                    "kmsKeyId": data_key.key_arn,
+                },
+            ),
+            on_update=default_log_group_call(
+                "associateKmsKey",
+                {
+                    "logGroupName": default_runtime_log_group_name,
+                    "kmsKeyId": data_key.key_arn,
+                },
+            ),
+            policy=default_log_group_policy(
+                "logs:AssociateKmsKey",
+                use_kms=True,
+            ),
+            install_latest_aws_sdk=False,
+            log_group=default_log_group_manager_logs,
+            removal_policy=removal_policy,
+            timeout=Duration.minutes(2),
+        )
+        retain_default_runtime_logs = cr.AwsCustomResource(
+            self,
+            "RetainDefaultRuntimeLogs",
+            on_create=default_log_group_call(
+                "putRetentionPolicy",
+                {
+                    "logGroupName": default_runtime_log_group_name,
+                    "retentionInDays": 365,
+                },
+            ),
+            on_update=default_log_group_call(
+                "putRetentionPolicy",
+                {
+                    "logGroupName": default_runtime_log_group_name,
+                    "retentionInDays": 365,
+                },
+            ),
+            policy=default_log_group_policy(
+                "logs:PutRetentionPolicy",
+                use_kms=False,
+            ),
+            install_latest_aws_sdk=False,
+            log_group=default_log_group_manager_logs,
+            removal_policy=removal_policy,
+            timeout=Duration.minutes(2),
+        )
+        encrypt_default_runtime_logs.node.add_dependency(
+            ensure_default_runtime_logs
+        )
+        retain_default_runtime_logs.node.add_dependency(
+            encrypt_default_runtime_logs
+        )
+
+        def secured_endpoint_log_group(
+            construct_id: str,
+            endpoint_name: str,
+            condition: CfnCondition,
+        ) -> logs.CfnLogGroup:
+            log_group = logs.LogGroup(
+                self,
+                construct_id,
+                log_group_name=Fn.join(
+                    "",
+                    [
+                        "/aws/bedrock-agentcore/runtimes/",
+                        runtime.agent_runtime_id,
+                        "-",
+                        endpoint_name,
+                    ],
+                ),
+                encryption_key=data_key,
+                retention=logs.RetentionDays.ONE_YEAR,
+                removal_policy=removal_policy,
+            )
+            cfn_log_group = log_group.node.default_child
+            if not isinstance(cfn_log_group, logs.CfnLogGroup):
+                raise TypeError(
+                    "AgentCore endpoint log group has no CfnLogGroup child"
+                )
+            cfn_log_group.cfn_options.condition = condition
+            return cfn_log_group
+
+        production_endpoint_logs = secured_endpoint_log_group(
+            "ProductionEndpointLogs",
+            "production",
+            production_endpoint_enabled,
+        )
+        candidate_endpoint_logs = secured_endpoint_log_group(
+            "CandidateEndpointLogs",
+            candidate_endpoint_name.value_as_string,
+            candidate_endpoint_enabled,
+        )
+        recovery_endpoint_logs = secured_endpoint_log_group(
+            "RecoveryEndpointLogs",
+            "recovery",
+            recovery_validation,
+        )
+
         production_endpoint = runtime.add_endpoint(
             "production",
             description="AxonLLM production endpoint",
@@ -2450,6 +2710,17 @@ class AxonLLMAgentCoreStack(Stack):
         cfn_production_endpoint.add_dependency(recovery_guard_resource)
         cfn_candidate_endpoint.add_dependency(recovery_guard_resource)
         cfn_recovery_endpoint.add_dependency(recovery_guard_resource)
+        cfn_production_endpoint.add_dependency(production_endpoint_logs)
+        cfn_candidate_endpoint.add_dependency(candidate_endpoint_logs)
+        cfn_recovery_endpoint.add_dependency(recovery_endpoint_logs)
+        for cfn_endpoint in (
+            cfn_production_endpoint,
+            cfn_candidate_endpoint,
+            cfn_recovery_endpoint,
+        ):
+            cfn_endpoint.node.add_dependency(
+                retain_default_runtime_logs
+            )
 
         alarm_topic = sns.Topic(
             self,

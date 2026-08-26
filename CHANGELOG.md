@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-08-26
+
+### Security
+
+- Secure the AgentCore service-created `DEFAULT` runtime log group
+  idempotently with the deployment data KMS key and one-year retention, then
+  pre-create the production, candidate, and recovery endpoint log groups with
+  the same controls before any managed endpoint is exposed.
+
 ### Changed
 
 - Production recovery validation now treats AgentCore as the default target
