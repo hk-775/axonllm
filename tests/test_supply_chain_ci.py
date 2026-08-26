@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import ast
-import datetime as dt
 import json
 import re
 import tomllib
@@ -367,52 +365,19 @@ def test_trivy_exception_is_narrow_and_expires() -> None:
     }
 
 
-def test_pip_audit_exception_is_narrow_and_current() -> None:
+def test_pip_audit_has_no_exceptions() -> None:
     exception_file = ROOT / ".github/pip-audit-ignore.txt"
     lines = exception_file.read_text(encoding="utf-8").splitlines()
     vulnerability_ids = [line for line in lines if line and not line.startswith("#")]
-    expiry_line = next(line for line in lines if line.startswith("# expires: "))
-    expiry = dt.date.fromisoformat(expiry_line.removeprefix("# expires: "))
 
-    assert vulnerability_ids == ["PYSEC-2026-1325"]
-    assert expiry > dt.date.today()
+    assert vulnerability_ids == []
 
 
-def test_ecdsa_exception_remains_verification_only() -> None:
-    runtime_paths = [
-        ROOT / "agentcore_agent.py",
-        *(path for path in (ROOT / "src").rglob("*.py") if "node_modules" not in path.parts),
-    ]
-    prohibited: list[str] = []
-
-    for path in runtime_paths:
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        jose_jwt_aliases: set[str] = set()
-        jose_encode_aliases: set[str] = set()
-        for node in ast.walk(tree):
-            if isinstance(node, (ast.Import, ast.ImportFrom)):
-                module = node.module if isinstance(node, ast.ImportFrom) else ""
-                imported = [alias.name if not module else f"{module}.{alias.name}" for alias in node.names]
-                if any(name == "ecdsa" or name.startswith("ecdsa.") for name in imported):
-                    prohibited.append(f"{path}: imports python-ecdsa")
-                if isinstance(node, ast.ImportFrom) and node.module == "jose":
-                    jose_jwt_aliases.update(alias.asname or alias.name for alias in node.names if alias.name == "jwt")
-                if isinstance(node, ast.ImportFrom) and node.module == "jose.jwt":
-                    jose_encode_aliases.update(
-                        alias.asname or alias.name for alias in node.names if alias.name == "encode"
-                    )
-            elif isinstance(node, ast.Call):
-                if (
-                    isinstance(node.func, ast.Attribute)
-                    and node.func.attr == "encode"
-                    and isinstance(node.func.value, ast.Name)
-                    and node.func.value.id in jose_jwt_aliases
-                ):
-                    prohibited.append(f"{path}: signs with jose.jwt.encode")
-                if isinstance(node.func, ast.Name) and node.func.id in jose_encode_aliases:
-                    prohibited.append(f"{path}: signs with jose.jwt.encode")
-
-    assert prohibited == []
+def test_oidc_runtime_excludes_python_jose_and_ecdsa() -> None:
+    for relative_path in ("requirements.txt", "uv.lock"):
+        dependency_lock = (ROOT / relative_path).read_text(encoding="utf-8").lower()
+        assert "python-jose" not in dependency_lock
+        assert re.search(r"(?m)^(name = \"ecdsa\"|ecdsa==)", dependency_lock) is None
 
 
 def _make_cdk_output(tmp_path: Path) -> Path:
@@ -497,7 +462,7 @@ def test_oidc_runtime_extra_contains_its_network_client() -> None:
     oidc_dependencies = pyproject["project"]["optional-dependencies"]["oidc"]
 
     assert any(dependency.startswith("httpx") for dependency in oidc_dependencies)
-    assert any(dependency.startswith("python-jose") for dependency in oidc_dependencies)
+    assert any(dependency.startswith("PyJWT[crypto]") for dependency in oidc_dependencies)
 
 
 def test_embedded_install_excludes_host_and_aws_dependencies() -> None:

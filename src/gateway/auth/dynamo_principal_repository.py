@@ -48,7 +48,12 @@ class PrincipalStoreUnavailable(PrincipalRepositoryError):
 
 
 def identity_partition_key(issuer: str, subject: str) -> str:
-    """Return a fixed-size key without exposing identity text in DynamoDB keys."""
+    """Return a collision-resistant, fixed-size index for verified identifiers.
+
+    This is not password storage: issuers are public trust namespaces and API
+    key subjects are random key IDs, not bearer secrets. SHA-256 keeps the
+    DynamoDB key bounded without persisting the source identifiers verbatim.
+    """
     digest = hashlib.sha256(f"{issuer}\0{subject}".encode()).hexdigest()
     return f"IDENTITY#{digest}"
 

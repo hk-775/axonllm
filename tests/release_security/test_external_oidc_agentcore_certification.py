@@ -12,7 +12,7 @@ import pytest
 import yaml
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
-from jose import jwt
+import jwt
 
 from scripts.ci.validate_workflows import (
     WorkflowLoader,

@@ -23,7 +23,8 @@ from typing import Any, Protocol
 from urllib.parse import quote, urlsplit
 
 import httpx
-from jose import JWTError, jwt
+import jwt
+from jwt import PyJWTError
 
 from certify_agentcore import (
     PRODUCTION_LAUNCH_PROFILE,
@@ -903,7 +904,7 @@ def _jwk_for_token(
         )
     try:
         header = jwt.get_unverified_header(token)
-    except JWTError as exc:
+    except PyJWTError as exc:
         raise ExternalOidcCertificationError(
             "fixture broker returned an undecodable identity"
         ) from exc
@@ -964,24 +965,24 @@ def verify_fixture_identity(
     """Verify one broker identity independently of AgentCore."""
     key, algorithm = _jwk_for_token(token, material)
     options = {
-        "require_aud": not expect_wrong_audience,
-        "require_exp": not expect_expired,
-        "require_iat": True,
-        "require_iss": True,
-        "require_sub": True,
+        "require": ["aud", "exp", "iat", "iss", "sub"],
         "verify_aud": not expect_wrong_audience,
         "verify_exp": not expect_expired,
+        # The certification clock is injected and the bounded iat/nbf policy is
+        # enforced below, so do not compare these claims to wall-clock time here.
+        "verify_iat": False,
+        "verify_nbf": False,
     }
     try:
         claims = jwt.decode(
             token,
-            key,
+            jwt.PyJWK.from_dict(key, algorithm=algorithm),
             algorithms=[algorithm],
             audience=None if expect_wrong_audience else audience,
             issuer=material.issuer,
             options=options,
         )
-    except JWTError as exc:
+    except PyJWTError as exc:
         raise ExternalOidcCertificationError(
             f"{case} identity signature or registered claims are invalid"
         ) from exc

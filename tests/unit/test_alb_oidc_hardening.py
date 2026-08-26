@@ -10,7 +10,7 @@ import aiohttp
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec, rsa
-from jose import jwt as jose_jwt
+import jwt
 
 from src.gateway.auth.oidc_service import (
     MAX_ALB_KEY_BYTES,
@@ -95,7 +95,7 @@ def _alb_token(
     claims.update(claim_overrides or {})
     for claim in remove_claims:
         claims.pop(claim, None)
-    return jose_jwt.encode(
+    return jwt.encode(
         claims,
         private_pem,
         algorithm="ES256",

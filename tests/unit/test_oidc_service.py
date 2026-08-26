@@ -7,11 +7,11 @@ import logging
 import time
 
 import httpx
+import jwt
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec, rsa
-from jose import jwk as jose_jwk
-from jose import jwt as jose_jwt
+from jwt.algorithms import ECAlgorithm, RSAAlgorithm
 
 from src.gateway.auth.oidc_service import (
     MAX_DIRECT_OIDC_HEADER_BYTES,
@@ -62,12 +62,11 @@ def _new_rsa_signing_material(kid: str):
         serialization.PrivateFormat.PKCS8,
         serialization.NoEncryption(),
     )
-    public_pem = private_key.public_key().public_bytes(
-        serialization.Encoding.PEM,
-        serialization.PublicFormat.SubjectPublicKeyInfo,
+    public_jwk = RSAAlgorithm.to_jwk(
+        private_key.public_key(),
+        as_dict=True,
     )
-    public_jwk = jose_jwk.construct(public_pem, algorithm="RS256").to_dict()
-    public_jwk.update({"kid": kid, "use": "sig"})
+    public_jwk.update({"alg": "RS256", "kid": kid, "use": "sig"})
     return private_pem, public_jwk
 
 
@@ -98,7 +97,7 @@ def _signed_token(
     claims = _valid_claims(config, **claim_overrides)
     for claim in remove_claims:
         claims.pop(claim, None)
-    return jose_jwt.encode(
+    return jwt.encode(
         claims,
         private_pem,
         algorithm="RS256",
@@ -307,17 +306,16 @@ class TestValidateOIDCJWT:
             serialization.PrivateFormat.PKCS8,
             serialization.NoEncryption(),
         )
-        public_pem = private_key.public_key().public_bytes(
-            serialization.Encoding.PEM,
-            serialization.PublicFormat.SubjectPublicKeyInfo,
+        public_jwk = ECAlgorithm.to_jwk(
+            private_key.public_key(),
+            as_dict=True,
         )
-        public_jwk = jose_jwk.construct(public_pem, algorithm="ES256").to_dict()
-        public_jwk.update({"kid": "ec1", "use": "sig"})
+        public_jwk.update({"alg": "ES256", "kid": "ec1", "use": "sig"})
         service._install_jwks(
             {"keys": [public_jwk]},
             service._config.issuer,
         )
-        token = jose_jwt.encode(
+        token = jwt.encode(
             _valid_claims(service._config),
             private_pem,
             algorithm="ES256",
@@ -446,12 +444,10 @@ class TestValidateOIDCJWT:
         assert asyncio.run(service.validate_oidc_jwt(token)) is None
 
     @pytest.mark.parametrize("headers", [{}, {"kid": ""}, {"kid": True}])
-    def test_rejects_missing_or_malformed_kid(self, service, rsa_signing_material, headers):
-        _cache_signing_key(service, rsa_signing_material)
-        token = _signed_token(
-            service._config,
-            rsa_signing_material,
-            headers=headers,
+    def test_rejects_missing_or_malformed_kid(self, service, headers):
+        token = _make_jwt(
+            {"alg": "RS256", **headers},
+            _valid_claims(service._config),
         )
 
         assert asyncio.run(service.validate_oidc_jwt(token)) is None

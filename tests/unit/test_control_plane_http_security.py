@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import hashlib
+from html.parser import HTMLParser
 from pathlib import Path
-import re
 import subprocess
 
 import pytest
@@ -30,6 +30,33 @@ ALB_HEADERS = {
 }
 BEARER_HEADERS = {"Authorization": "Bearer direct-jwt"}
 REPO_ROOT = Path(__file__).parents[2]
+
+
+class _ScriptTagCollector(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.attributes: list[dict[str, str | None]] = []
+        self.end_count = 0
+        self.inline_data: list[str] = []
+        self._depth = 0
+
+    def handle_starttag(
+        self,
+        tag: str,
+        attrs: list[tuple[str, str | None]],
+    ) -> None:
+        if tag == "script":
+            self.attributes.append(dict(attrs))
+            self._depth += 1
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "script":
+            self.end_count += 1
+            self._depth = max(0, self._depth - 1)
+
+    def handle_data(self, data: str) -> None:
+        if self._depth and data.strip():
+            self.inline_data.append(data)
 
 
 async def _read_body(request: Request) -> JSONResponse:
@@ -387,10 +414,16 @@ def test_dashboard_loads_only_external_same_origin_scripts() -> None:
         / "index.html"
     ).read_text(encoding="utf-8")
 
-    script_tags = re.findall(r"<script\b([^>]*)>", dashboard)
-    assert len(script_tags) == 3
-    assert all(re.search(r'\bsrc="/admin/static/', tag) for tag in script_tags)
-    assert dashboard.count("</script>") == len(script_tags)
+    scripts = _ScriptTagCollector()
+    scripts.feed(dashboard)
+
+    assert len(scripts.attributes) == 3
+    assert all(
+        (attributes.get("src") or "").startswith("/admin/static/")
+        for attributes in scripts.attributes
+    )
+    assert scripts.end_count == len(scripts.attributes)
+    assert scripts.inline_data == []
     assert 'type="text/babel"' not in dashboard
     assert "/admin/static/vendor/babel.min.js" not in dashboard
 

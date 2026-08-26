@@ -15,6 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   idempotently with the deployment data KMS key and one-year retention, then
   pre-create the production, candidate, and recovery endpoint log groups with
   the same controls before any managed endpoint is exposed.
+- Replace `python-jose` with `PyJWT[crypto]` so AgentCore and OIDC deployments
+  no longer include the unpatchable `python-ecdsa` P-256 timing vulnerability.
+  Secret-rotation reports also omit secret, key, and version identifiers.
 
 ### Changed
 

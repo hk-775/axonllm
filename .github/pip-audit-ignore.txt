@@ -1,6 +1,1 @@
-# package: ecdsa==0.19.2
-# advisory: CVE-2024-23342 / GHSA-wj6h-64fc-37mp
-# expires: 2027-02-07
-# AxonLLM verifies externally signed JWTs; the advisory states verification is
-# unaffected. tests/test_supply_chain_ci.py fails if runtime signing is added.
-PYSEC-2026-1325
+# No vulnerability exceptions. Every pip-audit finding fails CI.

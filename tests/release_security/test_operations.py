@@ -190,7 +190,7 @@ class SecretRotationTests(unittest.TestCase):
 
     def test_valid_manual_rotation_state(self) -> None:
         aws = self._aws()
-        result = check_secret_rotation.validate_secret(
+        result = check_secret_rotation.validate_rotation_metadata(
             aws,
             stack_name="AxonLLMStack",
             secret_id=None,
@@ -201,8 +201,12 @@ class SecretRotationTests(unittest.TestCase):
         )
         self.assertEqual(result["validationScope"], "METADATA_ONLY")
         self.assertFalse(result["secretContentRead"])
+        self.assertFalse(result["sensitiveIdentifiersEmitted"])
         self.assertFalse(result["automaticRotation"])
         self.assertNotIn("configuredProviderKeys", result)
+        self.assertNotIn("secretArn", result)
+        self.assertNotIn("kmsKeyArn", result)
+        self.assertNotIn("currentVersionId", result)
         self.assertNotIn(
             "get-secret-value",
             [operation for _, operation, _ in aws.calls],
@@ -213,7 +217,7 @@ class SecretRotationTests(unittest.TestCase):
             check_secret_rotation.SecretValidationError,
             "limit is 90",
         ):
-            check_secret_rotation.validate_secret(
+            check_secret_rotation.validate_rotation_metadata(
                 self._aws(age_days=91),
                 stack_name="AxonLLMStack",
                 secret_id=None,
@@ -228,7 +232,7 @@ class SecretRotationTests(unittest.TestCase):
             check_secret_rotation.SecretValidationError,
             "automatic Secrets Manager rotation is disabled",
         ):
-            check_secret_rotation.validate_secret(
+            check_secret_rotation.validate_rotation_metadata(
                 self._aws(),
                 stack_name="AxonLLMStack",
                 secret_id=None,
@@ -246,7 +250,7 @@ class SecretRotationTests(unittest.TestCase):
             check_secret_rotation.SecretValidationError,
             "customer-managed KMS key",
         ):
-            check_secret_rotation.validate_secret(
+            check_secret_rotation.validate_rotation_metadata(
                 aws,
                 stack_name="AxonLLMStack",
                 secret_id=None,
@@ -264,7 +268,7 @@ class SecretRotationTests(unittest.TestCase):
             check_secret_rotation.SecretValidationError,
             "KMS key rotation is disabled",
         ):
-            check_secret_rotation.validate_secret(
+            check_secret_rotation.validate_rotation_metadata(
                 aws,
                 stack_name="AxonLLMStack",
                 secret_id=None,
@@ -286,9 +290,9 @@ class SecretRotationTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(
             check_secret_rotation.SecretValidationError,
-            "stale AWSPENDING versions: pending",
+            "found 1 stale AWSPENDING version",
         ):
-            check_secret_rotation.validate_secret(
+            check_secret_rotation.validate_rotation_metadata(
                 aws,
                 stack_name="AxonLLMStack",
                 secret_id=None,
@@ -306,7 +310,7 @@ class SecretRotationTests(unittest.TestCase):
             check_secret_rotation.SecretValidationError,
             "rotation is enabled without a schedule",
         ):
-            check_secret_rotation.validate_secret(
+            check_secret_rotation.validate_rotation_metadata(
                 aws,
                 stack_name="AxonLLMStack",
                 secret_id=None,
@@ -324,7 +328,7 @@ class SecretRotationTests(unittest.TestCase):
             check_secret_rotation.SecretValidationError,
             "metadata is inconsistent",
         ):
-            check_secret_rotation.validate_secret(
+            check_secret_rotation.validate_rotation_metadata(
                 aws,
                 stack_name="AxonLLMStack",
                 secret_id=None,
