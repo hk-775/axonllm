@@ -43,6 +43,23 @@ the virtualenv.
 
 The test suite includes both unit tests and Hypothesis property-based tests.
 
+### Optional external containment suite
+
+Standard AxonLLM CI is self-contained. Adopters and contributors do not need
+Ostiari Escape Lab to build, test, or deploy AxonLLM.
+
+Maintainers who want the additional cross-repository adversarial gate can enable
+`.github/workflows/escape-lab.yml` with these repository variables:
+
+- `AXON_ESCAPE_LAB_ENABLED=true`
+- `AXON_ESCAPE_LAB_REPOSITORY=<owner/repository>`
+- `AXON_ESCAPE_LAB_REF=<immutable 40-character commit SHA>`
+
+They must also add `AXON_ESCAPE_LAB_TOKEN` as a repository secret. Use a
+fine-grained token or GitHub App token with read-only contents access to only the
+configured Escape Lab repository. Fork pull requests skip the optional
+integration because GitHub intentionally withholds repository secrets.
+
 ## Code Style
 
 - Python 3.11+
