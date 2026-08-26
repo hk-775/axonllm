@@ -14,35 +14,91 @@ concurrency:
   group: escape-lab-${{ github.ref }}
   cancel-in-progress: true
 
+# Escape Lab is an optional external hardening suite, not an AxonLLM runtime or
+# adoption dependency. Repositories that want the extended gate opt in with:
+#
+#   AXON_ESCAPE_LAB_ENABLED=true
+#   AXON_ESCAPE_LAB_REPOSITORY=<owner/repository>
+#   AXON_ESCAPE_LAB_REF=<immutable commit SHA>
+#   AXON_ESCAPE_LAB_TOKEN=<fine-grained secret with read-only contents access>
+#
+# Fork pull requests never receive repository secrets, so they skip this
+# external integration while AxonLLM's self-contained containment tests continue
+# to run in the normal CI workflow.
 jobs:
   containment:
     name: Agent containment regression
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    env:
+      ESCAPE_LAB_ENABLED: ${{ vars.AXON_ESCAPE_LAB_ENABLED }}
+      ESCAPE_LAB_REPOSITORY: ${{ vars.AXON_ESCAPE_LAB_REPOSITORY }}
+      ESCAPE_LAB_REF: ${{ vars.AXON_ESCAPE_LAB_REF }}
+      ESCAPE_LAB_RUN: ${{ vars.AXON_ESCAPE_LAB_ENABLED == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
 
     steps:
+      - name: Report optional integration status
+        if: env.ESCAPE_LAB_ENABLED != 'true'
+        run: |
+          echo "Escape Lab is not enabled for this repository."
+          echo "AxonLLM's self-contained CI and containment tests remain active."
+
+      - name: Report fork pull-request skip
+        if: env.ESCAPE_LAB_ENABLED == 'true' && env.ESCAPE_LAB_RUN != 'true'
+        run: |
+          echo "Escape Lab is enabled, but external private-repository credentials"
+          echo "are intentionally unavailable to fork pull requests."
+
+      - name: Validate Escape Lab configuration
+        if: env.ESCAPE_LAB_RUN == 'true'
+        env:
+          ESCAPE_LAB_TOKEN: ${{ secrets.AXON_ESCAPE_LAB_TOKEN }}
+        run: |
+          if [[ -z "${ESCAPE_LAB_REPOSITORY}" ]]; then
+            echo "::error::Set AXON_ESCAPE_LAB_REPOSITORY to owner/repository."
+            exit 1
+          fi
+          if [[ -z "${ESCAPE_LAB_REF}" ]]; then
+            echo "::error::Set AXON_ESCAPE_LAB_REF to an immutable commit SHA."
+            exit 1
+          fi
+          if [[ ! "${ESCAPE_LAB_REF}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::AXON_ESCAPE_LAB_REF must be a 40-character commit SHA."
+            exit 1
+          fi
+          if [[ -z "${ESCAPE_LAB_TOKEN}" ]]; then
+            echo "::error::Set AXON_ESCAPE_LAB_TOKEN with read-only access to the configured repository."
+            exit 1
+          fi
+
       - name: Check out AxonLLM
+        if: env.ESCAPE_LAB_RUN == 'true'
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           persist-credentials: false
 
       - name: Check out Escape Lab
+        if: env.ESCAPE_LAB_RUN == 'true'
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
-          repository: hk-775/OstiariEscapeLab
-          ref: 5b5896359331eaa66cca28a86bca22c0f1874415
+          repository: ${{ env.ESCAPE_LAB_REPOSITORY }}
+          ref: ${{ env.ESCAPE_LAB_REF }}
           path: escape-lab
           persist-credentials: false
+          token: ${{ secrets.AXON_ESCAPE_LAB_TOKEN }}
 
       - name: Set up Python
+        if: env.ESCAPE_LAB_RUN == 'true'
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.12"
 
       - name: Install AxonLLM and Escape Lab
+        if: env.ESCAPE_LAB_RUN == 'true'
         run: python -m pip install . ./escape-lab
 
       - name: Run containment gate
+        if: env.ESCAPE_LAB_RUN == 'true'
         run: |
           python -m escape_lab \
             --artifacts-root artifacts \
@@ -54,10 +110,10 @@ jobs:
             --output-dir artifacts/gate
 
       - name: Upload containment evidence
-        if: always()
+        if: always() && env.ESCAPE_LAB_RUN == 'true'
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: escape-lab-containment-evidence
           path: artifacts
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 14
