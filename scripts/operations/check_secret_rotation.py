@@ -93,7 +93,7 @@ def _has_rotation_schedule(metadata: dict[str, Any]) -> bool:
     return metadata.get("NextRotationDate") is not None
 
 
-def validate_secret(
+def validate_rotation_metadata(
     aws: AwsCli,
     *,
     stack_name: str,
@@ -118,7 +118,7 @@ def validate_secret(
     kms_key = metadata.get("KmsKeyId")
     if not isinstance(kms_key, str) or not kms_key:
         raise SecretValidationError("secret is not encrypted with a customer-managed KMS key")
-    kms_key_arn = _validate_kms_key(aws, kms_key)
+    _validate_kms_key(aws, kms_key)
 
     versions_response = aws.json(
         "secretsmanager",
@@ -149,7 +149,7 @@ def validate_secret(
     if age > timedelta(days=max_age_days):
         raise SecretValidationError(f"AWSCURRENT is {age.days} days old; limit is {max_age_days}")
 
-    stale_pending: list[str] = []
+    stale_pending_count = 0
     for version in pending:
         created = parse_aws_time(
             version.get("CreatedDate"),
@@ -159,9 +159,11 @@ def validate_secret(
         if pending_age < timedelta(0):
             raise SecretValidationError("AWSPENDING creation time is in the future")
         if pending_age > timedelta(hours=pending_max_hours):
-            stale_pending.append(str(version.get("VersionId", "unknown")))
-    if stale_pending:
-        raise SecretValidationError("stale AWSPENDING versions: " + ", ".join(stale_pending))
+            stale_pending_count += 1
+    if stale_pending_count:
+        raise SecretValidationError(
+            f"found {stale_pending_count} stale AWSPENDING version(s)"
+        )
 
     rotation_enabled = metadata.get("RotationEnabled") is True
     if require_automatic_rotation and not rotation_enabled:
@@ -173,10 +175,8 @@ def validate_secret(
     return {
         "validationScope": "METADATA_ONLY",
         "secretContentRead": False,
-        "secretArn": arn,
-        "kmsKeyArn": kms_key_arn,
+        "sensitiveIdentifiersEmitted": False,
         "kmsKeyRotation": "ENABLED",
-        "currentVersionId": current_version_id,
         "currentVersionAgeDays": round(age.total_seconds() / 86400, 2),
         "automaticRotation": rotation_enabled,
         "rotationScheduleConfigured": rotation_schedule_configured,
@@ -196,7 +196,7 @@ def main() -> int:
     if args.max_age_days < 1 or args.pending_max_hours < 1:
         parser.error("age limits must be positive")
     try:
-        result = validate_secret(
+        result = validate_rotation_metadata(
             AwsCli(args.region),
             stack_name=args.stack_name,
             secret_id=args.secret_id,

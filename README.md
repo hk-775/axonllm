@@ -1440,11 +1440,11 @@ and project claims. Set `AXON_OIDC_TENANT_CLAIM` and
 The AgentCore setup file requires both mappings explicitly. Other mappings
 remain available through `OIDCConfig.claim_mappings` when embedding the service.
 
-> Signature verification needs `python-jose`. Without it the gateway **refuses to
+> Signature verification needs `PyJWT[crypto]`. Without it the gateway **refuses to
 > decode** rather than trusting an unverified token — so every OIDC request fails
 > closed, and the reason is logged at `ERROR`. The Docker image installs the
 > locked `oidc` extra. The hash-pinned AgentCore `requirements.txt`, generated
-> from `uv.lock`, includes `python-jose`, cryptography, and
+> from `uv.lock`, includes PyJWT, cryptography, and
 > `bedrock-agentcore`.
 
 #### SAML 2.0 through managed Cognito

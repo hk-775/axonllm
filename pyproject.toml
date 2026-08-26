@@ -56,7 +56,7 @@ serverless-control = [
     "boto3>=1.28.0",
     "httpx>=0.25.0",
     "mangum>=0.21.0,<1",
-    "python-jose[cryptography]>=3.3",
+    "PyJWT[crypto]>=2.13.0,<3",
     "sqlglot>=27.0.0",
     "starlette>=0.37.0",
 ]
@@ -71,7 +71,7 @@ otel = [
 # SAML deployments.
 oidc = [
     "httpx>=0.25.0",
-    "python-jose[cryptography]>=3.3",
+    "PyJWT[crypto]>=2.13.0,<3",
 ]
 agentcore = [
     "bedrock-agentcore>=1.21.0,<2",
@@ -98,7 +98,7 @@ dev = [
     # so CI exercises the OTLP span-mapping path
     "opentelemetry-exporter-otlp-proto-http>=1.20",
     # so CI exercises OIDC JWT signature verification
-    "python-jose[cryptography]>=3.3",
+    "PyJWT[crypto]>=2.13.0,<3",
     # Deployment configuration is validated against the packaged JSON Schema.
     "jsonschema>=4.25.1,<5",
     "sqlglot>=27.0.0",

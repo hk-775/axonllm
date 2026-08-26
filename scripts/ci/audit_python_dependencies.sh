@@ -25,14 +25,19 @@ uv export \
   --format requirements-txt \
   >"${work_dir}/serverless-control-requirements.txt"
 
-ignore_arguments=()
+audit_arguments=(
+  --disable-pip
+  --progress-spinner
+  off
+  --require-hashes
+)
 while IFS= read -r line; do
   [[ -z "${line}" || "${line}" == \#* ]] && continue
   if [[ ! "${line}" =~ ^(PYSEC|GHSA|CVE)-[A-Za-z0-9-]+$ ]]; then
     printf 'invalid pip-audit exception: %s\n' "${line}" >&2
     exit 1
   fi
-  ignore_arguments+=(--ignore-vuln "${line}")
+  audit_arguments+=(--ignore-vuln "${line}")
 done <.github/pip-audit-ignore.txt
 
 audit_requirements() {
@@ -41,10 +46,7 @@ audit_requirements() {
 
   printf 'Auditing %s dependencies\n' "${label}"
   uv run --frozen --no-sync pip-audit \
-    --disable-pip \
-    --progress-spinner off \
-    --require-hashes \
-    "${ignore_arguments[@]}" \
+    "${audit_arguments[@]}" \
     --requirement "${requirements_file}"
 }
 

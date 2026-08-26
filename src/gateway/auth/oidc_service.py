@@ -339,14 +339,14 @@ class OIDCService:
     ) -> dict | None:
         """Verify JWT signature and decode claims.
 
-        Requires python-jose for signature verification. Refuses to decode
+        Requires PyJWT with cryptography for signature verification. Refuses to decode
         without verification to prevent authentication bypass.
         """
         try:
-            from jose import jwt as jose_jwt
+            import jwt as pyjwt
         except ImportError:
             logger.error(
-                "python-jose is not installed — JWT signature verification unavailable. "
+                "PyJWT is not installed — JWT signature verification unavailable. "
                 "Install it with: uv sync --extra oidc"
             )
             return None
@@ -362,20 +362,19 @@ class OIDCService:
                 ),
                 "verify_iss": issuer is not None,
                 "verify_exp": True,
+                "require": list(required_claims),
             }
-            options.update(
-                {
-                    f"require_{claim}": True
-                    for claim in required_claims
-                    if not (
-                        multiple_audiences is not None
-                        and claim == "aud"
-                    )
-                }
+            verification_key = (
+                pyjwt.PyJWK.from_dict(
+                    key,
+                    algorithm=algorithms[0],
+                )
+                if isinstance(key, dict)
+                else key
             )
-            claims = jose_jwt.decode(
+            claims = pyjwt.decode(
                 token,
-                key,
+                verification_key,
                 algorithms=algorithms,
                 audience=(
                     audience
