@@ -1201,6 +1201,9 @@ retention. `.github/workflows/operations-security.yml` always validates the
 AgentCore target and enables the Fargate target only when the protected
 production environment sets `AXON_FARGATE_RECOVERY_ENABLED=true`. A disabled
 Fargate target does not request AWS credentials or construct a session policy.
+The workflow stores only protected-variable names and documented defaults in
+its matrix; it resolves their values in runner steps after the `production`
+environment is attached to the job.
 
 Configure `AXON_OPERATIONS_AUDIT_ROLE_ARN`,
 `AXON_OPERATIONS_RECOVERY_ROLE_ARN`, `AXON_AWS_ACCOUNT_ID`, and

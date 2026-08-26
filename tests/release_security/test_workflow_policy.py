@@ -18,6 +18,16 @@ import validate_workflows  # noqa: E402
 
 CHECKOUT_PIN = validate_workflows.APPROVED_ACTION_PINS["actions/checkout"]
 OPERATIONS_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "operations-security.yml"
+TARGET_ENABLED = (
+    "${{ matrix.target == 'agentcore' || "
+    "vars.AXON_FARGATE_RECOVERY_ENABLED == 'true' }}"
+)
+TARGET_DISABLED = (
+    "${{ matrix.target == 'fargate' && "
+    "vars.AXON_FARGATE_RECOVERY_ENABLED != 'true' }}"
+)
+TARGET_KMS_KEY = "${{ vars[matrix.kms_variable] }}"
+TARGET_TABLE = "${{ vars[matrix.table_variable] || matrix.table_default }}"
 
 
 def _load_operations_workflow() -> dict[str, Any]:
@@ -254,7 +264,7 @@ jobs:
             credentials["with"]["role-to-assume"],
             "${{ secrets.AXON_OPERATIONS_AUDIT_ROLE_ARN }}",
         )
-        self.assertEqual(credentials["if"], "${{ matrix.enabled }}")
+        self.assertEqual(credentials["if"], TARGET_ENABLED)
         self.assertNotIn("secretsmanager:GetSecretValue", actions)
         self.assertNotIn("kms:Decrypt", actions)
         self.assertIn("secretsmanager:DescribeSecret", actions)
@@ -270,7 +280,7 @@ jobs:
         )
         self.assertNotIn("*", _policy_resources(policy))
         self.assertIn(
-            "${{ matrix.kms_key_arn }}",
+            TARGET_KMS_KEY,
             _policy_resources(policy),
         )
         secret_step = _named_step(
@@ -279,37 +289,61 @@ jobs:
         )
         self.assertEqual(
             secret_step["if"],
-            ("${{ matrix.enabled && matrix.validate_secret && !cancelled() }}"),
+            (
+                "${{ (matrix.target == 'agentcore' || "
+                "vars.AXON_FARGATE_RECOVERY_ENABLED == 'true') && "
+                "matrix.validate_secret && !cancelled() }}"
+            ),
         )
         target_config = {item["target"]: item for item in audit["strategy"]["matrix"]["include"]}
         self.assertEqual(set(target_config), {"fargate", "agentcore"})
-        self.assertEqual(
-            target_config["fargate"]["enabled"],
-            "${{ vars.AXON_FARGATE_RECOVERY_ENABLED == 'true' }}",
-        )
-        self.assertEqual(target_config["agentcore"]["enabled"], "true")
+        for item in target_config.values():
+            self.assertFalse(
+                any(
+                    isinstance(value, str) and "${{ vars." in value
+                    for value in item.values()
+                )
+            )
         validation = _named_step(
             audit,
             "Validate recovery target configuration",
         )
-        self.assertEqual(validation["if"], "${{ matrix.enabled }}")
+        self.assertEqual(validation["if"], TARGET_ENABLED)
         self.assertEqual(
             validation["env"]["KMS_KEY_ARN"],
-            "${{ matrix.kms_key_arn }}",
+            TARGET_KMS_KEY,
         )
         self.assertIn("exact us-east-1 KMS key ARN", validation["run"])
         disabled = _named_step(
             audit,
             "Report disabled recovery target",
         )
-        self.assertEqual(disabled["if"], "${{ !matrix.enabled }}")
-        table_names = {item["target"]: item["table_name"] for item in audit["strategy"]["matrix"]["include"]}
+        self.assertEqual(disabled["if"], TARGET_DISABLED)
+        table_names = {
+            item["target"]: (
+                item["table_variable"],
+                item["table_default"],
+            )
+            for item in audit["strategy"]["matrix"]["include"]
+        }
         self.assertEqual(
             table_names,
             {
-                "fargate": ("${{ vars.AXON_FARGATE_STATE_TABLE_NAME || 'axonllm-state' }}"),
-                "agentcore": ("${{ vars.AXON_AGENTCORE_STATE_TABLE_NAME || 'axonllm-agentcore-state' }}"),
+                "fargate": (
+                    "AXON_FARGATE_STATE_TABLE_NAME",
+                    "axonllm-state",
+                ),
+                "agentcore": (
+                    "AXON_AGENTCORE_STATE_TABLE_NAME",
+                    "axonllm-agentcore-state",
+                ),
             },
+        )
+        self.assertTrue(
+            any(
+                TARGET_TABLE in resource
+                for resource in _policy_resources(policy)
+            )
         )
 
     def test_operations_restore_is_monthly_and_uses_separate_role(self) -> None:
@@ -343,7 +377,7 @@ jobs:
             credentials["with"]["role-to-assume"],
             "${{ secrets.AXON_OPERATIONS_RECOVERY_ROLE_ARN }}",
         )
-        self.assertEqual(credentials["if"], "${{ matrix.enabled }}")
+        self.assertEqual(credentials["if"], TARGET_ENABLED)
         role_duration = credentials["with"]["role-duration-seconds"]
         self.assertGreater(
             role_duration,
@@ -351,18 +385,20 @@ jobs:
         )
         target_config = {item["target"]: item for item in recovery["strategy"]["matrix"]["include"]}
         self.assertEqual(set(target_config), {"fargate", "agentcore"})
-        self.assertEqual(
-            target_config["fargate"]["enabled"],
-            "${{ vars.AXON_FARGATE_RECOVERY_ENABLED == 'true' }}",
-        )
-        self.assertEqual(target_config["agentcore"]["enabled"], "true")
+        for item in target_config.values():
+            self.assertFalse(
+                any(
+                    isinstance(value, str) and "${{ vars." in value
+                    for value in item.values()
+                )
+            )
         validation = _named_step(
             recovery,
             "Validate recovery target configuration",
         )
-        self.assertEqual(validation["if"], "${{ matrix.enabled }}")
+        self.assertEqual(validation["if"], TARGET_ENABLED)
         restore = next(step for step in recovery["steps"] if step.get("id") == "restore")
-        self.assertEqual(restore["if"], "${{ matrix.enabled }}")
+        self.assertEqual(restore["if"], TARGET_ENABLED)
         self.assertIn(
             "matrix.target == 'fargate'",
             restore["env"]["RETAIN_RESTORE"],
@@ -376,19 +412,35 @@ jobs:
         self.assertTrue(evidence["uses"].startswith("actions/upload-artifact@"))
         self.assertEqual(
             evidence["if"],
-            ("${{ matrix.enabled && !cancelled() && steps.restore.outcome == 'success' }}"),
+            (
+                "${{ (matrix.target == 'agentcore' || "
+                "vars.AXON_FARGATE_RECOVERY_ENABLED == 'true') && "
+                "!cancelled() && steps.restore.outcome == 'success' }}"
+            ),
         )
         self.assertEqual(evidence["with"]["retention-days"], 90)
         disabled = _named_step(
             recovery,
             "Report disabled recovery target",
         )
-        self.assertEqual(disabled["if"], "${{ !matrix.enabled }}")
+        self.assertEqual(disabled["if"], TARGET_DISABLED)
         self.assertEqual(
-            {item["target"]: item["table_name"] for item in recovery["strategy"]["matrix"]["include"]},
             {
-                "fargate": ("${{ vars.AXON_FARGATE_STATE_TABLE_NAME || 'axonllm-state' }}"),
-                "agentcore": ("${{ vars.AXON_AGENTCORE_STATE_TABLE_NAME || 'axonllm-agentcore-state' }}"),
+                item["target"]: (
+                    item["table_variable"],
+                    item["table_default"],
+                )
+                for item in recovery["strategy"]["matrix"]["include"]
+            },
+            {
+                "fargate": (
+                    "AXON_FARGATE_STATE_TABLE_NAME",
+                    "axonllm-state",
+                ),
+                "agentcore": (
+                    "AXON_AGENTCORE_STATE_TABLE_NAME",
+                    "axonllm-agentcore-state",
+                ),
             },
         )
         recovery_commands = "\n".join(step.get("run", "") for step in recovery["steps"])
@@ -402,7 +454,7 @@ jobs:
         actions = _policy_actions(policy)
         resources = _policy_resources(policy)
         account = "${{ vars.AXON_AWS_ACCOUNT_ID }}"
-        source_table = f"arn:aws:dynamodb:us-east-1:{account}:table/${{{{ matrix.table_name }}}}"
+        source_table = f"arn:aws:dynamodb:us-east-1:{account}:table/{TARGET_TABLE}"
         restore_tables = source_table + "-restore-validation-*"
 
         self.assertIn("dynamodb:RestoreTableToPointInTime", actions)
@@ -432,7 +484,7 @@ jobs:
         decrypt_statement = next(statement for statement in policy["Statement"] if "kms:Decrypt" in statement["Action"])
         self.assertEqual(
             decrypt_statement["Resource"],
-            "${{ matrix.kms_key_arn }}",
+            TARGET_KMS_KEY,
         )
         self.assertEqual(
             decrypt_statement["Condition"]["StringEquals"]["kms:ViaService"],
