@@ -53,18 +53,18 @@ jobs:
       matrix:
         include:
           - target: fargate
-            enabled: ${{ vars.AXON_FARGATE_RECOVERY_ENABLED == 'true' }}
             stack_name: AxonLLMStack
-            table_name: ${{ vars.AXON_FARGATE_STATE_TABLE_NAME || 'axonllm-state' }}
+            table_variable: AXON_FARGATE_STATE_TABLE_NAME
+            table_default: axonllm-state
             vault_prefix: axon-state-
-            kms_key_arn: ${{ vars.AXON_DATA_KMS_KEY_ARN }}
+            kms_variable: AXON_DATA_KMS_KEY_ARN
             validate_secret: true
           - target: agentcore
-            enabled: true
             stack_name: AxonLLMAgentCoreStack
-            table_name: ${{ vars.AXON_AGENTCORE_STATE_TABLE_NAME || 'axonllm-agentcore-state' }}
+            table_variable: AXON_AGENTCORE_STATE_TABLE_NAME
+            table_default: axonllm-agentcore-state
             vault_prefix: axon-agent-
-            kms_key_arn: ${{ vars.AXON_AGENTCORE_DATA_KMS_KEY_ARN }}
+            kms_variable: AXON_AGENTCORE_DATA_KMS_KEY_ARN
             validate_secret: false
     permissions:
       contents: read
@@ -72,22 +72,22 @@ jobs:
 
     steps:
       - name: Check out operational checks
-        if: ${{ matrix.enabled }}
+        if: ${{ matrix.target == 'agentcore' || vars.AXON_FARGATE_RECOVERY_ENABLED == 'true' }}
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           persist-credentials: false
 
       - name: Set up Python
-        if: ${{ matrix.enabled }}
+        if: ${{ matrix.target == 'agentcore' || vars.AXON_FARGATE_RECOVERY_ENABLED == 'true' }}
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.12"
 
       - name: Validate recovery target configuration
-        if: ${{ matrix.enabled }}
+        if: ${{ matrix.target == 'agentcore' || vars.AXON_FARGATE_RECOVERY_ENABLED == 'true' }}
         env:
           AWS_ACCOUNT_ID: ${{ vars.AXON_AWS_ACCOUNT_ID }}
-          KMS_KEY_ARN: ${{ matrix.kms_key_arn }}
+          KMS_KEY_ARN: ${{ vars[matrix.kms_variable] }}
         run: |
           if [[ ! "${KMS_KEY_ARN}" =~ ^arn:aws:kms:us-east-1:${AWS_ACCOUNT_ID}:key/[A-Za-z0-9-]+$ ]]; then
             echo "::error::${{ matrix.target }} recovery requires an exact us-east-1 KMS key ARN."
@@ -95,7 +95,7 @@ jobs:
           fi
 
       - name: Configure read-only AWS credentials
-        if: ${{ matrix.enabled }}
+        if: ${{ matrix.target == 'agentcore' || vars.AXON_FARGATE_RECOVERY_ENABLED == 'true' }}
         uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
         with:
           aws-region: us-east-1
@@ -104,10 +104,10 @@ jobs:
           allowed-account-ids: ${{ vars.AXON_AWS_ACCOUNT_ID }}
           mask-aws-account-id: true
           inline-session-policy: >-
-            {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["backup:DescribeBackupVault","backup:ListRecoveryPointsByBackupVault"],"Resource":"arn:aws:backup:us-east-1:${{ vars.AXON_AWS_ACCOUNT_ID }}:backup-vault:${{ matrix.vault_prefix }}*"},{"Effect":"Allow","Action":["cloudformation:DescribeStacks","cloudformation:ListStackResources"],"Resource":"arn:aws:cloudformation:us-east-1:${{ vars.AXON_AWS_ACCOUNT_ID }}:stack/${{ matrix.stack_name }}/*"},{"Effect":"Allow","Action":["dynamodb:DescribeContinuousBackups","dynamodb:DescribeTable"],"Resource":"arn:aws:dynamodb:us-east-1:${{ vars.AXON_AWS_ACCOUNT_ID }}:table/${{ matrix.table_name }}"},{"Effect":"Allow","Action":["secretsmanager:DescribeSecret","secretsmanager:ListSecretVersionIds"],"Resource":"arn:aws:secretsmanager:us-east-1:${{ vars.AXON_AWS_ACCOUNT_ID }}:secret:AxonLLMStack-*"},{"Effect":"Allow","Action":["kms:DescribeKey","kms:GetKeyRotationStatus"],"Resource":"${{ matrix.kms_key_arn }}"}]}
+            {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["backup:DescribeBackupVault","backup:ListRecoveryPointsByBackupVault"],"Resource":"arn:aws:backup:us-east-1:${{ vars.AXON_AWS_ACCOUNT_ID }}:backup-vault:${{ matrix.vault_prefix }}*"},{"Effect":"Allow","Action":["cloudformation:DescribeStacks","cloudformation:ListStackResources"],"Resource":"arn:aws:cloudformation:us-east-1:${{ vars.AXON_AWS_ACCOUNT_ID }}:stack/${{ matrix.stack_name }}/*"},{"Effect":"Allow","Action":["dynamodb:DescribeContinuousBackups","dynamodb:DescribeTable"],"Resource":"arn:aws:dynamodb:us-east-1:${{ vars.AXON_AWS_ACCOUNT_ID }}:table/${{ vars[matrix.table_variable] || matrix.table_default }}"},{"Effect":"Allow","Action":["secretsmanager:DescribeSecret","secretsmanager:ListSecretVersionIds"],"Resource":"arn:aws:secretsmanager:us-east-1:${{ vars.AXON_AWS_ACCOUNT_ID }}:secret:AxonLLMStack-*"},{"Effect":"Allow","Action":["kms:DescribeKey","kms:GetKeyRotationStatus"],"Resource":"${{ vars[matrix.kms_variable] }}"}]}
 
       - name: Validate state recovery controls
-        if: ${{ matrix.enabled }}
+        if: ${{ matrix.target == 'agentcore' || vars.AXON_FARGATE_RECOVERY_ENABLED == 'true' }}
         env:
           REQUIRE_VAULT_LOCK: ${{ github.event_name == 'schedule' || inputs.require_vault_lock }}
         run: |
@@ -121,7 +121,7 @@ jobs:
             "${arguments[@]}"
 
       - name: Validate provider-secret rotation
-        if: ${{ matrix.enabled && matrix.validate_secret && !cancelled() }}
+        if: ${{ (matrix.target == 'agentcore' || vars.AXON_FARGATE_RECOVERY_ENABLED == 'true') && matrix.validate_secret && !cancelled() }}
         env:
           REQUIRE_AUTOMATIC_ROTATION: ${{ inputs.require_automatic_rotation || false }}
         run: |
@@ -135,7 +135,7 @@ jobs:
             "${arguments[@]}"
 
       - name: Report disabled recovery target
-        if: ${{ !matrix.enabled }}
+        if: ${{ matrix.target == 'fargate' && vars.AXON_FARGATE_RECOVERY_ENABLED != 'true' }}
         run: echo "${{ matrix.target }} recovery checks are disabled for this deployment."
 
   recovery:
@@ -151,39 +151,39 @@ jobs:
       matrix:
         include:
           - target: fargate
-            enabled: ${{ vars.AXON_FARGATE_RECOVERY_ENABLED == 'true' }}
             stack_name: AxonLLMStack
-            table_name: ${{ vars.AXON_FARGATE_STATE_TABLE_NAME || 'axonllm-state' }}
+            table_variable: AXON_FARGATE_STATE_TABLE_NAME
+            table_default: axonllm-state
             vault_prefix: axon-state-
-            kms_key_arn: ${{ vars.AXON_DATA_KMS_KEY_ARN }}
+            kms_variable: AXON_DATA_KMS_KEY_ARN
           - target: agentcore
-            enabled: true
             stack_name: AxonLLMAgentCoreStack
-            table_name: ${{ vars.AXON_AGENTCORE_STATE_TABLE_NAME || 'axonllm-agentcore-state' }}
+            table_variable: AXON_AGENTCORE_STATE_TABLE_NAME
+            table_default: axonllm-agentcore-state
             vault_prefix: axon-agent-
-            kms_key_arn: ${{ vars.AXON_AGENTCORE_DATA_KMS_KEY_ARN }}
+            kms_variable: AXON_AGENTCORE_DATA_KMS_KEY_ARN
     permissions:
       contents: read
       id-token: write
 
     steps:
       - name: Check out recovery tooling
-        if: ${{ matrix.enabled }}
+        if: ${{ matrix.target == 'agentcore' || vars.AXON_FARGATE_RECOVERY_ENABLED == 'true' }}
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           persist-credentials: false
 
       - name: Set up Python
-        if: ${{ matrix.enabled }}
+        if: ${{ matrix.target == 'agentcore' || vars.AXON_FARGATE_RECOVERY_ENABLED == 'true' }}
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.12"
 
       - name: Validate recovery target configuration
-        if: ${{ matrix.enabled }}
+        if: ${{ matrix.target == 'agentcore' || vars.AXON_FARGATE_RECOVERY_ENABLED == 'true' }}
         env:
           AWS_ACCOUNT_ID: ${{ vars.AXON_AWS_ACCOUNT_ID }}
-          KMS_KEY_ARN: ${{ matrix.kms_key_arn }}
+          KMS_KEY_ARN: ${{ vars[matrix.kms_variable] }}
         run: |
           if [[ ! "${KMS_KEY_ARN}" =~ ^arn:aws:kms:us-east-1:${AWS_ACCOUNT_ID}:key/[A-Za-z0-9-]+$ ]]; then
             echo "::error::${{ matrix.target }} recovery requires an exact us-east-1 KMS key ARN."
@@ -191,7 +191,7 @@ jobs:
           fi
 
       - name: Configure recovery AWS credentials
-        if: ${{ matrix.enabled }}
+        if: ${{ matrix.target == 'agentcore' || vars.AXON_FARGATE_RECOVERY_ENABLED == 'true' }}
         uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
         with:
           aws-region: us-east-1
@@ -201,11 +201,11 @@ jobs:
           allowed-account-ids: ${{ vars.AXON_AWS_ACCOUNT_ID }}
           mask-aws-account-id: true
           inline-session-policy: >-
-            {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["backup:DescribeBackupVault","backup:ListRecoveryPointsByBackupVault"],"Resource":"arn:aws:backup:us-east-1:${{ vars.AXON_AWS_ACCOUNT_ID }}:backup-vault:${{ matrix.vault_prefix }}*"},{"Effect":"Allow","Action":["cloudformation:DescribeStacks","cloudformation:ListStackResources"],"Resource":"arn:aws:cloudformation:us-east-1:${{ vars.AXON_AWS_ACCOUNT_ID }}:stack/${{ matrix.stack_name }}/*"},{"Effect":"Allow","Action":["dynamodb:DescribeContinuousBackups","dynamodb:DescribeTable","dynamodb:RestoreTableToPointInTime","dynamodb:Scan"],"Resource":"arn:aws:dynamodb:us-east-1:${{ vars.AXON_AWS_ACCOUNT_ID }}:table/${{ matrix.table_name }}"},{"Effect":"Allow","Action":["dynamodb:DeleteTable","dynamodb:DescribeContinuousBackups","dynamodb:DescribeTable","dynamodb:DescribeTimeToLive","dynamodb:RestoreTableToPointInTime","dynamodb:Scan","dynamodb:UpdateContinuousBackups","dynamodb:UpdateTable","dynamodb:UpdateTimeToLive"],"Resource":"arn:aws:dynamodb:us-east-1:${{ vars.AXON_AWS_ACCOUNT_ID }}:table/${{ matrix.table_name }}-restore-validation-*"},{"Effect":"Allow","Action":["kms:Decrypt","kms:DescribeKey","kms:Encrypt","kms:GenerateDataKey","kms:GenerateDataKeyWithoutPlaintext","kms:ReEncryptFrom","kms:ReEncryptTo"],"Resource":"${{ matrix.kms_key_arn }}","Condition":{"StringEquals":{"kms:CallerAccount":"${{ vars.AXON_AWS_ACCOUNT_ID }}","kms:ViaService":"dynamodb.us-east-1.amazonaws.com"}}},{"Effect":"Allow","Action":"kms:CreateGrant","Resource":"${{ matrix.kms_key_arn }}","Condition":{"Bool":{"kms:GrantIsForAWSResource":"true"},"StringEquals":{"kms:CallerAccount":"${{ vars.AXON_AWS_ACCOUNT_ID }}","kms:ViaService":"dynamodb.us-east-1.amazonaws.com"}}}]}
+            {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["backup:DescribeBackupVault","backup:ListRecoveryPointsByBackupVault"],"Resource":"arn:aws:backup:us-east-1:${{ vars.AXON_AWS_ACCOUNT_ID }}:backup-vault:${{ matrix.vault_prefix }}*"},{"Effect":"Allow","Action":["cloudformation:DescribeStacks","cloudformation:ListStackResources"],"Resource":"arn:aws:cloudformation:us-east-1:${{ vars.AXON_AWS_ACCOUNT_ID }}:stack/${{ matrix.stack_name }}/*"},{"Effect":"Allow","Action":["dynamodb:DescribeContinuousBackups","dynamodb:DescribeTable","dynamodb:RestoreTableToPointInTime","dynamodb:Scan"],"Resource":"arn:aws:dynamodb:us-east-1:${{ vars.AXON_AWS_ACCOUNT_ID }}:table/${{ vars[matrix.table_variable] || matrix.table_default }}"},{"Effect":"Allow","Action":["dynamodb:DeleteTable","dynamodb:DescribeContinuousBackups","dynamodb:DescribeTable","dynamodb:DescribeTimeToLive","dynamodb:RestoreTableToPointInTime","dynamodb:Scan","dynamodb:UpdateContinuousBackups","dynamodb:UpdateTable","dynamodb:UpdateTimeToLive"],"Resource":"arn:aws:dynamodb:us-east-1:${{ vars.AXON_AWS_ACCOUNT_ID }}:table/${{ vars[matrix.table_variable] || matrix.table_default }}-restore-validation-*"},{"Effect":"Allow","Action":["kms:Decrypt","kms:DescribeKey","kms:Encrypt","kms:GenerateDataKey","kms:GenerateDataKeyWithoutPlaintext","kms:ReEncryptFrom","kms:ReEncryptTo"],"Resource":"${{ vars[matrix.kms_variable] }}","Condition":{"StringEquals":{"kms:CallerAccount":"${{ vars.AXON_AWS_ACCOUNT_ID }}","kms:ViaService":"dynamodb.us-east-1.amazonaws.com"}}},{"Effect":"Allow","Action":"kms:CreateGrant","Resource":"${{ vars[matrix.kms_variable] }}","Condition":{"Bool":{"kms:GrantIsForAWSResource":"true"},"StringEquals":{"kms:CallerAccount":"${{ vars.AXON_AWS_ACCOUNT_ID }}","kms:ViaService":"dynamodb.us-east-1.amazonaws.com"}}}]}
 
       - name: Restore and validate temporary table
         id: restore
-        if: ${{ matrix.enabled }}
+        if: ${{ matrix.target == 'agentcore' || vars.AXON_FARGATE_RECOVERY_ENABLED == 'true' }}
         env:
           REQUIRE_VAULT_LOCK: ${{ github.event_name == 'schedule' || inputs.require_vault_lock }}
           RETAIN_RESTORE: >-
@@ -248,7 +248,7 @@ jobs:
           PY
 
       - name: Preserve recovery evidence
-        if: ${{ matrix.enabled && !cancelled() && steps.restore.outcome == 'success' }}
+        if: ${{ (matrix.target == 'agentcore' || vars.AXON_FARGATE_RECOVERY_ENABLED == 'true') && !cancelled() && steps.restore.outcome == 'success' }}
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: axonllm-recovery-${{ matrix.target }}-${{ github.run_id }}
@@ -257,5 +257,5 @@ jobs:
           retention-days: 90
 
       - name: Report disabled recovery target
-        if: ${{ !matrix.enabled }}
+        if: ${{ matrix.target == 'fargate' && vars.AXON_FARGATE_RECOVERY_ENABLED != 'true' }}
         run: echo "${{ matrix.target }} recovery exercise is disabled for this deployment."

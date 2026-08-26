@@ -12,7 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Production recovery validation now treats AgentCore as the default target
   and requires an explicit `AXON_FARGATE_RECOVERY_ENABLED=true` opt-in before
   auditing or restoring Fargate state. Enabled targets validate their exact
-  KMS key ARN before requesting an AWS session.
+  KMS key ARN before requesting an AWS session. Protected environment
+  variables are resolved only in runner steps, after GitHub has made the
+  selected environment available, rather than during matrix construction.
 - Completed the canonical GitHub ownership migration from the `AxonLLM`
   organization to `hk-775`. Release-foundation IAM now trusts only the exact
   immutable destination identity; the temporary legacy subject and stack
