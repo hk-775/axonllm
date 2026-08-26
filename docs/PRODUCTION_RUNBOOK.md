@@ -16,23 +16,28 @@ repositories, and deployment verification selects the exact target and
 platform. Schema-v3 verification remains supported for historical Fargate and
 AgentCore releases.
 
-`v0.3.0.post1` completed schema-v4 KMS signing and immutable private-ECR
-publication for all four targets; its Fargate deployment-verification gate also
-passed. `v0.3.1` is bound to protected-main commit
-`a7730a516928272c570da53845248f1f61c31f7c`. Release-security run
+`v0.4.1` is the current release line. It secures AgentCore runtime and endpoint
+logs with the deployment KMS key and bounded retention, replaces the vulnerable
+`python-jose`/`python-ecdsa` dependency, and redacts secret-rotation
+identifiers. Its promotability is determined only by successful exact-tag CI
+and KMS-backed release security, immutable publication of every target,
+target-specific deployment verification, and the protected AWS rehearsal and
+launch gates. A tag alone is not proof of publication or deployment.
+
+For historical context, `v0.3.0.post1` completed schema-v4 KMS signing and
+immutable private-ECR publication for all four targets; its Fargate
+deployment-verification gate also passed. `v0.3.1` is bound to protected-main
+commit `a7730a516928272c570da53845248f1f61c31f7c`. Release-security run
 `32403283893` built and scanned all four OCI targets and verified both KMS
 signatures, but GitHub rejected the final evidence-artifact upload after the
-repository reached its Actions storage quota. That tag is not promotable until
-the same immutable tagged run succeeds. Releases after it split compact signed
-evidence from short-lived OCI publication payloads, but still require
-successful storage, publication, target verification, and the protected AWS
-rehearsal. Do not move or recreate a tag as a recovery mechanism.
+repository reached its Actions storage quota. That tag remains unpromotable.
+Do not move or recreate a tag as a recovery mechanism.
 
-The repository also contains the newer shared HTTP/AgentCore Athena query
+The `v0.4.1` release line also contains the shared HTTP/AgentCore Athena query
 service, credential-free datasource administration, and managed-Cognito
-shared-state control-plane stack. These changes postdate `v0.2.4`; they do not
-yet have tagged release evidence, a deployed Athena canary, or a deployed
-control-plane canary.
+shared-state control-plane stack. Treat those capabilities as unpromoted until
+the exact release digest completes its target-account query, control-plane,
+recovery, and rollback canaries.
 
 The protected AgentCore launch orchestrator now certifies isolated external
 OIDC and managed-Cognito qualification deployments, runs seven launch gates,

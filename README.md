@@ -268,20 +268,14 @@ Canonical mode default-denies every unmapped `/api/*` and `/v1/*` route.
 selector aggregates users without a tenant filter and has no canonical action
 mapping.
 
-> **Current release status.** `v0.3.0.post1` completed schema-v4 KMS signing
-> and immutable private-ECR publication for Fargate, AgentCore, standalone
-> AMD64, and standalone ARM64. Its Fargate deployment-verification gate also
-> passed.
-> `v0.3.1` is bound to protected-main commit
-> `a7730a516928272c570da53845248f1f61c31f7c`. Its first release-security run
-> built and scanned all four targets and verified both KMS signatures, but
-> GitHub rejected the final evidence upload after the repository reached its
-> Actions artifact-storage quota. The tag remains unpromotable. Releases after
-> it store compact signed evidence separately from short-lived OCI payloads;
-> they are promotable only after the exact tagged run, immutable image
-> publication, target verification, and protected AWS rehearsal all succeed.
-> Do not move or recreate a tag to recover from an artifact-capacity failure.
-> See the
+> **Current release status.** `v0.4.1` is the current release line. It secures
+> AgentCore runtime and endpoint logs with the deployment KMS key and bounded
+> retention, replaces the vulnerable `python-jose`/`python-ecdsa` dependency,
+> and redacts secret-rotation identifiers. A tag alone is not proof of
+> publication or deployment. Promotion requires successful exact-tag CI and
+> KMS-backed release security, immutable ECR publication, target-specific
+> deployment verification, and the protected AWS rehearsal and launch gates.
+> Never move or recreate a release tag to recover a failed gate. See the
 > [Production Runbook](docs/PRODUCTION_RUNBOOK.md#release-status) and
 > [AgentCore Runbook](docs/AGENTCORE_RUNBOOK.md#current-status).
 
