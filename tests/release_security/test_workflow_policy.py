@@ -38,6 +38,10 @@ def _session_policy(job: dict[str, Any]) -> dict[str, Any]:
     raise AssertionError("AWS credential step is missing")
 
 
+def _named_step(job: dict[str, Any], name: str) -> dict[str, Any]:
+    return next(step for step in job["steps"] if step.get("name") == name)
+
+
 def _policy_actions(policy: dict[str, Any]) -> set[str]:
     actions: set[str] = set()
     for statement in policy["Statement"]:
@@ -241,11 +245,16 @@ jobs:
         audit = workflow["jobs"]["audit"]
         policy = _session_policy(audit)
         actions = _policy_actions(policy)
+        credentials = _named_step(
+            audit,
+            "Configure read-only AWS credentials",
+        )
 
         self.assertEqual(
-            audit["steps"][2]["with"]["role-to-assume"],
+            credentials["with"]["role-to-assume"],
             "${{ secrets.AXON_OPERATIONS_AUDIT_ROLE_ARN }}",
         )
+        self.assertEqual(credentials["if"], "${{ matrix.enabled }}")
         self.assertNotIn("secretsmanager:GetSecretValue", actions)
         self.assertNotIn("kms:Decrypt", actions)
         self.assertIn("secretsmanager:DescribeSecret", actions)
@@ -264,31 +273,42 @@ jobs:
             "${{ matrix.kms_key_arn }}",
             _policy_resources(policy),
         )
-        secret_step = next(step for step in audit["steps"] if step.get("name") == "Validate provider-secret rotation")
+        secret_step = _named_step(
+            audit,
+            "Validate provider-secret rotation",
+        )
         self.assertEqual(
             secret_step["if"],
-            "${{ matrix.validate_secret && !cancelled() }}",
+            ("${{ matrix.enabled && matrix.validate_secret && !cancelled() }}"),
         )
-        targets = {
-            item["target"]
-            for item in audit["strategy"]["matrix"]["include"]
-        }
-        self.assertEqual(targets, {"fargate", "agentcore"})
-        table_names = {
-            item["target"]: item["table_name"]
-            for item in audit["strategy"]["matrix"]["include"]
-        }
+        target_config = {item["target"]: item for item in audit["strategy"]["matrix"]["include"]}
+        self.assertEqual(set(target_config), {"fargate", "agentcore"})
+        self.assertEqual(
+            target_config["fargate"]["enabled"],
+            "${{ vars.AXON_FARGATE_RECOVERY_ENABLED == 'true' }}",
+        )
+        self.assertEqual(target_config["agentcore"]["enabled"], "true")
+        validation = _named_step(
+            audit,
+            "Validate recovery target configuration",
+        )
+        self.assertEqual(validation["if"], "${{ matrix.enabled }}")
+        self.assertEqual(
+            validation["env"]["KMS_KEY_ARN"],
+            "${{ matrix.kms_key_arn }}",
+        )
+        self.assertIn("exact us-east-1 KMS key ARN", validation["run"])
+        disabled = _named_step(
+            audit,
+            "Report disabled recovery target",
+        )
+        self.assertEqual(disabled["if"], "${{ !matrix.enabled }}")
+        table_names = {item["target"]: item["table_name"] for item in audit["strategy"]["matrix"]["include"]}
         self.assertEqual(
             table_names,
             {
-                "fargate": (
-                    "${{ vars.AXON_FARGATE_STATE_TABLE_NAME "
-                    "|| 'axonllm-state' }}"
-                ),
-                "agentcore": (
-                    "${{ vars.AXON_AGENTCORE_STATE_TABLE_NAME "
-                    "|| 'axonllm-agentcore-state' }}"
-                ),
+                "fargate": ("${{ vars.AXON_FARGATE_STATE_TABLE_NAME || 'axonllm-state' }}"),
+                "agentcore": ("${{ vars.AXON_AGENTCORE_STATE_TABLE_NAME || 'axonllm-agentcore-state' }}"),
             },
         )
 
@@ -315,27 +335,34 @@ jobs:
             "false",
         )
         self.assertGreaterEqual(recovery["timeout-minutes"], 60)
+        credentials = _named_step(
+            recovery,
+            "Configure recovery AWS credentials",
+        )
         self.assertEqual(
-            recovery["steps"][2]["with"]["role-to-assume"],
+            credentials["with"]["role-to-assume"],
             "${{ secrets.AXON_OPERATIONS_RECOVERY_ROLE_ARN }}",
         )
-        role_duration = recovery["steps"][2]["with"][
-            "role-duration-seconds"
-        ]
+        self.assertEqual(credentials["if"], "${{ matrix.enabled }}")
+        role_duration = credentials["with"]["role-duration-seconds"]
         self.assertGreater(
             role_duration,
             recovery["timeout-minutes"] * 60,
         )
-        targets = {
-            item["target"]
-            for item in recovery["strategy"]["matrix"]["include"]
-        }
-        self.assertEqual(targets, {"fargate", "agentcore"})
-        restore = next(
-            step
-            for step in recovery["steps"]
-            if step.get("id") == "restore"
+        target_config = {item["target"]: item for item in recovery["strategy"]["matrix"]["include"]}
+        self.assertEqual(set(target_config), {"fargate", "agentcore"})
+        self.assertEqual(
+            target_config["fargate"]["enabled"],
+            "${{ vars.AXON_FARGATE_RECOVERY_ENABLED == 'true' }}",
         )
+        self.assertEqual(target_config["agentcore"]["enabled"], "true")
+        validation = _named_step(
+            recovery,
+            "Validate recovery target configuration",
+        )
+        self.assertEqual(validation["if"], "${{ matrix.enabled }}")
+        restore = next(step for step in recovery["steps"] if step.get("id") == "restore")
+        self.assertEqual(restore["if"], "${{ matrix.enabled }}")
         self.assertIn(
             "matrix.target == 'fargate'",
             restore["env"]["RETAIN_RESTORE"],
@@ -345,29 +372,23 @@ jobs:
             restore["env"]["RETAIN_RESTORE"],
         )
         self.assertIn("--keep-restored-table", restore["run"])
-        evidence = next(
-            step
-            for step in recovery["steps"]
-            if step.get("name") == "Preserve recovery evidence"
-        )
-        self.assertTrue(
-            evidence["uses"].startswith("actions/upload-artifact@")
+        evidence = next(step for step in recovery["steps"] if step.get("name") == "Preserve recovery evidence")
+        self.assertTrue(evidence["uses"].startswith("actions/upload-artifact@"))
+        self.assertEqual(
+            evidence["if"],
+            ("${{ matrix.enabled && !cancelled() && steps.restore.outcome == 'success' }}"),
         )
         self.assertEqual(evidence["with"]["retention-days"], 90)
+        disabled = _named_step(
+            recovery,
+            "Report disabled recovery target",
+        )
+        self.assertEqual(disabled["if"], "${{ !matrix.enabled }}")
         self.assertEqual(
+            {item["target"]: item["table_name"] for item in recovery["strategy"]["matrix"]["include"]},
             {
-                item["target"]: item["table_name"]
-                for item in recovery["strategy"]["matrix"]["include"]
-            },
-            {
-                "fargate": (
-                    "${{ vars.AXON_FARGATE_STATE_TABLE_NAME "
-                    "|| 'axonllm-state' }}"
-                ),
-                "agentcore": (
-                    "${{ vars.AXON_AGENTCORE_STATE_TABLE_NAME "
-                    "|| 'axonllm-agentcore-state' }}"
-                ),
+                "fargate": ("${{ vars.AXON_FARGATE_STATE_TABLE_NAME || 'axonllm-state' }}"),
+                "agentcore": ("${{ vars.AXON_AGENTCORE_STATE_TABLE_NAME || 'axonllm-agentcore-state' }}"),
             },
         )
         recovery_commands = "\n".join(step.get("run", "") for step in recovery["steps"])
@@ -381,10 +402,7 @@ jobs:
         actions = _policy_actions(policy)
         resources = _policy_resources(policy)
         account = "${{ vars.AXON_AWS_ACCOUNT_ID }}"
-        source_table = (
-            "arn:aws:dynamodb:us-east-1:"
-            f"{account}:table/${{{{ matrix.table_name }}}}"
-        )
+        source_table = f"arn:aws:dynamodb:us-east-1:{account}:table/${{{{ matrix.table_name }}}}"
         restore_tables = source_table + "-restore-validation-*"
 
         self.assertIn("dynamodb:RestoreTableToPointInTime", actions)

@@ -53,12 +53,14 @@ jobs:
       matrix:
         include:
           - target: fargate
+            enabled: ${{ vars.AXON_FARGATE_RECOVERY_ENABLED == 'true' }}
             stack_name: AxonLLMStack
             table_name: ${{ vars.AXON_FARGATE_STATE_TABLE_NAME || 'axonllm-state' }}
             vault_prefix: axon-state-
             kms_key_arn: ${{ vars.AXON_DATA_KMS_KEY_ARN }}
             validate_secret: true
           - target: agentcore
+            enabled: true
             stack_name: AxonLLMAgentCoreStack
             table_name: ${{ vars.AXON_AGENTCORE_STATE_TABLE_NAME || 'axonllm-agentcore-state' }}
             vault_prefix: axon-agent-
@@ -70,16 +72,30 @@ jobs:
 
     steps:
       - name: Check out operational checks
+        if: ${{ matrix.enabled }}
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           persist-credentials: false
 
       - name: Set up Python
+        if: ${{ matrix.enabled }}
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.12"
 
+      - name: Validate recovery target configuration
+        if: ${{ matrix.enabled }}
+        env:
+          AWS_ACCOUNT_ID: ${{ vars.AXON_AWS_ACCOUNT_ID }}
+          KMS_KEY_ARN: ${{ matrix.kms_key_arn }}
+        run: |
+          if [[ ! "${KMS_KEY_ARN}" =~ ^arn:aws:kms:us-east-1:${AWS_ACCOUNT_ID}:key/[A-Za-z0-9-]+$ ]]; then
+            echo "::error::${{ matrix.target }} recovery requires an exact us-east-1 KMS key ARN."
+            exit 1
+          fi
+
       - name: Configure read-only AWS credentials
+        if: ${{ matrix.enabled }}
         uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
         with:
           aws-region: us-east-1
@@ -91,6 +107,7 @@ jobs:
             {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["backup:DescribeBackupVault","backup:ListRecoveryPointsByBackupVault"],"Resource":"arn:aws:backup:us-east-1:${{ vars.AXON_AWS_ACCOUNT_ID }}:backup-vault:${{ matrix.vault_prefix }}*"},{"Effect":"Allow","Action":["cloudformation:DescribeStacks","cloudformation:ListStackResources"],"Resource":"arn:aws:cloudformation:us-east-1:${{ vars.AXON_AWS_ACCOUNT_ID }}:stack/${{ matrix.stack_name }}/*"},{"Effect":"Allow","Action":["dynamodb:DescribeContinuousBackups","dynamodb:DescribeTable"],"Resource":"arn:aws:dynamodb:us-east-1:${{ vars.AXON_AWS_ACCOUNT_ID }}:table/${{ matrix.table_name }}"},{"Effect":"Allow","Action":["secretsmanager:DescribeSecret","secretsmanager:ListSecretVersionIds"],"Resource":"arn:aws:secretsmanager:us-east-1:${{ vars.AXON_AWS_ACCOUNT_ID }}:secret:AxonLLMStack-*"},{"Effect":"Allow","Action":["kms:DescribeKey","kms:GetKeyRotationStatus"],"Resource":"${{ matrix.kms_key_arn }}"}]}
 
       - name: Validate state recovery controls
+        if: ${{ matrix.enabled }}
         env:
           REQUIRE_VAULT_LOCK: ${{ github.event_name == 'schedule' || inputs.require_vault_lock }}
         run: |
@@ -104,7 +121,7 @@ jobs:
             "${arguments[@]}"
 
       - name: Validate provider-secret rotation
-        if: ${{ matrix.validate_secret && !cancelled() }}
+        if: ${{ matrix.enabled && matrix.validate_secret && !cancelled() }}
         env:
           REQUIRE_AUTOMATIC_ROTATION: ${{ inputs.require_automatic_rotation || false }}
         run: |
@@ -116,6 +133,10 @@ jobs:
           python scripts/operations/check_secret_rotation.py \
             --stack-name "${{ matrix.stack_name }}" \
             "${arguments[@]}"
+
+      - name: Report disabled recovery target
+        if: ${{ !matrix.enabled }}
+        run: echo "${{ matrix.target }} recovery checks are disabled for this deployment."
 
   recovery:
     name: Exercise ${{ matrix.target }} point-in-time recovery
@@ -130,11 +151,13 @@ jobs:
       matrix:
         include:
           - target: fargate
+            enabled: ${{ vars.AXON_FARGATE_RECOVERY_ENABLED == 'true' }}
             stack_name: AxonLLMStack
             table_name: ${{ vars.AXON_FARGATE_STATE_TABLE_NAME || 'axonllm-state' }}
             vault_prefix: axon-state-
             kms_key_arn: ${{ vars.AXON_DATA_KMS_KEY_ARN }}
           - target: agentcore
+            enabled: true
             stack_name: AxonLLMAgentCoreStack
             table_name: ${{ vars.AXON_AGENTCORE_STATE_TABLE_NAME || 'axonllm-agentcore-state' }}
             vault_prefix: axon-agent-
@@ -145,16 +168,30 @@ jobs:
 
     steps:
       - name: Check out recovery tooling
+        if: ${{ matrix.enabled }}
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           persist-credentials: false
 
       - name: Set up Python
+        if: ${{ matrix.enabled }}
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.12"
 
+      - name: Validate recovery target configuration
+        if: ${{ matrix.enabled }}
+        env:
+          AWS_ACCOUNT_ID: ${{ vars.AXON_AWS_ACCOUNT_ID }}
+          KMS_KEY_ARN: ${{ matrix.kms_key_arn }}
+        run: |
+          if [[ ! "${KMS_KEY_ARN}" =~ ^arn:aws:kms:us-east-1:${AWS_ACCOUNT_ID}:key/[A-Za-z0-9-]+$ ]]; then
+            echo "::error::${{ matrix.target }} recovery requires an exact us-east-1 KMS key ARN."
+            exit 1
+          fi
+
       - name: Configure recovery AWS credentials
+        if: ${{ matrix.enabled }}
         uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
         with:
           aws-region: us-east-1
@@ -168,6 +205,7 @@ jobs:
 
       - name: Restore and validate temporary table
         id: restore
+        if: ${{ matrix.enabled }}
         env:
           REQUIRE_VAULT_LOCK: ${{ github.event_name == 'schedule' || inputs.require_vault_lock }}
           RETAIN_RESTORE: >-
@@ -210,10 +248,14 @@ jobs:
           PY
 
       - name: Preserve recovery evidence
-        if: ${{ !cancelled() && steps.restore.outcome == 'success' }}
+        if: ${{ matrix.enabled && !cancelled() && steps.restore.outcome == 'success' }}
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: axonllm-recovery-${{ matrix.target }}-${{ github.run_id }}
           path: ${{ runner.temp }}/recovery-${{ matrix.target }}.json
           if-no-files-found: error
           retention-days: 90
+
+      - name: Report disabled recovery target
+        if: ${{ !matrix.enabled }}
+        run: echo "${{ matrix.target }} recovery exercise is disabled for this deployment."
