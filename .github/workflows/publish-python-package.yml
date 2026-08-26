@@ -141,10 +141,8 @@ jobs:
                   archive.read(metadata_name)
               )
           with tarfile.open(sdist, "r:gz") as archive:
-              pkg_info_name, = (
-                  name for name in archive.getnames()
-                  if name.endswith("/PKG-INFO")
-              )
+              sdist_root = sdist.name.removesuffix(".tar.gz")
+              pkg_info_name = f"{sdist_root}/PKG-INFO"
               member = archive.extractfile(pkg_info_name)
               assert member is not None
               sdist_metadata = email.message_from_bytes(member.read())

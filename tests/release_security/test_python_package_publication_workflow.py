@@ -90,6 +90,13 @@ def test_python_package_workflow_is_pinned_and_tokenless() -> None:
 
     package_build = _step(build, "Build wheel and source distribution")["run"]
     assert package_build == "uv build --wheel --sdist --out-dir dist"
+    verification = _step(
+        build,
+        "Verify distribution metadata and clean install",
+    )["run"]
+    assert 'sdist_root = sdist.name.removesuffix(".tar.gz")' in verification
+    assert 'pkg_info_name = f"{sdist_root}/PKG-INFO"' in verification
+    assert 'if name.endswith("/PKG-INFO")' not in verification
     upload = _step(build, "Upload verified distributions")["with"]
     assert upload["retention-days"] == 1
 
