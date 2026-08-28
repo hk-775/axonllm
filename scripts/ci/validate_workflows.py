@@ -17,13 +17,16 @@ PINNED_ACTION = re.compile(
     r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_./-]+)?@[0-9a-f]{40}$"
 )
 VALID_PERMISSION = {"read", "write", "none"}
-ALLOWED_WRITE_PERMISSIONS = {"id-token", "security-events"}
+ALLOWED_WRITE_PERMISSIONS = {"id-token", "pages", "security-events"}
 APPROVED_ACTION_PINS = {
     "actions/checkout": "fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09",
+    "actions/configure-pages": "45bfe0192ca1faeb007ade9deae92b16b8254a0d",
+    "actions/deploy-pages": "cd2ce8fcbc39b97be8ca5fce6e763baed58fa128",
     "actions/download-artifact": "37930b1c2abaa49bbe596cd826c3c89aef350131",
     "actions/setup-node": "a0853c24544627f65ddf259abe73b1d18a591444",
     "actions/setup-python": "ece7cb06caefa5fff74198d8649806c4678c61a1",
     "actions/upload-artifact": "b7c566a772e6b6bfb58ed0dc250532a479d7789f",
+    "actions/upload-pages-artifact": "fc324d3547104276b827a68afc52ff2a11cc49c9",
     "aws-actions/configure-aws-credentials": (
         "e6de054238d6b7531b4efff3b6587d9aade6a06c"
     ),

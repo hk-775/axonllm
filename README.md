@@ -4,6 +4,10 @@
 [![License: MIT-0](https://img.shields.io/badge/License-MIT--0-blue.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
 
+[Website](https://hk-775.github.io/axonllm/) ·
+[Interactive architecture](https://hk-775.github.io/axonllm/architecture.html) ·
+[Quick start](#quick-start)
+
 **An open-source multi-provider LLM gateway with a mandatory control plane.**
 
 AxonLLM uses one routing core for an embedded Python API, a standalone
