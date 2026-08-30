@@ -609,6 +609,7 @@ class APIKey:
     revoked_at: datetime | None = None
     revoked_by: str | None = None
     last_used_at: datetime | None = None
+    principal_role: TenantRole = TenantRole.SERVICE
 
 
 @dataclass

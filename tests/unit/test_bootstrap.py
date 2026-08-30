@@ -9,6 +9,7 @@ import pytest
 from src.gateway.bootstrap import (
     ControlAPIComponents,
     GatewayComponents,
+    _merge_policies,
     _persistence_readiness,
     build_control_api,
     build_gateway_components,
@@ -46,6 +47,37 @@ def minimal_app_config() -> AppConfig:
 
 
 class TestBuildGatewayComponents:
+    def test_policy_merge_keeps_same_name_in_distinct_tenants(self):
+        merged = _merge_policies(
+            [
+                {
+                    "tenant_id": "tenant-a",
+                    "name": "guard",
+                    "mode": "ENFORCE",
+                },
+                {
+                    "tenant_id": "tenant-b",
+                    "name": "guard",
+                    "mode": "LOG_ONLY",
+                },
+            ],
+            [
+                {
+                    "tenant_id": "tenant-a",
+                    "name": "guard",
+                    "mode": "LOG_ONLY",
+                }
+            ],
+        )
+
+        assert {
+            (policy["tenant_id"], policy["mode"])
+            for policy in merged
+        } == {
+            ("tenant-a", "LOG_ONLY"),
+            ("tenant-b", "LOG_ONLY"),
+        }
+
     def test_returns_gateway_components(self, demo_app_config: AppConfig):
         comp = build_gateway_components(demo_app_config)
         assert isinstance(comp, GatewayComponents)

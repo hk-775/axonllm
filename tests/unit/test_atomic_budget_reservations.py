@@ -859,6 +859,66 @@ def test_abandoned_stream_reconciles_its_reservation() -> None:
     )
 
 
+def test_abandoned_stream_does_not_repeat_inner_settlement() -> None:
+    quota = MagicMock(spec=QuotaEnforcer)
+    quota.finalize_budget = AsyncMock(
+        return_value={"quota": 0.1, "user": 0.1}
+    )
+    agent = GatewayAgent(
+        router=MagicMock(),
+        rate_limiter=MagicMock(),
+        guardrail_engine=GuardrailEngine(),
+        cache_manager=CacheManager(),
+        cost_tracker=MagicMock(spec=CostTracker),
+        quota_enforcer=quota,
+    )
+    reservation = BudgetReservation(
+        request_id="stream-inner-finalized",
+        counters=(("quota", "project-a", 10.0),),
+        amount=0.5,
+    )
+    context = RequestContext(
+        user_id="user-a",
+        project_id="project-a",
+        roles=[],
+        scopes=[],
+        tenant_id="tenant-a",
+    )
+
+    async def inner():
+        try:
+            yield {"data": "started"}
+            await asyncio.Event().wait()
+        finally:
+            await agent._finalize_request_budget(
+                reservation,
+                actual_cost=0.1,
+                req_ctx=context,
+            )
+
+    async def abandon():
+        guarded = agent._guard_budgeted_stream(
+            inner(),
+            reservation,
+            req_ctx=context,
+        )
+        assert await anext(guarded) == {"data": "started"}
+        await guarded.aclose()
+
+    _run(abandon())
+
+    quota.finalize_budget.assert_awaited_once_with(
+        reservation,
+        0.1,
+        tenant_id="tenant-a",
+        project_id="project-a",
+    )
+    assert (
+        reservation.request_id
+        not in agent._budget_stream_settlements
+    )
+
+
 def test_cancelled_stream_before_first_event_reconciles_reservation() -> None:
     quota = MagicMock(spec=QuotaEnforcer)
     quota.finalize_budget = AsyncMock(return_value={"quota": 0.5})

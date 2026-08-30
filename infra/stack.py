@@ -164,7 +164,7 @@ class AxonLLMStack(Stack):
             default="false",
             allowed_values=["false", "true"],
             description=(
-                "Load the checked-in fictional demo tenant, projects, usage, "
+                "Load the checked-in fictional demo tenants, projects, usage, "
                 "audit, policies, keys, and webhook records"
             ),
         )
@@ -249,6 +249,20 @@ class AxonLLMStack(Stack):
             expression=Fn.condition_equals(
                 deployment_mode.value_as_string,
                 "production",
+            ),
+        )
+        canonical_identity_mode = CfnCondition(
+            self,
+            "CanonicalIdentityMode",
+            expression=Fn.condition_or(
+                Fn.condition_equals(
+                    deployment_mode.value_as_string,
+                    "production",
+                ),
+                Fn.condition_equals(
+                    load_demo_data.value_as_string,
+                    "true",
+                ),
             ),
         )
         manage_public_dns = CfnCondition(
@@ -1353,10 +1367,13 @@ class AxonLLMStack(Stack):
                         ),
                         "AXON_REQUIRE_CANONICAL_IDENTITY": Token.as_string(
                             Fn.condition_if(
-                                production_mode.logical_id,
+                                canonical_identity_mode.logical_id,
                                 "true",
                                 "false",
                             )
+                        ),
+                        "AXON_DEMO_SEED_CONFIG": (
+                            "config/demo_seed_multitenant.yaml"
                         ),
                         "AXON_SERVER_PORT": "8000",
                         "HOME": "/tmp",

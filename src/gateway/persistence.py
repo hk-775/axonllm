@@ -12,6 +12,7 @@ import threading
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from urllib.parse import urlsplit
 
 from src.gateway.models import (
     APIKey,
@@ -25,6 +26,7 @@ from src.gateway.models import (
     ScimGroup,
     ScimUser,
     SpendCounterState,
+    TenantRole,
     UsageRecord,
 )
 from src.gateway.routing_config import (
@@ -136,6 +138,36 @@ def _require_revision(value: object, *, name: str = "revision") -> int:
     return normalized
 
 
+def _development_dynamodb_endpoint() -> str | None:
+    endpoint = os.environ.get("AXON_DYNAMODB_ENDPOINT_URL", "").strip()
+    if not endpoint:
+        return None
+    if os.environ.get(
+        "AXON_DEPLOYMENT_PROFILE",
+        "production",
+    ).strip().lower() == "production":
+        raise RuntimeError(
+            "AXON_DYNAMODB_ENDPOINT_URL is forbidden in production"
+        )
+    try:
+        parsed = urlsplit(endpoint)
+    except ValueError as exc:
+        raise ValueError("AXON_DYNAMODB_ENDPOINT_URL is invalid") from exc
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+        or parsed.path not in {"", "/"}
+    ):
+        raise ValueError(
+            "AXON_DYNAMODB_ENDPOINT_URL must be an http(s) origin"
+        )
+    return endpoint.rstrip("/")
+
+
 class DynamoPersistence:
     """DynamoDB persistence layer for LLM Router state."""
 
@@ -158,6 +190,7 @@ class DynamoPersistence:
             or os.environ.get("AXON_DYNAMODB_TABLE", "axonllm-state")
         )
         self._region = region
+        self._dynamodb_endpoint_url = _development_dynamodb_endpoint()
         self._routing_config_signing_mode = (
             routing_config_signing_mode
             if routing_config_signing_mode is not None
@@ -262,6 +295,12 @@ class DynamoPersistence:
         self.last_write_error = f"{what} {ident}"
         logger.error("Failed to persist %s %s to DynamoDB", what, ident, exc_info=True)
 
+    def _dynamodb_client_options(self) -> dict[str, str]:
+        options = {"region_name": self._region}
+        if self._dynamodb_endpoint_url is not None:
+            options["endpoint_url"] = self._dynamodb_endpoint_url
+        return options
+
     async def health_status(self) -> dict:
         """Report persistence reachability for a health probe.
 
@@ -283,7 +322,10 @@ class DynamoPersistence:
             import boto3
 
             if self._dynamodb is None:
-                self._dynamodb = boto3.resource("dynamodb", region_name=self._region)
+                self._dynamodb = boto3.resource(
+                    "dynamodb",
+                    **self._dynamodb_client_options(),
+                )
             self._dynamodb.meta.client.describe_table(TableName=self._table_name)
             return True
 
@@ -304,7 +346,10 @@ class DynamoPersistence:
                 if self._table is None:
                     import boto3
 
-                    self._dynamodb = boto3.resource("dynamodb", region_name=self._region)
+                    self._dynamodb = boto3.resource(
+                        "dynamodb",
+                        **self._dynamodb_client_options(),
+                    )
                     self._table = self._dynamodb.Table(self._table_name)
         return self._table
 
@@ -328,7 +373,7 @@ class DynamoPersistence:
 
                     self._low_level_dynamodb_client = boto3.client(
                         "dynamodb",
-                        region_name=self._region,
+                        **self._dynamodb_client_options(),
                     )
         return self._low_level_dynamodb_client
 
@@ -507,7 +552,8 @@ class DynamoPersistence:
 
             if self._dynamodb is None:
                 self._dynamodb = boto3.resource(
-                    "dynamodb", region_name=self._region
+                    "dynamodb",
+                    **self._dynamodb_client_options(),
                 )
 
             client = self._dynamodb.meta.client
@@ -2907,6 +2953,7 @@ class DynamoPersistence:
             "name": key.name,
             "scopes": json.dumps(key.scopes),
             "created_by": key.created_by,
+            "principal_role": key.principal_role.value,
             "created_at": key.created_at.isoformat(),
             "expires_at": key.expires_at.isoformat() if key.expires_at else None,
             "revoked": key.revoked,
@@ -2930,6 +2977,9 @@ class DynamoPersistence:
             scopes=scopes,
             created_by=item["created_by"],
             tenant_id=item.get("tenant_id"),
+            principal_role=TenantRole(
+                item.get("principal_role", TenantRole.SERVICE.value)
+            ),
             created_at=datetime.fromisoformat(item["created_at"]),
             expires_at=datetime.fromisoformat(item["expires_at"]) if item.get("expires_at") else None,
             revoked=bool(item.get("revoked", False)),
@@ -2974,15 +3024,29 @@ class DynamoPersistence:
 
         if key.tenant_id is None:
             raise ValueError("canonical API-key principal requires tenant_id")
+        if key.principal_role not in {
+            TenantRole.SERVICE,
+            TenantRole.TENANT_ADMIN,
+        }:
+            raise ValueError("API-key principal role is not supported")
+        expected_scopes = (
+            frozenset(key.scopes)
+            if key.principal_role is TenantRole.SERVICE
+            else frozenset()
+        )
+        if key.principal_role is TenantRole.TENANT_ADMIN and key.scopes:
+            raise ValueError(
+                "tenant-admin API-key authority cannot include service scopes"
+            )
         if (
             principal.tenant_id != key.tenant_id
             or principal.subject != key.key_id
             or principal.issuer != API_KEY_ISSUER
             or principal.auth_method is not AuthMethod.API_KEY
             or principal.membership_status is not MembershipStatus.ACTIVE
-            or principal.roles != frozenset({TenantRole.SERVICE})
+            or principal.roles != frozenset({key.principal_role})
             or principal.project_ids != frozenset({key.project_id})
-            or principal.scopes != frozenset(key.scopes)
+            or principal.scopes != expected_scopes
             or principal.credential_id != key.key_id
             or principal.authorization_version != 1
         ):

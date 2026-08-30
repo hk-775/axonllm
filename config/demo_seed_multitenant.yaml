@@ -1,0 +1,262 @@
+# Canonical customer-demo seed.
+#
+# The complete existing demo becomes Acme's tenant data, then a second tenant
+# adds deliberately colliding project and user identifiers. The collision is
+# intentional: switching dashboard credentials must change the data even though
+# both tenants use "proj-alpha" and "user-alice".
+base_seed: demo_seed.yaml
+default_tenant_id: tenant-acme
+
+tenants:
+  - tenant_id: tenant-acme
+    display_name: Acme Corp
+    admin_project_id: proj-alpha
+    persona_label: Acme administrator
+  - tenant_id: tenant-globex
+    display_name: Globex Labs
+    admin_project_id: proj-alpha
+    persona_label: Globex administrator
+
+projects:
+  - tenant_id: tenant-globex
+    project_id: proj-alpha
+    name: Globex Growth AI
+    budget_limit: 1250.0
+    alert_threshold: 1000.0
+    cache_enabled: true
+    semantic_cache_enabled: true
+    prompt_caching_enabled: false
+    members:
+      - user-alice
+      - user-diego
+    allowed_models:
+      - claude-haiku
+      - gpt-4o-mini
+      - nova-lite
+      - groq-gpt-oss-20b
+
+  - tenant_id: tenant-globex
+    project_id: proj-orbit
+    name: Orbit Support Copilot
+    budget_limit: 350.0
+    alert_threshold: 280.0
+    members:
+      - user-mei
+    allowed_models:
+      - claude-haiku
+      - nova-micro
+      - together-qwen-3.5-9b
+
+user_budgets:
+  - tenant_id: tenant-globex
+    user_id: user-alice
+    budget_limit: 300.0
+    alert_threshold: 240.0
+  - tenant_id: tenant-globex
+    user_id: user-diego
+    budget_limit: 175.0
+    alert_threshold: 140.0
+  - tenant_id: tenant-globex
+    user_id: user-mei
+    budget_limit: 125.0
+    alert_threshold: 100.0
+
+usage_seeds:
+  - tenant_id: tenant-globex
+    project_id: proj-alpha
+    user_id: user-alice
+    provider: openai
+    model: gpt-4o-mini
+    prompt_tokens: 1340
+    completion_tokens: 410
+    cost: 0.00214
+    latency_ms: 615.0
+    minutes_ago: 18
+  - tenant_id: tenant-globex
+    project_id: proj-alpha
+    user_id: user-diego
+    provider: groq
+    model: groq-gpt-oss-20b
+    prompt_tokens: 920
+    completion_tokens: 580
+    cost: 0.00172
+    latency_ms: 284.0
+    minutes_ago: 31
+    cached_tokens: 420
+    cache_creation_tokens: 70
+  - tenant_id: tenant-globex
+    project_id: proj-alpha
+    user_id: user-alice
+    provider: anthropic
+    model: claude-haiku
+    prompt_tokens: 1870
+    completion_tokens: 720
+    cost: 0.00443
+    latency_ms: 744.0
+    minutes_ago: 49
+  - tenant_id: tenant-globex
+    project_id: proj-orbit
+    user_id: user-mei
+    provider: bedrock
+    model: nova-micro
+    prompt_tokens: 760
+    completion_tokens: 260
+    cost: 0.00039
+    latency_ms: 482.0
+    minutes_ago: 66
+  - tenant_id: tenant-globex
+    project_id: proj-orbit
+    user_id: user-mei
+    provider: together
+    model: together-qwen-3.5-9b
+    prompt_tokens: 1530
+    completion_tokens: 510
+    cost: 0.00131
+    latency_ms: 528.0
+    minutes_ago: 83
+  - tenant_id: tenant-globex
+    project_id: proj-alpha
+    user_id: user-diego
+    provider: bedrock
+    model: nova-lite
+    prompt_tokens: 2100
+    completion_tokens: 880
+    cost: 0.00208
+    latency_ms: 696.0
+    minutes_ago: 112
+  - tenant_id: tenant-globex
+    project_id: proj-alpha
+    user_id: user-alice
+    provider: openai
+    model: gpt-4o-mini
+    prompt_tokens: 640
+    completion_tokens: 330
+    cost: 0.00107
+    latency_ms: 554.0
+    minutes_ago: 144
+  - tenant_id: tenant-globex
+    project_id: proj-orbit
+    user_id: user-mei
+    provider: anthropic
+    model: claude-haiku
+    prompt_tokens: 1180
+    completion_tokens: 440
+    cost: 0.00282
+    latency_ms: 719.0
+    minutes_ago: 178
+
+policies:
+  - tenant_id: tenant-globex
+    name: globex-allow-read
+    description: Allow tenant members to inspect governed resources
+    policy_text: 'permit(principal, action == Action::"read", resource);'
+    mode: ENFORCE
+  - tenant_id: tenant-globex
+    name: globex-sensitive-model-review
+    description: Show a review-only restriction for premium models
+    policy_text: 'forbid(principal, action, resource) unless { principal.role == "senior" };'
+    mode: LOG_ONLY
+
+policy_nodes:
+  - tenant_id: tenant-globex
+    node_id: org:globex
+    node_type: org
+    parent_id: null
+    display_name: Globex Labs
+    limits:
+      rate_limit_rpm: 3000
+      budget_limit: 30000.0
+      max_tokens_per_request: 16384
+  - tenant_id: tenant-globex
+    node_id: bu:customer-ai
+    node_type: business_unit
+    parent_id: org:globex
+    display_name: Customer AI
+    limits:
+      rate_limit_rpm: 1200
+      budget_limit: 12000.0
+      pii_redaction_enabled: true
+      pii_redact_types: [email, phone, credit_card]
+  - tenant_id: tenant-globex
+    node_id: proj-alpha
+    node_type: project
+    parent_id: bu:customer-ai
+    display_name: Globex Growth AI
+    limits:
+      rate_limit_rpm: 700
+      budget_limit: 1250.0
+  - tenant_id: tenant-globex
+    node_id: proj-orbit
+    node_type: project
+    parent_id: bu:customer-ai
+    display_name: Orbit Support Copilot
+    limits:
+      rate_limit_rpm: 300
+      budget_limit: 350.0
+      allowed_models: [claude-haiku, nova-micro, together-qwen-3.5-9b]
+  - tenant_id: tenant-globex
+    node_id: proj-alpha:prod
+    node_type: environment
+    parent_id: proj-alpha
+    display_name: Growth Production
+    limits:
+      rate_limit_rpm: 400
+      max_tokens_per_request: 4096
+
+api_keys:
+  - tenant_id: tenant-globex
+    project_id: proj-alpha
+    name: globex-growth-service
+    scopes: [chat:invoke, models:read]
+    created_by: user-diego
+    expires_in_days: 60
+  - tenant_id: tenant-globex
+    project_id: proj-orbit
+    name: orbit-support-service
+    scopes: [chat:invoke]
+    created_by: user-mei
+    expires_in_days: 30
+
+audit_events:
+  - tenant_id: tenant-globex
+    event_type: auth_success
+    user_id: user-alice
+    project_id: proj-alpha
+    request_id: req-globex-0001
+    data: {method: api_key, persona: globex-admin}
+  - tenant_id: tenant-globex
+    event_type: llm_request
+    user_id: user-diego
+    project_id: proj-alpha
+    request_id: req-globex-0002
+    data: {model: gpt-4o-mini, provider: openai, message_count: 2}
+  - tenant_id: tenant-globex
+    event_type: pii_redaction
+    user_id: user-mei
+    project_id: proj-orbit
+    request_id: req-globex-0003
+    data: {redacted_types: [EMAIL, CREDIT_CARD], count: 2}
+  - tenant_id: tenant-globex
+    event_type: policy_deny
+    user_id: user-diego
+    project_id: proj-alpha
+    request_id: req-globex-0004
+    data: {policy: globex-sensitive-model-review, model: premium-model}
+
+webhook_destinations:
+  - tenant_id: tenant-globex
+    name: globex-security-operations
+    type: webhook
+    config:
+      url: https://security.globex.example.invalid/axonllm
+      timeout_seconds: 5
+    event_filter: [policy_deny, auth_failure, injection_blocked]
+    enabled: true
+  - tenant_id: tenant-globex
+    name: globex-budget-events
+    type: sns
+    config:
+      topic_arn: arn:aws:sns:us-east-1:000000000000:globex-demo-budget-events
+      region: us-east-1
+    event_filter: [budget_exceeded]
+    enabled: true

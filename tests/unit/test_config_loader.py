@@ -156,6 +156,77 @@ class TestLoadDemoSeedConfig:
         assert result.policies == []
         assert result.unhealthy_providers == []
 
+    def test_relative_base_seed_merges_and_tenantizes_rows(
+        self,
+        tmp_path: Path,
+    ):
+        (tmp_path / "base.yaml").write_text(
+            textwrap.dedent(
+                """\
+                projects:
+                  - project_id: proj-alpha
+                    name: Acme
+                unhealthy_providers:
+                  - provider: example
+                """
+            )
+        )
+        (tmp_path / "child.yaml").write_text(
+            textwrap.dedent(
+                """\
+                base_seed: base.yaml
+                default_tenant_id: tenant-acme
+                tenants:
+                  - tenant_id: tenant-acme
+                projects:
+                  - tenant_id: tenant-globex
+                    project_id: proj-alpha
+                    name: Globex
+                """
+            )
+        )
+
+        result = load_demo_seed_config(str(tmp_path / "child.yaml"))
+
+        assert result.default_tenant_id == "tenant-acme"
+        assert result.tenants == [{"tenant_id": "tenant-acme"}]
+        assert [
+            (project["tenant_id"], project["name"])
+            for project in result.projects
+        ] == [
+            ("tenant-acme", "Acme"),
+            ("tenant-globex", "Globex"),
+        ]
+        assert result.unhealthy_providers == [{"provider": "example"}]
+
+    def test_base_seed_must_be_relative(self, tmp_path: Path):
+        seed_yaml = tmp_path / "seed.yaml"
+        seed_yaml.write_text(f"base_seed: {tmp_path / 'base.yaml'}\n")
+
+        with pytest.raises(ValueError, match="relative path"):
+            load_demo_seed_config(str(seed_yaml))
+
+    def test_missing_base_seed_is_rejected(self, tmp_path: Path):
+        seed_yaml = tmp_path / "seed.yaml"
+        seed_yaml.write_text("base_seed: missing.yaml\n")
+
+        with pytest.raises(ValueError, match="base_seed not found"):
+            load_demo_seed_config(str(seed_yaml))
+
+    def test_base_seed_cycle_is_rejected(self, tmp_path: Path):
+        (tmp_path / "a.yaml").write_text("base_seed: b.yaml\n")
+        (tmp_path / "b.yaml").write_text("base_seed: a.yaml\n")
+
+        with pytest.raises(ValueError, match="cycle"):
+            load_demo_seed_config(str(tmp_path / "a.yaml"))
+
+    def test_seed_sections_require_lists_of_mappings(self, tmp_path: Path):
+        seed_yaml = tmp_path / "seed.yaml"
+        seed_yaml.write_text("projects: null\n")
+
+        with pytest.raises(ValueError, match="projects"):
+            load_demo_seed_config(str(seed_yaml))
+
 
 # ---------------------------------------------------------------------------
 # load_catalog_config
@@ -418,11 +489,25 @@ class TestSerialization:
 
     def test_demo_seed_round_trip(self, tmp_path: Path):
         original = DemoSeedData(
-            projects=[{"project_id": "p1", "name": "P1"}],
-            user_budgets=[{"user_id": "u1", "budget_limit": 50.0}],
+            projects=[
+                {
+                    "tenant_id": "tenant-a",
+                    "project_id": "p1",
+                    "name": "P1",
+                }
+            ],
+            user_budgets=[
+                {
+                    "tenant_id": "tenant-a",
+                    "user_id": "u1",
+                    "budget_limit": 50.0,
+                }
+            ],
             usage_seeds=[],
-            policies=[{"name": "pol1"}],
+            policies=[{"tenant_id": "tenant-a", "name": "pol1"}],
             unhealthy_providers=[],
+            default_tenant_id="tenant-a",
+            tenants=[{"tenant_id": "tenant-a"}],
         )
         serialized = serialize_demo_seed_config(original)
         yaml_path = tmp_path / "seed.yaml"
@@ -432,3 +517,5 @@ class TestSerialization:
         assert reloaded.projects == original.projects
         assert reloaded.user_budgets == original.user_budgets
         assert reloaded.policies == original.policies
+        assert reloaded.default_tenant_id == original.default_tenant_id
+        assert reloaded.tenants == original.tenants

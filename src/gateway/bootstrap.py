@@ -13,7 +13,7 @@ import json
 import logging
 import math
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from typing import cast
 
@@ -121,7 +121,13 @@ from src.gateway.health_tracker import ProviderHealthTracker
 from src.gateway.host_assemblies import WorkerAssembly, build_worker
 from src.gateway.model_leaderboard import ModelLeaderboard
 from src.gateway.model_registry import ModelRegistry
-from src.gateway.models import PolicyNode, Project, RateLimitConfig, UsageRecord
+from src.gateway.models import (
+    PolicyNode,
+    Project,
+    RateLimitConfig,
+    TenantRole,
+    UsageRecord,
+)
 from src.gateway.multi_provider_factory import MultiProviderFactory
 from src.gateway.persistence import (
     DynamoPersistence,
@@ -159,6 +165,24 @@ _DEMO_SEED_COORDINATION_VERSION = 1
 _DEMO_SEED_LEASE_SECONDS = 120
 _DEMO_SEED_WAIT_SECONDS = 180.0
 _DEMO_SEED_POLL_SECONDS = 0.25
+
+
+def _merge_policies(
+    seeded: list[dict],
+    persisted: list[dict],
+) -> list[dict]:
+    """Merge policy edits within, never across, tenant namespaces."""
+    by_identity = {
+        (policy.get("tenant_id"), policy["name"]): policy
+        for policy in seeded
+    }
+    by_identity.update(
+        {
+            (policy.get("tenant_id"), policy["name"]): policy
+            for policy in persisted
+        }
+    )
+    return list(by_identity.values())
 
 
 # ---------------------------------------------------------------------------
@@ -783,13 +807,10 @@ def _build_process_components(
         # ones need the same treatment or they are decorative.
         _register_persisted_budgets(
             cost_tracker, policy_resolver, loaded_projects, loaded_user_configs)
-        # Merge by name, matching POST /admin/policies' update-by-name identity: a
-        # persisted policy replaces the seeded one it shares a name with rather
-        # than being evaluated alongside it, which for a permit/forbid pair would
-        # otherwise silently resolve to DENY.
-        by_name = {p["name"]: p for p in policies}
-        by_name.update({p["name"]: p for p in loaded_policies})
-        policies = list(by_name.values())
+        # Merge by tenant and name, matching POST /admin/policies' scoped
+        # update-by-name identity. A persisted policy replaces its seeded copy
+        # without collapsing another tenant's same-named policy.
+        policies = _merge_policies(policies, loaded_policies)
         _apply_persisted_infrastructure(
             event_dispatcher, hub_config, loaded_destinations, loaded_topology)
         # Rehydrate via load_records so the running spend counters (which back
@@ -837,10 +858,17 @@ def _build_process_components(
                 )
             )
         if seed is not None and seed.audit_events:
-            hydrated_audit_count = asyncio.run(
-                audit_trail.hydrate_recent_from_persistence(
-                    LEGACY_TENANT_ID
+            audit_tenants = {
+                event.get("tenant_id") or LEGACY_TENANT_ID
+                for event in seed.audit_events
+            }
+            hydrated_audit_count = sum(
+                asyncio.run(
+                    audit_trail.hydrate_recent_from_persistence(
+                        tenant_id
+                    )
                 )
+                for tenant_id in sorted(audit_tenants)
             )
             logger.info(
                 "Hydrated %d durable demo audit records",
@@ -1617,10 +1645,12 @@ def _apply_seed_data(
 ) -> tuple[dict[str, Project], dict[str, dict], list[dict]]:
     """Apply demo seed data to components. Returns (projects, user_configs, policies)."""
     projects: dict[str, Project] = {}
+    scoped_projects: dict[tuple[str | None, str], Project] = {}
     for p in seed.projects:
         proj = Project(
             project_id=p["project_id"],
             name=p["name"],
+            tenant_id=p.get("tenant_id"),
             budget_limit=p.get("budget_limit"),
             alert_threshold=p.get("alert_threshold"),
             cache_enabled=p.get("cache_enabled", False),
@@ -1634,12 +1664,21 @@ def _apply_seed_data(
             members=p.get("members", []),
             allowed_models=p.get("allowed_models"),
         )
-        projects[proj.project_id] = proj
+        project_key = proj.project_id
+        if project_key in projects:
+            tenant_marker = proj.tenant_id or "legacy"
+            project_key = (
+                f"tenant:{len(tenant_marker)}:{tenant_marker}:"
+                f"project:{len(proj.project_id)}:{proj.project_id}"
+            )
+        projects[project_key] = proj
+        scoped_projects[(proj.tenant_id, proj.project_id)] = proj
         if proj.budget_limit is not None or proj.alert_threshold is not None:
             cost_tracker.register_project(
                 proj.project_id,
                 budget_limit=proj.budget_limit,
                 alert_threshold=proj.alert_threshold,
+                tenant_id=proj.tenant_id,
             )
         # Fallback policy node, so the quota endpoint can still resolve the
         # project's budget_limit (the resolver reads limits from PolicyNodes,
@@ -1647,7 +1686,15 @@ def _apply_seed_data(
         # limit. The policy_nodes section below overwrites it where the seed
         # describes a real tree, which is why this runs first.
         if proj.budget_limit is not None:
-            policy_resolver._nodes[proj.project_id] = PolicyNode(
+            node_store = (
+                policy_resolver._nodes
+                if proj.tenant_id is None
+                else policy_resolver._tenant_nodes.setdefault(
+                    proj.tenant_id,
+                    {},
+                )
+            )
+            node_store[proj.project_id] = PolicyNode(
                 node_id=proj.project_id,
                 node_type="project",
                 parent_id=None,
@@ -1661,25 +1708,141 @@ def _apply_seed_data(
     # for exceeding limits it cannot see yet. The invariant is not skipped —
     # _validate_seed_hierarchy re-checks the whole tree once it is all present,
     # which is strictly stronger than validating each node on arrival.
+    tenant_policy_nodes: dict[str, dict[str, PolicyNode]] = {}
     for pn in seed.policy_nodes:
-        policy_resolver._nodes[pn["node_id"]] = PolicyNode(
+        tenant_id = pn.get("tenant_id")
+        node_store = (
+            policy_resolver._nodes
+            if tenant_id is None
+            else policy_resolver._tenant_nodes.setdefault(tenant_id, {})
+        )
+        node = PolicyNode(
             node_id=pn["node_id"],
             node_type=pn["node_type"],
             parent_id=pn.get("parent_id"),
             display_name=pn.get("display_name", pn["node_id"]),
             limits=pn.get("limits") or {},
         )
+        node_store[node.node_id] = node
+        if tenant_id is not None:
+            tenant_policy_nodes.setdefault(tenant_id, {})[
+                node.node_id
+            ] = node
     if seed.policy_nodes:
-        _validate_seed_hierarchy(policy_resolver)
+        if any(pn.get("tenant_id") is None for pn in seed.policy_nodes):
+            _validate_seed_hierarchy(policy_resolver)
+        for nodes in tenant_policy_nodes.values():
+            tenant_validator = PolicyHierarchyResolver(
+                persistence=policy_resolver._persistence
+            )
+            tenant_validator._nodes = dict(nodes)
+            _validate_seed_hierarchy(tenant_validator)
 
     # User budgets
     user_configs: dict[str, dict] = {}
     for ub in seed.user_budgets:
+        tenant_id = ub.get("tenant_id")
         cost_tracker.register_user(
             ub["user_id"],
             budget_limit=ub.get("budget_limit"),
             alert_threshold=ub.get("alert_threshold"),
+            tenant_id=tenant_id,
         )
+        user_key = ub["user_id"]
+        if tenant_id is not None:
+            user_key = (
+                f"tenant:{len(tenant_id)}:{tenant_id}:"
+                f"user:{len(ub['user_id'])}:{ub['user_id']}"
+            )
+        user_configs[user_key] = {
+            "budget_limit": ub.get("budget_limit"),
+            "alert_threshold": ub.get("alert_threshold"),
+            "revision": 0,
+        }
+
+    async def _persist_tenant_configuration() -> None:
+        persistence = api_key_service.persistence
+        if not persistence.enabled:
+            return
+
+        for project in scoped_projects.values():
+            if project.tenant_id is None:
+                continue
+            current = await persistence.get_project(
+                project.project_id,
+                project.tenant_id,
+            )
+            if current is None:
+                await persistence.create_project(project)
+            else:
+                await persistence.save_project(
+                    replace(project, revision=current.revision),
+                    expected_revision=current.revision,
+                )
+
+        for user_budget in seed.user_budgets:
+            tenant_id = user_budget.get("tenant_id")
+            if tenant_id is None:
+                continue
+            current = await persistence.get_tenant_user_config(
+                tenant_id,
+                user_budget["user_id"],
+            )
+            expected_revision = (
+                int(current.get("revision", 0))
+                if current is not None
+                else 0
+            )
+            await persistence.save_tenant_user_config(
+                tenant_id,
+                user_budget["user_id"],
+                {
+                    "budget_limit": user_budget.get("budget_limit"),
+                    "alert_threshold": user_budget.get("alert_threshold"),
+                },
+                expected_revision=expected_revision,
+            )
+
+        for tenant_id, nodes in policy_resolver._tenant_nodes.items():
+            for node in nodes.values():
+                await persistence.save_tenant_policy_node(
+                    tenant_id,
+                    node,
+                )
+
+        for policy in seed.policies:
+            tenant_id = policy.get("tenant_id")
+            if tenant_id is not None:
+                await persistence.save_tenant_cedar_policy(
+                    tenant_id,
+                    policy,
+                )
+
+        destinations_by_tenant: dict[str, list[dict]] = {}
+        for destination in seed.webhook_destinations:
+            tenant_id = destination.get("tenant_id")
+            if tenant_id is None:
+                continue
+            destinations_by_tenant.setdefault(tenant_id, []).append(
+                {
+                    "name": destination["name"],
+                    "destination_type": destination.get(
+                        "type",
+                        "webhook",
+                    ),
+                    "config": destination.get("config", {}),
+                    "event_filter": destination.get("event_filter"),
+                    "enabled": destination.get("enabled", True),
+                }
+            )
+        for tenant_id, destinations in destinations_by_tenant.items():
+            await persistence.save_tenant_event_destinations(
+                tenant_id,
+                destinations,
+            )
+
+    if persist_records:
+        asyncio.run(_persist_tenant_configuration())
 
     # Usage seeds
     async def _seed_usage():
@@ -1694,7 +1857,9 @@ def _apply_seed_data(
                     # request ids read as one request retried rather than a
                     # populated trace log.
                     request_id=(
-                        f"req-{i:04d}-{s['project_id']}-{s['user_id']}"
+                        f"req-{i:04d}-"
+                        f"{(s.get('tenant_id') + '-') if s.get('tenant_id') else ''}"
+                        f"{s['project_id']}-{s['user_id']}"
                     ),
                     project_id=s["project_id"],
                     user_id=s["user_id"],
@@ -1714,6 +1879,7 @@ def _apply_seed_data(
                     # The dashboard shows an average latency tile; unset it reads
                     # 0ms, i.e. a gateway that answered instantly.
                     latency_ms=float(s.get("latency_ms", 0.0)),
+                    tenant_id=s.get("tenant_id"),
                     cached_tokens=s.get("cached_tokens", 0),
                     cache_creation_tokens=s.get(
                         "cache_creation_tokens",
@@ -1741,9 +1907,18 @@ def _apply_seed_data(
             await quota_enforcer.record_spend(
                 s["project_id"],
                 s.get("cost", 0.0),
-                budget_limit=projects[s["project_id"]].budget_limit
-                if s["project_id"] in projects else None,
+                budget_limit=(
+                    scoped_projects[
+                        (s.get("tenant_id"), s["project_id"])
+                    ].budget_limit
+                    if (
+                        s.get("tenant_id"),
+                        s["project_id"],
+                    ) in scoped_projects
+                    else None
+                ),
                 share=False,
+                tenant_id=s.get("tenant_id"),
             )
 
     asyncio.run(_seed_usage())
@@ -1770,9 +1945,17 @@ def _apply_seed_data(
                 scopes=k.get("scopes", ["chat:invoke"]),
                 created_by=k.get("created_by", "admin"),
                 expires_at=expires_at,
+                tenant_id=k.get("tenant_id"),
+                principal_role=TenantRole(
+                    k.get("principal_role", TenantRole.SERVICE.value)
+                ),
             )
             if k.get("revoked"):
-                await api_key_service.revoke_key(record.key_id)
+                await api_key_service.revoke_key(
+                    record.key_id,
+                    record.tenant_id,
+                    revoked_by=k.get("created_by", "demo-seed"),
+                )
 
     if persist_records and seed.api_keys:
         asyncio.run(_seed_api_keys())
@@ -1796,6 +1979,7 @@ def _apply_seed_data(
                 project_id=ev.get("project_id", "unknown"),
                 request_id=ev.get("request_id", "req-demo"),
                 data=ev.get("data", {}),
+                tenant_id=ev.get("tenant_id") or LEGACY_TENANT_ID,
             )
 
     if persist_records and seed.audit_events:
@@ -1817,6 +2001,7 @@ def _apply_seed_data(
             config=wd.get("config", {}),
             event_filter=wd.get("event_filter"),
             enabled=wd.get("enabled", True),
+            tenant_id=wd.get("tenant_id") or LEGACY_TENANT_ID,
         ))
 
     return projects, user_configs, seed.policies

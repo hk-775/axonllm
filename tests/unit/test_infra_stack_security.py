@@ -459,6 +459,14 @@ def test_demo_seed_is_an_explicit_false_by_default_parameter(
     assert environment["AXON_LOAD_DEMO_DATA"] == {
         "Ref": "LoadDemoData"
     }
+    assert environment["AXON_DEMO_SEED_CONFIG"] == (
+        "config/demo_seed_multitenant.yaml"
+    )
+    assert environment["AXON_REQUIRE_CANONICAL_IDENTITY"]["Fn::If"] == [
+        "CanonicalIdentityMode",
+        "true",
+        "false",
+    ]
 
 
 def test_task_egress_and_aws_endpoints_are_explicitly_bounded(
@@ -997,6 +1005,24 @@ def test_production_oidc_is_conditional_and_bound_to_the_alb(
     assert demo_rule["Assertions"][0]["Assert"] == {
         "Fn::Equals": [{"Ref": "LoadDemoData"}, "false"]
     }
+    assert synthesized_template["Conditions"][
+        "CanonicalIdentityMode"
+    ] == {
+        "Fn::Or": [
+            {
+                "Fn::Equals": [
+                    {"Ref": "DeploymentMode"},
+                    "production",
+                ]
+            },
+            {
+                "Fn::Equals": [
+                    {"Ref": "LoadDemoData"},
+                    "true",
+                ]
+            },
+        ]
+    }
 
     listener_rule = _one_resource(
         synthesized_template,
@@ -1051,7 +1077,7 @@ def test_production_oidc_is_conditional_and_bound_to_the_alb(
         "",
     ]
     assert environment["AXON_REQUIRE_CANONICAL_IDENTITY"]["Fn::If"] == [
-        "ProductionMode",
+        "CanonicalIdentityMode",
         "true",
         "false",
     ]

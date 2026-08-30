@@ -113,6 +113,7 @@ axonllm-agentcore.json
 # Local data
 *.db
 *.sqlite3
+.demo/
 
 # Demo recording intermediates now go under the system temp dir, not the tree --
 # see scripts/demo/paths.py. The one MP4 that ships (site/axonllm-demo.mp4) is

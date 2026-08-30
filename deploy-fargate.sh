@@ -21,6 +21,7 @@
 #   AXON_DEPLOYMENT_NAMESPACE (dedicated stack suffix, for example demo)
 #   AXON_FARGATE_EDGE_MODE (custom-domain or cloudfront-default)
 #   AXON_LOAD_DEMO_DATA (false or true; production requires false)
+#   AXON_DEMO_ACCESS_SECRET_NAME (seeded demo persona document)
 #   AXON_SCIM_TENANTS_SECRET_ARN (complete us-east-1 Secrets Manager ARN)
 #   AXON_PUBLIC_HOSTED_ZONE_ID and AXON_PUBLIC_HOSTED_ZONE_NAME
 #
@@ -286,8 +287,30 @@ echo ""
 
 if [ -f outputs.json ]; then
     PUBLIC_URL=$(python3 -c "import json; d=json.load(open('outputs.json')); print(list(d.values())[0].get('CloudFrontURL', 'check AWS console'))" 2>/dev/null || echo "check AWS console")
+    SELECTED_TABLE=$(python3 -c "import json; d=json.load(open('outputs.json')); print(list(d.values())[0].get('SelectedRuntimeStateTableName', ''))")
     echo "Dashboard: ${PUBLIC_URL}/admin/dashboard"
     echo "API:       ${PUBLIC_URL}/api/chat"
+    echo ""
+fi
+
+if [ "$LOAD_DEMO_DATA" = "true" ]; then
+    if [ -n "$DEPLOYMENT_NAMESPACE" ]; then
+        DEFAULT_DEMO_SECRET="axonllm/${DEPLOYMENT_NAMESPACE}/demo/access"
+    else
+        DEFAULT_DEMO_SECRET="axonllm/demo/access"
+    fi
+    DEMO_ACCESS_SECRET_NAME="${AXON_DEMO_ACCESS_SECRET_NAME:-$DEFAULT_DEMO_SECRET}"
+    if [ -z "${SELECTED_TABLE:-}" ]; then
+        echo "SelectedRuntimeStateTableName is missing from CDK outputs." >&2
+        exit 1
+    fi
+    echo "==> Creating isolated tenant-admin demo personas..."
+    cd ..
+    uv run python scripts/bootstrap_demo_access.py \
+        --table "$SELECTED_TABLE" \
+        --region "$REGION" \
+        --secret-name "$DEMO_ACCESS_SECRET_NAME"
+    cd infra
     echo ""
 fi
 
@@ -298,4 +321,8 @@ if [ "$EDGE_MODE" = "custom-domain" ]; then
 else
     echo "  2. Use the generated CloudFrontURL output directly."
 fi
-echo "  3. Mint an AxonLLM API key before using protected APIs."
+if [ "$LOAD_DEMO_DATA" = "true" ]; then
+    echo "  3. Resolve a tenant persona from ${DEMO_ACCESS_SECRET_NAME} at runtime."
+else
+    echo "  3. Mint an AxonLLM API key before using protected APIs."
+fi
