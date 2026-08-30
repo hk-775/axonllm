@@ -685,6 +685,17 @@ def test_task_egress_and_aws_endpoints_are_explicitly_bounded(
         "dynamodb:UpdateItem",
     }
     assert "StateTable" in json.dumps(dynamodb_statement["Resource"])
+    dynamodb_endpoint_resource = next(
+        endpoint
+        for endpoint in synthesized_template["Resources"].values()
+        if endpoint["Type"] == "AWS::EC2::VPCEndpoint"
+        and ".dynamodb" in json.dumps(
+            endpoint["Properties"]["ServiceName"]
+        )
+    )
+    assert dynamodb_endpoint_resource["Metadata"]["cfn-lint"] == {
+        "config": {"ignore_checks": ["W3037"]}
+    }
 
     gateway_egress = [
         resource["Properties"]
@@ -1470,7 +1481,6 @@ def test_task_role_has_item_permissions_for_atomic_state_transactions(
         "dynamodb:PutItem",
         "dynamodb:Query",
         "dynamodb:Scan",
-        "dynamodb:TransactWriteItems",
         "dynamodb:UpdateItem",
     } == set(state_access["Action"])
     selected_table_conditions = _values_for_key(
@@ -1489,6 +1499,29 @@ def test_task_role_has_item_permissions_for_atomic_state_transactions(
         "AWS::DynamoDB::Table"
     )
     assert state_access["Resource"][1]["Fn::Join"][1][-1] == "/index/*"
+    transaction_policy = next(
+        policy
+        for policy in policies
+        if any(
+            "dynamodb:TransactWriteItems" in _actions(statement)
+            for statement in policy["Properties"]["PolicyDocument"][
+                "Statement"
+            ]
+        )
+    )
+    transaction_statement = transaction_policy["Properties"][
+        "PolicyDocument"
+    ]["Statement"][0]
+    assert transaction_statement["Sid"] == (
+        "TransactWithSelectedStateTable"
+    )
+    assert _actions(transaction_statement) == {
+        "dynamodb:TransactWriteItems"
+    }
+    assert transaction_statement["Resource"] == state_access["Resource"]
+    assert transaction_policy["Metadata"]["cfn-lint"] == {
+        "config": {"ignore_checks": ["W3037"]}
+    }
     all_actions = {
         action
         for statement in statements
