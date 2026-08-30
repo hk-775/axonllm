@@ -43,6 +43,9 @@ class ResponsesRequestError(ValueError):
     """A client-correctable Responses API translation error."""
 
 
+_ENCRYPTED_REASONING_INCLUDE = ["reasoning.encrypted_content"]
+
+
 def _identity(
     request: Request,
 ) -> tuple[str | None, str | None, str | None]:
@@ -349,7 +352,13 @@ def _translate_responses_request(body: dict[str, Any]) -> dict[str, Any]:
         raise ResponsesRequestError(
             "Responses structured text configuration is not supported yet."
         )
-    for field in ("include", "max_tool_calls", "service_tier"):
+    include = body.get("include")
+    if include not in (None, [], _ENCRYPTED_REASONING_INCLUDE):
+        raise ResponsesRequestError(
+            "Field 'include' is unsupported except for "
+            "['reasoning.encrypted_content'] transport metadata."
+        )
+    for field in ("max_tool_calls", "service_tier"):
         if body.get(field) is not None:
             raise ResponsesRequestError(
                 f"Field '{field}' is not supported by AxonLLM."

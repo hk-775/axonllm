@@ -65,7 +65,7 @@
     },
     {
       "provider": "groq",
-      "model": "groq-llama-3.3-70b",
+      "model": "groq-gpt-oss-120b",
       "features": [
         "completion",
         "stream",

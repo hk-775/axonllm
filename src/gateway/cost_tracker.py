@@ -683,10 +683,21 @@ class CostTracker:
         self,
         usage: UsageRecord,
         *,
+        persist: bool = True,
+        require_persisted: bool = False,
         share: bool = True,
         skip_shared_scopes: frozenset[str] = frozenset(),
     ) -> None:
         """Persist a usage record to the in-memory store.
+
+        ``persist=False`` keeps the record and local spend counters in memory
+        without writing the history row to DynamoDB. Fleet followers use this
+        while one elected task performs the durable demo seed.
+
+        ``require_persisted=True`` turns a dropped durable history write into a
+        startup error. Normal request accounting retains its historical
+        best-effort behavior; the elected demo seeder uses the strict mode so it
+        never marks a seed complete after silently losing records.
 
         ``share=False`` records the cost locally without adding it to the shared
         fleet-wide counter. Used by the demo seed: every instance applies the
@@ -694,6 +705,8 @@ class CostTracker:
         across the fleet, and ``ADD`` is not idempotent — sharing it would
         multiply demo spend by the instance count and again by every restart.
         """
+        if require_persisted and not persist:
+            raise ValueError("require_persisted requires persist=True")
         self._records.append(usage)
         # Counters are authoritative for budgets, so update them BEFORE any
         # trimming — trimming the record list must not lose spend.
@@ -702,15 +715,33 @@ class CostTracker:
             self._records = self._records[-(self.MAX_RECORDS // 2):]
 
         # Fire-and-forget DynamoDB write
-        if self._persistence is not None and self._persistence.enabled:
+        if (
+            persist
+            and self._persistence is not None
+            and self._persistence.enabled
+        ):
             try:
-                await self._persistence.save_usage_record(usage)
+                if require_persisted:
+                    writer = getattr(
+                        self._persistence,
+                        "save_usage_record_strict",
+                        None,
+                    )
+                    if not callable(writer):
+                        raise RuntimeError(
+                            "strict usage persistence is not configured"
+                        )
+                    await writer(usage)
+                else:
+                    await self._persistence.save_usage_record(usage)
             except Exception:
                 logger.warning(
                     "Failed to persist usage record %s to DynamoDB",
                     usage.request_id,
                     exc_info=True,
                 )
+                if require_persisted:
+                    raise
 
         # Fold this cost into the shared counters and adopt the fleet totals, so
         # the next budget check compares against every instance's spend rather

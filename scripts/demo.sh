@@ -57,10 +57,10 @@ PROMPTS=(
 MODELS_TO_TEST=(
   "claude-sonnet"
   "grok-3-mini"
-  "groq-llama-3.3-70b"
-  "groq-llama-3.1-8b"
+  "groq-gpt-oss-120b"
+  "groq-gpt-oss-20b"
   "together-llama-3.3-70b"
-  "together-deepseek-r1"
+  "together-deepseek-v4-flash"
   "fireworks-deepseek-v4"
 )
 
@@ -96,7 +96,7 @@ echo ""
 echo -e "${CYAN}Generating routing diversity (multiple requests to multi-provider models)...${NC}"
 
 for run in 1 2 3; do
-  for model in "claude-sonnet" "groq-llama-3.3-70b"; do
+  for model in "claude-sonnet" "groq-gpt-oss-120b"; do
     user="${USERS[$((RANDOM % ${#USERS[@]}))]}"
     curl -s -m 20 -X POST "$BASE/api/chat" \
       -H "Content-Type: application/json" \

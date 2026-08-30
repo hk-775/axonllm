@@ -469,6 +469,13 @@ class TestPersistedPoliciesAreLoadedAtStartup:
         }]
         persistence = self._persistence(stored)
         monkeypatch.setattr(bootstrap_mod, "DynamoPersistence", lambda *a, **k: persistence)
+        async def completed_seed(*args, **kwargs):
+            return None
+        monkeypatch.setattr(
+            bootstrap_mod,
+            "_coordinate_demo_seed",
+            completed_seed,
+        )
 
         comp = build_gateway_components(demo_app_config)
         matching = [p for p in comp.policies if p["name"] == "allow-all-write"]
@@ -581,6 +588,13 @@ class TestSpendCountersAtStartup:
         writes: list = []
         persistence = self._persistence({}, writes)
         monkeypatch.setattr(bootstrap_mod, "DynamoPersistence", lambda *a, **k: persistence)
+        async def completed_seed(*args, **kwargs):
+            return None
+        monkeypatch.setattr(
+            bootstrap_mod,
+            "_coordinate_demo_seed",
+            completed_seed,
+        )
 
         comp = build_gateway_components(demo_app_config)
         assert comp.cost_tracker._records, "expected the seed to have been applied"

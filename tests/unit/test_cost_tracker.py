@@ -124,6 +124,26 @@ class TestRecordUsage:
         await tracker.record_usage(_make_record(request_id="r2"))
         assert len(tracker._records) == 2
 
+    @pytest.mark.asyncio
+    async def test_persist_false_keeps_local_record_without_store_write(self):
+        class _Store:
+            enabled = True
+
+            async def save_usage_record(self, record):
+                raise AssertionError("follower wrote a durable seed record")
+
+        tracker = CostTracker(_pricing_config(), persistence=_Store())
+        record = _make_record()
+
+        await tracker.record_usage(
+            record,
+            persist=False,
+            share=False,
+        )
+
+        assert tracker._records == [record]
+        assert tracker._project_spend["proj-1"] == pytest.approx(record.cost)
+
 
 # ---------------------------------------------------------------------------
 # estimate_tokens

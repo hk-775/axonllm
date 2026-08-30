@@ -131,15 +131,41 @@ class AxonLLMStack(Stack):
                 "CloudFront WebACL has global scope"
             )
 
+        edge_mode = (
+            self.node.try_get_context("fargate_edge_mode")
+            or "custom-domain"
+        )
+        if edge_mode not in {"custom-domain", "cloudfront-default"}:
+            raise ValueError(
+                "fargate_edge_mode must be 'custom-domain' or "
+                "'cloudfront-default'"
+            )
+        cloudfront_default_domain = edge_mode == "cloudfront-default"
+
         deployment_mode = CfnParameter(
             self,
             "DeploymentMode",
             type="String",
             default="staging",
-            allowed_values=["staging", "production"],
+            allowed_values=(
+                ["staging"]
+                if cloudfront_default_domain
+                else ["staging", "production"]
+            ),
             description=(
                 "staging preserves the existing API-key/direct-JWT deployment; "
                 "production also requires ALB OIDC and canonical identities"
+            ),
+        )
+        load_demo_data = CfnParameter(
+            self,
+            "LoadDemoData",
+            type="String",
+            default="false",
+            allowed_values=["false", "true"],
+            description=(
+                "Load the checked-in fictional demo tenant, projects, usage, "
+                "audit, policies, keys, and webhook records"
             ),
         )
         oidc_issuer = CfnParameter(
@@ -270,6 +296,25 @@ class AxonLLMStack(Stack):
         )
         CfnRule(
             self,
+            "ProductionDisablesDemoData",
+            rule_condition=Fn.condition_equals(
+                deployment_mode.value_as_string,
+                "production",
+            ),
+            assertions=[
+                CfnRuleAssertion(
+                    assert_=Fn.condition_equals(
+                        load_demo_data.value_as_string,
+                        "false",
+                    ),
+                    assert_description=(
+                        "LoadDemoData must remain false in production mode"
+                    ),
+                )
+            ],
+        )
+        CfnRule(
+            self,
             "PublicDnsInputs",
             assertions=[
                 CfnRuleAssertion(
@@ -307,46 +352,53 @@ class AxonLLMStack(Stack):
             ],
         )
 
-        # These values are deliberately required CloudFormation parameters. A
-        # deploy must bring account-owned TLS, DNS, and egress policy; the
-        # reference stack must not silently fall back to plaintext or open
-        # networking when those controls are absent.
-        viewer_domain_name = CfnParameter(
-            self,
-            "ViewerDomainName",
-            type="String",
-            min_length=1,
-            description=(
-                "CloudFront alternate domain name covered by ViewerCertificateArn"
-            ),
-        )
-        viewer_certificate_arn = CfnParameter(
-            self,
-            "ViewerCertificateArn",
-            type="String",
-            min_length=1,
-            description=(
-                "ACM certificate ARN in us-east-1 covering ViewerDomainName"
-            ),
-        )
-        origin_domain_name = CfnParameter(
-            self,
-            "OriginDomainName",
-            type="String",
-            min_length=1,
-            description=(
-                "Private ALB origin name covered by OriginCertificateArn"
-            ),
-        )
-        origin_certificate_arn = CfnParameter(
-            self,
-            "OriginCertificateArn",
-            type="String",
-            min_length=1,
-            description=(
-                "ACM certificate ARN in this stack's region covering OriginDomainName"
-            ),
-        )
+        viewer_domain_name = None
+        viewer_certificate_arn = None
+        origin_domain_name = None
+        origin_certificate_arn = None
+        if not cloudfront_default_domain:
+            # The production-shaped edge requires account-owned TLS and DNS.
+            # The explicitly selected cloudfront-default mode is a disposable
+            # staging/demo path: viewers still use CloudFront HTTPS, while the
+            # private VPC origin uses HTTP and has no public address.
+            viewer_domain_name = CfnParameter(
+                self,
+                "ViewerDomainName",
+                type="String",
+                min_length=1,
+                description=(
+                    "CloudFront alternate domain name covered by "
+                    "ViewerCertificateArn"
+                ),
+            )
+            viewer_certificate_arn = CfnParameter(
+                self,
+                "ViewerCertificateArn",
+                type="String",
+                min_length=1,
+                description=(
+                    "ACM certificate ARN in us-east-1 covering ViewerDomainName"
+                ),
+            )
+            origin_domain_name = CfnParameter(
+                self,
+                "OriginDomainName",
+                type="String",
+                min_length=1,
+                description=(
+                    "Private ALB origin name covered by OriginCertificateArn"
+                ),
+            )
+            origin_certificate_arn = CfnParameter(
+                self,
+                "OriginCertificateArn",
+                type="String",
+                min_length=1,
+                description=(
+                    "ACM certificate ARN in this stack's region covering "
+                    "OriginDomainName"
+                ),
+            )
         approved_https_prefix_list_id = CfnParameter(
             self,
             "ApprovedHttpsPrefixListId",
@@ -498,11 +550,16 @@ class AxonLLMStack(Stack):
         )
 
         # --- Networking ---
+        application_subnet_type = (
+            ec2.SubnetType.PRIVATE_ISOLATED
+            if cloudfront_default_domain
+            else ec2.SubnetType.PRIVATE_WITH_EGRESS
+        )
         vpc = ec2.Vpc(
             self,
             "Vpc",
             max_azs=2,
-            nat_gateways=2,
+            nat_gateways=0 if cloudfront_default_domain else 2,
             restrict_default_security_group=True,
             subnet_configuration=[
                 ec2.SubnetConfiguration(
@@ -513,7 +570,7 @@ class AxonLLMStack(Stack):
                 ),
                 ec2.SubnetConfiguration(
                     name="Application",
-                    subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS,
+                    subnet_type=application_subnet_type,
                     cidr_mask=24,
                 ),
             ],
@@ -548,19 +605,18 @@ class AxonLLMStack(Stack):
             retention=logs.RetentionDays.ONE_WEEK,
             removal_policy=RemovalPolicy.DESTROY,
         )
-        cloudfront_origin_prefix_list = cr.AwsCustomResource(
-            self,
-            "CloudFrontOriginPrefixList",
-            on_create=cr.AwsSdkCall(
+        def managed_prefix_list_id(
+            construct_id: str,
+            prefix_list_name: str,
+        ) -> str:
+            call = cr.AwsSdkCall(
                 service="EC2",
                 action="describeManagedPrefixLists",
                 parameters={
                     "Filters": [
                         {
                             "Name": "prefix-list-name",
-                            "Values": [
-                                "com.amazonaws.global.cloudfront.origin-facing"
-                            ],
+                            "Values": [prefix_list_name],
                         }
                     ]
                 },
@@ -568,23 +624,49 @@ class AxonLLMStack(Stack):
                 physical_resource_id=cr.PhysicalResourceId.from_response(
                     "PrefixLists.0.PrefixListId"
                 ),
-            ),
-            policy=cr.AwsCustomResourcePolicy.from_statements(
-                [
-                    iam.PolicyStatement(
-                        actions=["ec2:DescribeManagedPrefixLists"],
-                        resources=["*"],
-                    )
-                ]
-            ),
-            install_latest_aws_sdk=False,
-            log_group=prefix_lookup_logs,
-            timeout=Duration.seconds(30),
-        )
-        cloudfront_origin_prefix_list_id = (
-            cloudfront_origin_prefix_list.get_response_field(
+            )
+            lookup = cr.AwsCustomResource(
+                self,
+                construct_id,
+                on_create=call,
+                on_update=call,
+                policy=cr.AwsCustomResourcePolicy.from_statements(
+                    [
+                        iam.PolicyStatement(
+                            actions=["ec2:DescribeManagedPrefixLists"],
+                            resources=["*"],
+                        )
+                    ]
+                ),
+                install_latest_aws_sdk=False,
+                log_group=prefix_lookup_logs,
+                timeout=Duration.seconds(30),
+            )
+            return lookup.get_response_field(
                 "PrefixLists.0.PrefixListId"
             )
+
+        cloudfront_origin_prefix_list_id = managed_prefix_list_id(
+            "CloudFrontOriginPrefixList",
+            "com.amazonaws.global.cloudfront.origin-facing",
+        )
+        s3_prefix_list_id = managed_prefix_list_id(
+            "S3PrefixList",
+            f"com.amazonaws.{self.region}.s3",
+        )
+        dynamodb_prefix_list_id = managed_prefix_list_id(
+            "DynamoDbPrefixList",
+            f"com.amazonaws.{self.region}.dynamodb",
+        )
+        task_security_group.add_egress_rule(
+            ec2.Peer.prefix_list(s3_prefix_list_id),
+            ec2.Port.tcp(443),
+            "HTTPS to the regional S3 gateway endpoint",
+        )
+        task_security_group.add_egress_rule(
+            ec2.Peer.prefix_list(dynamodb_prefix_list_id),
+            ec2.Port.tcp(443),
+            "HTTPS to the regional DynamoDB gateway endpoint",
         )
 
         alb_security_group = ec2.SecurityGroup(
@@ -596,8 +678,12 @@ class AxonLLMStack(Stack):
         )
         alb_security_group.add_ingress_rule(
             ec2.Peer.prefix_list(cloudfront_origin_prefix_list_id),
-            ec2.Port.tcp(443),
-            "TLS from the CloudFront origin-facing managed prefix list",
+            ec2.Port.tcp(80 if cloudfront_default_domain else 443),
+            (
+                "HTTP from the CloudFront origin-facing managed prefix list"
+                if cloudfront_default_domain
+                else "TLS from the CloudFront origin-facing managed prefix list"
+            ),
         )
         alb_security_group.add_egress_rule(
             ec2.Peer.ipv4(vpc.vpc_cidr_block),
@@ -635,7 +721,7 @@ class AxonLLMStack(Stack):
             desync_mitigation_mode=elbv2.DesyncMitigationMode.STRICTEST,
             security_group=alb_security_group,
             vpc_subnets=ec2.SubnetSelection(
-                subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS
+                subnet_type=application_subnet_type
             ),
         )
 
@@ -746,6 +832,30 @@ class AxonLLMStack(Stack):
                 state_table.table_name,
             )
         )
+        selected_state_table_arn = self.format_arn(
+            service="dynamodb",
+            resource="table",
+            resource_name=selected_state_table_name,
+        )
+        dynamodb_standard_actions = [
+            "dynamodb:BatchGetItem",
+            "dynamodb:BatchWriteItem",
+            "dynamodb:ConditionCheckItem",
+            "dynamodb:DeleteItem",
+            "dynamodb:DescribeTable",
+            "dynamodb:GetItem",
+            "dynamodb:PutItem",
+            "dynamodb:Query",
+            "dynamodb:Scan",
+            "dynamodb:UpdateItem",
+        ]
+        dynamodb_transaction_actions = [
+            "dynamodb:TransactWriteItems",
+        ]
+        dynamodb_state_actions = [
+            *dynamodb_standard_actions,
+            *dynamodb_transaction_actions,
+        ]
 
         event_dead_letter_queue = sqs.Queue(
             self,
@@ -791,6 +901,13 @@ class AxonLLMStack(Stack):
             retention=logs.RetentionDays.ONE_YEAR,
             removal_policy=RemovalPolicy.RETAIN,
         )
+        application_log_group = logs.LogGroup(
+            self,
+            "ApplicationLogGroup",
+            encryption_key=data_key,
+            retention=logs.RetentionDays.ONE_MONTH,
+            removal_policy=RemovalPolicy.RETAIN,
+        )
         logs.LogStream(
             self,
             "SecurityEventLogStream",
@@ -823,7 +940,7 @@ class AxonLLMStack(Stack):
             private_dns_enabled=True,
             security_groups=[aws_endpoint_security_group],
             subnets=ec2.SubnetSelection(
-                subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS
+                subnet_type=application_subnet_type
             ),
         )
         kms_endpoint = vpc.add_interface_endpoint(
@@ -833,7 +950,7 @@ class AxonLLMStack(Stack):
             private_dns_enabled=True,
             security_groups=[aws_endpoint_security_group],
             subnets=ec2.SubnetSelection(
-                subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS
+                subnet_type=application_subnet_type
             ),
         )
         sqs_endpoint.add_to_policy(
@@ -856,7 +973,7 @@ class AxonLLMStack(Stack):
             private_dns_enabled=True,
             security_groups=[aws_endpoint_security_group],
             subnets=ec2.SubnetSelection(
-                subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS
+                subnet_type=application_subnet_type
             ),
         )
         sns_endpoint.add_to_policy(
@@ -873,7 +990,7 @@ class AxonLLMStack(Stack):
             private_dns_enabled=True,
             security_groups=[aws_endpoint_security_group],
             subnets=ec2.SubnetSelection(
-                subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS
+                subnet_type=application_subnet_type
             ),
         )
         logs_endpoint.add_to_policy(
@@ -886,8 +1003,142 @@ class AxonLLMStack(Stack):
                 resources=[
                     security_event_log_group.log_group_arn,
                     f"{security_event_log_group.log_group_arn}:*",
+                    application_log_group.log_group_arn,
+                    f"{application_log_group.log_group_arn}:*",
                 ],
             )
+        )
+        secrets_endpoint = vpc.add_interface_endpoint(
+            "SecretsManagerEndpoint",
+            service=ec2.InterfaceVpcEndpointAwsService.SECRETS_MANAGER,
+            open=False,
+            private_dns_enabled=True,
+            security_groups=[aws_endpoint_security_group],
+            subnets=ec2.SubnetSelection(
+                subnet_type=application_subnet_type
+            ),
+        )
+        secret_resources = [api_keys_secret.secret_arn]
+        if scim_tenants_secret_arn is not None:
+            secret_resources.append(scim_tenants_secret_arn)
+        secrets_endpoint.add_to_policy(
+            iam.PolicyStatement(
+                principals=[iam.AnyPrincipal()],
+                actions=[
+                    "secretsmanager:DescribeSecret",
+                    "secretsmanager:GetSecretValue",
+                ],
+                resources=secret_resources,
+            )
+        )
+        ecr_api_endpoint = vpc.add_interface_endpoint(
+            "EcrApiEndpoint",
+            service=ec2.InterfaceVpcEndpointAwsService.ECR,
+            open=False,
+            private_dns_enabled=True,
+            security_groups=[aws_endpoint_security_group],
+            subnets=ec2.SubnetSelection(
+                subnet_type=application_subnet_type
+            ),
+        )
+        ecr_docker_endpoint = vpc.add_interface_endpoint(
+            "EcrDockerEndpoint",
+            service=ec2.InterfaceVpcEndpointAwsService.ECR_DOCKER,
+            open=False,
+            private_dns_enabled=True,
+            security_groups=[aws_endpoint_security_group],
+            subnets=ec2.SubnetSelection(
+                subnet_type=application_subnet_type
+            ),
+        )
+        for ecr_endpoint in (ecr_api_endpoint, ecr_docker_endpoint):
+            ecr_endpoint.add_to_policy(
+                iam.PolicyStatement(
+                    principals=[iam.AnyPrincipal()],
+                    actions=["ecr:GetAuthorizationToken"],
+                    resources=["*"],
+                )
+            )
+            ecr_endpoint.add_to_policy(
+                iam.PolicyStatement(
+                    principals=[iam.AnyPrincipal()],
+                    actions=[
+                        "ecr:BatchCheckLayerAvailability",
+                        "ecr:BatchGetImage",
+                        "ecr:GetDownloadUrlForLayer",
+                    ],
+                    resources=[verified_image_repository_arn],
+                )
+            )
+        bedrock_runtime_endpoint = vpc.add_interface_endpoint(
+            "BedrockRuntimeEndpoint",
+            service=ec2.InterfaceVpcEndpointAwsService.BEDROCK_RUNTIME,
+            open=False,
+            private_dns_enabled=True,
+            security_groups=[aws_endpoint_security_group],
+            subnets=ec2.SubnetSelection(
+                subnet_type=application_subnet_type
+            ),
+        )
+        bedrock_runtime_endpoint.add_to_policy(
+            iam.PolicyStatement(
+                principals=[iam.AnyPrincipal()],
+                actions=[
+                    "bedrock:InvokeModel",
+                    "bedrock:InvokeModelWithResponseStream",
+                ],
+                resources=bedrock_invoke_resource_arns.value_as_list,
+            )
+        )
+        s3_endpoint = vpc.add_gateway_endpoint(
+            "S3Endpoint",
+            service=ec2.GatewayVpcEndpointAwsService.S3,
+            subnets=[
+                ec2.SubnetSelection(
+                    subnet_type=application_subnet_type
+                )
+            ],
+        )
+        s3_endpoint.add_to_policy(
+            iam.PolicyStatement(
+                principals=[iam.AnyPrincipal()],
+                actions=["s3:GetObject"],
+                resources=[
+                    (
+                        f"arn:{self.partition}:s3:::"
+                        f"prod-{self.region}-starport-layer-bucket/*"
+                    )
+                ],
+            )
+        )
+        dynamodb_endpoint = vpc.add_gateway_endpoint(
+            "DynamoDbEndpoint",
+            service=ec2.GatewayVpcEndpointAwsService.DYNAMODB,
+            subnets=[
+                ec2.SubnetSelection(
+                    subnet_type=application_subnet_type
+                )
+            ],
+        )
+        dynamodb_endpoint.add_to_policy(
+            iam.PolicyStatement(
+                principals=[iam.AnyPrincipal()],
+                actions=dynamodb_state_actions,
+                resources=[
+                    selected_state_table_arn,
+                    f"{selected_state_table_arn}/index/*",
+                ],
+            )
+        )
+        cfn_dynamodb_endpoint = dynamodb_endpoint.node.default_child
+        if not isinstance(cfn_dynamodb_endpoint, ec2.CfnVPCEndpoint):
+            raise TypeError(
+                "DynamoDB gateway endpoint has no CfnVPCEndpoint child"
+            )
+        # cfn-lint 1.52.1 omits this valid DynamoDB IAM action.
+        cfn_dynamodb_endpoint.add_metadata(
+            "cfn-lint",
+            {"config": {"ignore_checks": ["W3037"]}},
         )
 
         backup_key = kms.Key(
@@ -982,11 +1233,13 @@ class AxonLLMStack(Stack):
             container_insights_v2=ecs.ContainerInsights.ENABLED,
         )
 
-        origin_certificate = acm.Certificate.from_certificate_arn(
-            self,
-            "OriginCertificate",
-            origin_certificate_arn.value_as_string,
-        )
+        origin_certificate = None
+        if origin_certificate_arn is not None:
+            origin_certificate = acm.Certificate.from_certificate_arn(
+                self,
+                "OriginCertificate",
+                origin_certificate_arn.value_as_string,
+            )
 
         container_secrets = {
             "ANTHROPIC_API_KEY": ecs.Secret.from_secrets_manager(
@@ -1010,126 +1263,135 @@ class AxonLLMStack(Stack):
             )
 
         # --- Fargate service with ALB ---
-        fargate_service = ecs_patterns.ApplicationLoadBalancedFargateService(
-            self,
-            "Service",
-            cluster=cluster,
-            cpu=1024,
-            memory_limit_mib=2048,
-            desired_count=2,
-            circuit_breaker=ecs.DeploymentCircuitBreaker(rollback=True),
-            min_healthy_percent=100,
-            max_healthy_percent=200,
+        service_options: dict = {
+            "cluster": cluster,
+            "cpu": 1024,
+            "memory_limit_mib": 2048,
+            "desired_count": 2,
+            "circuit_breaker": ecs.DeploymentCircuitBreaker(rollback=True),
+            "min_healthy_percent": 100,
+            "max_healthy_percent": 200,
             # Named for the same reason as the cluster: `--service axonllm` and
             # `--task-definition axonllm` appear in the README's post-deploy
             # steps, and both failed against a real deployment before this.
-            service_name="axonllm",
-            task_image_options=ecs_patterns.ApplicationLoadBalancedTaskImageOptions(
-                image=ecs.ContainerImage.from_registry(
-                    verified_image_uri.value_as_string
-                ),
-                container_port=8000,
-                family="axonllm",
-                log_driver=ecs.LogDrivers.aws_logs(
-                    stream_prefix="axonllm",
-                    log_retention=logs.RetentionDays.ONE_MONTH,
-                ),
-                secrets=container_secrets,
-                environment={
-                    "AWS_DEFAULT_REGION": self.region,
-                    "AXON_AWS_ACCOUNT_ID": self.account,
-                    "LLM_ROUTER_DYNAMODB_ENABLED": "true",
-                    "AXON_DYNAMODB_TABLE": selected_state_table_name,
-                    "AXON_ROUTING_CONFIG_SIGNING_MODE": "sign-verify",
-                    "AXON_ROUTING_CONFIG_SIGNING_KEY_ARN": (
-                        routing_config_signing_key.key_arn
+            "service_name": "axonllm",
+            "task_image_options": (
+                ecs_patterns.ApplicationLoadBalancedTaskImageOptions(
+                    image=ecs.ContainerImage.from_registry(
+                        verified_image_uri.value_as_string
                     ),
-                    "AXON_EVENT_OUTBOX_QUEUE_URL": (
-                        event_outbox_queue.queue_url
+                    container_port=8000,
+                    family="axonllm",
+                    log_driver=ecs.LogDrivers.aws_logs(
+                        stream_prefix="axonllm",
+                        log_group=application_log_group,
                     ),
-                    "AXON_SECURITY_EVENT_SNS_TOPIC_ARN": (
-                        security_event_topic.topic_arn
-                    ),
-                    "AXON_SECURITY_EVENT_LOG_GROUP_ARN": (
-                        security_event_log_group.log_group_arn
-                    ),
-                    "AXON_AUTH_MODE": "ENFORCE",
-                    "AXON_DEPLOYMENT_PROFILE": Token.as_string(
-                        Fn.condition_if(
-                            production_mode.logical_id,
-                            "production",
-                            "development",
-                        )
-                    ),
-                    "AXON_OIDC_ISSUER": Token.as_string(
-                        Fn.condition_if(
-                            production_mode.logical_id,
-                            oidc_issuer.value_as_string,
-                            "",
-                        )
-                    ),
-                    "AXON_OIDC_AUDIENCE": Token.as_string(
-                        Fn.condition_if(
-                            production_mode.logical_id,
-                            oidc_audience.value_as_string,
-                            "",
-                        )
-                    ),
-                    "AXON_ALB_SIGNER_ARN": Token.as_string(
-                        Fn.condition_if(
-                            production_mode.logical_id,
-                            load_balancer.load_balancer_arn,
-                            "",
-                        )
-                    ),
-                    "AXON_ALB_CLIENT_ID": Token.as_string(
-                        Fn.condition_if(
-                            production_mode.logical_id,
-                            oidc_client_id.value_as_string,
-                            "",
-                        )
-                    ),
-                    "AXON_ALB_ISSUER": Token.as_string(
-                        Fn.condition_if(
-                            production_mode.logical_id,
-                            (
-                                "https://public-keys.auth.elb."
-                                f"{self.region}.amazonaws.com"
-                            ),
-                            "",
-                        )
-                    ),
-                    "AXON_REQUIRE_CANONICAL_IDENTITY": Token.as_string(
-                        Fn.condition_if(
-                            production_mode.logical_id,
-                            "true",
-                            "false",
-                        )
-                    ),
-                    "AXON_SERVER_PORT": "8000",
-                    "HOME": "/tmp",
-                    # Explicit "false" because the container CMD is
-                    # serve_dashboard.py, which defaults this to "true" when the
-                    # variable is absent. Omitting it here deploys Acme Corp,
-                    # three fictional users and 66 fabricated usage records to
-                    # Fargate — indistinguishable from real usage in the UI, and
-                    # merged into DynamoDB where they outlive the flag. For a
-                    # seeded demo deployment, flip this to "true" deliberately.
-                    "AXON_LOAD_DEMO_DATA": "false",
-                },
+                    secrets=container_secrets,
+                    environment={
+                        "AWS_DEFAULT_REGION": self.region,
+                        "AXON_AWS_ACCOUNT_ID": self.account,
+                        "LLM_ROUTER_DYNAMODB_ENABLED": "true",
+                        "AXON_DYNAMODB_TABLE": selected_state_table_name,
+                        "AXON_ROUTING_CONFIG_SIGNING_MODE": "sign-verify",
+                        "AXON_ROUTING_CONFIG_SIGNING_KEY_ARN": (
+                            routing_config_signing_key.key_arn
+                        ),
+                        "AXON_EVENT_OUTBOX_QUEUE_URL": (
+                            event_outbox_queue.queue_url
+                        ),
+                        "AXON_SECURITY_EVENT_SNS_TOPIC_ARN": (
+                            security_event_topic.topic_arn
+                        ),
+                        "AXON_SECURITY_EVENT_LOG_GROUP_ARN": (
+                            security_event_log_group.log_group_arn
+                        ),
+                        "AXON_AUTH_MODE": "ENFORCE",
+                        "AXON_DEPLOYMENT_PROFILE": Token.as_string(
+                            Fn.condition_if(
+                                production_mode.logical_id,
+                                "production",
+                                "development",
+                            )
+                        ),
+                        "AXON_OIDC_ISSUER": Token.as_string(
+                            Fn.condition_if(
+                                production_mode.logical_id,
+                                oidc_issuer.value_as_string,
+                                "",
+                            )
+                        ),
+                        "AXON_OIDC_AUDIENCE": Token.as_string(
+                            Fn.condition_if(
+                                production_mode.logical_id,
+                                oidc_audience.value_as_string,
+                                "",
+                            )
+                        ),
+                        "AXON_ALB_SIGNER_ARN": Token.as_string(
+                            Fn.condition_if(
+                                production_mode.logical_id,
+                                load_balancer.load_balancer_arn,
+                                "",
+                            )
+                        ),
+                        "AXON_ALB_CLIENT_ID": Token.as_string(
+                            Fn.condition_if(
+                                production_mode.logical_id,
+                                oidc_client_id.value_as_string,
+                                "",
+                            )
+                        ),
+                        "AXON_ALB_ISSUER": Token.as_string(
+                            Fn.condition_if(
+                                production_mode.logical_id,
+                                (
+                                    "https://public-keys.auth.elb."
+                                    f"{self.region}.amazonaws.com"
+                                ),
+                                "",
+                            )
+                        ),
+                        "AXON_REQUIRE_CANONICAL_IDENTITY": Token.as_string(
+                            Fn.condition_if(
+                                production_mode.logical_id,
+                                "true",
+                                "false",
+                            )
+                        ),
+                        "AXON_SERVER_PORT": "8000",
+                        "HOME": "/tmp",
+                        # This remains false by default and is forbidden in
+                        # production. A dedicated disposable demo must opt in
+                        # through the reviewed LoadDemoData parameter.
+                        "AXON_LOAD_DEMO_DATA": (
+                            load_demo_data.value_as_string
+                        ),
+                    },
+                )
             ),
-            assign_public_ip=False,
-            load_balancer=load_balancer,
-            task_subnets=ec2.SubnetSelection(
-                subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS
+            "assign_public_ip": False,
+            "load_balancer": load_balancer,
+            "task_subnets": ec2.SubnetSelection(
+                subnet_type=application_subnet_type
             ),
-            security_groups=[task_security_group],
-            open_listener=False,
-            certificate=origin_certificate,
-            protocol=elbv2.ApplicationProtocol.HTTPS,
-            listener_port=443,
-            ssl_policy=elbv2.SslPolicy.RECOMMENDED_TLS,
-            health_check_grace_period=Duration.seconds(60),
+            "security_groups": [task_security_group],
+            "open_listener": False,
+            "protocol": (
+                elbv2.ApplicationProtocol.HTTP
+                if cloudfront_default_domain
+                else elbv2.ApplicationProtocol.HTTPS
+            ),
+            "listener_port": 80 if cloudfront_default_domain else 443,
+            "health_check_grace_period": Duration.seconds(60),
+        }
+        if origin_certificate is not None:
+            service_options["certificate"] = origin_certificate
+            service_options["ssl_policy"] = elbv2.SslPolicy.RECOMMENDED_TLS
+
+        fargate_service = ecs_patterns.ApplicationLoadBalancedFargateService(
+            self,
+            "Service",
+            **service_options,
         )
         cutover_guard_handler_logs = logs.LogGroup(
             self,
@@ -1210,6 +1472,22 @@ class AxonLLMStack(Stack):
         if cutover_guard_resource is None:
             raise TypeError("recovery cutover guard has no CloudFormation child")
         cfn_service.add_dependency(cutover_guard_resource)
+        for endpoint in (
+            logs_endpoint,
+            secrets_endpoint,
+            ecr_api_endpoint,
+            ecr_docker_endpoint,
+            bedrock_runtime_endpoint,
+            s3_endpoint,
+            dynamodb_endpoint,
+        ):
+            endpoint_resource = endpoint.node.default_child
+            if not isinstance(endpoint_resource, CfnResource):
+                raise TypeError(
+                    "Fargate service dependency endpoint has no "
+                    "CloudFormation resource"
+                )
+            cfn_service.add_dependency(endpoint_resource)
 
         task_definition = fargate_service.task_definition
         task_definition.add_volume(name="tmp")
@@ -1343,14 +1621,16 @@ class AxonLLMStack(Stack):
         # --- IAM permissions ---
         task_role = fargate_service.task_definition.task_role
 
+        bedrock_runtime_actions = [
+            "bedrock:InvokeModel",
+            "bedrock:InvokeModelWithResponseStream",
+        ]
+
         # Bedrock runtime and Mantle inference. Mantle uses a separate IAM
         # service prefix; grant only the two API operations this runtime calls.
         task_role.add_to_policy(
             iam.PolicyStatement(
-                actions=[
-                    "bedrock:InvokeModel",
-                    "bedrock:InvokeModelWithResponseStream",
-                ],
+                actions=bedrock_runtime_actions,
                 resources=bedrock_invoke_resource_arns.value_as_list,
             )
         )
@@ -1366,31 +1646,40 @@ class AxonLLMStack(Stack):
 
         # Resolve IAM through the same condition as AXON_DYNAMODB_TABLE so a
         # recovery cutover never leaves both state tables writable.
-        selected_state_table_arn = self.format_arn(
-            service="dynamodb",
-            resource="table",
-            resource_name=selected_state_table_name,
-        )
         task_role.add_to_policy(
             iam.PolicyStatement(
                 sid="UseSelectedStateTable",
-                actions=[
-                    "dynamodb:BatchGetItem",
-                    "dynamodb:BatchWriteItem",
-                    "dynamodb:ConditionCheckItem",
-                    "dynamodb:DeleteItem",
-                    "dynamodb:DescribeTable",
-                    "dynamodb:GetItem",
-                    "dynamodb:PutItem",
-                    "dynamodb:Query",
-                    "dynamodb:Scan",
-                    "dynamodb:UpdateItem",
-                ],
+                actions=dynamodb_standard_actions,
                 resources=[
                     selected_state_table_arn,
                     f"{selected_state_table_arn}/index/*",
                 ],
             )
+        )
+        transaction_policy = iam.Policy(
+            self,
+            "TaskDynamoTransactionPolicy",
+            statements=[
+                iam.PolicyStatement(
+                    sid="TransactWithSelectedStateTable",
+                    actions=dynamodb_transaction_actions,
+                    resources=[
+                        selected_state_table_arn,
+                        f"{selected_state_table_arn}/index/*",
+                    ],
+                )
+            ],
+        )
+        transaction_policy.attach_to_role(task_role)
+        cfn_transaction_policy = transaction_policy.node.default_child
+        if not isinstance(cfn_transaction_policy, iam.CfnPolicy):
+            raise TypeError(
+                "task transaction policy has no CfnPolicy child"
+            )
+        # cfn-lint 1.52.1 omits this valid DynamoDB IAM action.
+        cfn_transaction_policy.add_metadata(
+            "cfn-lint",
+            {"config": {"ignore_checks": ["W3037"]}},
         )
         task_role.add_to_policy(
             iam.PolicyStatement(
@@ -1470,20 +1759,25 @@ class AxonLLMStack(Stack):
         )
 
         # --- CloudFront distribution ---
-        vpc_origin = origins.VpcOrigin.with_application_load_balancer(
-            fargate_service.load_balancer,
-            domain_name=origin_domain_name.value_as_string,
-            protocol_policy=cloudfront.OriginProtocolPolicy.HTTPS_ONLY,
-            origin_ssl_protocols=[cloudfront.OriginSslPolicy.TLS_V1_2],
-            https_port=443,
-            read_timeout=Duration.seconds(60),
-            keepalive_timeout=Duration.seconds(60),
-        )
-        viewer_certificate = acm.Certificate.from_certificate_arn(
-            self,
-            "ViewerCertificate",
-            viewer_certificate_arn.value_as_string,
-        )
+        if cloudfront_default_domain:
+            vpc_origin = origins.VpcOrigin.with_application_load_balancer(
+                fargate_service.load_balancer,
+                protocol_policy=cloudfront.OriginProtocolPolicy.HTTP_ONLY,
+                http_port=80,
+                read_timeout=Duration.seconds(60),
+                keepalive_timeout=Duration.seconds(60),
+            )
+        else:
+            assert origin_domain_name is not None
+            vpc_origin = origins.VpcOrigin.with_application_load_balancer(
+                fargate_service.load_balancer,
+                domain_name=origin_domain_name.value_as_string,
+                protocol_policy=cloudfront.OriginProtocolPolicy.HTTPS_ONLY,
+                origin_ssl_protocols=[cloudfront.OriginSslPolicy.TLS_V1_2],
+                https_port=443,
+                read_timeout=Duration.seconds(60),
+                keepalive_timeout=Duration.seconds(60),
+            )
         web_acl = wafv2.CfnWebACL(
             self,
             "WebAcl",
@@ -1536,60 +1830,100 @@ class AxonLLMStack(Stack):
                 ),
             ],
         )
-        distribution = cloudfront.Distribution(
-            self,
-            "CDN",
-            default_behavior=cloudfront.BehaviorOptions(
+        distribution_options: dict = {
+            "default_behavior": cloudfront.BehaviorOptions(
                 origin=vpc_origin,
                 viewer_protocol_policy=cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
                 allowed_methods=cloudfront.AllowedMethods.ALLOW_ALL,
                 cache_policy=cloudfront.CachePolicy.CACHING_DISABLED,
                 origin_request_policy=cloudfront.OriginRequestPolicy.ALL_VIEWER,
             ),
-            additional_behaviors={
+            "additional_behaviors": {
                 "/admin/static/*": cloudfront.BehaviorOptions(
                     origin=vpc_origin,
                     viewer_protocol_policy=cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
                     cache_policy=cloudfront.CachePolicy.CACHING_OPTIMIZED,
                 ),
             },
-            certificate=viewer_certificate,
-            domain_names=[viewer_domain_name.value_as_string],
-            minimum_protocol_version=cloudfront.SecurityPolicyProtocol.TLS_V1_2_2021,
-            ssl_support_method=cloudfront.SSLMethod.SNI,
-            web_acl_id=web_acl.attr_arn,
-            price_class=cloudfront.PriceClass.PRICE_CLASS_100,
-            enable_logging=True,
-            log_bucket=access_logs_bucket,
-            log_file_prefix="cloudfront/",
-            log_includes_cookies=False,
+            "web_acl_id": web_acl.attr_arn,
+            "price_class": cloudfront.PriceClass.PRICE_CLASS_100,
+            "enable_logging": True,
+            "log_bucket": access_logs_bucket,
+            "log_file_prefix": "cloudfront/",
+            "log_includes_cookies": False,
+        }
+        if not cloudfront_default_domain:
+            assert viewer_certificate_arn is not None
+            assert viewer_domain_name is not None
+            distribution_options.update(
+                {
+                    "certificate": acm.Certificate.from_certificate_arn(
+                        self,
+                        "ViewerCertificate",
+                        viewer_certificate_arn.value_as_string,
+                    ),
+                    "domain_names": [
+                        viewer_domain_name.value_as_string
+                    ],
+                    "minimum_protocol_version": (
+                        cloudfront.SecurityPolicyProtocol.TLS_V1_2_2021
+                    ),
+                    "ssl_support_method": cloudfront.SSLMethod.SNI,
+                }
+            )
+        distribution = cloudfront.Distribution(
+            self,
+            "CDN",
+            **distribution_options,
         )
+        cfn_distribution = distribution.node.default_child
+        vpc_origin_resources = [
+            child
+            for child in distribution.node.find_all()
+            if isinstance(child, cloudfront.CfnVpcOrigin)
+        ]
+        if (
+            not isinstance(cfn_distribution, cloudfront.CfnDistribution)
+            or len(vpc_origin_resources) != 1
+        ):
+            raise RuntimeError(
+                "CloudFront distribution must contain exactly one VPC origin"
+            )
+        # The VPC-origin provider exposes its ID during the eventual-consistency
+        # phase. Without an explicit dependency CloudFormation can start the
+        # distribution while the origin still reports CREATE_IN_PROGRESS, and
+        # CloudFront rejects the association with a concurrent CRUD error.
+        cfn_distribution.add_dependency(vpc_origin_resources[0])
 
-        public_alias_target = route53.CfnRecordSet.AliasTargetProperty(
-            dns_name=distribution.domain_name,
-            hosted_zone_id="Z2FDTNDATAQYW2",
-            evaluate_target_health=False,
-        )
-        public_a_record = route53.CfnRecordSet(
-            self,
-            "PublicAliasA",
-            hosted_zone_id=public_hosted_zone_id.value_as_string,
-            name=viewer_domain_name.value_as_string,
-            type="A",
-            alias_target=public_alias_target,
-            comment="AxonLLM CloudFront IPv4 alias",
-        )
-        public_a_record.cfn_options.condition = manage_public_dns
-        public_aaaa_record = route53.CfnRecordSet(
-            self,
-            "PublicAliasAaaa",
-            hosted_zone_id=public_hosted_zone_id.value_as_string,
-            name=viewer_domain_name.value_as_string,
-            type="AAAA",
-            alias_target=public_alias_target,
-            comment="AxonLLM CloudFront IPv6 alias",
-        )
-        public_aaaa_record.cfn_options.condition = manage_public_dns
+        if not cloudfront_default_domain:
+            assert viewer_domain_name is not None
+            public_alias_target = (
+                route53.CfnRecordSet.AliasTargetProperty(
+                    dns_name=distribution.domain_name,
+                    hosted_zone_id="Z2FDTNDATAQYW2",
+                    evaluate_target_health=False,
+                )
+            )
+            public_a_record = route53.CfnRecordSet(
+                self,
+                "PublicAliasA",
+                hosted_zone_id=public_hosted_zone_id.value_as_string,
+                name=viewer_domain_name.value_as_string,
+                type="A",
+                alias_target=public_alias_target,
+                comment="AxonLLM CloudFront IPv4 alias",
+            )
+            public_a_record.cfn_options.condition = manage_public_dns
+            public_aaaa_record = route53.CfnRecordSet(
+                self,
+                "PublicAliasAaaa",
+                hosted_zone_id=public_hosted_zone_id.value_as_string,
+                name=viewer_domain_name.value_as_string,
+                type="AAAA",
+                alias_target=public_alias_target,
+                comment="AxonLLM CloudFront IPv6 alias",
+            )
+            public_aaaa_record.cfn_options.condition = manage_public_dns
 
         # --- Monitoring and alerting ---
         alarm_topic = sns.Topic(
@@ -1857,10 +2191,20 @@ class AxonLLMStack(Stack):
         )
 
         # --- Outputs ---
+        cloudfront_url = (
+            f"https://{distribution.domain_name}"
+            if cloudfront_default_domain
+            else f"https://{viewer_domain_name.value_as_string}"
+        )
+        alb_url = (
+            f"http://{fargate_service.load_balancer.load_balancer_dns_name}"
+            if cloudfront_default_domain
+            else f"https://{origin_domain_name.value_as_string}"
+        )
         CfnOutput(
             self,
             "CloudFrontURL",
-            value=f"https://{viewer_domain_name.value_as_string}",
+            value=cloudfront_url,
         )
         CfnOutput(
             self,
@@ -1870,7 +2214,7 @@ class AxonLLMStack(Stack):
         CfnOutput(
             self,
             "ALBURL",
-            value=f"https://{origin_domain_name.value_as_string}",
+            value=alb_url,
         )
         CfnOutput(
             self,

@@ -165,6 +165,49 @@ def synthesized_template(tmp_path_factory: pytest.TempPathFactory) -> dict:
     )
 
 
+@pytest.fixture(scope="module")
+def demo_edge_template(tmp_path_factory: pytest.TempPathFactory) -> dict:
+    if not _INFRA_PYTHON.is_file():
+        pytest.skip("infra/.venv is required for CDK synthesis tests")
+
+    work_dir = tmp_path_factory.mktemp("infra-stack-demo-edge")
+    out_dir = work_dir / "cdk.out"
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "CDK_CONTEXT_JSON": json.dumps(
+                {
+                    "region": "us-east-1",
+                    "deployment_namespace": "demo",
+                    "fargate_edge_mode": "cloudfront-default",
+                    "table_name": "axonllm-demo-state",
+                }
+            ),
+            "CDK_OUTDIR": str(out_dir),
+            "JSII_RUNTIME_PACKAGE_CACHE_ROOT": str(
+                work_dir / "jsii-cache"
+            ),
+            "PYTHONPYCACHEPREFIX": str(work_dir / "pycache"),
+        }
+    )
+    completed = subprocess.run(
+        [str(_INFRA_PYTHON), "app.py"],
+        cwd=_INFRA,
+        env=environment,
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        timeout=120,
+    )
+    assert completed.returncode == 0, completed.stdout
+    return json.loads(
+        (out_dir / "AxonLLMStack-demo.template.json").read_text(
+            encoding="utf-8"
+        )
+    )
+
+
 def test_required_inputs_have_no_source_defaults():
     tree = ast.parse(_STACK.read_text(encoding="utf-8"))
     parameters: dict[str, ast.Call] = {}
@@ -220,7 +263,7 @@ def test_deploy_wrapper_requires_and_passes_every_stack_parameter():
     for parameter, environment_name in _DEPLOY_ENV_BY_PARAMETER.items():
         assert f"require_env {environment_name}" in script
         assert (
-            f'--parameters "AxonLLMStack:{parameter}='
+            f'--parameters "${{STACK_ID}}:{parameter}='
             f"${{{environment_name}}}\""
         ) in script
 
@@ -228,19 +271,25 @@ def test_deploy_wrapper_requires_and_passes_every_stack_parameter():
     assert ".get('CloudFrontURL'" in script
     assert 'DEPLOYMENT_MODE="${AXON_DEPLOYMENT_MODE:-staging}"' in script
     assert (
-        '--parameters "AxonLLMStack:DeploymentMode=$DEPLOYMENT_MODE"'
+        '--parameters "${STACK_ID}:DeploymentMode=$DEPLOYMENT_MODE"'
         in script
     )
     assert (
-        '--parameters "AxonLLMStack:RuntimeStateTableName='
+        '--parameters "${STACK_ID}:RuntimeStateTableName='
         '$RUNTIME_TABLE_NAME"'
         in script
     )
     assert (
-        '--parameters "AxonLLMStack:RecoveryCutoverMode='
+        '--parameters "${STACK_ID}:RecoveryCutoverMode='
         '$RECOVERY_CUTOVER_MODE"'
         in script
     )
+    assert (
+        '--parameters "${STACK_ID}:LoadDemoData=$LOAD_DEMO_DATA"'
+        in script
+    )
+    assert 'AXON_FARGATE_EDGE_MODE:-custom-domain' in script
+    assert 'AXON_DEPLOYMENT_NAMESPACE:-' in script
     assert "require_env AXON_OIDC_ISSUER" in script
     assert "require_env AXON_OIDC_CLIENT_SECRET" in script
     assert 'try_get_context("scim_tenants_secret_arn")' in (
@@ -333,6 +382,85 @@ def test_origin_transport_is_tls_only(synthesized_template):
     assert vpc_origin["OriginSSLProtocols"] == ["TLSv1.2"]
 
 
+def test_demo_edge_uses_cloudfront_https_with_a_private_http_origin(
+    demo_edge_template,
+):
+    parameters = demo_edge_template["Parameters"]
+    for name in (
+        "ViewerDomainName",
+        "ViewerCertificateArn",
+        "OriginDomainName",
+        "OriginCertificateArn",
+    ):
+        assert name not in parameters
+    assert parameters["DeploymentMode"]["AllowedValues"] == ["staging"]
+
+    listener = _one_resource(
+        demo_edge_template,
+        "AWS::ElasticLoadBalancingV2::Listener",
+    )["Properties"]
+    assert listener["Port"] == 80
+    assert listener["Protocol"] == "HTTP"
+    assert "Certificates" not in listener
+
+    vpc_origin = _one_resource(
+        demo_edge_template,
+        "AWS::CloudFront::VpcOrigin",
+    )["Properties"]["VpcOriginEndpointConfig"]
+    assert vpc_origin["HTTPPort"] == 80
+    assert vpc_origin["OriginProtocolPolicy"] == "http-only"
+    assert not _resources(demo_edge_template, "AWS::EC2::NatGateway")
+    assert not _resources(demo_edge_template, "AWS::EC2::EIP")
+
+    distribution = _one_resource(
+        demo_edge_template,
+        "AWS::CloudFront::Distribution",
+    )["Properties"]["DistributionConfig"]
+    assert "Aliases" not in distribution
+    assert "ViewerCertificate" not in distribution
+    assert not _resources(demo_edge_template, "AWS::Route53::RecordSet")
+
+    output = demo_edge_template["Outputs"]["CloudFrontURL"]["Value"]
+    assert output["Fn::Join"][1][0] == "https://"
+    assert output["Fn::Join"][1][1]["Fn::GetAtt"][1] == "DomainName"
+
+
+def test_distribution_waits_for_vpc_origin_stabilization(
+    demo_edge_template,
+):
+    vpc_origin_id = next(
+        logical_id
+        for logical_id, resource in demo_edge_template["Resources"].items()
+        if resource["Type"] == "AWS::CloudFront::VpcOrigin"
+    )
+    distribution = _one_resource(
+        demo_edge_template,
+        "AWS::CloudFront::Distribution",
+    )
+
+    assert vpc_origin_id in distribution["DependsOn"]
+
+
+def test_demo_seed_is_an_explicit_false_by_default_parameter(
+    demo_edge_template,
+):
+    parameter = demo_edge_template["Parameters"]["LoadDemoData"]
+    assert parameter["Default"] == "false"
+    assert parameter["AllowedValues"] == ["false", "true"]
+
+    task = _one_resource(
+        demo_edge_template,
+        "AWS::ECS::TaskDefinition",
+    )["Properties"]["ContainerDefinitions"][0]
+    environment = {
+        item["Name"]: item["Value"]
+        for item in task["Environment"]
+    }
+    assert environment["AXON_LOAD_DEMO_DATA"] == {
+        "Ref": "LoadDemoData"
+    }
+
+
 def test_task_egress_and_aws_endpoints_are_explicitly_bounded(
     synthesized_template,
 ):
@@ -373,43 +501,82 @@ def test_task_egress_and_aws_endpoints_are_explicitly_bounded(
     assert task_group_ref[0].startswith("TaskSecurityGroup")
     assert task_group_ref[1] == "GroupId"
 
-    aws_endpoints = [
-        endpoint["Properties"]
-        for endpoint in _resources(
-            synthesized_template,
-            "AWS::EC2::VPCEndpoint",
-        )
-    ]
-    assert len(aws_endpoints) == 4
+    endpoint_resources = {
+        logical_id: endpoint["Properties"]
+        for logical_id, endpoint in synthesized_template["Resources"].items()
+        if endpoint["Type"] == "AWS::EC2::VPCEndpoint"
+    }
+    assert len(endpoint_resources) == 10
+    interface_endpoints = {
+        logical_id: endpoint
+        for logical_id, endpoint in endpoint_resources.items()
+        if endpoint["VpcEndpointType"] == "Interface"
+    }
+    gateway_endpoints = {
+        logical_id: endpoint
+        for logical_id, endpoint in endpoint_resources.items()
+        if endpoint["VpcEndpointType"] == "Gateway"
+    }
+    assert len(interface_endpoints) == 8
+    assert len(gateway_endpoints) == 2
     assert all(
-        endpoint["VpcEndpointType"] == "Interface"
-        and endpoint["PrivateDnsEnabled"] is True
+        endpoint["PrivateDnsEnabled"] is True
         and len(endpoint["SubnetIds"]) == 2
         and all(
             subnet["Ref"].startswith("VpcApplicationSubnet")
             for subnet in endpoint["SubnetIds"]
         )
-        for endpoint in aws_endpoints
+        for endpoint in interface_endpoints.values()
+    )
+    assert all(
+        len(endpoint["RouteTableIds"]) == 2
+        and all(
+            route_table["Ref"].startswith(
+                "VpcApplicationSubnet"
+            )
+            for route_table in endpoint["RouteTableIds"]
+        )
+        for endpoint in gateway_endpoints.values()
     )
     sqs_endpoint = next(
         endpoint
-        for endpoint in aws_endpoints
+        for endpoint in interface_endpoints.values()
         if endpoint["ServiceName"].endswith(".sqs")
     )
     sns_endpoint = next(
         endpoint
-        for endpoint in aws_endpoints
+        for endpoint in interface_endpoints.values()
         if endpoint["ServiceName"].endswith(".sns")
     )
     logs_endpoint = next(
         endpoint
-        for endpoint in aws_endpoints
+        for endpoint in interface_endpoints.values()
         if endpoint["ServiceName"].endswith(".logs")
     )
     kms_endpoint = next(
         endpoint
-        for endpoint in aws_endpoints
+        for endpoint in interface_endpoints.values()
         if endpoint["ServiceName"].endswith(".kms")
+    )
+    secrets_endpoint = next(
+        endpoint
+        for endpoint in interface_endpoints.values()
+        if endpoint["ServiceName"].endswith(".secretsmanager")
+    )
+    ecr_api_endpoint = next(
+        endpoint
+        for endpoint in interface_endpoints.values()
+        if endpoint["ServiceName"].endswith(".ecr.api")
+    )
+    ecr_docker_endpoint = next(
+        endpoint
+        for endpoint in interface_endpoints.values()
+        if endpoint["ServiceName"].endswith(".ecr.dkr")
+    )
+    bedrock_runtime_endpoint = next(
+        endpoint
+        for endpoint in interface_endpoints.values()
+        if endpoint["ServiceName"].endswith(".bedrock-runtime")
     )
     sqs_statement = sqs_endpoint["PolicyDocument"]["Statement"][0]
     assert _actions(sqs_statement) == {
@@ -438,10 +605,180 @@ def test_task_egress_and_aws_endpoints_are_explicitly_bounded(
     assert "SecurityEventLogGroup" in json.dumps(
         logs_statement["Resource"][1]
     )
+    assert logs_statement["Resource"][2]["Fn::GetAtt"][0].startswith(
+        "ApplicationLogGroup"
+    )
+    assert "ApplicationLogGroup" in json.dumps(
+        logs_statement["Resource"][3]
+    )
     kms_statement = kms_endpoint["PolicyDocument"]["Statement"][0]
     assert _actions(kms_statement) == {"kms:Sign", "kms:Verify"}
     assert kms_statement["Resource"]["Fn::GetAtt"][0].startswith(
         "RoutingConfigSigningKey"
+    )
+    secrets_statement = secrets_endpoint["PolicyDocument"]["Statement"][0]
+    assert _actions(secrets_statement) == {
+        "secretsmanager:DescribeSecret",
+        "secretsmanager:GetSecretValue",
+    }
+    assert secrets_statement["Resource"]["Ref"].startswith("ApiKeys")
+    for ecr_endpoint in (ecr_api_endpoint, ecr_docker_endpoint):
+        statements = ecr_endpoint["PolicyDocument"]["Statement"]
+        assert len(statements) == 2
+        authorization = next(
+            statement
+            for statement in statements
+            if _actions(statement) == {"ecr:GetAuthorizationToken"}
+        )
+        assert authorization["Resource"] == "*"
+        image_pull = next(
+            statement
+            for statement in statements
+            if "ecr:BatchGetImage" in _actions(statement)
+        )
+        assert _actions(image_pull) == {
+            "ecr:BatchCheckLayerAvailability",
+            "ecr:BatchGetImage",
+            "ecr:GetDownloadUrlForLayer",
+        }
+        assert "VerifiedImageUri" in json.dumps(image_pull["Resource"])
+    bedrock_statement = (
+        bedrock_runtime_endpoint["PolicyDocument"]["Statement"][0]
+    )
+    assert _actions(bedrock_statement) == {
+        "bedrock:InvokeModel",
+        "bedrock:InvokeModelWithResponseStream",
+    }
+    assert bedrock_statement["Resource"] == {
+        "Ref": "BedrockInvokeResourceArns"
+    }
+
+    s3_endpoint = next(
+        endpoint
+        for endpoint in gateway_endpoints.values()
+        if ".s3" in json.dumps(endpoint["ServiceName"])
+    )
+    dynamodb_endpoint = next(
+        endpoint
+        for endpoint in gateway_endpoints.values()
+        if ".dynamodb" in json.dumps(endpoint["ServiceName"])
+    )
+    s3_statement = s3_endpoint["PolicyDocument"]["Statement"][0]
+    assert _actions(s3_statement) == {"s3:GetObject"}
+    assert "starport-layer-bucket" in json.dumps(
+        s3_statement["Resource"]
+    )
+    dynamodb_statement = (
+        dynamodb_endpoint["PolicyDocument"]["Statement"][0]
+    )
+    assert _actions(dynamodb_statement) == {
+        "dynamodb:BatchGetItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable",
+        "dynamodb:GetItem",
+        "dynamodb:PutItem",
+        "dynamodb:Query",
+        "dynamodb:Scan",
+        "dynamodb:TransactWriteItems",
+        "dynamodb:UpdateItem",
+    }
+    assert "StateTable" in json.dumps(dynamodb_statement["Resource"])
+    dynamodb_endpoint_resource = next(
+        endpoint
+        for endpoint in synthesized_template["Resources"].values()
+        if endpoint["Type"] == "AWS::EC2::VPCEndpoint"
+        and ".dynamodb" in json.dumps(
+            endpoint["Properties"]["ServiceName"]
+        )
+    )
+    assert dynamodb_endpoint_resource["Metadata"]["cfn-lint"] == {
+        "config": {"ignore_checks": ["W3037"]}
+    }
+
+    gateway_egress = [
+        resource["Properties"]
+        for resource in _resources(
+            synthesized_template, "AWS::EC2::SecurityGroupEgress"
+        )
+        if resource["Properties"].get("Description")
+        in {
+            "HTTPS to the regional S3 gateway endpoint",
+            "HTTPS to the regional DynamoDB gateway endpoint",
+        }
+    ]
+    assert {
+        rule["Description"] for rule in gateway_egress
+    } == {
+        "HTTPS to the regional S3 gateway endpoint",
+        "HTTPS to the regional DynamoDB gateway endpoint",
+    }
+    assert all(
+        rule["FromPort"] == rule["ToPort"] == 443
+        and rule["IpProtocol"] == "tcp"
+        for rule in gateway_egress
+    )
+    prefix_refs = {
+        rule["Description"]: (
+            rule["DestinationPrefixListId"]["Fn::GetAtt"][0]
+        )
+        for rule in gateway_egress
+    }
+    assert prefix_refs[
+        "HTTPS to the regional S3 gateway endpoint"
+    ].startswith("S3PrefixList")
+    assert prefix_refs[
+        "HTTPS to the regional DynamoDB gateway endpoint"
+    ].startswith("DynamoDbPrefixList")
+
+    service = _one_resource(
+        synthesized_template, "AWS::ECS::Service"
+    )
+    dependencies = set(service["DependsOn"])
+    for logical_id in endpoint_resources:
+        if any(
+            token in logical_id
+            for token in (
+                "BedrockRuntimeEndpoint",
+                "CloudWatchLogsEndpoint",
+                "DynamoDbEndpoint",
+                "EcrApiEndpoint",
+                "EcrDockerEndpoint",
+                "S3Endpoint",
+                "SecretsManagerEndpoint",
+            )
+        ):
+            assert logical_id in dependencies
+
+
+def test_ecs_application_logs_use_the_endpoint_allowed_log_group(
+    synthesized_template,
+):
+    application_log_group_id, application_log_group = next(
+        (logical_id, resource)
+        for logical_id, resource in synthesized_template[
+            "Resources"
+        ].items()
+        if logical_id.startswith("ApplicationLogGroup")
+    )
+    assert application_log_group["Type"] == "AWS::Logs::LogGroup"
+    assert application_log_group["Properties"]["RetentionInDays"] == 30
+    assert application_log_group["Properties"]["KmsKeyId"][
+        "Fn::GetAtt"
+    ][0].startswith("DataKey")
+
+    container = _one_resource(
+        synthesized_template,
+        "AWS::ECS::TaskDefinition",
+    )["Properties"]["ContainerDefinitions"][0]
+    log_configuration = container["LogConfiguration"]
+    assert log_configuration["LogDriver"] == "awslogs"
+    assert log_configuration["Options"]["awslogs-group"] == {
+        "Ref": application_log_group_id
+    }
+    assert log_configuration["Options"]["awslogs-stream-prefix"] == (
+        "axonllm"
     )
 
 
@@ -631,6 +968,8 @@ def test_production_oidc_is_conditional_and_bound_to_the_alb(
         "production",
     ]
     assert parameters["OidcClientSecret"]["NoEcho"] is True
+    assert parameters["LoadDemoData"]["Default"] == "false"
+    assert parameters["LoadDemoData"]["AllowedValues"] == ["false", "true"]
 
     identity_rule = synthesized_template["Rules"]["ProductionIdentityInputs"]
     assert identity_rule["RuleCondition"] == {
@@ -648,6 +987,15 @@ def test_production_oidc_is_conditional_and_bound_to_the_alb(
         "OidcClientId",
         "OidcClientSecret",
         "OidcAudience",
+    }
+    demo_rule = synthesized_template["Rules"][
+        "ProductionDisablesDemoData"
+    ]
+    assert demo_rule["RuleCondition"] == {
+        "Fn::Equals": [{"Ref": "DeploymentMode"}, "production"]
+    }
+    assert demo_rule["Assertions"][0]["Assert"] == {
+        "Fn::Equals": [{"Ref": "LoadDemoData"}, "false"]
     }
 
     listener_rule = _one_resource(
@@ -1151,6 +1499,29 @@ def test_task_role_has_item_permissions_for_atomic_state_transactions(
         "AWS::DynamoDB::Table"
     )
     assert state_access["Resource"][1]["Fn::Join"][1][-1] == "/index/*"
+    transaction_policy = next(
+        policy
+        for policy in policies
+        if any(
+            "dynamodb:TransactWriteItems" in _actions(statement)
+            for statement in policy["Properties"]["PolicyDocument"][
+                "Statement"
+            ]
+        )
+    )
+    transaction_statement = transaction_policy["Properties"][
+        "PolicyDocument"
+    ]["Statement"][0]
+    assert transaction_statement["Sid"] == (
+        "TransactWithSelectedStateTable"
+    )
+    assert _actions(transaction_statement) == {
+        "dynamodb:TransactWriteItems"
+    }
+    assert transaction_statement["Resource"] == state_access["Resource"]
+    assert transaction_policy["Metadata"]["cfn-lint"] == {
+        "config": {"ignore_checks": ["W3037"]}
+    }
     all_actions = {
         action
         for statement in statements
@@ -1161,7 +1532,7 @@ def test_task_role_has_item_permissions_for_atomic_state_transactions(
         )
     }
     assert "dynamodb:TransactGetItems" not in all_actions
-    assert "dynamodb:TransactWriteItems" not in all_actions
+    assert "dynamodb:TransactWriteItems" in all_actions
     routing_key = next(
         statement
         for statement in statements

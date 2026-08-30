@@ -98,10 +98,17 @@ class ArtifactReceipt:
         ).encode("utf-8")
 
 
-def _regular_files(root: Path) -> Iterable[Path]:
+def _regular_files(
+    root: Path,
+    *,
+    excluded_parts: frozenset[str] = frozenset(),
+) -> Iterable[Path]:
     if not root.is_dir():
         raise ValueError(f"directory does not exist: {root}")
     for path in sorted(root.rglob("*")):
+        relative = path.relative_to(root)
+        if any(part in excluded_parts for part in relative.parts):
+            continue
         if path.is_symlink():
             raise ValueError(f"symbolic links are not allowed: {path}")
         if path.is_file():
@@ -177,11 +184,12 @@ def _runtime_source_entries(repository: Path) -> dict[PurePosixPath, Path]:
     entries: dict[PurePosixPath, Path] = {}
     for root_name in ("axonllm", "src"):
         root = repository / root_name
-        for path in _regular_files(root):
+        for path in _regular_files(
+            root,
+            excluded_parts=_SOURCE_EXCLUDED_PARTS,
+        ):
             relative = path.relative_to(repository)
             if path.suffix != ".py" and path.name != "py.typed":
-                continue
-            if any(part in _SOURCE_EXCLUDED_PARTS for part in relative.parts):
                 continue
             _add_entry(
                 entries,

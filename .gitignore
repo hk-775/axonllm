@@ -104,6 +104,7 @@ Thumbs.db
 
 # CDK
 infra/cdk.out/
+infra/cdk.out.*/
 infra/.venv/
 infra/outputs.json
 .axonllm/

@@ -15,7 +15,7 @@ PROVIDER_NAME = "together"
 # never had.
 _TOGETHER_MODELS = [
     ModelInfo(model_id="meta-llama/Llama-3.3-70B-Instruct-Turbo", provider=PROVIDER_NAME, capabilities=["chat", "streaming", "function_calling"]),
-    ModelInfo(model_id="deepseek-ai/DeepSeek-V4-Pro", provider=PROVIDER_NAME, capabilities=["chat", "streaming", "function_calling"]),
+    ModelInfo(model_id="deepseek-ai/DeepSeek-V4-Flash-0731", provider=PROVIDER_NAME, capabilities=["chat", "streaming"]),
     ModelInfo(model_id="openai/gpt-oss-120b", provider=PROVIDER_NAME, capabilities=["chat", "streaming"]),
     ModelInfo(model_id="Qwen/Qwen3.5-9B", provider=PROVIDER_NAME, capabilities=["chat", "streaming"]),
 ]

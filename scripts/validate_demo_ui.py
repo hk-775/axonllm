@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 import re
 import time
@@ -12,7 +13,7 @@ from playwright.sync_api import Browser, Page, Playwright, sync_playwright
 
 
 DEFAULT_BASE_URL = "http://127.0.0.1:8000"
-DEFAULT_LIVE_MODEL = "groq-llama-3.1-8b"
+DEFAULT_LIVE_MODEL = "groq-gpt-oss-20b"
 
 
 def _launch_browser(playwright: Playwright) -> Browser:
@@ -388,6 +389,7 @@ def _validate_dashboard_pages(
 def _validate_live_sandbox(
     page: Page,
     requested_model: str,
+    expected_provider: str,
 ) -> list[str]:
     results: list[str] = []
 
@@ -408,9 +410,10 @@ def _validate_live_sandbox(
     answer = _wait_for_chat_result(frame, timeout=75)
     provider = frame.locator(".message-bubble.assistant .model-badge").last
     provider_text = provider.inner_text().strip() if provider.count() else "unknown"
-    if "groq" not in provider_text.lower():
+    if expected_provider.lower() not in provider_text.lower():
         raise AssertionError(
-            f"Chat succeeded but did not show its Groq provider: {provider_text}"
+            "Chat succeeded but did not show the expected provider "
+            f"{expected_provider!r}: {provider_text}"
         )
     results.append(f"Chat: {provider_text}: {answer[:80]}")
 
@@ -435,10 +438,10 @@ def _validate_live_sandbox(
     playground_metadata = " ".join(
         playground_badges.all_inner_texts()
     ).strip()
-    if "groq" not in playground_metadata.lower():
+    if expected_provider.lower() not in playground_metadata.lower():
         raise AssertionError(
-            "Playground succeeded but did not show its Groq provider: "
-            + playground_metadata
+            "Playground succeeded but did not show the expected provider "
+            f"{expected_provider!r}: {playground_metadata}"
         )
     results.append(
         f"Playground: {playground_metadata}: {playground_answer[:80]}"
@@ -468,12 +471,15 @@ def _validate_mobile(
     browser: Browser,
     base_url: str,
     shots: Path | None,
+    extra_http_headers: dict[str, str],
 ) -> None:
-    page = browser.new_page(
+    context = browser.new_context(
         viewport={"width": 390, "height": 844},
         device_scale_factor=1,
         is_mobile=True,
+        extra_http_headers=extra_http_headers,
     )
+    page = context.new_page()
     try:
         page.goto(base_url + "/", wait_until="domcontentloaded")
         page.locator("[data-axon-flow][data-ready=true]").wait_for()
@@ -496,12 +502,22 @@ def _validate_mobile(
             )
     finally:
         page.close()
+        context.close()
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
     parser.add_argument("--live-model", default=DEFAULT_LIVE_MODEL)
+    parser.add_argument("--expected-provider", default="groq")
+    parser.add_argument(
+        "--api-key-env",
+        default="AXONLLM_API_KEY",
+        help=(
+            "Environment variable containing the protected demo API key; "
+            "the value is never printed"
+        ),
+    )
     parser.add_argument("--skip-live-provider", action="store_true")
     parser.add_argument("--screenshot-dir", type=Path)
     args = parser.parse_args()
@@ -512,12 +528,20 @@ def main() -> int:
 
     console_errors: list[str] = []
     server_errors: list[str] = []
+    api_key = os.environ.get(args.api_key_env, "")
+    extra_http_headers = (
+        {"Authorization": f"Bearer {api_key}"}
+        if api_key
+        else {}
+    )
     with sync_playwright() as playwright:
         browser = _launch_browser(playwright)
-        page = browser.new_page(
+        context = browser.new_context(
             viewport={"width": 1440, "height": 900},
             device_scale_factor=1,
+            extra_http_headers=extra_http_headers,
         )
+        page = context.new_page()
         page.on(
             "console",
             lambda message: (
@@ -545,10 +569,20 @@ def main() -> int:
             )
             live = None
             if not args.skip_live_provider:
-                live = _validate_live_sandbox(page, args.live_model)
-            _validate_mobile(browser, args.base_url, shots)
+                live = _validate_live_sandbox(
+                    page,
+                    args.live_model,
+                    args.expected_provider,
+                )
+            _validate_mobile(
+                browser,
+                args.base_url,
+                shots,
+                extra_http_headers,
+            )
         finally:
             page.close()
+            context.close()
             browser.close()
 
     if server_errors:

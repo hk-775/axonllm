@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 from uuid import UUID
 
+import boto3
 import pytest
 from boto3.dynamodb.types import TypeDeserializer
 
@@ -125,6 +126,19 @@ class _TransactionalClient:
             self.rows = staged
 
 
+class _AutoMarshallingClient:
+    """Resource client that must not receive pre-serialized transactions."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def transact_write_items(self, **request) -> None:
+        self.calls += 1
+        raise AssertionError(
+            "resource DynamoDB client would double-marshal AttributeValue maps"
+        )
+
+
 class _Table:
     def __init__(self, client: _TransactionalClient) -> None:
         self.meta = SimpleNamespace(client=client)
@@ -216,6 +230,33 @@ class TestFailClosedLookup:
 
 
 class TestAtomicIssuance:
+    def test_runtime_uses_plain_client_for_preserialized_transaction(
+        self,
+        monkeypatch,
+    ):
+        resource_client = _AutoMarshallingClient()
+        low_level_client = _TransactionalClient()
+        persistence = _Persistence(resource_client)
+        persistence._dynamodb = object()
+
+        def _client(service_name, *, region_name):
+            assert service_name == "dynamodb"
+            assert region_name == "us-east-1"
+            return low_level_client
+
+        monkeypatch.setattr(boto3, "client", _client)
+
+        asyncio.run(persistence.save_api_key(_key()))
+
+        assert resource_client.calls == 0
+        assert len(low_level_client.transactions) == 1
+        first_item = low_level_client.transactions[0]["TransactItems"][0][
+            "Put"
+        ]["Item"]
+        assert first_item["PK"] == {
+            "S": "TENANT#tenant-a#APIKEY#axk_test"
+        }
+
     def test_one_transaction_creates_primary_hash_and_project_rows(self):
         client = _TransactionalClient()
         persistence = _Persistence(client)

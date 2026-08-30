@@ -217,6 +217,67 @@ class AuditTrail:
         async with self._lock_for(tenant_id):
             await self._initialize_tenant_locked(tenant_id)
 
+    async def hydrate_recent_from_persistence(
+        self,
+        tenant_id: str = LEGACY_TENANT_ID,
+    ) -> int:
+        """Replace one tenant's local buffer with its durable audit records.
+
+        Demo seeding is performed by one elected task, but every replica serves
+        the in-memory audit query endpoint. Hydrating after the seed completes
+        gives every task the same chain head and recent rows before it begins
+        accepting traffic.
+        """
+        tenant_id = _normalize_tenant_id(tenant_id)
+        if not self._persistence_enabled:
+            return 0
+
+        async with self._lock_for(tenant_id):
+            try:
+                rows = await self._load_audit_records(
+                    tenant_id,
+                    project_id=None,
+                    strict=True,
+                )
+                records = [
+                    self._deserialize_record(row, tenant_id)
+                    for row in rows
+                ]
+            except AuditStoreUnavailable:
+                raise
+            except Exception as exc:
+                raise AuditStoreUnavailable(
+                    f"Audit records unavailable for tenant {tenant_id!r}"
+                ) from exc
+
+            previous = GENESIS_HASH
+            for record in records:
+                if record.prev_hash != previous:
+                    raise AuditStoreUnavailable(
+                        "Durable audit records do not form a continuous chain"
+                    )
+                if record.record_hash != record.compute_hash():
+                    raise AuditStoreUnavailable(
+                        "Durable audit record hash validation failed"
+                    )
+                previous = record.record_hash
+
+            if tenant_id != LEGACY_TENANT_ID:
+                durable_head = await self._load_tenant_head(tenant_id)
+                expected_head = previous if records else None
+                if durable_head != expected_head:
+                    raise AuditStoreUnavailable(
+                        "Durable audit head does not match loaded records"
+                    )
+
+            self._buffers[tenant_id] = deque(
+                records[-self._buffer_size :],
+                maxlen=self._buffer_size,
+            )
+            self._last_hashes[tenant_id] = previous
+            self._initialized_tenants.add(tenant_id)
+            return len(records)
+
     async def _initialize_tenant_locked(self, tenant_id: str) -> None:
         if tenant_id in self._initialized_tenants:
             return
@@ -652,11 +713,26 @@ class AuditTrail:
         self,
         tenant_id: str,
         project_id: str | None,
+        *,
+        strict: bool = False,
     ) -> list[dict]:
         if self._persistence is None:
             return []
         if tenant_id == LEGACY_TENANT_ID:
-            loader = getattr(self._persistence, "load_audit_records", None)
+            loader = (
+                getattr(
+                    self._persistence,
+                    "load_audit_records_strict",
+                    None,
+                )
+                if strict
+                else None
+            )
+            loader = loader or getattr(
+                self._persistence,
+                "load_audit_records",
+                None,
+            )
         else:
             loader = getattr(
                 self._persistence,

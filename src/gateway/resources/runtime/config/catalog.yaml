@@ -175,12 +175,12 @@ providers:
     display_name: Groq
     auth_type: api_key
     models:
-      - model_id: llama-3.3-70b-versatile
-        name: Llama 3.3 70B Versatile
+      - model_id: openai/gpt-oss-120b
+        name: GPT-OSS 120B
         capabilities: [chat, streaming, tools]
-      - model_id: llama-3.1-8b-instant
-        name: Llama 3.1 8B Instant
-        capabilities: [chat, streaming]
+      - model_id: openai/gpt-oss-20b
+        name: GPT-OSS 20B
+        capabilities: [chat, streaming, tools]
 
   together:
     display_name: Together AI
@@ -189,9 +189,9 @@ providers:
       - model_id: meta-llama/Llama-3.3-70B-Instruct-Turbo
         name: Llama 3.3 70B Instruct Turbo
         capabilities: [chat, streaming, tools]
-      - model_id: deepseek-ai/DeepSeek-V4-Pro
-        name: DeepSeek V4 Pro
-        capabilities: [chat, streaming, tools]
+      - model_id: deepseek-ai/DeepSeek-V4-Flash-0731
+        name: DeepSeek V4 Flash 0731
+        capabilities: [chat, streaming]
       - model_id: Qwen/Qwen3.5-9B
         name: Qwen 3.5 9B
         capabilities: [chat, streaming]
