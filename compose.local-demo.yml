@@ -1,0 +1,55 @@
+name: axonllm-local-demo
+
+services:
+  axonllm:
+    image: ${AXON_LOCAL_DEMO_IMAGE:-axonllm-local-demo:codex-compat}
+    platform: linux/amd64
+    user: "${AXON_LOCAL_UID:-10001}:${AXON_LOCAL_GID:-10001}"
+    init: true
+    read_only: true
+    restart: unless-stopped
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=128m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 45s
+    ports:
+      - "${AXON_LOCAL_DEMO_PORT:-8001}:8000"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      AWS_CONFIG_FILE: /tmp/.aws/config
+      AWS_DEFAULT_PROFILE: ${AWS_DEFAULT_PROFILE:-default}
+      AWS_DEFAULT_REGION: ${AXON_LOCAL_AWS_REGION:-us-east-1}
+      AWS_PROFILE: ${AWS_PROFILE:-default}
+      AWS_REGION: ${AXON_LOCAL_AWS_REGION:-us-east-1}
+      AWS_SHARED_CREDENTIALS_FILE: /tmp/.aws/credentials
+      AXON_AUTH_MODE: LOG_ONLY
+      AXON_DEPLOYMENT_PROFILE: development
+      AXON_GRACEFUL_SHUTDOWN_SECONDS: "30"
+      AXON_LOAD_DEMO_DATA: "true"
+      AXON_NO_BROWSER: "true"
+      AXON_PII_REDACTION_DEFAULT: "true"
+      AXON_REQUIRE_CANONICAL_IDENTITY: "false"
+      AXON_SEMANTIC_CACHE: "true"
+      AXON_SERVER_HOST: 0.0.0.0
+      AXON_SERVER_PORT: "8000"
+      LLM_ROUTER_DYNAMODB_ENABLED: "false"
+    volumes:
+      - ./config:/app/config:ro
+      - ${HOME}/.aws:/tmp/.aws:ro
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request;
+          urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s

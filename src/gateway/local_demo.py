@@ -17,10 +17,10 @@ import webbrowser
 _MODELS = (
     "claude-sonnet",
     "grok-3-mini",
-    "groq-llama-3.3-70b",
-    "groq-llama-3.1-8b",
+    "groq-gpt-oss-120b",
+    "groq-gpt-oss-20b",
     "together-llama-3.3-70b",
-    "together-deepseek-r1",
+    "together-deepseek-v4-flash",
     "fireworks-deepseek-v4",
 )
 _PROMPTS = (

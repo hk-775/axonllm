@@ -64,6 +64,7 @@ _TENANT_DATASOURCE_DOCUMENT_FIELDS = frozenset(
 )
 _MODEL_REGISTRY_MAX_DOCUMENT_BYTES = 350 * 1024
 _DYNAMODB_MAX_ITEM_BYTES = 400 * 1024
+_DEMO_SEED_PARTITION_KEY = "SYSTEM#DEMO_SEED"
 
 
 def _validate_project_item_size(item: dict) -> None:
@@ -216,6 +217,7 @@ class DynamoPersistence:
         ).lower() == "true"
         self._table = None
         self._dynamodb = None
+        self._low_level_dynamodb_client = None
         self._init_lock = threading.Lock()
         # Set to a short reason string when a write is dropped, so a health probe
         # can surface silent persistence failures instead of losing data quietly.
@@ -305,6 +307,193 @@ class DynamoPersistence:
                     self._dynamodb = boto3.resource("dynamodb", region_name=self._region)
                     self._table = self._dynamodb.Table(self._table_name)
         return self._table
+
+    def _get_transaction_client(self, table):
+        """Return a client that accepts low-level DynamoDB AttributeValue maps.
+
+        DynamoDB resource clients auto-marshal native Python values. Transaction
+        builders in this class intentionally use ``TypeSerializer`` and must
+        therefore use a plain low-level client or keys such as ``{"S": "..."}``
+        are marshalled a second time as maps.
+
+        Injected table fakes retain their own clients so the persistence layer
+        remains testable without constructing an AWS SDK resource.
+        """
+        if self._dynamodb is None:
+            return getattr(getattr(table, "meta", None), "client", None)
+        if self._low_level_dynamodb_client is None:
+            with self._init_lock:
+                if self._low_level_dynamodb_client is None:
+                    import boto3
+
+                    self._low_level_dynamodb_client = boto3.client(
+                        "dynamodb",
+                        region_name=self._region,
+                    )
+        return self._low_level_dynamodb_client
+
+    @staticmethod
+    def _demo_seed_key(seed_id: str) -> dict[str, str]:
+        if not isinstance(seed_id, str) or not seed_id or len(seed_id) > 128:
+            raise ValueError(
+                "seed_id must be a non-empty string up to 128 characters"
+            )
+        return {
+            "PK": _DEMO_SEED_PARTITION_KEY,
+            "SK": f"VERSION#{seed_id}",
+        }
+
+    async def try_claim_demo_seed(
+        self,
+        seed_id: str,
+        *,
+        lease_seconds: int = 120,
+    ) -> dict | None:
+        """Claim one fleet-wide demo-seed lease, or return ``None``.
+
+        A stale in-progress lease can be replaced. Completed versions remain
+        immutable, so task restarts and additional replicas do not duplicate
+        durable demo records.
+        """
+        if not self._enabled:
+            return None
+        if (
+            isinstance(lease_seconds, bool)
+            or not isinstance(lease_seconds, int)
+            or lease_seconds < 1
+        ):
+            raise ValueError("lease_seconds must be a positive integer")
+
+        key = self._demo_seed_key(seed_id)
+
+        def _claim() -> dict:
+            import uuid
+
+            table = self._get_table()
+            now = datetime.now(timezone.utc)
+            owner_token = uuid.uuid4().hex
+            response = table.update_item(
+                Key=key,
+                UpdateExpression=(
+                    "SET #status = :in_progress, "
+                    "owner_token = :owner_token, "
+                    "seed_started_at = :seed_started_at, "
+                    "lease_expires_at = :lease_expires_at, "
+                    "entity_type = :entity_type"
+                ),
+                ConditionExpression=(
+                    "attribute_not_exists(PK) OR "
+                    "(#status = :in_progress AND lease_expires_at < :now)"
+                ),
+                ExpressionAttributeNames={"#status": "status"},
+                ExpressionAttributeValues={
+                    ":in_progress": "in_progress",
+                    ":owner_token": owner_token,
+                    ":seed_started_at": now.isoformat(),
+                    ":lease_expires_at": int(now.timestamp()) + lease_seconds,
+                    ":entity_type": "demo_seed_marker",
+                    ":now": int(now.timestamp()),
+                },
+                ReturnValues="ALL_NEW",
+            )
+            return response["Attributes"]
+
+        try:
+            return await asyncio.to_thread(_claim)
+        except Exception as exc:
+            if self._api_key_condition_failed(exc, 0):
+                return None
+            raise
+
+    async def get_demo_seed_state(self, seed_id: str) -> dict | None:
+        """Read one demo-seed marker consistently."""
+        if not self._enabled:
+            return None
+        key = self._demo_seed_key(seed_id)
+
+        def _get() -> dict | None:
+            table = self._get_table()
+            item = table.get_item(
+                Key=key,
+                ConsistentRead=True,
+            ).get("Item")
+            if item is None:
+                return None
+            return self._convert_decimals_to_native(item)
+
+        return await asyncio.to_thread(_get)
+
+    async def complete_demo_seed(
+        self,
+        seed_id: str,
+        owner_token: str,
+    ) -> None:
+        """Mark a claimed demo-seed version complete."""
+        if not self._enabled:
+            return
+        if not isinstance(owner_token, str) or not owner_token:
+            raise ValueError("owner_token must be a non-empty string")
+        key = self._demo_seed_key(seed_id)
+
+        def _complete() -> None:
+            table = self._get_table()
+            table.update_item(
+                Key=key,
+                UpdateExpression=(
+                    "SET #status = :complete, completed_at = :completed_at "
+                    "REMOVE lease_expires_at"
+                ),
+                ConditionExpression=(
+                    "#status = :in_progress AND owner_token = :owner_token"
+                ),
+                ExpressionAttributeNames={"#status": "status"},
+                ExpressionAttributeValues={
+                    ":complete": "complete",
+                    ":completed_at": datetime.now(timezone.utc).isoformat(),
+                    ":in_progress": "in_progress",
+                    ":owner_token": owner_token,
+                },
+            )
+
+        try:
+            await asyncio.to_thread(_complete)
+        except Exception as exc:
+            if self._api_key_condition_failed(exc, 0):
+                raise RuntimeError("demo seed lease is no longer owned") from exc
+            raise
+
+    async def abandon_demo_seed(
+        self,
+        seed_id: str,
+        owner_token: str,
+    ) -> None:
+        """Release a failed demo-seed claim without deleting another owner."""
+        if not self._enabled:
+            return
+        if not isinstance(owner_token, str) or not owner_token:
+            raise ValueError("owner_token must be a non-empty string")
+        key = self._demo_seed_key(seed_id)
+
+        def _delete() -> None:
+            table = self._get_table()
+            table.delete_item(
+                Key=key,
+                ConditionExpression=(
+                    "#status = :in_progress AND owner_token = :owner_token"
+                ),
+                ExpressionAttributeNames={"#status": "status"},
+                ExpressionAttributeValues={
+                    ":in_progress": "in_progress",
+                    ":owner_token": owner_token,
+                },
+            )
+
+        try:
+            await asyncio.to_thread(_delete)
+        except Exception as exc:
+            if self._api_key_condition_failed(exc, 0):
+                return
+            raise
 
     # --- Table management ---
 
@@ -637,8 +826,12 @@ class DynamoPersistence:
 
     # --- Async DynamoDB operations ---
 
-    async def save_usage_record(self, record: UsageRecord) -> None:
-        """Serialize and write a UsageRecord to DynamoDB."""
+    async def _save_usage_record(
+        self,
+        record: UsageRecord,
+        *,
+        raise_on_error: bool,
+    ) -> None:
         if not self._enabled:
             return
 
@@ -650,8 +843,18 @@ class DynamoPersistence:
 
         try:
             await asyncio.to_thread(_put)
-        except Exception:
+        except Exception as exc:
             self._record_write_failure("usage record", record.request_id)
+            if raise_on_error:
+                raise RuntimeError("usage record write failed") from exc
+
+    async def save_usage_record(self, record: UsageRecord) -> None:
+        """Serialize and write a UsageRecord to DynamoDB."""
+        await self._save_usage_record(record, raise_on_error=False)
+
+    async def save_usage_record_strict(self, record: UsageRecord) -> None:
+        """Write a UsageRecord and raise if the durable write fails."""
+        await self._save_usage_record(record, raise_on_error=True)
 
     async def load_usage_records_or_none(self) -> list[UsageRecord] | None:
         """Like ``load_usage_records``, but None on failure instead of ``[]``.
@@ -710,13 +913,12 @@ class DynamoPersistence:
             self._last_scan_failed = True
             return []
 
-    async def load_audit_records(self, project_id: str | None = None) -> list[dict]:
-        """Load persisted audit records (raw dicts), ordered by SK (timestamp).
-
-        Audit rows use PK ``AUDIT#<project_id>`` / SK
-        ``AUDIT#<iso>#<record_id>``. Returns them chronologically so the hash
-        chain can be reloaded/verified against the durable store.
-        """
+    async def _load_legacy_audit_records(
+        self,
+        project_id: str | None,
+        *,
+        raise_on_error: bool,
+    ) -> list[dict]:
         if not self._enabled:
             return []
 
@@ -743,9 +945,33 @@ class DynamoPersistence:
             raw = [self._convert_decimals_to_native(i) for i in raw]
             raw.sort(key=lambda i: i.get("SK", ""))
             return raw
-        except Exception:
+        except Exception as exc:
             logger.warning("Failed to load audit records from DynamoDB", exc_info=True)
+            if raise_on_error:
+                raise RuntimeError("audit record load failed") from exc
             return []
+
+    async def load_audit_records(self, project_id: str | None = None) -> list[dict]:
+        """Load persisted audit records (raw dicts), ordered by SK (timestamp).
+
+        Audit rows use PK ``AUDIT#<project_id>`` / SK
+        ``AUDIT#<iso>#<record_id>``. Returns them chronologically so the hash
+        chain can be reloaded/verified against the durable store.
+        """
+        return await self._load_legacy_audit_records(
+            project_id,
+            raise_on_error=False,
+        )
+
+    async def load_audit_records_strict(
+        self,
+        project_id: str | None = None,
+    ) -> list[dict]:
+        """Load legacy audit records and distinguish an outage from no rows."""
+        return await self._load_legacy_audit_records(
+            project_id,
+            raise_on_error=True,
+        )
 
     async def get_latest_audit_hash(self) -> str | None:
         """Return the most recent persisted audit record_hash (the chain head).
@@ -816,7 +1042,7 @@ class DynamoPersistence:
 
         def _append() -> None:
             table = self._get_table()
-            client = getattr(getattr(table, "meta", None), "client", None)
+            client = self._get_transaction_client(table)
             if client is None:
                 raise RuntimeError("atomic tenant audit persistence requires transactions")
             client.transact_write_items(
@@ -1375,7 +1601,7 @@ class DynamoPersistence:
 
         def _put() -> None:
             table = self._get_table()
-            client = getattr(getattr(table, "meta", None), "client", None)
+            client = self._get_transaction_client(table)
             if client is None:
                 raise RuntimeError(
                     "atomic project persistence requires transactions"
@@ -1423,7 +1649,7 @@ class DynamoPersistence:
 
         def _put() -> None:
             table = self._get_table()
-            client = getattr(getattr(table, "meta", None), "client", None)
+            client = self._get_transaction_client(table)
             if client is None:
                 raise RuntimeError(
                     "atomic project persistence requires transactions"
@@ -2287,7 +2513,7 @@ class DynamoPersistence:
                     ExpressionAttributeValues=values,
                 )
                 return
-            client = getattr(getattr(table, "meta", None), "client", None)
+            client = self._get_transaction_client(table)
             if client is None:
                 raise RuntimeError(
                     "atomic user config persistence requires transactions"
@@ -2916,7 +3142,7 @@ class DynamoPersistence:
             rows = self._api_key_issue_rows(key)
             if principal is not None:
                 rows.append(self._serialize_principal(principal))
-            client = getattr(getattr(table, "meta", None), "client", None)
+            client = self._get_transaction_client(table)
             if client is None:
                 # Compatibility for existing in-process table fakes. Every
                 # boto3 DynamoDB Table has meta.client and therefore cannot take
@@ -3130,7 +3356,7 @@ class DynamoPersistence:
         def _revoke() -> None:
             table = self._get_table()
             epoch_key = self._api_key_epoch_key(key.tenant_id)
-            client = getattr(getattr(table, "meta", None), "client", None)
+            client = self._get_transaction_client(table)
             if client is None:
                 if include_principal:
                     raise RuntimeError(
@@ -3213,7 +3439,7 @@ class DynamoPersistence:
 
         def _rotate() -> None:
             table = self._get_table()
-            client = getattr(getattr(table, "meta", None), "client", None)
+            client = self._get_transaction_client(table)
             if client is None:
                 raise RuntimeError(
                     "canonical API-key rotation requires transactions"
@@ -3390,7 +3616,7 @@ class DynamoPersistence:
 
         def _consume() -> tuple[bool, list[int]] | None:
             table = self._get_table()
-            client = getattr(getattr(table, "meta", None), "client", None)
+            client = self._get_transaction_client(table)
             if client is None:
                 return None
             operations = []
@@ -4062,7 +4288,7 @@ class DynamoPersistence:
 
         def _reserve() -> dict:
             table = self._get_table()
-            client = getattr(getattr(table, "meta", None), "client", None)
+            client = self._get_transaction_client(table)
             if client is None:
                 raise RuntimeError(
                     "atomic query admission requires transactions"
@@ -4332,7 +4558,7 @@ class DynamoPersistence:
 
         def _finalize() -> bool:
             table = self._get_table()
-            client = getattr(getattr(table, "meta", None), "client", None)
+            client = self._get_transaction_client(table)
             if client is None:
                 raise RuntimeError(
                     "atomic query finalization requires transactions"
@@ -4771,7 +4997,7 @@ class DynamoPersistence:
 
         def _finalize() -> bool:
             table = self._get_table()
-            client = getattr(getattr(table, "meta", None), "client", None)
+            client = self._get_transaction_client(table)
             if client is None:
                 raise RuntimeError(
                     "atomic query reconciliation requires transactions"
@@ -5382,7 +5608,7 @@ class DynamoPersistence:
 
         def _reserve() -> BudgetReservationResult:
             table = self._get_table()
-            client = getattr(getattr(table, "meta", None), "client", None)
+            client = self._get_transaction_client(table)
             if client is None:
                 raise RuntimeError(
                     "atomic budget reservations require transactions"
@@ -5617,7 +5843,7 @@ class DynamoPersistence:
 
         def _finalize() -> BudgetReservationResult:
             table = self._get_table()
-            client = getattr(getattr(table, "meta", None), "client", None)
+            client = self._get_transaction_client(table)
             if client is None:
                 raise RuntimeError(
                     "atomic budget finalization requires transactions"
@@ -6220,7 +6446,7 @@ class DynamoPersistence:
 
         def _reset() -> dict[str, SpendCounterState]:
             table = self._get_table()
-            client = getattr(getattr(table, "meta", None), "client", None)
+            client = self._get_transaction_client(table)
             if client is None:
                 raise RuntimeError("atomic spend reset requires transactions")
             operations = []
@@ -6423,7 +6649,7 @@ class DynamoPersistence:
 
         def _put() -> None:
             table = self._get_table()
-            client = getattr(getattr(table, "meta", None), "client", None)
+            client = self._get_transaction_client(table)
             if client is None:
                 raise RuntimeError(
                     "tenant policy persistence requires transactions"
@@ -6745,7 +6971,7 @@ class DynamoPersistence:
 
         def _write() -> None:
             table = self._get_table()
-            client = getattr(getattr(table, "meta", None), "client", None)
+            client = self._get_transaction_client(table)
             if client is None:
                 raise RuntimeError(
                     "tenant Cedar policy persistence requires transactions"
@@ -7777,7 +8003,7 @@ class DynamoPersistence:
 
         def _write() -> None:
             table = self._get_table()
-            client = getattr(getattr(table, "meta", None), "client", None)
+            client = self._get_transaction_client(table)
             if client is None:
                 raise RuntimeError(
                     "canonical SCIM persistence requires transactions"
@@ -7976,7 +8202,7 @@ class DynamoPersistence:
 
         def _write() -> None:
             table = self._get_table()
-            client = getattr(getattr(table, "meta", None), "client", None)
+            client = self._get_transaction_client(table)
             if client is None:
                 raise RuntimeError(
                     "canonical SCIM persistence requires transactions"
@@ -8107,7 +8333,7 @@ class DynamoPersistence:
             )
 
             table = self._get_table()
-            client = getattr(getattr(table, "meta", None), "client", None)
+            client = self._get_transaction_client(table)
             if client is None:
                 raise RuntimeError(
                     "canonical project membership requires transactions"

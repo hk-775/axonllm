@@ -1673,10 +1673,10 @@ what left this appendix 17 rows long and one routing strategy wrong.
 | `gemini-2.5-pro` | Gemini 2.5 Pro (Vertex AI) | round-robin | vertex_ai |
 | `grok-4.3` | Grok 4.3 | round-robin | xai |
 | `grok-4.5` | Grok 4.5 | round-robin | xai |
-| `groq-llama-3.3-70b` | Llama 3.3 70B (Groq) | round-robin | groq |
-| `groq-llama-3.1-8b` | Llama 3.1 8B Instant (Groq) | round-robin | groq |
+| `groq-gpt-oss-120b` | GPT-OSS 120B (Groq) | round-robin | groq |
+| `groq-gpt-oss-20b` | GPT-OSS 20B (Groq) | round-robin | groq |
 | `together-llama-3.3-70b` | Llama 3.3 70B Turbo (Together) | round-robin | together |
-| `together-deepseek-v4` | DeepSeek V4 Pro (Together) | round-robin | together |
+| `together-deepseek-v4-flash` | DeepSeek V4 Flash 0731 (Together) | round-robin | together |
 | `together-qwen-3.5-9b` | Qwen 3.5 9B (Together) | round-robin | together |
 | `together-gpt-oss-120b` | GPT-OSS 120B (Together) | round-robin | together |
 | `fireworks-deepseek-v4` | DeepSeek V4 Pro (Fireworks) | round-robin | fireworks |

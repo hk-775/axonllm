@@ -1,0 +1,21 @@
+# Copy this into a dedicated Codex profile, replace the CloudFront hostname,
+# and resolve AXONLLM_API_KEY from Secrets Manager at process launch.
+
+model = "claude-sonnet"
+model_provider = "axonllm"
+model_supports_reasoning_summaries = false
+model_reasoning_summary = "none"
+web_search = "disabled"
+
+[features]
+multi_agent = false
+
+[model_providers.axonllm]
+name = "AxonLLM"
+base_url = "https://d-example.cloudfront.net/v1"
+env_key = "AXONLLM_API_KEY"
+wire_api = "responses"
+request_max_retries = 2
+stream_max_retries = 2
+stream_idle_timeout_ms = 120000
+requires_openai_auth = false

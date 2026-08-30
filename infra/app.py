@@ -115,7 +115,7 @@ if deployment_target == "fargate":
 
     AxonLLMStack(
         app,
-        "AxonLLMStack",
+        stack_name("AxonLLMStack", namespace),
         env=environment,
     )
 elif deployment_target == "agentcore":

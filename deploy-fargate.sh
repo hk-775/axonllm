@@ -3,19 +3,24 @@
 # Usage: ./deploy-fargate.sh [region] [--yes]
 #
 # Required deployment inputs:
+#   AXON_APPROVED_HTTPS_PREFIX_LIST_ID
+#   AXON_BEDROCK_INVOKE_RESOURCE_ARNS
+#   AXON_VERIFIED_IMAGE_URI
+#
+# Custom-domain edge mode (the default) also requires:
 #   AXON_VIEWER_DOMAIN_NAME
 #   AXON_VIEWER_CERTIFICATE_ARN
 #   AXON_ORIGIN_DOMAIN_NAME
 #   AXON_ORIGIN_CERTIFICATE_ARN
-#   AXON_APPROVED_HTTPS_PREFIX_LIST_ID
-#   AXON_BEDROCK_INVOKE_RESOURCE_ARNS
-#   AXON_VERIFIED_IMAGE_URI
 #
 # Optional:
 #   AXON_DYNAMODB_TABLE_NAME (defaults to axonllm-state)
 #   AXON_RUNTIME_STATE_TABLE_NAME (blank selects the primary table)
 #   AXON_RECOVERY_CUTOVER_MODE (true only during a quiesced table switch)
 #   AXON_DEPLOYMENT_MODE (staging or production; defaults to staging)
+#   AXON_DEPLOYMENT_NAMESPACE (dedicated stack suffix, for example demo)
+#   AXON_FARGATE_EDGE_MODE (custom-domain or cloudfront-default)
+#   AXON_LOAD_DEMO_DATA (false or true; production requires false)
 #   AXON_SCIM_TENANTS_SECRET_ARN (complete us-east-1 Secrets Manager ARN)
 #   AXON_PUBLIC_HOSTED_ZONE_ID and AXON_PUBLIC_HOSTED_ZONE_NAME
 #
@@ -93,19 +98,44 @@ require_env() {
     fi
 }
 
-require_env AXON_VIEWER_DOMAIN_NAME
-require_env AXON_VIEWER_CERTIFICATE_ARN
-require_env AXON_ORIGIN_DOMAIN_NAME
-require_env AXON_ORIGIN_CERTIFICATE_ARN
 require_env AXON_APPROVED_HTTPS_PREFIX_LIST_ID
 require_env AXON_BEDROCK_INVOKE_RESOURCE_ARNS
 require_env AXON_VERIFIED_IMAGE_URI
+
+EDGE_MODE="${AXON_FARGATE_EDGE_MODE:-custom-domain}"
+if [ "$EDGE_MODE" != "custom-domain" ] &&
+   [ "$EDGE_MODE" != "cloudfront-default" ]; then
+    echo "AXON_FARGATE_EDGE_MODE must be custom-domain or cloudfront-default." >&2
+    exit 2
+fi
+
+DEPLOYMENT_NAMESPACE="${AXON_DEPLOYMENT_NAMESPACE:-}"
+if [ -n "$DEPLOYMENT_NAMESPACE" ] &&
+   [[ ! "$DEPLOYMENT_NAMESPACE" =~ ^[a-z]([a-z0-9-]{0,14}[a-z0-9])?$ ]]; then
+    echo "AXON_DEPLOYMENT_NAMESPACE must be 1-16 lowercase letters, digits, or internal hyphens." >&2
+    exit 2
+fi
+STACK_ID="AxonLLMStack"
+if [ -n "$DEPLOYMENT_NAMESPACE" ]; then
+    STACK_ID="${STACK_ID}-${DEPLOYMENT_NAMESPACE}"
+fi
 
 DEPLOYMENT_MODE="${AXON_DEPLOYMENT_MODE:-staging}"
 if [ "$DEPLOYMENT_MODE" != "staging" ] &&
    [ "$DEPLOYMENT_MODE" != "production" ]; then
     echo "AXON_DEPLOYMENT_MODE must be staging or production." >&2
     exit 2
+fi
+if [ "$EDGE_MODE" = "cloudfront-default" ] &&
+   [ "$DEPLOYMENT_MODE" != "staging" ]; then
+    echo "cloudfront-default edge mode is restricted to staging." >&2
+    exit 2
+fi
+if [ "$EDGE_MODE" = "custom-domain" ]; then
+    require_env AXON_VIEWER_DOMAIN_NAME
+    require_env AXON_VIEWER_CERTIFICATE_ARN
+    require_env AXON_ORIGIN_DOMAIN_NAME
+    require_env AXON_ORIGIN_CERTIFICATE_ARN
 fi
 if [ "$DEPLOYMENT_MODE" = "production" ]; then
     require_env AXON_OIDC_ISSUER
@@ -125,15 +155,24 @@ if [[ ! "$AXON_VERIFIED_IMAGE_URI" =~ ^[0-9]{12}\.dkr\.ecr\.us-east-1\.amazonaws
     echo "AXON_VERIFIED_IMAGE_URI must be an immutable private ECR URI in us-east-1." >&2
     exit 2
 fi
-if [[ "$AXON_VIEWER_CERTIFICATE_ARN" != arn:aws:acm:us-east-1:* ]] ||
-   [[ "$AXON_ORIGIN_CERTIFICATE_ARN" != arn:aws:acm:us-east-1:* ]]; then
-    echo "Both ACM certificate ARNs must be in us-east-1." >&2
-    exit 2
+if [ "$EDGE_MODE" = "custom-domain" ]; then
+    if [[ "$AXON_VIEWER_CERTIFICATE_ARN" != arn:aws:acm:us-east-1:* ]] ||
+       [[ "$AXON_ORIGIN_CERTIFICATE_ARN" != arn:aws:acm:us-east-1:* ]]; then
+        echo "Both ACM certificate ARNs must be in us-east-1." >&2
+        exit 2
+    fi
 fi
 
-TABLE_NAME="${AXON_DYNAMODB_TABLE_NAME:-axonllm-state}"
+if [ -n "${AXON_DYNAMODB_TABLE_NAME:-}" ]; then
+    TABLE_NAME="$AXON_DYNAMODB_TABLE_NAME"
+elif [ -n "$DEPLOYMENT_NAMESPACE" ]; then
+    TABLE_NAME="axonllm-${DEPLOYMENT_NAMESPACE}-state"
+else
+    TABLE_NAME="axonllm-state"
+fi
 RUNTIME_TABLE_NAME="${AXON_RUNTIME_STATE_TABLE_NAME:-}"
 RECOVERY_CUTOVER_MODE="${AXON_RECOVERY_CUTOVER_MODE:-false}"
+LOAD_DEMO_DATA="${AXON_LOAD_DEMO_DATA:-false}"
 SCIM_SECRET_ARN="${AXON_SCIM_TENANTS_SECRET_ARN:-}"
 HOSTED_ZONE_ID="${AXON_PUBLIC_HOSTED_ZONE_ID:-}"
 HOSTED_ZONE_NAME="${AXON_PUBLIC_HOSTED_ZONE_NAME:-}"
@@ -152,6 +191,16 @@ if [ "$RECOVERY_CUTOVER_MODE" != "false" ] &&
     echo "AXON_RECOVERY_CUTOVER_MODE must be false or true." >&2
     exit 2
 fi
+if [ "$LOAD_DEMO_DATA" != "false" ] &&
+   [ "$LOAD_DEMO_DATA" != "true" ]; then
+    echo "AXON_LOAD_DEMO_DATA must be false or true." >&2
+    exit 2
+fi
+if [ "$DEPLOYMENT_MODE" = "production" ] &&
+   [ "$LOAD_DEMO_DATA" != "false" ]; then
+    echo "AXON_LOAD_DEMO_DATA must be false in production." >&2
+    exit 2
+fi
 
 # "broadening" still prompts, and only when a change widens IAM or network
 # access; "never" prompts for nothing. Anything else CDK would reject.
@@ -162,6 +211,9 @@ else
 fi
 
 echo "==> Deploying AxonLLM to ECS Fargate in ${REGION}..."
+echo "    Stack: ${STACK_ID}"
+echo "    Edge:  ${EDGE_MODE}"
+echo "    Seed:  ${LOAD_DEMO_DATA}"
 if [ "$APPROVAL" = never ]; then
     echo "    Approval prompts disabled (--yes or CI=true)."
 fi
@@ -182,38 +234,47 @@ echo "==> Running cdk deploy..."
 CONTEXT=(
     --context "region=$REGION"
     --context "table_name=$TABLE_NAME"
+    --context "fargate_edge_mode=$EDGE_MODE"
 )
+if [ -n "$DEPLOYMENT_NAMESPACE" ]; then
+    CONTEXT+=(--context "deployment_namespace=$DEPLOYMENT_NAMESPACE")
+fi
 if [ -n "$SCIM_SECRET_ARN" ]; then
     CONTEXT+=(--context "scim_tenants_secret_arn=$SCIM_SECRET_ARN")
 fi
 
 PARAMETERS=(
-    --parameters "AxonLLMStack:DeploymentMode=$DEPLOYMENT_MODE"
-    --parameters "AxonLLMStack:ViewerDomainName=${AXON_VIEWER_DOMAIN_NAME}"
-    --parameters "AxonLLMStack:ViewerCertificateArn=${AXON_VIEWER_CERTIFICATE_ARN}"
-    --parameters "AxonLLMStack:OriginDomainName=${AXON_ORIGIN_DOMAIN_NAME}"
-    --parameters "AxonLLMStack:OriginCertificateArn=${AXON_ORIGIN_CERTIFICATE_ARN}"
-    --parameters "AxonLLMStack:ApprovedHttpsPrefixListId=${AXON_APPROVED_HTTPS_PREFIX_LIST_ID}"
-    --parameters "AxonLLMStack:BedrockInvokeResourceArns=${AXON_BEDROCK_INVOKE_RESOURCE_ARNS}"
-    --parameters "AxonLLMStack:VerifiedImageUri=${AXON_VERIFIED_IMAGE_URI}"
-    --parameters "AxonLLMStack:RuntimeStateTableName=$RUNTIME_TABLE_NAME"
-    --parameters "AxonLLMStack:RecoveryCutoverMode=$RECOVERY_CUTOVER_MODE"
-    --parameters "AxonLLMStack:PublicHostedZoneId=$HOSTED_ZONE_ID"
-    --parameters "AxonLLMStack:PublicHostedZoneName=$HOSTED_ZONE_NAME"
+    --parameters "${STACK_ID}:DeploymentMode=$DEPLOYMENT_MODE"
+    --parameters "${STACK_ID}:LoadDemoData=$LOAD_DEMO_DATA"
+    --parameters "${STACK_ID}:ApprovedHttpsPrefixListId=${AXON_APPROVED_HTTPS_PREFIX_LIST_ID}"
+    --parameters "${STACK_ID}:BedrockInvokeResourceArns=${AXON_BEDROCK_INVOKE_RESOURCE_ARNS}"
+    --parameters "${STACK_ID}:VerifiedImageUri=${AXON_VERIFIED_IMAGE_URI}"
+    --parameters "${STACK_ID}:RuntimeStateTableName=$RUNTIME_TABLE_NAME"
+    --parameters "${STACK_ID}:RecoveryCutoverMode=$RECOVERY_CUTOVER_MODE"
+    --parameters "${STACK_ID}:PublicHostedZoneId=$HOSTED_ZONE_ID"
+    --parameters "${STACK_ID}:PublicHostedZoneName=$HOSTED_ZONE_NAME"
 )
+if [ "$EDGE_MODE" = "custom-domain" ]; then
+    PARAMETERS+=(
+        --parameters "${STACK_ID}:ViewerDomainName=${AXON_VIEWER_DOMAIN_NAME}"
+        --parameters "${STACK_ID}:ViewerCertificateArn=${AXON_VIEWER_CERTIFICATE_ARN}"
+        --parameters "${STACK_ID}:OriginDomainName=${AXON_ORIGIN_DOMAIN_NAME}"
+        --parameters "${STACK_ID}:OriginCertificateArn=${AXON_ORIGIN_CERTIFICATE_ARN}"
+    )
+fi
 if [ "$DEPLOYMENT_MODE" = "production" ]; then
     PARAMETERS+=(
-        --parameters "AxonLLMStack:OidcIssuer=${AXON_OIDC_ISSUER}"
-        --parameters "AxonLLMStack:OidcAuthorizationEndpoint=${AXON_OIDC_AUTHORIZATION_ENDPOINT}"
-        --parameters "AxonLLMStack:OidcTokenEndpoint=${AXON_OIDC_TOKEN_ENDPOINT}"
-        --parameters "AxonLLMStack:OidcUserInfoEndpoint=${AXON_OIDC_USER_INFO_ENDPOINT}"
-        --parameters "AxonLLMStack:OidcClientId=${AXON_OIDC_CLIENT_ID}"
-        --parameters "AxonLLMStack:OidcClientSecret=${AXON_OIDC_CLIENT_SECRET}"
-        --parameters "AxonLLMStack:OidcAudience=${AXON_OIDC_AUDIENCE}"
+        --parameters "${STACK_ID}:OidcIssuer=${AXON_OIDC_ISSUER}"
+        --parameters "${STACK_ID}:OidcAuthorizationEndpoint=${AXON_OIDC_AUTHORIZATION_ENDPOINT}"
+        --parameters "${STACK_ID}:OidcTokenEndpoint=${AXON_OIDC_TOKEN_ENDPOINT}"
+        --parameters "${STACK_ID}:OidcUserInfoEndpoint=${AXON_OIDC_USER_INFO_ENDPOINT}"
+        --parameters "${STACK_ID}:OidcClientId=${AXON_OIDC_CLIENT_ID}"
+        --parameters "${STACK_ID}:OidcClientSecret=${AXON_OIDC_CLIENT_SECRET}"
+        --parameters "${STACK_ID}:OidcAudience=${AXON_OIDC_AUDIENCE}"
     )
 fi
 
-npx cdk deploy \
+npx cdk deploy "$STACK_ID" \
     "${CONTEXT[@]}" \
     "${PARAMETERS[@]}" \
     --require-approval "$APPROVAL" \
@@ -232,5 +293,9 @@ fi
 
 echo "Next steps:"
 echo "  1. Set API keys in the ProviderSecretArn stack output."
-echo "  2. Point ${AXON_VIEWER_DOMAIN_NAME} at the CloudFront distribution."
-echo "  3. Configure OIDC and canonical principals before allowing real traffic."
+if [ "$EDGE_MODE" = "custom-domain" ]; then
+    echo "  2. Point ${AXON_VIEWER_DOMAIN_NAME} at the CloudFront distribution."
+else
+    echo "  2. Use the generated CloudFrontURL output directly."
+fi
+echo "  3. Mint an AxonLLM API key before using protected APIs."

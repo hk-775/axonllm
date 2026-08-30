@@ -362,22 +362,24 @@ models:
     weight: 1.0
     fallback_order: 0
 # --- Groq (fast inference) ---
-- name: groq-llama-3.3-70b
-  description: Llama 3.3 70B (Groq)
+# Groq retired both Llama launch ids on 2026-08-16. These GPT-OSS replacements
+# are current production models and were confirmed with live completions.
+- name: groq-gpt-oss-120b
+  description: GPT-OSS 120B (Groq)
   capabilities: [chat, streaming, tools]
   routing_strategy: round-robin
   providers:
   - provider: groq
-    model_id: llama-3.3-70b-versatile
+    model_id: openai/gpt-oss-120b
     weight: 1.0
     fallback_order: 0
-- name: groq-llama-3.1-8b
-  description: Llama 3.1 8B Instant (Groq)
-  capabilities: [chat, streaming]
+- name: groq-gpt-oss-20b
+  description: GPT-OSS 20B (Groq)
+  capabilities: [chat, streaming, tools]
   routing_strategy: round-robin
   providers:
   - provider: groq
-    model_id: llama-3.1-8b-instant
+    model_id: openai/gpt-oss-20b
     weight: 1.0
     fallback_order: 0
 # --- Together AI ---
@@ -396,15 +398,15 @@ models:
     model_id: meta-llama/Llama-3.3-70B-Instruct-Turbo
     weight: 1.0
     fallback_order: 0
-# Was deepseek-ai/DeepSeek-R1, which is not serverless — nor is R1-0528, nor
-# V3.1. V4 Pro is the DeepSeek generation Together serves on demand.
-- name: together-deepseek-v4
-  description: DeepSeek V4 Pro (Together)
-  capabilities: [chat, streaming, tools]
+# V4 Pro remains visible in Together's catalogue but requires a dedicated
+# endpoint for this account. V4 Flash is the current serverless V4 route.
+- name: together-deepseek-v4-flash
+  description: DeepSeek V4 Flash 0731 (Together)
+  capabilities: [chat, streaming]
   routing_strategy: round-robin
   providers:
   - provider: together
-    model_id: deepseek-ai/DeepSeek-V4-Pro
+    model_id: deepseek-ai/DeepSeek-V4-Flash-0731
     weight: 1.0
     fallback_order: 0
 # Was Qwen/Qwen2.5-72B-Instruct-Turbo, also non-serverless. No 72B-class Qwen

@@ -53,18 +53,19 @@ class TestTheTaskDefinitionEnvironment:
         return _environment_dict()
 
     def test_demo_data_is_explicitly_off(self, env):
-        """The one value that has to be present rather than merely correct.
+        """The deployment parameter remains explicit and defaults off.
 
-        The image default is safe, but production intent must remain explicit.
-        This assertion prevents a future image or task-definition change from
-        introducing fictional tenants without a visible infrastructure diff.
+        Production has a CloudFormation rule that forbids true; a dedicated
+        staging demo may deliberately opt in without editing the image.
         """
         assert "AXON_LOAD_DEMO_DATA" in env, (
             "production task definitions must bind demo data off explicitly"
         )
         node = env["AXON_LOAD_DEMO_DATA"]
-        assert isinstance(node, ast.Constant), "must be a literal, not computed at synth time"
-        assert node.value == "false"
+        assert isinstance(node, ast.Attribute)
+        assert node.attr == "value_as_string"
+        assert isinstance(node.value, ast.Name)
+        assert node.value.id == "load_demo_data"
 
     def test_auth_is_enforced(self, env):
         """Nothing behind a public ALB should accept unauthenticated requests.
@@ -115,15 +116,25 @@ class TestTheTaskDefinitionEnvironment:
 
 
 def _keyword_literals(name: str) -> list[str]:
-    """Every `name="literal"` keyword argument in the CDK stack."""
+    """Every named literal option in the CDK stack."""
     tree = ast.parse(_STACK.read_text(encoding="utf-8"))
-    return [
+    keyword_values = [
         node.value.value
         for node in ast.walk(tree)
         if isinstance(node, ast.keyword)
         and node.arg == name
         and isinstance(node.value, ast.Constant)
     ]
+    dict_values = [
+        value.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Dict)
+        for key, value in zip(node.keys, node.values)
+        if isinstance(key, ast.Constant)
+        and key.value == name
+        and isinstance(value, ast.Constant)
+    ]
+    return keyword_values + dict_values
 
 
 class TestTheResourcesTheDocsAddressByName:

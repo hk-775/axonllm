@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
+import json
 import logging
 import math
 import os
@@ -78,7 +80,11 @@ from src.gateway.middleware.security import (
 )
 from src.gateway.observability.otlp_exporter import OTLPSpanExporter
 from src.gateway.observability.trace_forwarder import TraceForwarder
-from src.gateway.security.audit_trail import AuditEventType, AuditTrail
+from src.gateway.security.audit_trail import (
+    LEGACY_TENANT_ID,
+    AuditEventType,
+    AuditTrail,
+)
 from src.gateway.security.event_dispatcher import (
     DestinationType,
     EventDestination,
@@ -105,6 +111,7 @@ from src.gateway.config_loader import (
     load_demo_seed_config,
     load_ensemble_config,
     load_pricing_config,
+    serialize_demo_seed_config,
 )
 from src.gateway.control_plane_routes import control_route_inventory
 from src.gateway.cost_tracker import CostTracker
@@ -147,6 +154,11 @@ from src.gateway.smart_routing import SmartRoutingStrategy
 from src.gateway.task_classifier import TaskClassifier
 
 logger = logging.getLogger(__name__)
+
+_DEMO_SEED_COORDINATION_VERSION = 1
+_DEMO_SEED_LEASE_SECONDS = 120
+_DEMO_SEED_WAIT_SECONDS = 180.0
+_DEMO_SEED_POLL_SECONDS = 0.25
 
 
 # ---------------------------------------------------------------------------
@@ -700,14 +712,58 @@ def _build_process_components(
     projects: dict[str, Project] = {}
     user_configs: dict[str, dict] = {}
     policies: list[dict] = []
+    seed: DemoSeedData | None = None
+    demo_seed_id: str | None = None
+    demo_seed_owner_token: str | None = None
 
     if app_config.load_demo_data:
         seed = load_demo_seed_config(app_config.demo_seed_config_path)
-        projects, user_configs, policies = _apply_seed_data(
-            seed, cost_tracker, health_tracker, all_model_names,
-            quota_enforcer, policy_resolver,
-            audit_trail, api_key_service, event_dispatcher,
-        )
+        persist_seed_records = True
+        if persistence.enabled:
+            demo_seed_id = _demo_seed_fingerprint(seed)
+            demo_seed_owner_token = asyncio.run(
+                _coordinate_demo_seed(
+                    persistence,
+                    demo_seed_id,
+                )
+            )
+            persist_seed_records = demo_seed_owner_token is not None
+        try:
+            projects, user_configs, policies = _apply_seed_data(
+                seed,
+                cost_tracker,
+                health_tracker,
+                all_model_names,
+                quota_enforcer,
+                policy_resolver,
+                audit_trail,
+                api_key_service,
+                event_dispatcher,
+                persist_records=persist_seed_records,
+            )
+            if demo_seed_owner_token is not None:
+                assert demo_seed_id is not None
+                asyncio.run(
+                    persistence.complete_demo_seed(
+                        demo_seed_id,
+                        demo_seed_owner_token,
+                    )
+                )
+                logger.info(
+                    "Completed fleet-wide demo seed %s",
+                    demo_seed_id[:15],
+                )
+        except Exception:
+            if demo_seed_owner_token is not None:
+                assert demo_seed_id is not None
+                with contextlib.suppress(Exception):
+                    asyncio.run(
+                        persistence.abandon_demo_seed(
+                            demo_seed_id,
+                            demo_seed_owner_token,
+                        )
+                    )
+            raise
 
     # --- DynamoDB persisted state (merges on top of seed data) ---
     loaded_feedback: list = []
@@ -779,6 +835,16 @@ def _build_process_components(
                     project_ids,
                     tenant_id=tenant_id,
                 )
+            )
+        if seed is not None and seed.audit_events:
+            hydrated_audit_count = asyncio.run(
+                audit_trail.hydrate_recent_from_persistence(
+                    LEGACY_TENANT_ID
+                )
+            )
+            logger.info(
+                "Hydrated %d durable demo audit records",
+                hydrated_audit_count,
             )
 
     # --- Smart routing components ---
@@ -1432,6 +1498,80 @@ def build_gateway_agent(app_config: AppConfig | None = None) -> GatewayAgent:
 # ---------------------------------------------------------------------------
 
 
+def _demo_seed_fingerprint(seed: DemoSeedData) -> str:
+    """Return a stable version identifier for one checked-in demo seed."""
+    payload = {
+        "coordination_version": _DEMO_SEED_COORDINATION_VERSION,
+        "seed": serialize_demo_seed_config(seed),
+    }
+    serialized = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    )
+    digest = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+    return f"v{_DEMO_SEED_COORDINATION_VERSION}-{digest}"
+
+
+async def _coordinate_demo_seed(
+    persistence: DynamoPersistence,
+    seed_id: str,
+    *,
+    wait_seconds: float = _DEMO_SEED_WAIT_SECONDS,
+    poll_seconds: float = _DEMO_SEED_POLL_SECONDS,
+) -> str | None:
+    """Elect one durable seeder and wait for its fleet-wide completion.
+
+    Returns the leader's owner token to exactly one task. Followers return
+    ``None`` only after a consistent read observes the completed marker.
+    """
+    if wait_seconds <= 0:
+        raise ValueError("wait_seconds must be positive")
+    if poll_seconds <= 0:
+        raise ValueError("poll_seconds must be positive")
+
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + wait_seconds
+    while True:
+        claim = await persistence.try_claim_demo_seed(
+            seed_id,
+            lease_seconds=_DEMO_SEED_LEASE_SECONDS,
+        )
+        if claim is not None:
+            owner_token = claim.get("owner_token")
+            if not isinstance(owner_token, str) or not owner_token:
+                raise RuntimeError(
+                    "demo seed coordination returned an invalid owner token"
+                )
+            logger.info(
+                "This task claimed fleet-wide demo seed %s",
+                seed_id[:15],
+            )
+            return owner_token
+
+        state = await persistence.get_demo_seed_state(seed_id)
+        if state is not None:
+            status = state.get("status")
+            if status == "complete":
+                logger.info(
+                    "Fleet-wide demo seed %s is already complete; "
+                    "this task is a follower",
+                    seed_id[:15],
+                )
+                return None
+            if status != "in_progress":
+                raise RuntimeError(
+                    f"demo seed marker has invalid status {status!r}"
+                )
+
+        if loop.time() >= deadline:
+            raise TimeoutError(
+                "timed out waiting for the fleet-wide demo seed"
+            )
+        await asyncio.sleep(poll_seconds)
+
+
 def _validate_seed_hierarchy(policy_resolver: PolicyHierarchyResolver) -> None:
     """Re-check the seeded tree against the resolver's own child<=parent rule.
 
@@ -1472,6 +1612,8 @@ def _apply_seed_data(
     audit_trail: AuditTrail,
     api_key_service: APIKeyService,
     event_dispatcher: EventDispatcher,
+    *,
+    persist_records: bool = True,
 ) -> tuple[dict[str, Project], dict[str, dict], list[dict]]:
     """Apply demo seed data to components. Returns (projects, user_configs, policies)."""
     projects: dict[str, Project] = {}
@@ -1545,29 +1687,50 @@ def _apply_seed_data(
         for i, s in enumerate(seed.usage_seeds):
             pt = s.get("prompt_tokens", 0)
             ct = s.get("completion_tokens", 0)
-            await cost_tracker.record_usage(UsageRecord(
-                # Indexed, because project+user+provider is not unique: several
-                # seeded calls share all three, and identical request ids read as
-                # one request retried rather than a populated trace log.
-                request_id=f"req-{i:04d}-{s['project_id']}-{s['user_id']}",
-                project_id=s["project_id"],
-                user_id=s["user_id"],
-                provider=s["provider"],
-                model=s["model"],
-                prompt_tokens=pt,
-                completion_tokens=ct,
-                total_tokens=pt + ct,
-                cost=s.get("cost", 0.0),
-                # Spread over the window the seed asks for. Stamping every record
-                # at import time puts the whole trace log on one clock minute,
-                # which is not what a live gateway looks like.
-                timestamp=now - timedelta(minutes=float(s.get("minutes_ago", 0))),
-                # The dashboard shows an average latency tile; unset it reads
-                # 0ms, i.e. a gateway that answered instantly.
-                latency_ms=float(s.get("latency_ms", 0.0)),
-                cached_tokens=s.get("cached_tokens", 0),
-                cache_creation_tokens=s.get("cache_creation_tokens", 0),
-            ), share=False)
+            await cost_tracker.record_usage(
+                UsageRecord(
+                    # Indexed, because project+user+provider is not unique:
+                    # several seeded calls share all three, and identical
+                    # request ids read as one request retried rather than a
+                    # populated trace log.
+                    request_id=(
+                        f"req-{i:04d}-{s['project_id']}-{s['user_id']}"
+                    ),
+                    project_id=s["project_id"],
+                    user_id=s["user_id"],
+                    provider=s["provider"],
+                    model=s["model"],
+                    prompt_tokens=pt,
+                    completion_tokens=ct,
+                    total_tokens=pt + ct,
+                    cost=s.get("cost", 0.0),
+                    # Spread over the window the seed asks for. Stamping every
+                    # record at import time puts the whole trace log on one clock
+                    # minute, which is not what a live gateway looks like.
+                    timestamp=now
+                    - timedelta(
+                        minutes=float(s.get("minutes_ago", 0))
+                    ),
+                    # The dashboard shows an average latency tile; unset it reads
+                    # 0ms, i.e. a gateway that answered instantly.
+                    latency_ms=float(s.get("latency_ms", 0.0)),
+                    cached_tokens=s.get("cached_tokens", 0),
+                    cache_creation_tokens=s.get(
+                        "cache_creation_tokens",
+                        0,
+                    ),
+                ),
+                persist=persist_records,
+                require_persisted=(
+                    persist_records
+                    and getattr(
+                        cost_tracker._persistence,
+                        "enabled",
+                        False,
+                    )
+                ),
+                share=False,
+            )
             # Mirror spend into the quota enforcer so /admin/quotas reflects
             # seeded usage (enforcer tracks spend separately from cost_tracker).
             #
@@ -1611,7 +1774,7 @@ def _apply_seed_data(
             if k.get("revoked"):
                 await api_key_service.revoke_key(record.key_id)
 
-    if seed.api_keys:
+    if persist_records and seed.api_keys:
         asyncio.run(_seed_api_keys())
 
     # Audit events. Recorded through AuditTrail.record so each entry gets a real
@@ -1635,7 +1798,7 @@ def _apply_seed_data(
                 data=ev.get("data", {}),
             )
 
-    if seed.audit_events:
+    if persist_records and seed.audit_events:
         asyncio.run(_seed_audit_events())
 
     # Webhook destinations

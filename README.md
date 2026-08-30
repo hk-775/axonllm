@@ -153,6 +153,26 @@ records) and auth in `LOG_ONLY`, which is what you want for a first look and not
 what you want anywhere else. [Quick Start](#quick-start) covers the four
 install paths — local or AWS, seeded or clean — and which flag decides.
 
+For a meeting-ready local backup on port 8001, using every provider configured
+in `.env` plus Bedrock through the current AWS credential chain:
+
+```bash
+./scripts/local_demo_backup.sh start
+# http://localhost:8001/admin/dashboard
+
+./scripts/local_demo_backup.sh status
+./scripts/local_demo_backup.sh stop
+```
+
+The start command verifies the canonical seed (66 requests, $1.26, 2 projects,
+3 users) before reporting success. Set `AXON_LOCAL_DEMO_PORT` to use another
+port. Send a Codex CLI prompt through the same local gateway and watch it in the
+dashboard's **Traces** view with:
+
+```bash
+./scripts/codex_local_demo.sh "Inspect this repository and summarize its API."
+```
+
 ## Why AxonLLM?
 
 | Problem | AxonLLM Solution |
@@ -800,10 +820,28 @@ operator path connected to the same table.
 
 ### AWS seeded demos
 
-The checked-in AWS stacks intentionally set `AXON_LOAD_DEMO_DATA=false` and do
-not expose a deployment parameter that changes it. Use
-[Local, seeded demo](#2-local-seeded-demo) for walkthroughs. Do not modify and
-promote the production task definition merely to seed fictional tenants.
+The Fargate stack defaults `LoadDemoData=false`, and production mode rejects any
+attempt to enable it. A separate disposable staging stack may explicitly set
+`AXON_LOAD_DEMO_DATA=true`; never promote that task definition or its retained
+state table into production.
+
+For a generated CloudFront HTTPS hostname with no custom DNS or ACM
+prerequisite, deploy a dedicated namespace:
+
+```bash
+export AXON_DEPLOYMENT_NAMESPACE=demo
+export AXON_FARGATE_EDGE_MODE=cloudfront-default
+export AXON_DEPLOYMENT_MODE=staging
+export AXON_LOAD_DEMO_DATA=true
+
+# Also set the immutable image, approved egress prefix list, and concrete
+# Bedrock resource ARNs documented in the Fargate deployment section.
+./deploy-fargate.sh us-east-1 --yes
+```
+
+The `CloudFrontURL` output is the customer-demo address. Viewer traffic remains
+HTTPS; only the private CloudFront VPC origin uses HTTP in this explicit staging
+mode.
 
 > **Two things to know before showing this to anyone.**
 >
@@ -819,6 +857,19 @@ promote the production task definition merely to seed fictional tenants.
 DynamoDB persistence merges on top of a seed, so demo projects and anything you
 create coexist. This is convenient in a disposable sandbox and is why a seeded
 environment must never be promoted.
+
+The four seeded API-key rows are display-only. Mint a real protected demo key
+into the dedicated table and store its one-time plaintext directly in Secrets
+Manager without printing it:
+
+```bash
+uv run python scripts/bootstrap_demo_access.py \
+  --table axonllm-demo-state \
+  --secret-name axonllm/demo/access
+```
+
+Use the secret's `api_key` field through a runtime resolver such as `asm-exec`
+when launching the dashboard validator or Codex CLI.
 
 Two exceptions, both deliberate: **event destinations and the region topology
 replace the seed rather than merging with it**, because merging cannot express a

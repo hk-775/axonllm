@@ -263,12 +263,12 @@ providers:
       completion_token_cost: 0.01
 
   groq:
-    llama-3.1-8b-instant:
-      prompt_token_cost: 0.00005
-      completion_token_cost: 0.00008
-    llama-3.3-70b-versatile:
-      prompt_token_cost: 0.00059
-      completion_token_cost: 0.00079
+    openai/gpt-oss-20b:
+      prompt_token_cost: 0.000075
+      completion_token_cost: 0.0003
+    openai/gpt-oss-120b:
+      prompt_token_cost: 0.00015
+      completion_token_cost: 0.0006
 
   # Cohere's pricing page lists Command R at $0.15/$0.60 per MTok and Command
   # R+ 08-2024 at $2.50/$10.00. The model documentation marks these versioned
@@ -315,10 +315,10 @@ providers:
     meta-llama/Llama-3.3-70B-Instruct-Turbo:
       prompt_token_cost: 0.00104
       completion_token_cost: 0.00104
-    deepseek-ai/DeepSeek-V4-Pro:
-      prompt_token_cost: 0.00174
-      completion_token_cost: 0.00348
-      cached_token_cost: 0.0002
+    deepseek-ai/DeepSeek-V4-Flash-0731:
+      prompt_token_cost: 0.00014
+      completion_token_cost: 0.00028
+      cached_token_cost: 0.00003
     Qwen/Qwen3.5-9B:
       prompt_token_cost: 0.00017
       completion_token_cost: 0.00025

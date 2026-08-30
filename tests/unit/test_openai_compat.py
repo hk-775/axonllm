@@ -494,6 +494,36 @@ class TestResponses:
             assert response.json()["error"]["type"] == "invalid_request_error"
             assert agent.last_call == {}
 
+    def test_codex_encrypted_reasoning_include_is_accepted_as_transport_metadata(
+        self,
+    ):
+        client, agent = _make_client()
+        response = client.post("/v1/responses", json={
+            "model": "m",
+            "input": "hello",
+            "reasoning": {},
+            "include": ["reasoning.encrypted_content"],
+        })
+
+        assert response.status_code == 200
+        assert agent.last_call["messages"] == [
+            {"role": "user", "content": "hello"},
+        ]
+
+    def test_other_include_fields_are_rejected_without_calling_router(self):
+        client, agent = _make_client()
+        response = client.post("/v1/responses", json={
+            "model": "m",
+            "input": "hello",
+            "include": ["message.output_text.logprobs"],
+        })
+
+        assert response.status_code == 400
+        assert "reasoning.encrypted_content" in (
+            response.json()["error"]["message"]
+        )
+        assert agent.last_call == {}
+
     def test_hosted_tool_is_rejected(self):
         client, agent = _make_client()
         response = client.post("/v1/responses", json={

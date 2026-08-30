@@ -63,7 +63,12 @@ def test_fargate_deploy_requires_and_passes_verified_image() -> None:
     script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
 
     assert "require_env AXON_VERIFIED_IMAGE_URI" in script
-    parameter = '--parameters "AxonLLMStack:VerifiedImageUri=${AXON_VERIFIED_IMAGE_URI}"'
+    assert 'STACK_ID="AxonLLMStack"' in script
+    assert 'STACK_ID="${STACK_ID}-${DEPLOYMENT_NAMESPACE}"' in script
+    parameter = (
+        '--parameters "${STACK_ID}:'
+        'VerifiedImageUri=${AXON_VERIFIED_IMAGE_URI}"'
+    )
     assert parameter in script
     assert "immutable private ECR URI in us-east-1" in script
 

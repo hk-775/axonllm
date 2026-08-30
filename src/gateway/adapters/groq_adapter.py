@@ -6,10 +6,8 @@ from src.gateway.models import ModelInfo
 PROVIDER_NAME = "groq"
 
 _GROQ_MODELS = [
-    ModelInfo(model_id="llama-3.3-70b-versatile", provider=PROVIDER_NAME, capabilities=["chat", "streaming", "function_calling"]),
-    ModelInfo(model_id="llama-3.1-8b-instant", provider=PROVIDER_NAME, capabilities=["chat", "streaming"]),
-    ModelInfo(model_id="mixtral-8x7b-32768", provider=PROVIDER_NAME, capabilities=["chat", "streaming"]),
-    ModelInfo(model_id="gemma2-9b-it", provider=PROVIDER_NAME, capabilities=["chat", "streaming"]),
+    ModelInfo(model_id="openai/gpt-oss-120b", provider=PROVIDER_NAME, capabilities=["chat", "streaming", "function_calling"]),
+    ModelInfo(model_id="openai/gpt-oss-20b", provider=PROVIDER_NAME, capabilities=["chat", "streaming", "function_calling"]),
 ]
 
 
