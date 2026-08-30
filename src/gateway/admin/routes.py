@@ -697,6 +697,56 @@ class AdminAPI:
         })
 
     # ------------------------------------------------------------------
+    # GET /admin/session
+    # ------------------------------------------------------------------
+
+    async def session_context(self, request: Request) -> JSONResponse:
+        """Return the canonical dashboard identity without credential material."""
+        state = getattr(request, "state", None)
+        context = getattr(state, "context", None)
+        principal = getattr(state, "principal", None)
+        roles = (
+            sorted(role.value for role in principal.roles)
+            if principal is not None
+            else sorted(getattr(context, "roles", []) or [])
+        )
+        project_ids = (
+            sorted(principal.project_ids)
+            if principal is not None
+            else (
+                [context.project_id]
+                if getattr(context, "project_id", "")
+                else []
+            )
+        )
+        auth_method = getattr(context, "auth_method", None)
+        return JSONResponse(
+            {
+                "tenant_id": _request_tenant_id(request),
+                "principal_id": getattr(
+                    context,
+                    "principal_id",
+                    None,
+                )
+                or getattr(context, "user_id", None),
+                "roles": roles,
+                "auth_method": (
+                    auth_method.value
+                    if auth_method is not None
+                    and hasattr(auth_method, "value")
+                    else str(auth_method or "")
+                ),
+                "project_ids": project_ids,
+                "active_project_id": getattr(
+                    context,
+                    "project_id",
+                    None,
+                ),
+            },
+            headers={"Cache-Control": "no-store"},
+        )
+
+    # ------------------------------------------------------------------
     # GET /admin/projects
     # ------------------------------------------------------------------
 
@@ -746,6 +796,7 @@ class AdminAPI:
                 else None
             )
             result.append({
+                "tenant_id": project.tenant_id,
                 "project_id": project.project_id,
                 "name": project.name,
                 "revision": project.revision,
@@ -3775,6 +3826,7 @@ def create_admin_routes(admin_api: AdminAPI) -> list[Route]:
         Route("/admin/pricing-drift", admin_api.pricing_drift, methods=["GET"]),
         Route("/admin/catalog-drift", admin_api.catalog_drift, methods=["GET"]),
         Route("/admin/production-checklist", admin_api.production_checklist, methods=["GET"]),
+        Route("/admin/session", admin_api.session_context, methods=["GET"]),
         Route("/admin/overview", admin_api.overview, methods=["GET"]),
         Route("/admin/projects", admin_api.list_projects, methods=["GET"]),
         Route("/admin/projects", admin_api.create_project, methods=["POST"]),

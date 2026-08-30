@@ -3,6 +3,7 @@
 
 model = "claude-sonnet"
 model_provider = "axonllm"
+model_catalog_json = "/absolute/path/to/AxonLLM/config/codex/model_catalog.json"
 model_supports_reasoning_summaries = false
 model_reasoning_summary = "none"
 web_search = "disabled"

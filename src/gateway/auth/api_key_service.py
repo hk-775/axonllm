@@ -104,16 +104,21 @@ class APIKeyService:
     def _principal_for_key(key: APIKey) -> Principal:
         if key.tenant_id is None:
             raise ValueError("canonical API-key principals require tenant_id")
+        principal_scopes = (
+            frozenset(key.scopes)
+            if key.principal_role is TenantRole.SERVICE
+            else frozenset()
+        )
         return Principal(
             principal_id=f"apikey:{key.key_id}",
             tenant_id=key.tenant_id,
             subject=key.key_id,
             issuer=API_KEY_ISSUER,
-            roles=frozenset({TenantRole.SERVICE}),
+            roles=frozenset({key.principal_role}),
             auth_method=AuthMethod.API_KEY,
             membership_status=MembershipStatus.ACTIVE,
             project_ids=frozenset({key.project_id}),
-            scopes=frozenset(key.scopes),
+            scopes=principal_scopes,
             authorization_version=1,
             credential_id=key.key_id,
         )
@@ -138,8 +143,22 @@ class APIKeyService:
         created_by: str,
         expires_at: datetime | None = None,
         tenant_id: str | None = None,
+        principal_role: TenantRole = TenantRole.SERVICE,
     ) -> tuple[APIKey, str]:
         """Issue a new API key. Returns (key_record, raw_key_one_time)."""
+        if principal_role not in {
+            TenantRole.SERVICE,
+            TenantRole.TENANT_ADMIN,
+        }:
+            raise ValueError(
+                "API keys may represent only service or tenant_admin principals"
+            )
+        if tenant_id is None and principal_role is not TenantRole.SERVICE:
+            raise ValueError("tenant_admin API keys require tenant_id")
+        if principal_role is TenantRole.TENANT_ADMIN and scopes:
+            raise ValueError(
+                "tenant_admin API keys must not carry service scopes"
+            )
         now = datetime.now(timezone.utc)
         raw_key = self.generate_raw_key()
         key_hash = self.hash_key(raw_key)
@@ -153,6 +172,7 @@ class APIKeyService:
             scopes=scopes,
             created_by=created_by,
             tenant_id=tenant_id,
+            principal_role=principal_role,
             created_at=now,
             expires_at=self._resolve_expiry(expires_at, tenant_id, now),
         )
@@ -432,6 +452,7 @@ class APIKeyService:
                 scopes=list(old_key.scopes),
                 created_by=rotated_by,
                 tenant_id=old_key.tenant_id,
+                principal_role=old_key.principal_role,
                 created_at=now,
                 expires_at=self._resolve_expiry(
                     old_key.expires_at,
@@ -470,6 +491,7 @@ class APIKeyService:
             created_by=rotated_by,
             expires_at=old_key.expires_at,
             tenant_id=old_key.tenant_id,
+            principal_role=old_key.principal_role,
         )
 
     async def list_keys(

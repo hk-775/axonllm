@@ -537,6 +537,7 @@ class KeyManagementAPI:
                     "name": k.name,
                     "project_id": k.project_id,
                     "scopes": k.scopes,
+                    "principal_role": k.principal_role.value,
                     "created_by": k.created_by,
                     "created_at": k.created_at.isoformat(),
                     "expires_at": k.expires_at.isoformat() if k.expires_at else None,

@@ -25,7 +25,7 @@ const getCsrfToken = () => {
 };
 let browserSessionMode = Boolean(getCsrfToken());
 const promptForKey = () => {
-  const k = window.prompt('This gateway requires an API key (ENFORCE mode).\n' + 'Paste an admin API key (create one with: axon issue-key):');
+  const k = window.prompt('This gateway requires an API key (ENFORCE mode).\n' + 'Paste the tenant-admin API key supplied for this environment:');
   if (k) setApiKey(k.trim());
   return getApiKey();
 };
@@ -34,6 +34,11 @@ const authHeaders = extra => {
   const key = browserSessionMode ? '' : getApiKey();
   if (key) h['Authorization'] = 'Bearer ' + key;
   return h;
+};
+const hasNewSessionKey = headers => {
+  if (browserSessionMode) return false;
+  const key = getApiKey();
+  return Boolean(key && headers['Authorization'] !== 'Bearer ' + key);
 };
 
 // Turn any failed response into a readable Error (status + server message),
@@ -72,6 +77,9 @@ async function request(method, url, body, _retried) {
       throw new Error('Authentication required (401). Redirecting to sign in.');
     }
     browserSessionMode = false;
+    // Another startup request may have collected a key while this one was in
+    // flight. Retry with that key instead of showing two blocking prompts.
+    if (hasNewSessionKey(headers)) return request(method, url, body, true);
     if (promptForKey()) return request(method, url, body, true);
     throw new Error('Authentication required (401). Provide an admin API key.');
   }
@@ -95,13 +103,14 @@ async function authorizedDownloadRequest(url, _retried) {
   if (!sameOriginAdminPath(url)) {
     throw new Error('The export service returned an invalid download path.');
   }
+  const headers = authHeaders({
+    'Accept': 'application/json, text/csv'
+  });
   let response;
   try {
     response = await fetch(url, {
       method: 'GET',
-      headers: authHeaders({
-        'Accept': 'application/json, text/csv'
-      }),
+      headers,
       credentials: 'same-origin',
       redirect: 'follow'
     });
@@ -121,6 +130,9 @@ async function authorizedDownloadRequest(url, _retried) {
       throw new Error('Authentication required (401). Redirecting to sign in.');
     }
     browserSessionMode = false;
+    if (hasNewSessionKey(headers)) {
+      return authorizedDownloadRequest(url, true);
+    }
     if (promptForKey()) return authorizedDownloadRequest(url, true);
     throw new Error('Authentication required (401). Provide an admin API key.');
   }
@@ -5935,6 +5947,7 @@ function App() {
     return value === '1' || value === 'true';
   });
   const [browserAuth, setBrowserAuth] = useState(null);
+  const [sessionContext, setSessionContext] = useState(null);
   useEffect(() => {
     let active = true;
     fetch('/auth/config', {
@@ -5955,6 +5968,15 @@ function App() {
       active = false;
     };
   }, []);
+  useEffect(() => {
+    let active = true;
+    api.get('/admin/session').then(payload => {
+      if (active) setSessionContext(payload);
+    }).catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, []);
   const handleSignOut = useCallback(async () => {
     if (!browserAuth) return;
     try {
@@ -5966,6 +5988,13 @@ function App() {
       window.alert(error && error.message ? error.message : 'Sign out failed.');
     }
   }, [browserAuth]);
+  const handleSwitchTenant = useCallback(() => {
+    const key = window.prompt('Switch tenant\n\nPaste the tenant-admin API key for the other demo persona:');
+    if (!key || !key.trim()) return;
+    browserSessionMode = false;
+    setApiKey(key.trim());
+    window.location.reload();
+  }, []);
   const navigate = (v, opts = {}) => {
     setView(v);
     setSelectedProject(opts.projectId || null);
@@ -6312,7 +6341,11 @@ function App() {
     className: "dot"
   }), "AxonLLM \u2014 The neural control plane for enterprise LLMs")), /*#__PURE__*/React.createElement("div", {
     className: "topbar-right"
-  }, browserAuth && /*#__PURE__*/React.createElement("button", {
+  }, sessionContext && sessionContext.tenant_id && /*#__PURE__*/React.createElement("button", {
+    className: "topbar-pill",
+    onClick: browserAuth ? undefined : handleSwitchTenant,
+    title: browserAuth ? 'Current tenant' : 'Switch demo tenant with another tenant-admin API key'
+  }, "Tenant: ", sessionContext.tenant_id, !browserAuth && ' · Switch'), browserAuth && /*#__PURE__*/React.createElement("button", {
     className: "topbar-pill",
     onClick: handleSignOut,
     title: "Sign out"

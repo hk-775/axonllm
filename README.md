@@ -148,10 +148,10 @@ answers and the gateway you started by hand goes quietly unreachable.
 
 No Docker? Use [path 1 or 2](#quick-start) below, which need only Python and uv.
 
-This comes up **with the demo data seeded** (Acme Corp, 3 users, 66 usage
-records) and auth in `LOG_ONLY`, which is what you want for a first look and not
-what you want anywhere else. [Quick Start](#quick-start) covers the four
-install paths — local or AWS, seeded or clean — and which flag decides.
+The zero-configuration developer path comes up **with demo data seeded** and
+auth in `LOG_ONLY`, which is useful for a first look and not appropriate beyond
+local development. The meeting-ready backup below instead uses canonical
+identity, DynamoDB Local, and two isolated tenant-admin personas.
 
 For a meeting-ready local backup on port 8001, using every provider configured
 in `.env` plus Bedrock through the current AWS credential chain:
@@ -160,17 +160,27 @@ in `.env` plus Bedrock through the current AWS credential chain:
 ./scripts/local_demo_backup.sh start
 # http://localhost:8001/admin/dashboard
 
+./scripts/local_demo_backup.sh personas
+./scripts/local_demo_backup.sh copy-key tenant-acme
+# Paste the copied key when the dashboard asks for authentication.
+# Use tenant-globex to switch the complete dashboard tenant view.
+
 ./scripts/local_demo_backup.sh status
 ./scripts/local_demo_backup.sh stop
 ```
 
-The start command verifies the canonical seed (66 requests, $1.26, 2 projects,
-3 users) before reporting success. Set `AXON_LOCAL_DEMO_PORT` to use another
-port. Send a Codex CLI prompt through the same local gateway and watch it in the
-dashboard's **Traces** view with:
+The start command verifies the Acme seed (66 requests, $1.26, 2 projects,
+3 users), the Globex seed, and that both tenants resolve their own distinct
+`proj-alpha` before reporting success. Credentials are written mode 0600 under
+`.demo/` and never printed. Set `AXON_LOCAL_DEMO_PORT` to use another port.
+Send a Codex CLI prompt through the same local gateway and watch it in the
+matching tenant's **Traces** view with:
 
 ```bash
 ./scripts/codex_local_demo.sh "Inspect this repository and summarize its API."
+AXON_LOCAL_DEMO_TENANT=tenant-globex \
+AXON_LOCAL_DEMO_MODEL=claude-haiku \
+  ./scripts/codex_local_demo.sh "Summarize the tenant isolation controls."
 ```
 
 ## Why AxonLLM?
@@ -845,10 +855,10 @@ mode.
 
 > **Two things to know before showing this to anyone.**
 >
-> 1. **The data is fictional and does not say so.** Acme Corp, Alice/Bob/Carol,
->    $1.26 of spend, an audit trail whose hash chain verifies. It is indistinguishable
->    from real usage in the UI, which is what makes it a good demo and a bad
->    thing to leave running where someone might mistake it for a live tenant.
+> 1. **The data is fictional and does not say so.** Acme Corp and Globex Labs,
+>    their users, spend, and verifying audit chains are indistinguishable from
+>    real usage in the UI. That makes this a useful demo and a bad environment
+>    to leave running where someone might mistake it for live customer data.
 > 2. **Seeded API key records are not usable credentials.** Four keys appear on
 >    the API Keys page, including a revoked one, but issuance discards the raw
 >    value — only the hash is stored, exactly as for a real key. Nothing can
@@ -858,9 +868,9 @@ DynamoDB persistence merges on top of a seed, so demo projects and anything you
 create coexist. This is convenient in a disposable sandbox and is why a seeded
 environment must never be promoted.
 
-The four seeded API-key rows are display-only. Mint a real protected demo key
-into the dedicated table and store its one-time plaintext directly in Secrets
-Manager without printing it:
+The seeded service-key rows are display-only. Mint the two bounded tenant-admin
+demo personas into the dedicated table and store their one-time plaintext
+directly in Secrets Manager without printing it:
 
 ```bash
 uv run python scripts/bootstrap_demo_access.py \
@@ -868,8 +878,11 @@ uv run python scripts/bootstrap_demo_access.py \
   --secret-name axonllm/demo/access
 ```
 
-Use the secret's `api_key` field through a runtime resolver such as `asm-exec`
-when launching the dashboard validator or Codex CLI.
+The secret uses schema `axonllm.demo-personas/v1`; select the required entry
+from `personas[]` by `tenant_id` through a runtime resolver such as `asm-exec`
+when launching the dashboard validator or Codex CLI. A Fargate deployment with
+`AXON_LOAD_DEMO_DATA=true` performs this bootstrap automatically after the ECS
+service becomes healthy.
 
 Two exceptions, both deliberate: **event destinations and the region topology
 replace the seed rather than merging with it**, because merging cannot express a

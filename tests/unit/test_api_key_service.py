@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from src.gateway.auth.api_key_service import APIKeyService, PREFIX
-from src.gateway.models import APIKey
+from src.gateway.models import APIKey, TenantRole
 
 
 class FakePersistence:
@@ -150,6 +150,70 @@ class TestIssueKey:
         assert key.expires_at is not None
         assert before + timedelta(days=90) <= key.expires_at
         assert key.expires_at <= after + timedelta(days=90)
+
+    def test_tenant_admin_key_persists_bounded_canonical_authority(self):
+        class CanonicalPersistence(FakePersistence):
+            principal = None
+
+            async def save_api_key_with_principal(
+                self,
+                key,
+                principal,
+            ):
+                await self.save_api_key(key)
+                self.principal = principal
+
+        persistence = CanonicalPersistence()
+        service = APIKeyService(persistence)
+        key, _ = asyncio.run(
+            service.issue_key(
+                "proj-1",
+                "Demo admin",
+                [],
+                "demo-bootstrap",
+                tenant_id="tenant-a",
+                principal_role=TenantRole.TENANT_ADMIN,
+            )
+        )
+
+        assert key.principal_role is TenantRole.TENANT_ADMIN
+        assert persistence.principal.roles == frozenset(
+            {TenantRole.TENANT_ADMIN}
+        )
+        assert persistence.principal.project_ids == frozenset({"proj-1"})
+        assert persistence.principal.scopes == frozenset()
+
+    def test_tenant_admin_key_rejects_service_scopes(self, service):
+        with pytest.raises(
+            ValueError,
+            match="must not carry service scopes",
+        ):
+            asyncio.run(
+                service.issue_key(
+                    "proj-1",
+                    "Demo admin",
+                    ["admin:*"],
+                    "demo-bootstrap",
+                    tenant_id="tenant-a",
+                    principal_role=TenantRole.TENANT_ADMIN,
+                )
+            )
+
+    def test_api_key_cannot_become_a_platform_admin(self, service):
+        with pytest.raises(
+            ValueError,
+            match="only service or tenant_admin",
+        ):
+            asyncio.run(
+                service.issue_key(
+                    "proj-1",
+                    "Invalid admin",
+                    [],
+                    "demo-bootstrap",
+                    tenant_id="tenant-a",
+                    principal_role=TenantRole.PLATFORM_ADMIN,
+                )
+            )
 
     @pytest.mark.parametrize(
         ("expires_at", "message"),

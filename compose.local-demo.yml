@@ -1,6 +1,38 @@
 name: axonllm-local-demo
 
 services:
+  dynamodb-local:
+    image: amazon/dynamodb-local:3.3.1@sha256:ff89bd48ff32cd8d9be5fee8873b65b8854dc408f1afe881be6eb00247bc0dab
+    command:
+      - -jar
+      - DynamoDBLocal.jar
+      - -sharedDb
+      - -inMemory
+    restart: unless-stopped
+
+  dynamodb-init:
+    image: ${AXON_LOCAL_DEMO_IMAGE:-axonllm-local-demo:codex-compat}
+    platform: linux/amd64
+    user: "${AXON_LOCAL_UID:-10001}:${AXON_LOCAL_GID:-10001}"
+    depends_on:
+      dynamodb-local:
+        condition: service_started
+    restart: "no"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    environment:
+      AWS_ACCESS_KEY_ID: DUMMYIDEXAMPLE
+      AWS_DEFAULT_REGION: ${AXON_LOCAL_AWS_REGION:-us-east-1}
+      AWS_SECRET_ACCESS_KEY: DUMMYEXAMPLEKEYDUMMYEXAMPLEKEY
+      AXON_DEPLOYMENT_PROFILE: development
+      AXON_DYNAMODB_ENDPOINT_URL: http://dynamodb-local:8000
+      AXON_DYNAMODB_TABLE: axonllm-local-demo
+      LLM_ROUTER_DYNAMODB_ENABLED: "true"
+    command:
+      - python
+      - scripts/init_local_demo_store.py
+
   axonllm:
     image: ${AXON_LOCAL_DEMO_IMAGE:-axonllm-local-demo:codex-compat}
     platform: linux/amd64
@@ -8,6 +40,9 @@ services:
     init: true
     read_only: true
     restart: unless-stopped
+    depends_on:
+      dynamodb-init:
+        condition: service_completed_successfully
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=128m
     cap_drop:
@@ -27,17 +62,20 @@ services:
       AWS_PROFILE: ${AWS_PROFILE:-default}
       AWS_REGION: ${AXON_LOCAL_AWS_REGION:-us-east-1}
       AWS_SHARED_CREDENTIALS_FILE: /tmp/.aws/credentials
-      AXON_AUTH_MODE: LOG_ONLY
+      AXON_AUTH_MODE: ENFORCE
       AXON_DEPLOYMENT_PROFILE: development
+      AXON_DEMO_SEED_CONFIG: config/demo_seed_multitenant.yaml
+      AXON_DYNAMODB_ENDPOINT_URL: http://dynamodb-local:8000
+      AXON_DYNAMODB_TABLE: axonllm-local-demo
       AXON_GRACEFUL_SHUTDOWN_SECONDS: "30"
       AXON_LOAD_DEMO_DATA: "true"
       AXON_NO_BROWSER: "true"
       AXON_PII_REDACTION_DEFAULT: "true"
-      AXON_REQUIRE_CANONICAL_IDENTITY: "false"
+      AXON_REQUIRE_CANONICAL_IDENTITY: "true"
       AXON_SEMANTIC_CACHE: "true"
       AXON_SERVER_HOST: 0.0.0.0
       AXON_SERVER_PORT: "8000"
-      LLM_ROUTER_DYNAMODB_ENABLED: "false"
+      LLM_ROUTER_DYNAMODB_ENABLED: "true"
     volumes:
       - ./config:/app/config:ro
       - ${HOME}/.aws:/tmp/.aws:ro
@@ -53,3 +91,37 @@ services:
       timeout: 5s
       retries: 6
       start_period: 20s
+
+  demo-access:
+    image: ${AXON_LOCAL_DEMO_IMAGE:-axonllm-local-demo:codex-compat}
+    platform: linux/amd64
+    user: "${AXON_LOCAL_UID:-10001}:${AXON_LOCAL_GID:-10001}"
+    depends_on:
+      axonllm:
+        condition: service_healthy
+    restart: "no"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    environment:
+      AWS_ACCESS_KEY_ID: DUMMYIDEXAMPLE
+      AWS_DEFAULT_REGION: ${AXON_LOCAL_AWS_REGION:-us-east-1}
+      AWS_SECRET_ACCESS_KEY: DUMMYEXAMPLEKEYDUMMYEXAMPLEKEY
+      AXON_DEPLOYMENT_PROFILE: development
+      AXON_DYNAMODB_ENDPOINT_URL: http://dynamodb-local:8000
+      AXON_DYNAMODB_TABLE: axonllm-local-demo
+      LLM_ROUTER_DYNAMODB_ENABLED: "true"
+    volumes:
+      - ./config:/app/config:ro
+      - ${AXON_LOCAL_DEMO_ACCESS_DIR:-./.demo}:/demo-access
+    command:
+      - python
+      - scripts/bootstrap_demo_access.py
+      - --table
+      - axonllm-local-demo
+      - --endpoint-url
+      - http://dynamodb-local:8000
+      - --seed-config
+      - config/demo_seed_multitenant.yaml
+      - --local-output
+      - /demo-access/personas.json

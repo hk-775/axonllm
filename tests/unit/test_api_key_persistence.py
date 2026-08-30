@@ -21,7 +21,12 @@ from src.gateway.auth.dynamo_principal_repository import (
     membership_sort_key,
 )
 from src.gateway.auth.principal import API_KEY_ISSUER, CredentialIdentity
-from src.gateway.models import APIKey, AuthMethod, MembershipStatus
+from src.gateway.models import (
+    APIKey,
+    AuthMethod,
+    MembershipStatus,
+    TenantRole,
+)
 from src.gateway.persistence import DynamoPersistence
 
 
@@ -183,6 +188,22 @@ def _run_concurrently(*coroutines):
 
 
 class TestTenantQualifiedSerialization:
+    def test_principal_role_preserves_the_legacy_positional_constructor(self):
+        created_at = datetime(2026, 8, 7, tzinfo=timezone.utc)
+        key = APIKey(
+            "axk_test",
+            "a" * 64,
+            "project-a",
+            "Production key",
+            ["chat:invoke"],
+            "principal-a",
+            "tenant-a",
+            created_at,
+        )
+
+        assert key.created_at == created_at
+        assert key.principal_role is TenantRole.SERVICE
+
     def test_tenant_id_round_trips_and_qualifies_primary_namespace(self):
         item = DynamoPersistence.serialize_api_key(_key())
         restored = DynamoPersistence.deserialize_api_key(item)
@@ -200,6 +221,21 @@ class TestTenantQualifiedSerialization:
         assert item["SK"] == "APIKEY"
         assert "tenant_id" not in item
         assert restored.tenant_id is None
+
+    def test_tenant_admin_role_round_trips_without_service_scopes(self):
+        key = replace(
+            _key(),
+            scopes=[],
+            principal_role=TenantRole.TENANT_ADMIN,
+        )
+        item = DynamoPersistence.serialize_api_key(key)
+        restored = DynamoPersistence.deserialize_api_key(item)
+
+        assert item["principal_role"] == "tenant_admin"
+        assert restored.principal_role is TenantRole.TENANT_ADMIN
+        principal = APIKeyService._principal_for_key(restored)
+        assert principal.roles == frozenset({TenantRole.TENANT_ADMIN})
+        assert principal.scopes == frozenset()
 
 
 class TestTransactionTokens:

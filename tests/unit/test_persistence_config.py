@@ -27,6 +27,8 @@ CDK_TABLE_NAME = "axonllm-state"
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch):
     monkeypatch.delenv("AXON_DYNAMODB_TABLE", raising=False)
+    monkeypatch.delenv("AXON_DYNAMODB_ENDPOINT_URL", raising=False)
+    monkeypatch.delenv("AXON_DEPLOYMENT_PROFILE", raising=False)
     monkeypatch.delenv("LLM_ROUTER_DYNAMODB_ENABLED", raising=False)
 
 
@@ -41,6 +43,55 @@ class TestTableNameResolution:
     def test_explicit_arg_wins_over_env(self, monkeypatch):
         monkeypatch.setenv("AXON_DYNAMODB_TABLE", "env-table")
         assert DynamoPersistence(table_name="arg-table")._table_name == "arg-table"
+
+
+class TestDevelopmentEndpoint:
+    def test_local_endpoint_is_available_only_in_development(
+        self,
+        monkeypatch,
+    ):
+        monkeypatch.setenv("AXON_DEPLOYMENT_PROFILE", "development")
+        monkeypatch.setenv(
+            "AXON_DYNAMODB_ENDPOINT_URL",
+            "http://dynamodb-local:8000/",
+        )
+
+        persistence = DynamoPersistence(region="us-east-1")
+
+        assert persistence._dynamodb_client_options() == {
+            "region_name": "us-east-1",
+            "endpoint_url": "http://dynamodb-local:8000",
+        }
+
+    def test_production_rejects_endpoint_override(self, monkeypatch):
+        monkeypatch.setenv("AXON_DEPLOYMENT_PROFILE", "production")
+        monkeypatch.setenv(
+            "AXON_DYNAMODB_ENDPOINT_URL",
+            "http://127.0.0.1:8000",
+        )
+
+        with pytest.raises(RuntimeError, match="forbidden in production"):
+            DynamoPersistence(region="us-east-1")
+
+    @pytest.mark.parametrize(
+        "endpoint",
+        [
+            "file:///tmp/dynamodb",
+            "http://user:password@localhost:8000",
+            "http://localhost:8000/path",
+            "http://localhost:8000?tenant=a",
+        ],
+    )
+    def test_malformed_endpoint_is_rejected(
+        self,
+        monkeypatch,
+        endpoint,
+    ):
+        monkeypatch.setenv("AXON_DEPLOYMENT_PROFILE", "development")
+        monkeypatch.setenv("AXON_DYNAMODB_ENDPOINT_URL", endpoint)
+
+        with pytest.raises(ValueError, match="http\\(s\\) origin"):
+            DynamoPersistence(region="us-east-1")
 
 
 class TestHealthStatus:

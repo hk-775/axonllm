@@ -40,6 +40,8 @@ class DemoSeedData:
     audit_events: list[dict] = field(default_factory=list)
     api_keys: list[dict] = field(default_factory=list)
     webhook_destinations: list[dict] = field(default_factory=list)
+    default_tenant_id: str | None = None
+    tenants: list[dict] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -407,29 +409,123 @@ def load_pricing_config(path: str) -> dict[str, dict[str, TokenPricing]]:
 # load_demo_seed_config
 # ---------------------------------------------------------------------------
 
+_DEMO_SEED_LIST_FIELDS = (
+    "tenants",
+    "projects",
+    "user_budgets",
+    "usage_seeds",
+    "policies",
+    "policy_nodes",
+    "unhealthy_providers",
+    "audit_events",
+    "api_keys",
+    "webhook_destinations",
+)
+_TENANT_SCOPED_DEMO_FIELDS = frozenset(
+    {
+        "projects",
+        "user_budgets",
+        "usage_seeds",
+        "policies",
+        "policy_nodes",
+        "audit_events",
+        "api_keys",
+        "webhook_destinations",
+    }
+)
+
+
+def _load_demo_seed_document(
+    path: Path,
+    *,
+    visited: frozenset[Path] = frozenset(),
+) -> dict:
+    resolved = path.resolve()
+    if resolved in visited:
+        raise ValueError(f"Demo seed base_seed cycle includes {resolved}")
+    if not resolved.exists():
+        logger.warning(
+            "Demo seed config not found at %s — using empty seed data",
+            resolved,
+        )
+        return {}
+
+    with resolved.open(encoding="utf-8") as f:
+        raw = yaml.safe_load(f) or {}
+    if not isinstance(raw, dict):
+        raise ValueError("Demo seed config must contain a YAML mapping")
+
+    base_name = raw.get("base_seed")
+    merged: dict = {}
+    if base_name is not None:
+        if not isinstance(base_name, str) or not base_name.strip():
+            raise ValueError("base_seed must be a non-empty relative path")
+        if Path(base_name).is_absolute():
+            raise ValueError("base_seed must be a non-empty relative path")
+        base_path = (resolved.parent / base_name).resolve()
+        if not base_path.exists():
+            raise ValueError(f"Demo seed base_seed not found: {base_path}")
+        merged = _load_demo_seed_document(
+            base_path,
+            visited=visited | {resolved},
+        )
+
+    result: dict[str, object] = {}
+    for name in _DEMO_SEED_LIST_FIELDS:
+        local_rows = raw.get(name, [])
+        if not isinstance(local_rows, list) or any(
+            not isinstance(row, dict) for row in local_rows
+        ):
+            raise ValueError(f"{name} must be a list of mappings")
+        result[name] = [
+            *merged.get(name, []),
+            *(dict(row) for row in local_rows),
+        ]
+    result["default_tenant_id"] = raw.get(
+        "default_tenant_id",
+        merged.get("default_tenant_id"),
+    )
+    return result
+
 
 def load_demo_seed_config(path: str) -> DemoSeedData:
     """Load demo seed data from a YAML file.
 
     Returns empty DemoSeedData if the file does not exist.
     """
-    if not Path(path).exists():
-        logger.warning("Demo seed config not found at %s — using empty seed data", path)
-        return DemoSeedData()
+    raw = _load_demo_seed_document(Path(path))
+    default_tenant_id = raw.get("default_tenant_id")
+    if default_tenant_id is not None and (
+        not isinstance(default_tenant_id, str)
+        or not default_tenant_id.strip()
+    ):
+        raise ValueError("default_tenant_id must be None or a non-empty string")
 
-    with open(path, encoding="utf-8") as f:
-        raw = yaml.safe_load(f) or {}
+    normalized: dict[str, list[dict]] = {}
+    for name in _DEMO_SEED_LIST_FIELDS:
+        rows = raw.get(name, [])
+        if not isinstance(rows, list) or any(
+            not isinstance(row, dict) for row in rows
+        ):
+            raise ValueError(f"{name} must be a list of mappings")
+        copied = [dict(row) for row in rows]
+        if default_tenant_id is not None and name in _TENANT_SCOPED_DEMO_FIELDS:
+            for row in copied:
+                row.setdefault("tenant_id", default_tenant_id)
+        normalized[name] = copied
 
     return DemoSeedData(
-        projects=raw.get("projects", []),
-        user_budgets=raw.get("user_budgets", []),
-        usage_seeds=raw.get("usage_seeds", []),
-        policies=raw.get("policies", []),
-        policy_nodes=raw.get("policy_nodes", []),
-        unhealthy_providers=raw.get("unhealthy_providers", []),
-        audit_events=raw.get("audit_events", []),
-        api_keys=raw.get("api_keys", []),
-        webhook_destinations=raw.get("webhook_destinations", []),
+        default_tenant_id=default_tenant_id,
+        tenants=normalized["tenants"],
+        projects=normalized["projects"],
+        user_budgets=normalized["user_budgets"],
+        usage_seeds=normalized["usage_seeds"],
+        policies=normalized["policies"],
+        policy_nodes=normalized["policy_nodes"],
+        unhealthy_providers=normalized["unhealthy_providers"],
+        audit_events=normalized["audit_events"],
+        api_keys=normalized["api_keys"],
+        webhook_destinations=normalized["webhook_destinations"],
     )
 
 
@@ -512,7 +608,11 @@ def serialize_pricing_config(pricing: dict[str, dict[str, TokenPricing]]) -> dic
 
 def serialize_demo_seed_config(seed_data: DemoSeedData) -> dict:
     """Convert DemoSeedData back to a plain dict suitable for YAML dump."""
-    result: dict[str, list] = {}
+    result: dict[str, object] = {}
+    if seed_data.default_tenant_id is not None:
+        result["default_tenant_id"] = seed_data.default_tenant_id
+    if seed_data.tenants:
+        result["tenants"] = seed_data.tenants
     if seed_data.projects:
         result["projects"] = seed_data.projects
     if seed_data.user_budgets:

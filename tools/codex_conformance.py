@@ -15,6 +15,7 @@ import json
 import os
 import signal
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -24,11 +25,16 @@ from typing import Any
 
 from starlette.requests import Request
 
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 from src.gateway.chat.openai_routes import OpenAICompatAPI
 
 
 SUPPORTED_CODEX_VERSION = "0.150.1"
 MODEL = "claude-sonnet"
+MODEL_CATALOG = ROOT / "config" / "codex" / "model_catalog.json"
 TOKEN = "axonllm-codex-conformance-token"
 SUCCESS_PROMPT = "AXONLLM_CONFORMANCE_SUCCESS"
 ERROR_PROMPT = "AXONLLM_CONFORMANCE_ERROR"
@@ -385,6 +391,8 @@ def _codex_command(
         MODEL,
         "--output-last-message",
         str(output),
+        "-c",
+        f'model_catalog_json="{MODEL_CATALOG}"',
         "-c",
         'model_provider="axonllm"',
         "-c",

@@ -75,6 +75,13 @@ _MAX_EMBEDDING_INPUT_BYTES = 512 * 1024
 _MAX_EMBEDDING_DIMENSIONS = 65_536
 
 
+@dataclasses.dataclass
+class _BudgetStreamSettlement:
+    """Tracks which layer owns settlement for one active stream."""
+
+    claimed: bool = False
+
+
 # ---------------------------------------------------------------------------
 # Stub for BedrockAgentCoreApp (since we can't import the real SDK)
 # ---------------------------------------------------------------------------
@@ -237,6 +244,10 @@ class GatewayAgent:
         self._semantic_cache = semantic_cache
         self._persistence = persistence
         self._routing_runtime = routing_runtime
+        self._budget_stream_settlements: dict[
+            str,
+            _BudgetStreamSettlement,
+        ] = {}
 
     # ------------------------------------------------------------------
     # Public API
@@ -3062,6 +3073,11 @@ class GatewayAgent:
     ) -> dict[str, float] | None:
         if reservation is None or self._quota_enforcer is None:
             return {}
+        stream_settlement = self._budget_stream_settlements.get(
+            reservation.request_id
+        )
+        if stream_settlement is not None:
+            stream_settlement.claimed = True
         return await self._quota_enforcer.finalize_budget(
             reservation,
             actual_cost,
@@ -3078,47 +3094,70 @@ class GatewayAgent:
     ) -> AsyncIterator[dict]:
         """Reconcile a reservation when a caller abandons a stream."""
         completed = False
+        settlement: _BudgetStreamSettlement | None = None
+        if reservation is not None:
+            settlement = _BudgetStreamSettlement()
+            self._budget_stream_settlements[
+                reservation.request_id
+            ] = settlement
         try:
             async for event in stream:
                 yield event
             completed = True
         finally:
-            if not completed:
-                close = getattr(stream, "aclose", None)
-                if close is not None:
-                    try:
-                        await close()
-                    except Exception:  # noqa: BLE001
-                        logger.debug(
-                            "budgeted stream close failed req=%s",
-                            reservation.request_id if reservation else "",
-                            exc_info=True,
-                        )
-                if reservation is not None:
-                    try:
-                        totals = await self._finalize_request_budget(
-                            reservation,
-                            actual_cost=reservation.amount,
-                            req_ctx=req_ctx,
-                        )
-                        if totals and "user" in totals:
-                            self.cost_tracker.adopt_user_spend(
-                                req_ctx.user_id,
-                                totals["user"],
-                                tenant_id=req_ctx.tenant_id,
+            try:
+                if not completed:
+                    close = getattr(stream, "aclose", None)
+                    if close is not None:
+                        try:
+                            await close()
+                        except Exception:  # noqa: BLE001
+                            logger.debug(
+                                "budgeted stream close failed req=%s",
+                                reservation.request_id if reservation else "",
+                                exc_info=True,
                             )
-                        if totals is None:
-                            logger.error(
-                                "Failed to reconcile interrupted stream "
-                                "reservation req=%s",
+                    if (
+                        reservation is not None
+                        and settlement is not None
+                        and not settlement.claimed
+                    ):
+                        try:
+                            totals = await self._finalize_request_budget(
+                                reservation,
+                                actual_cost=reservation.amount,
+                                req_ctx=req_ctx,
+                            )
+                            if totals and "user" in totals:
+                                self.cost_tracker.adopt_user_spend(
+                                    req_ctx.user_id,
+                                    totals["user"],
+                                    tenant_id=req_ctx.tenant_id,
+                                )
+                            if totals is None:
+                                logger.error(
+                                    "Failed to reconcile interrupted stream "
+                                    "reservation req=%s",
+                                    reservation.request_id,
+                                )
+                        except Exception:  # noqa: BLE001
+                            logger.exception(
+                                "Interrupted stream reservation "
+                                "reconciliation raised req=%s",
                                 reservation.request_id,
                             )
-                    except Exception:  # noqa: BLE001
-                        logger.exception(
-                            "Interrupted stream reservation reconciliation "
-                            "raised req=%s",
-                            reservation.request_id,
-                        )
+            finally:
+                if (
+                    reservation is not None
+                    and settlement is not None
+                    and self._budget_stream_settlements.get(
+                        reservation.request_id
+                    ) is settlement
+                ):
+                    self._budget_stream_settlements.pop(
+                        reservation.request_id,
+                        None,
+                    )
 
     async def _release_request_budget(
         self,
@@ -3128,6 +3167,11 @@ class GatewayAgent:
     ) -> None:
         if reservation is None or self._quota_enforcer is None:
             return
+        stream_settlement = self._budget_stream_settlements.get(
+            reservation.request_id
+        )
+        if stream_settlement is not None:
+            stream_settlement.claimed = True
         released = await self._quota_enforcer.release_budget(
             reservation,
             tenant_id=req_ctx.tenant_id,
