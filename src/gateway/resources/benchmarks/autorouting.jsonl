@@ -1,0 +1,72 @@
+{"id":"coding-01","prompt":"Implement a Python function that merges overlapping time intervals.","expected_task":"coding","tags":["clear","english"]}
+{"id":"coding-02","prompt":"Debug this TypeScript API endpoint; it returns 502 only when the reverse proxy is enabled.","expected_task":"coding","tags":["clear","english"]}
+{"id":"coding-03","prompt":"Write a SQL query that returns the top three products by revenue in each region.","expected_task":"coding","tags":["clear","english"]}
+{"id":"coding-04","prompt":"Refactor this shell script so rerunning it is idempotent.","expected_task":"coding","tags":["clear","english"]}
+{"id":"coding-05","prompt":"Why does this Rust iterator borrow fail after I call map twice?","expected_task":"coding","tags":["ambiguous","english"]}
+{"id":"coding-06","prompt":"The failing unit test contains the sentence 'write a poem'; fix the assertion without changing production behavior.","expected_task":"coding","tags":["collision","english"]}
+{"id":"coding-07","prompt":"Create an AWS CDK construct for a private S3 bucket behind CloudFront OAC.","expected_task":"coding","tags":["clear","infrastructure"]}
+{"id":"coding-08","prompt":"Convert this recursive graph traversal to an iterative algorithm and explain the complexity.","expected_task":"coding","tags":["ambiguous","english"]}
+{"id":"coding-09","prompt":"Escribe una función de Python que valide una dirección IPv6.","expected_task":"coding","tags":["multilingual","implicit"]}
+{"id":"coding-10","prompt":"Can you make the retry loop stop duplicating payments when the network times out?","expected_task":"coding","tags":["implicit","english"]}
+{"id":"coding-11","prompt":"SELECT is slow after adding the index; show me how to inspect the query plan.","expected_task":"coding","tags":["implicit","english"]}
+{"id":"coding-12","prompt":"```go\nfunc total(xs []int) int { return 0 }\n```\nComplete this implementation.","expected_task":"coding","tags":["clear","code-block"]}
+{"id":"reasoning-01","prompt":"Explain why correlation does not establish causation.","expected_task":"reasoning","tags":["clear","english"]}
+{"id":"reasoning-02","prompt":"Compare and contrast centralized and federated governance, including their failure modes.","expected_task":"reasoning","tags":["clear","english"]}
+{"id":"reasoning-03","prompt":"Given these three witness statements, determine which claims can all be true at once.","expected_task":"reasoning","tags":["clear","english"]}
+{"id":"reasoning-04","prompt":"Assess whether the evidence supports launching now or waiting for another experiment.","expected_task":"reasoning","tags":["implicit","english"]}
+{"id":"reasoning-05","prompt":"Why is an API contract a useful analogy for social institutions?","expected_task":"reasoning","tags":["collision","english"]}
+{"id":"reasoning-06","prompt":"Analyze the tradeoff between minimizing false positives and catching rare fraud.","expected_task":"reasoning","tags":["clear","english"]}
+{"id":"reasoning-07","prompt":"A says B is lying, B says C is lying, and C says A and B are both truthful. Who can be truthful?","expected_task":"reasoning","tags":["clear","logic"]}
+{"id":"reasoning-08","prompt":"What assumptions must hold for this conclusion to follow from the premises?","expected_task":"reasoning","tags":["implicit","english"]}
+{"id":"reasoning-09","prompt":"Explica por qué una tasa de conversión mayor no implica necesariamente más beneficio.","expected_task":"reasoning","tags":["multilingual","implicit"]}
+{"id":"reasoning-10","prompt":"The report says 'implement the policy immediately.' Evaluate that recommendation rather than implementing software.","expected_task":"reasoning","tags":["collision","english"]}
+{"id":"reasoning-11","prompt":"Should a marketplace optimize only for engagement? Argue both sides before reaching a conclusion.","expected_task":"reasoning","tags":["clear","ethical"]}
+{"id":"reasoning-12","prompt":"Think step by step about which dependency most likely caused the observed outage pattern.","expected_task":"reasoning","tags":["clear","operations"]}
+{"id":"creative-01","prompt":"Write a poem about sunlight arriving after a long winter.","expected_task":"creative_writing","tags":["clear","english"]}
+{"id":"creative-02","prompt":"Create a short story in which a robot learns to keep a promise.","expected_task":"creative_writing","tags":["clear","english"]}
+{"id":"creative-03","prompt":"Draft dialogue between a skeptical buyer and a patient solutions engineer.","expected_task":"creative_writing","tags":["clear","english"]}
+{"id":"creative-04","prompt":"Compose a sonnet about an empty train station at midnight.","expected_task":"creative_writing","tags":["implicit","english"]}
+{"id":"creative-05","prompt":"Give this product launch a playful opening paragraph without making unsupported claims.","expected_task":"creative_writing","tags":["implicit","marketing"]}
+{"id":"creative-06","prompt":"Rewrite this dry announcement in a warm, conversational voice: The service is now available.","expected_task":"creative_writing","tags":["ambiguous","english"]}
+{"id":"creative-07","prompt":"Tell the same scene from the antagonist's point of view.","expected_task":"creative_writing","tags":["implicit","english"]}
+{"id":"creative-08","prompt":"Escribe un poema breve sobre la luna y el mar.","expected_task":"creative_writing","tags":["multilingual","clear"]}
+{"id":"creative-09","prompt":"Invent three names and taglines for a privacy-first analytics company.","expected_task":"creative_writing","tags":["implicit","marketing"]}
+{"id":"creative-10","prompt":"The character is a programmer, but do not write code; write her internal monologue before launch.","expected_task":"creative_writing","tags":["collision","english"]}
+{"id":"creative-11","prompt":"Continue this narrative with mounting tension but no violence: The elevator stopped between floors.","expected_task":"creative_writing","tags":["clear","english"]}
+{"id":"creative-12","prompt":"Turn these facts into a vivid museum placard for children.","expected_task":"creative_writing","tags":["ambiguous","english"]}
+{"id":"summary-01","prompt":"Summarize this article in five bullet points.","expected_task":"summarization","tags":["clear","english"]}
+{"id":"summary-02","prompt":"Give me a concise TLDR of the incident report and its corrective actions.","expected_task":"summarization","tags":["clear","operations"]}
+{"id":"summary-03","prompt":"Condense the following meeting transcript into decisions, owners, and deadlines.","expected_task":"summarization","tags":["clear","english"]}
+{"id":"summary-04","prompt":"Extract the central claims and evidence from this paper without critiquing them.","expected_task":"summarization","tags":["implicit","english"]}
+{"id":"summary-05","prompt":"In three bullets, capture what changed between these two policy versions.","expected_task":"summarization","tags":["implicit","english"]}
+{"id":"summary-06","prompt":"Recap the customer conversation, emphasizing objections and promised follow-ups.","expected_task":"summarization","tags":["clear","english"]}
+{"id":"summary-07","prompt":"Resume este informe en español y conserva las cifras principales.","expected_task":"summarization","tags":["multilingual","clear"]}
+{"id":"summary-08","prompt":"The document contains Python and SQL examples; provide an executive overview, not code changes.","expected_task":"summarization","tags":["collision","english"]}
+{"id":"summary-09","prompt":"What are the key points in the text below?","expected_task":"summarization","tags":["clear","english"]}
+{"id":"summary-10","prompt":"Shorten this 900-word explanation to one paragraph while preserving every conclusion.","expected_task":"summarization","tags":["implicit","english"]}
+{"id":"summary-11","prompt":"Create release notes from these merged pull-request descriptions.","expected_task":"summarization","tags":["ambiguous","software"]}
+{"id":"summary-12","prompt":"Briefly state the proposal, the dissenting view, and the final decision.","expected_task":"summarization","tags":["clear","english"]}
+{"id":"math-01","prompt":"Calculate the integral of x squared from 0 to 3.","expected_task":"math","tags":["clear","english"]}
+{"id":"math-02","prompt":"Solve 3x + 7 = 25.","expected_task":"math","tags":["clear","notation"]}
+{"id":"math-03","prompt":"What is 17 percent of 840?","expected_task":"math","tags":["clear","english"]}
+{"id":"math-04","prompt":"Find the eigenvalues of the matrix [[2,1],[1,2]].","expected_task":"math","tags":["implicit","notation"]}
+{"id":"math-05","prompt":"Prove that the square root of 2 is irrational.","expected_task":"math","tags":["clear","proof"]}
+{"id":"math-06","prompt":"A test has 95% sensitivity and 90% specificity. Compute the positive predictive value at 2% prevalence.","expected_task":"math","tags":["clear","statistics"]}
+{"id":"math-07","prompt":"¿Cuánto es 15 por ciento de 260?","expected_task":"math","tags":["multilingual","implicit"]}
+{"id":"math-08","prompt":"Explain why 0! equals 1.","expected_task":"math","tags":["ambiguous","notation"]}
+{"id":"math-09","prompt":"Estimate the probability of at least one collision when hashing 10,000 items into one million buckets.","expected_task":"math","tags":["clear","statistics"]}
+{"id":"math-10","prompt":"The variable is named story_count; derive its expected value, do not write a story.","expected_task":"math","tags":["collision","english"]}
+{"id":"math-11","prompt":"Differentiate sin(x) times e to the x.","expected_task":"math","tags":["implicit","english"]}
+{"id":"math-12","prompt":"sqrt(144) + gcd(18, 24)","expected_task":"math","tags":["short","notation"]}
+{"id":"general-01","prompt":"Hello, how are you today?","expected_task":"general","tags":["clear","short"]}
+{"id":"general-02","prompt":"What time is it in Tokyo when it is noon in New York?","expected_task":"general","tags":["clear","english"]}
+{"id":"general-03","prompt":"Recommend a quiet weekend destination reachable by train from Boston.","expected_task":"general","tags":["clear","travel"]}
+{"id":"general-04","prompt":"I named my dog Python. Suggest a matching name for a second dog.","expected_task":"general","tags":["collision","english"]}
+{"id":"general-05","prompt":"Which questions should I ask when interviewing a contractor?","expected_task":"general","tags":["implicit","english"]}
+{"id":"general-06","prompt":"Translate 'the meeting starts at nine' into French.","expected_task":"general","tags":["clear","translation"]}
+{"id":"general-07","prompt":"¿Dónde está la estación de tren más cercana?","expected_task":"general","tags":["multilingual","clear"]}
+{"id":"general-08","prompt":"Recommend a book about creative writing for a beginner.","expected_task":"general","tags":["collision","english"]}
+{"id":"general-09","prompt":"What does the phrase 'move the goalposts' mean?","expected_task":"general","tags":["clear","english"]}
+{"id":"general-10","prompt":"Help me plan a balanced vegetarian lunch for six people.","expected_task":"general","tags":["clear","planning"]}
+{"id":"general-11","prompt":"Is it better to water indoor plants in the morning or evening?","expected_task":"general","tags":["clear","english"]}
+{"id":"general-12","prompt":"The word algorithm appears on this T-shirt. What color trousers would match it?","expected_task":"general","tags":["collision","english"]}

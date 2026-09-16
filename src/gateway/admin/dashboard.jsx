@@ -88,6 +88,18 @@ const api = {
   del: (url) => request('DELETE', url),
 };
 
+/* Platform-wide reads are useful enhancements on the dashboard, but they are
+   not part of a tenant administrator's authority. A 403 therefore means
+   "omit this platform-only panel", not "the tenant page failed to load". */
+async function optionalPlatformRead(url) {
+  try {
+    return await api.get(url);
+  } catch (error) {
+    if (error && error.status === 403) return null;
+    throw error;
+  }
+}
+
 const sleep = (milliseconds) => new Promise(resolve => {
   window.setTimeout(resolve, milliseconds);
 });
@@ -289,7 +301,10 @@ function OverviewPage() {
   const [error, setError] = useState(null);
 
   useEffect(() => {
-    Promise.all([api.get('/admin/overview'), api.get('/admin/health')])
+    Promise.all([
+      api.get('/admin/overview'),
+      optionalPlatformRead('/admin/health'),
+    ])
       .then(([o, h]) => { setData(o); setHealth(h); })
       .catch(e => setError('Failed to load overview data: ' + (e && e.message ? e.message : 'unknown error')));
   }, []);
@@ -1240,10 +1255,34 @@ function TracesPage() {
 function HealthPage() {
   const [health, setHealth] = useState(null);
   const [error, setError] = useState(null);
+  const [restricted, setRestricted] = useState(false);
 
-  useEffect(() => { api.get('/admin/health').then(setHealth).catch(e => setError('Failed to load health: ' + (e && e.message ? e.message : 'unknown error'))); }, []);
+  useEffect(() => {
+    api.get('/admin/health')
+      .then(setHealth)
+      .catch(e => {
+        if (e && e.status === 403) {
+          setRestricted(true);
+          return;
+        }
+        setError('Failed to load health: ' + (e && e.message ? e.message : 'unknown error'));
+      });
+  }, []);
 
   if (error) return <Flash type="error">{error}</Flash>;
+  if (restricted) {
+    return (
+      <div>
+        <div className="page-header"><h1>System health</h1><p>Provider connectivity and runtime status</p></div>
+        <div className="container">
+          <EmptyState
+            title="Platform administrator access required"
+            subtitle="Provider, persistence, and runtime health are platform-wide. Tenant administrators can continue using tenant-scoped dashboard pages."
+          />
+        </div>
+      </div>
+    );
+  }
   if (!health) return <Loading text="Loading health..." />;
 
   const providers = Object.entries(health.providers || {});
@@ -3148,6 +3187,12 @@ function App() {
   });
   const [browserAuth, setBrowserAuth] = useState(null);
   const [sessionContext, setSessionContext] = useState(null);
+  const sessionRoles = new Set((sessionContext && sessionContext.roles) || []);
+  const tenantScopedDashboard = (
+    !sessionRoles.has('admin') &&
+    !sessionRoles.has('platform_admin') &&
+    ['tenant_admin', 'tenant_member', 'tenant_auditor'].some(role => sessionRoles.has(role))
+  );
 
   useEffect(() => {
     let active = true;
@@ -3253,7 +3298,7 @@ function App() {
       { key: 'security', icon: '🛡', label: 'Audit Log' },
     ]},
     { label: 'Configure', items: [
-      { key: 'models', icon: '🤖', label: 'Models' },
+      { key: 'models', icon: '🤖', label: 'Models', platformOnly: true },
       { key: 'projects', icon: '📁', label: 'Projects', activeViews: ['projects', 'project-detail', 'project-form'] },
       { key: 'users', icon: '👤', label: 'Users', activeViews: ['users', 'user-detail'] },
       { key: 'api-keys', icon: '🔑', label: 'API Keys' },
@@ -3265,18 +3310,18 @@ function App() {
          — the only way in was to set the view by hand. */
       { key: 'policy-hierarchy', icon: '🏛', label: 'Hierarchy' },
       { key: 'quotas', icon: '📏', label: 'Quotas' },
-      { key: 'regions', icon: '🌐', label: 'Regions' },
+      { key: 'regions', icon: '🌐', label: 'Regions', platformOnly: true },
       { key: 'webhooks', icon: '🔔', label: 'Webhooks' },
     ]},
     { label: 'System', items: [
-      { key: 'health', icon: '💚', label: 'Health' },
-      { key: 'configuration', icon: '⚙', label: 'Configuration' },
+      { key: 'health', icon: '💚', label: 'Health', platformOnly: true },
+      { key: 'configuration', icon: '⚙', label: 'Configuration', platformOnly: true },
       /* No href: these render in the main pane like every other item, so
          the sidebar survives the click and stays highlighted. */
-      { key: 'architecture', icon: '🗺', label: 'Architecture' },
-      { key: 'pricing-drift', icon: '💲', label: 'Pricing' },
-      { key: 'catalog-drift', icon: '📇', label: 'Catalogue' },
-      { key: 'production-checklist', icon: '✅', label: 'Readiness' },
+      { key: 'architecture', icon: '🗺', label: 'Architecture', platformOnly: true },
+      { key: 'pricing-drift', icon: '💲', label: 'Pricing', platformOnly: true },
+      { key: 'catalog-drift', icon: '📇', label: 'Catalogue', platformOnly: true },
+      { key: 'production-checklist', icon: '✅', label: 'Readiness', platformOnly: true },
     ]},
   ];
 
@@ -3302,21 +3347,27 @@ function App() {
           <span>AxonLLM</span>
         </div>
         <nav style={{flex: 1, padding: '0.5rem 0.5rem', overflow: 'auto'}}>
-          {navSections.map(section => (
-            <div key={section.label} className="sidebar-section">
-              <div className="sidebar-section-label">{section.label}</div>
-              {/* Every item navigates in-shell. The `item.href ?
-                  window.location.href = ...` escape hatch this used to have
-                  was the whole bug -- it left the sidebar behind -- and is
-                  gone rather than left for the next item to rediscover. */}
-              {section.items.map(item => (
-                <button key={item.key} className={`nav-item ${isActive(item) ? 'active' : ''}`} onClick={() => navigate(item.key)}>
-                  <span className="nav-icon">{item.icon}</span>
-                  {item.label}
-                </button>
-              ))}
-            </div>
-          ))}
+          {navSections.map(section => {
+            const items = section.items.filter(
+              item => !item.platformOnly || !tenantScopedDashboard
+            );
+            if (items.length === 0) return null;
+            return (
+              <div key={section.label} className="sidebar-section">
+                <div className="sidebar-section-label">{section.label}</div>
+                {/* Every item navigates in-shell. The `item.href ?
+                    window.location.href = ...` escape hatch this used to have
+                    was the whole bug -- it left the sidebar behind -- and is
+                    gone rather than left for the next item to rediscover. */}
+                {items.map(item => (
+                  <button key={item.key} className={`nav-item ${isActive(item) ? 'active' : ''}`} onClick={() => navigate(item.key)}>
+                    <span className="nav-icon">{item.icon}</span>
+                    {item.label}
+                  </button>
+                ))}
+              </div>
+            );
+          })}
         </nav>
         <div style={{borderTop: '1px solid #f5f5f4', padding: '0.75rem 1.25rem'}}>
           <p style={{fontSize: '11px', color: '#a8a29e'}}>v0.2.0 · 13 providers</p>
