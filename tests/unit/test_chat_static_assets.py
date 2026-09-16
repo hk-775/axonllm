@@ -172,6 +172,20 @@ def test_chat_clients_echo_csrf_for_unsafe_session_requests() -> None:
             assert "requestOptions.credentials = 'same-origin';" in content
 
 
+def test_chat_clients_share_and_retry_the_dashboard_api_key() -> None:
+    for name in ("chat", "playground", "routing"):
+        source = (CHAT_ROOT / f"{name}.jsx").read_text(encoding="utf-8")
+        compiled = (STATIC_ROOT / f"{name}.js").read_text(
+            encoding="utf-8"
+        )
+        for content in (source, compiled):
+            assert "const AUTH_KEY = 'axon_admin_api_key';" in content
+            assert "return window.parent.sessionStorage;" in content
+            assert "headers.Authorization = 'Bearer ' + apiKey;" in content
+            assert "response.status !== 401 || retried" in content
+            assert "return appFetch(url, options, true);" in content
+
+
 def test_chat_static_route_serves_only_the_build_allowlist() -> None:
     app = Starlette(routes=create_chat_routes(ChatAPI(object())))
 
