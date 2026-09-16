@@ -1,0 +1,4795 @@
+{
+  "comparisons": [
+    {
+      "accuracy_delta_percentage_points": 4.999999999999993,
+      "additional_correct_routes": 3,
+      "baseline": "axon-heuristic",
+      "break_even_downstream_savings_per_request_usd": 4.508249999999999e-05,
+      "candidate": "llm-router",
+      "incremental_router_cost_usd": 0.0027049499999999994,
+      "macro_f1_delta": 0.05166647555708437,
+      "p50_latency_delta_ms": 657.3606249988787,
+      "p95_latency_delta_ms": 843.1005059451999,
+      "router_cost_per_additional_correct_route_usd": 0.0009016499999999998
+    },
+    {
+      "accuracy_delta_percentage_points": 8.333333333333325,
+      "additional_correct_routes": 5,
+      "baseline": "axon-heuristic",
+      "break_even_downstream_savings_per_request_usd": 1.1589999999999996e-05,
+      "candidate": "hybrid-0.3",
+      "incremental_router_cost_usd": 0.0006953999999999998,
+      "macro_f1_delta": 0.07498866993191033,
+      "p50_latency_delta_ms": 1.1494790054401383,
+      "p95_latency_delta_ms": 850.3691606952784,
+      "router_cost_per_additional_correct_route_usd": 0.00013907999999999995
+    }
+  ],
+  "corpus": {
+    "label_distribution": {
+      "coding": 10,
+      "creative_writing": 10,
+      "general": 10,
+      "math": 10,
+      "reasoning": 10,
+      "summarization": 10
+    },
+    "repetitions": 1,
+    "requests_per_strategy": 60,
+    "source": "docs/benchmarks/autorouting-final-test-2026-09-16.jsonl",
+    "tag_distribution": {
+      "clear": 12,
+      "collision": 12,
+      "english": 48,
+      "german": 6,
+      "implicit": 24,
+      "multilingual": 12,
+      "spanish": 6
+    },
+    "unique_cases": 60
+  },
+  "generated_at": "2026-09-16T17:19:17.167580+00:00",
+  "records": {
+    "axon-heuristic": [
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9999997500000625,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 1.504792,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "coding"
+        },
+        "expected_task": "coding",
+        "id": "fresh-coding-02",
+        "prompt": "Build a REST endpoint in Express.js that accepts a JSON body, validates required fields, and stores the result in a PostgreSQL table.",
+        "tags": [
+          "clear",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.99999950000025,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.405042,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "coding"
+        },
+        "expected_task": "coding",
+        "id": "fresh-coding-04",
+        "prompt": "Implement a binary search tree in TypeScript with insert, delete, and in-order traversal methods, including unit tests using Jest.",
+        "tags": [
+          "clear",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9999998181818512,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.285625,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "coding"
+        },
+        "expected_task": "coding",
+        "id": "fresh-coding-06",
+        "prompt": "Every time our nightly job runs, the database connection pool exhausts and new requests hang indefinitely. What should we change to prevent this?",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.0,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.577792,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "general"
+        },
+        "expected_task": "coding",
+        "id": "fresh-coding-08",
+        "prompt": "The checkout page takes 12 seconds to load. Profiling shows most time is spent in a nested loop inside the pricing engine. Help me speed it up.",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9999998181818512,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.218209,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "coding"
+        },
+        "expected_task": "coding",
+        "id": "fresh-coding-10",
+        "prompt": "Our CI pipeline fails with 'ModuleNotFoundError: No module named pandas' even though it's listed in requirements.txt. What's going wrong and how do we fix it?",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.99999960000016,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.379042,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "coding"
+        },
+        "expected_task": "coding",
+        "id": "fresh-coding-12",
+        "prompt": "After migrating to a new schema, the search results come back in random order instead of sorted by relevance. Identify and patch the issue.",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9999999130434859,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.418375,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "coding"
+        },
+        "expected_task": "coding",
+        "id": "fresh-coding-14",
+        "prompt": "This is purely a business question, not a technical one: our invoice totals are wrong when discounts stack. Show me the SQL query that reproduces the calculation so finance can verify the numbers.",
+        "tags": [
+          "collision",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.0,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.759416,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "general"
+        },
+        "expected_task": "coding",
+        "id": "fresh-coding-16",
+        "prompt": "Forget summarizing the paper\u2014what I actually need is a simulation in NumPy that reproduces Figure 3's Monte Carlo experiment so I can tweak the parameters myself.",
+        "tags": [
+          "collision",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9999997142857959,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.459833,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "coding"
+        },
+        "expected_task": "coding",
+        "id": "fresh-coding-18",
+        "prompt": "Escribe una funci\u00f3n en JavaScript que reciba un arreglo de objetos con campos 'nombre' y 'precio', y devuelva los cinco productos m\u00e1s caros ordenados de mayor a menor.",
+        "tags": [
+          "multilingual",
+          "spanish"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.0,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.452875,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "general"
+        },
+        "expected_task": "coding",
+        "id": "fresh-coding-20",
+        "prompt": "Schreibe eine Terraform-Konfiguration, die eine AWS Lambda-Funktion mit einer API-Gateway-Ausl\u00f6sung und den n\u00f6tigen IAM-Rollen bereitstellt.",
+        "tags": [
+          "german",
+          "multilingual"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9999996666667778,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.664209,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "reasoning"
+        },
+        "expected_task": "reasoning",
+        "id": "fresh-reasoning-02",
+        "prompt": "A city reduced speeding tickets by 40% after installing cameras, yet traffic fatalities rose. What are the most plausible explanations for this apparent contradiction?",
+        "tags": [
+          "clear",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9999998333333611,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.827375,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "reasoning"
+        },
+        "expected_task": "reasoning",
+        "id": "fresh-reasoning-04",
+        "prompt": "A patient takes a new medication and their symptoms improve. Their doctor attributes the improvement to the drug, but the patient had also changed their diet the same week. Evaluate the strength of the doctor's conclusion.",
+        "tags": [
+          "clear",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9999996666667778,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.698708,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "reasoning"
+        },
+        "expected_task": "reasoning",
+        "id": "fresh-reasoning-06",
+        "prompt": "A nation's birth rate fell sharply in the decade following a major economic recession. Several commentators blame cultural shifts while economists point to housing costs. Which account better fits the evidence?",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9999998333333611,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.436041,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "reasoning"
+        },
+        "expected_task": "reasoning",
+        "id": "fresh-reasoning-08",
+        "prompt": "A startup's user engagement doubled after a redesign, but revenue stayed flat. Walk through the competing interpretations before settling on the most credible one.",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9999996666667778,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.894125,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "reasoning"
+        },
+        "expected_task": "reasoning",
+        "id": "fresh-reasoning-10",
+        "prompt": "An elderly resident's health declined rapidly after moving to an assisted-living facility. Family members disagree about whether the environment, the loss of independence, or an underlying condition is responsible. How should one weigh these possibilities?",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9999996666667778,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.472375,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "reasoning"
+        },
+        "expected_task": "reasoning",
+        "id": "fresh-reasoning-12",
+        "prompt": "Two witnesses to the same accident give incompatible accounts, yet both pass a lie-detector test. What principles should guide deciding whose testimony carries more weight?",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.6666664444445185,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 1.04825,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "math"
+        },
+        "expected_task": "reasoning",
+        "id": "fresh-reasoning-14",
+        "prompt": "This is a statistics question about numbers, but don't calculate anything: a poll shows 60% of voters support a policy before a debate and 55% after. What non-numerical factors best explain the shift?",
+        "tags": [
+          "collision",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9354838106139477,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.446125,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "reasoning"
+        },
+        "expected_task": "reasoning",
+        "id": "fresh-reasoning-16",
+        "prompt": "A legal brief argues: 'All previous rulings favored the defendant, therefore this ruling should too.' Summarizing the brief is not the goal \u2014 assess whether the argument's logical structure is valid.",
+        "tags": [
+          "collision",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9999996666667778,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.935084,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "reasoning"
+        },
+        "expected_task": "reasoning",
+        "id": "fresh-reasoning-18",
+        "prompt": "Una empresa redujo su plantilla un 20% y las ganancias aumentaron ese a\u00f1o, pero cayeron dos a\u00f1os despu\u00e9s. \u00bfCu\u00e1les son las explicaciones m\u00e1s plausibles para ese patr\u00f3n y qu\u00e9 factores deber\u00edan haberse considerado antes del recorte?",
+        "tags": [
+          "multilingual",
+          "spanish"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9999996666667778,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.515833,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "reasoning"
+        },
+        "expected_task": "reasoning",
+        "id": "fresh-reasoning-20",
+        "prompt": "Zwei L\u00e4nder haben \u00e4hnliche Impfquoten, aber sehr unterschiedliche COVID-Sterblichkeitsraten. Welche konkurrierenden Erkl\u00e4rungen sollten vor einer politischen Schlussfolgerung gepr\u00fcft werden?",
+        "tags": [
+          "german",
+          "multilingual"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9999996666667778,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.311459,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "creative_writing"
+        },
+        "expected_task": "creative_writing",
+        "id": "fresh-creative_writing-02",
+        "prompt": "Compose a lullaby sung by a lighthouse keeper to the sea itself, treating the ocean as a restless child who refuses to sleep.",
+        "tags": [
+          "clear",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9999996666667778,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.302583,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "creative_writing"
+        },
+        "expected_task": "creative_writing",
+        "id": "fresh-creative_writing-04",
+        "prompt": "Invent five brand names and matching one-line slogans for a fictional apothecary that sells bottled memories instead of medicine.",
+        "tags": [
+          "clear",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.99999960000016,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.299625,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "creative_writing"
+        },
+        "expected_task": "creative_writing",
+        "id": "fresh-creative_writing-06",
+        "prompt": "The last bookshop on a flooded planet has one afternoon left before the water rises to the door. Show me that afternoon.",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9999998333333611,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.279541,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "creative_writing"
+        },
+        "expected_task": "creative_writing",
+        "id": "fresh-creative_writing-08",
+        "prompt": "Give a nineteenth-century naturalist's voice to a field note describing the first sighting of a smartphone in the wild.",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.0,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.285208,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "general"
+        },
+        "expected_task": "creative_writing",
+        "id": "fresh-creative_writing-10",
+        "prompt": "A ghost haunts the apartment but is more embarrassed than frightening. Show a single evening from the ghost's perspective.",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9999996666667778,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.218167,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "creative_writing"
+        },
+        "expected_task": "creative_writing",
+        "id": "fresh-creative_writing-12",
+        "prompt": "Give the moon a personals ad. It should sound sincere, a little desperate, and geologically accurate.",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.5454544462810098,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.443417,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "creative_writing"
+        },
+        "expected_task": "creative_writing",
+        "id": "fresh-creative_writing-14",
+        "prompt": "The dataset label says 'factual description' but ignore that: spin a myth explaining why the Sahara forgot how to grow things, told by a grandmother to grandchildren around a fire.",
+        "tags": [
+          "collision",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9047618185941125,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.273833,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "creative_writing"
+        },
+        "expected_task": "creative_writing",
+        "id": "fresh-creative_writing-16",
+        "prompt": "This looks like a legal brief request: 'Party A: Autumn. Party B: Summer. Dispute: Custody of September.' Draft the actual court transcript as absurdist fiction, not a legal document.",
+        "tags": [
+          "collision",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9999996666667778,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.417917,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "creative_writing"
+        },
+        "expected_task": "creative_writing",
+        "id": "fresh-creative_writing-18",
+        "prompt": "Escribe un microrrelato de no m\u00e1s de cien palabras sobre un relojero que descubre que todos los relojes del pueblo llevan a\u00f1os contando el tiempo al rev\u00e9s.",
+        "tags": [
+          "multilingual",
+          "spanish"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9999996666667778,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.379083,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "creative_writing"
+        },
+        "expected_task": "creative_writing",
+        "id": "fresh-creative_writing-20",
+        "prompt": "Schreib einen kurzen Dialog zwischen zwei Laternen auf einer leeren Br\u00fccke, die sich fragen, ob jemand sie noch braucht, wenn die Stadt schl\u00e4ft.",
+        "tags": [
+          "german",
+          "multilingual"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9999996666667778,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.383292,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "summarization"
+        },
+        "expected_task": "summarization",
+        "id": "fresh-summarization-02",
+        "prompt": "The following email thread covers a week of back-and-forth about the office relocation. Extract the key decisions and action items from it: 'Monday: HR confirmed lease signed. Wednesday: IT flagged cabling issues. Friday: Move date set for October 14, IT to resolve cabling by October 7.'",
+        "tags": [
+          "clear",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9999999130434859,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.238958,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "summarization"
+        },
+        "expected_task": "summarization",
+        "id": "fresh-summarization-04",
+        "prompt": "Condense the following patient discharge notes into a brief overview suitable for a follow-up nurse: 'Patient admitted with acute bronchitis, treated with antibiotics and nebulizer therapy for three days, discharged with a five-day oral antibiotic course, advised to return if symptoms worsen.'",
+        "tags": [
+          "clear",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.0,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.112042,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "general"
+        },
+        "expected_task": "summarization",
+        "id": "fresh-summarization-06",
+        "prompt": "Pull out what matters most from this legal memo passage: 'The arbitration clause is enforceable under state law, the 30-day notice requirement was not met by the claimant, and the panel recommends dismissal without prejudice pending proper notice.'",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9999996666667778,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.121791,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "summarization"
+        },
+        "expected_task": "summarization",
+        "id": "fresh-summarization-08",
+        "prompt": "Capture the gist of this research abstract in two sentences: 'This study examined sleep deprivation effects on 450 adults over six weeks. Results showed a 34% decline in reaction time, elevated cortisol levels, and impaired memory consolidation in participants sleeping fewer than six hours nightly.'",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9999998823529551,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.134917,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "summarization"
+        },
+        "expected_task": "summarization",
+        "id": "fresh-summarization-10",
+        "prompt": "Trim this customer complaint log entry to its core facts: 'Customer called on March 3 reporting a delayed shipment originally due February 28. Agent confirmed warehouse error, issued a $15 credit, and escalated to logistics for priority re-shipment within 48 hours.'",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9999996666667778,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.115291,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "summarization"
+        },
+        "expected_task": "summarization",
+        "id": "fresh-summarization-12",
+        "prompt": "What's the takeaway from this press release section: 'TechNova announced a partnership with CloudBridge to co-develop AI-driven analytics tools, targeting enterprise clients in healthcare and finance, with a planned product launch in Q2 next year and a joint investment of $50 million.'",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.7142855102041399,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.193542,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "summarization"
+        },
+        "expected_task": "summarization",
+        "id": "fresh-summarization-14",
+        "prompt": "This looks like a math-heavy financial report but I just need the narrative highlights: 'Revenue grew 22% to $4.1B. Operating margin expanded 150 basis points. Debt-to-equity ratio improved to 0.6. Management cited strong consumer demand and cost discipline as primary drivers.'",
+        "tags": [
+          "collision",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.8461537159763514,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.249708,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "summarization"
+        },
+        "expected_task": "summarization",
+        "id": "fresh-summarization-16",
+        "prompt": "This is a coding project status update, but I need a plain-language digest of it, not a code review: 'Sprint 7 closed with 34 of 40 story points completed. Two critical bugs remain open. The API integration module passed QA. Deployment to staging is scheduled for Thursday.'",
+        "tags": [
+          "collision",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9999998333333611,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.11675,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "summarization"
+        },
+        "expected_task": "summarization",
+        "id": "fresh-summarization-18",
+        "prompt": "Por favor, resume este correo en dos o tres oraciones: 'Estimado equipo, les informamos que la reuni\u00f3n del martes ha sido pospuesta al jueves a las 10:00 a.m. El orden del d\u00eda incluye revisi\u00f3n de presupuesto, avances del proyecto y asignaci\u00f3n de nuevas responsabilidades. Confirmen asistencia antes del mi\u00e9rcoles.'",
+        "tags": [
+          "multilingual",
+          "spanish"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9999996666667778,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.107334,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "summarization"
+        },
+        "expected_task": "summarization",
+        "id": "fresh-summarization-20",
+        "prompt": "Fasse eine kurze Zusammenfassung dieser Besprechungsnotizen: 'Das Team einigte sich auf einen neuen Zeitplan f\u00fcr die Produkteinf\u00fchrung im M\u00e4rz. Das Marketingbudget wurde um 10 % gek\u00fcrzt. Die Qualit\u00e4tssicherung soll ab sofort w\u00f6chentlich berichten. Offene Punkte werden bis Freitag gekl\u00e4rt.'",
+        "tags": [
+          "german",
+          "multilingual"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.99999960000016,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.288125,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "math"
+        },
+        "expected_task": "math",
+        "id": "fresh-math-02",
+        "prompt": "A fair six-sided die is rolled four times. What is the probability that at least two rolls show the same number?",
+        "tags": [
+          "clear",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9999998181818512,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.372666,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "math"
+        },
+        "expected_task": "math",
+        "id": "fresh-math-04",
+        "prompt": "Compute the definite integral of f(x) = 3x^2 - 2x + 1 from x = 0 to x = 4 and interpret the numerical result.",
+        "tags": [
+          "clear",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.0,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.430584,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "general"
+        },
+        "expected_task": "math",
+        "id": "fresh-math-06",
+        "prompt": "If a triangle has sides of length 7, 10, and 13, figure out whether it is acute, right, or obtuse using side lengths alone.",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9999998333333611,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.303041,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "math"
+        },
+        "expected_task": "math",
+        "id": "fresh-math-08",
+        "prompt": "Given a dataset of values 4, 8, 15, 16, 23, 42, determine the sample variance and standard deviation.",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9999998181818512,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.187625,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "math"
+        },
+        "expected_task": "math",
+        "id": "fresh-math-10",
+        "prompt": "Show that the square root of 3 cannot be expressed as a ratio of two integers.",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9999998333333611,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.302833,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "math"
+        },
+        "expected_task": "math",
+        "id": "fresh-math-12",
+        "prompt": "Determine the eigenvalues of the matrix [[2, 1], [5, 3]] and find a corresponding eigenvector for each.",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.799999840000032,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.40475,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "math"
+        },
+        "expected_task": "math",
+        "id": "fresh-math-14",
+        "prompt": "Without writing any code or pseudocode, derive the closed-form formula for the sum of a geometric series with first term a, ratio r, and n terms.",
+        "tags": [
+          "collision",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9999998571428775,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.652375,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "math"
+        },
+        "expected_task": "math",
+        "id": "fresh-math-16",
+        "prompt": "In a clinical trial framing: 200 patients, 30% in the control group showed recovery. Of the treated group of 140, 85 recovered. Calculate and compare the two recovery proportions using a z-test for proportions.",
+        "tags": [
+          "collision",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.0,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.437375,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "general"
+        },
+        "expected_task": "math",
+        "id": "fresh-math-18",
+        "prompt": "Si lanzas dos dados justos de seis caras, \u00bfcu\u00e1l es la probabilidad de que la suma sea mayor que 8? Muestra todos los casos favorables.",
+        "tags": [
+          "multilingual",
+          "spanish"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9999996666667778,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.372375,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "math"
+        },
+        "expected_task": "math",
+        "id": "fresh-math-20",
+        "prompt": "Beweise, dass die Summe zweier gerader ganzer Zahlen stets gerade ist, und zeige dasselbe f\u00fcr das Produkt einer geraden und einer ungeraden Zahl.",
+        "tags": [
+          "german",
+          "multilingual"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.0,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.088917,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "general"
+        },
+        "expected_task": "general",
+        "id": "fresh-general-02",
+        "prompt": "List the official languages spoken in Switzerland.",
+        "tags": [
+          "clear",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.0,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.067,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "general"
+        },
+        "expected_task": "general",
+        "id": "fresh-general-04",
+        "prompt": "Translate the phrase 'Where is the nearest train station?' into Japanese.",
+        "tags": [
+          "clear",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.0,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.278375,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "general"
+        },
+        "expected_task": "general",
+        "id": "fresh-general-06",
+        "prompt": "I have basil, mozzarella, and tomatoes in my fridge. Name a classic dish I can make with just those three ingredients.",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.0,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.229542,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "general"
+        },
+        "expected_task": "general",
+        "id": "fresh-general-08",
+        "prompt": "My passport expires in four months and I want to visit the EU. Will most Schengen countries accept it?",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.0,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.253333,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "general"
+        },
+        "expected_task": "general",
+        "id": "fresh-general-10",
+        "prompt": "I keep finding small black ants near my kitchen sink every morning. What household items can I use to deter them?",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.0,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.167042,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "general"
+        },
+        "expected_task": "general",
+        "id": "fresh-general-12",
+        "prompt": "Give me a phonetic pronunciation guide for the Welsh town name Llanfairpwllgwyngyll.",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.0,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.336375,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "general"
+        },
+        "expected_task": "general",
+        "id": "fresh-general-14",
+        "prompt": "This label says 'Agiter avant utilisation' \u2014 what does that mean in English, and on what kind of product would you typically see it?",
+        "tags": [
+          "collision",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.0,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.298834,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "general"
+        },
+        "expected_task": "general",
+        "id": "fresh-general-16",
+        "prompt": "My recipe calls for 'bicarbonate of soda' but I'm in the US. What is the American name for this ingredient and which aisle is it usually in?",
+        "tags": [
+          "collision",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.0,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.147875,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "general"
+        },
+        "expected_task": "general",
+        "id": "fresh-general-18",
+        "prompt": "\u00bfCu\u00e1les son los documentos necesarios para renovar el pasaporte en M\u00e9xico?",
+        "tags": [
+          "multilingual",
+          "spanish"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.0,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.164666,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "general"
+        },
+        "expected_task": "general",
+        "id": "fresh-general-20",
+        "prompt": "Welche Impfungen werden f\u00fcr eine Reise nach S\u00fcdostasien generell empfohlen?",
+        "tags": [
+          "german",
+          "multilingual"
+        ]
+      }
+    ],
+    "hybrid-0.3": [
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9999997500000625,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": 0.9999997500000625,
+          "heuristic_task": "coding",
+          "input_tokens": 0,
+          "latency_ms": 1.1429580044932663,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "hybrid-0.3",
+          "task_type": "coding"
+        },
+        "expected_task": "coding",
+        "id": "fresh-coding-02",
+        "prompt": "Build a REST endpoint in Express.js that accepts a JSON body, validates required fields, and stores the result in a PostgreSQL table.",
+        "tags": [
+          "clear",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.99999950000025,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": 0.99999950000025,
+          "heuristic_task": "coding",
+          "input_tokens": 0,
+          "latency_ms": 0.9097089932765812,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "hybrid-0.3",
+          "task_type": "coding"
+        },
+        "expected_task": "coding",
+        "id": "fresh-coding-04",
+        "prompt": "Implement a binary search tree in TypeScript with insert, delete, and in-order traversal methods, including unit tests using Jest.",
+        "tags": [
+          "clear",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9999998181818512,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": 0.9999998181818512,
+          "heuristic_task": "coding",
+          "input_tokens": 0,
+          "latency_ms": 0.9220420033670962,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "hybrid-0.3",
+          "task_type": "coding"
+        },
+        "expected_task": "coding",
+        "id": "fresh-coding-06",
+        "prompt": "Every time our nightly job runs, the database connection pool exhausts and new requests hang indefinitely. What should we change to prevent this?",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9,
+          "cost_usd": 4.139999999999999e-05,
+          "error": null,
+          "heuristic_confidence": 0.0,
+          "heuristic_task": "general",
+          "input_tokens": 228,
+          "latency_ms": 592.0792079996318,
+          "llm_calls": 1,
+          "model": "gpt-4o-mini",
+          "output_tokens": 12,
+          "strategy": "hybrid-0.3",
+          "task_type": "coding"
+        },
+        "expected_task": "coding",
+        "id": "fresh-coding-08",
+        "prompt": "The checkout page takes 12 seconds to load. Profiling shows most time is spent in a nested loop inside the pricing engine. Help me speed it up.",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9999998181818512,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": 0.9999998181818512,
+          "heuristic_task": "coding",
+          "input_tokens": 0,
+          "latency_ms": 4.958332981914282,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "hybrid-0.3",
+          "task_type": "coding"
+        },
+        "expected_task": "coding",
+        "id": "fresh-coding-10",
+        "prompt": "Our CI pipeline fails with 'ModuleNotFoundError: No module named pandas' even though it's listed in requirements.txt. What's going wrong and how do we fix it?",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.99999960000016,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": 0.99999960000016,
+          "heuristic_task": "coding",
+          "input_tokens": 0,
+          "latency_ms": 3.1495840230491012,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "hybrid-0.3",
+          "task_type": "coding"
+        },
+        "expected_task": "coding",
+        "id": "fresh-coding-12",
+        "prompt": "After migrating to a new schema, the search results come back in random order instead of sorted by relevance. Identify and patch the issue.",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9999999130434859,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": 0.9999999130434859,
+          "heuristic_task": "coding",
+          "input_tokens": 0,
+          "latency_ms": 1.4508330204989761,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "hybrid-0.3",
+          "task_type": "coding"
+        },
+        "expected_task": "coding",
+        "id": "fresh-coding-14",
+        "prompt": "This is purely a business question, not a technical one: our invoice totals are wrong when discounts stack. Show me the SQL query that reproduces the calculation so finance can verify the numbers.",
+        "tags": [
+          "collision",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9,
+          "cost_usd": 4.155e-05,
+          "error": null,
+          "heuristic_confidence": 0.0,
+          "heuristic_task": "general",
+          "input_tokens": 229,
+          "latency_ms": 848.8675419939682,
+          "llm_calls": 1,
+          "model": "gpt-4o-mini",
+          "output_tokens": 12,
+          "strategy": "hybrid-0.3",
+          "task_type": "coding"
+        },
+        "expected_task": "coding",
+        "id": "fresh-coding-16",
+        "prompt": "Forget summarizing the paper\u2014what I actually need is a simulation in NumPy that reproduces Figure 3's Monte Carlo experiment so I can tweak the parameters myself.",
+        "tags": [
+          "collision",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9999997142857959,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": 0.9999997142857959,
+          "heuristic_task": "coding",
+          "input_tokens": 0,
+          "latency_ms": 1.4626249903813004,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "hybrid-0.3",
+          "task_type": "coding"
+        },
+        "expected_task": "coding",
+        "id": "fresh-coding-18",
+        "prompt": "Escribe una funci\u00f3n en JavaScript que reciba un arreglo de objetos con campos 'nombre' y 'precio', y devuelva los cinco productos m\u00e1s caros ordenados de mayor a menor.",
+        "tags": [
+          "multilingual",
+          "spanish"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9,
+          "cost_usd": 4.155e-05,
+          "error": null,
+          "heuristic_confidence": 0.0,
+          "heuristic_task": "general",
+          "input_tokens": 229,
+          "latency_ms": 745.9212499961723,
+          "llm_calls": 1,
+          "model": "gpt-4o-mini",
+          "output_tokens": 12,
+          "strategy": "hybrid-0.3",
+          "task_type": "coding"
+        },
+        "expected_task": "coding",
+        "id": "fresh-coding-20",
+        "prompt": "Schreibe eine Terraform-Konfiguration, die eine AWS Lambda-Funktion mit einer API-Gateway-Ausl\u00f6sung und den n\u00f6tigen IAM-Rollen bereitstellt.",
+        "tags": [
+          "german",
+          "multilingual"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9999996666667778,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": 0.9999996666667778,
+          "heuristic_task": "reasoning",
+          "input_tokens": 0,
+          "latency_ms": 1.818874996388331,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "hybrid-0.3",
+          "task_type": "reasoning"
+        },
+        "expected_task": "reasoning",
+        "id": "fresh-reasoning-02",
+        "prompt": "A city reduced speeding tickets by 40% after installing cameras, yet traffic fatalities rose. What are the most plausible explanations for this apparent contradiction?",
+        "tags": [
+          "clear",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9999998333333611,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": 0.9999998333333611,
+          "heuristic_task": "reasoning",
+          "input_tokens": 0,
+          "latency_ms": 2.594999998109415,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "hybrid-0.3",
+          "task_type": "reasoning"
+        },
+        "expected_task": "reasoning",
+        "id": "fresh-reasoning-04",
+        "prompt": "A patient takes a new medication and their symptoms improve. Their doctor attributes the improvement to the drug, but the patient had also changed their diet the same week. Evaluate the strength of the doctor's conclusion.",
+        "tags": [
+          "clear",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9999996666667778,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": 0.9999996666667778,
+          "heuristic_task": "reasoning",
+          "input_tokens": 0,
+          "latency_ms": 1.7128750041592866,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "hybrid-0.3",
+          "task_type": "reasoning"
+        },
+        "expected_task": "reasoning",
+        "id": "fresh-reasoning-06",
+        "prompt": "A nation's birth rate fell sharply in the decade following a major economic recession. Several commentators blame cultural shifts while economists point to housing costs. Which account better fits the evidence?",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9999998333333611,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": 0.9999998333333611,
+          "heuristic_task": "reasoning",
+          "input_tokens": 0,
+          "latency_ms": 1.1434579791966826,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "hybrid-0.3",
+          "task_type": "reasoning"
+        },
+        "expected_task": "reasoning",
+        "id": "fresh-reasoning-08",
+        "prompt": "A startup's user engagement doubled after a redesign, but revenue stayed flat. Walk through the competing interpretations before settling on the most credible one.",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9999996666667778,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": 0.9999996666667778,
+          "heuristic_task": "reasoning",
+          "input_tokens": 0,
+          "latency_ms": 2.810249978210777,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "hybrid-0.3",
+          "task_type": "reasoning"
+        },
+        "expected_task": "reasoning",
+        "id": "fresh-reasoning-10",
+        "prompt": "An elderly resident's health declined rapidly after moving to an assisted-living facility. Family members disagree about whether the environment, the loss of independence, or an underlying condition is responsible. How should one weigh these possibilities?",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9999996666667778,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": 0.9999996666667778,
+          "heuristic_task": "reasoning",
+          "input_tokens": 0,
+          "latency_ms": 1.606416975846514,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "hybrid-0.3",
+          "task_type": "reasoning"
+        },
+        "expected_task": "reasoning",
+        "id": "fresh-reasoning-12",
+        "prompt": "Two witnesses to the same accident give incompatible accounts, yet both pass a lie-detector test. What principles should guide deciding whose testimony carries more weight?",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.6666664444445185,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": 0.6666664444445185,
+          "heuristic_task": "math",
+          "input_tokens": 0,
+          "latency_ms": 3.462166991084814,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "hybrid-0.3",
+          "task_type": "math"
+        },
+        "expected_task": "reasoning",
+        "id": "fresh-reasoning-14",
+        "prompt": "This is a statistics question about numbers, but don't calculate anything: a poll shows 60% of voters support a policy before a debate and 55% after. What non-numerical factors best explain the shift?",
+        "tags": [
+          "collision",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9354838106139477,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": 0.9354838106139477,
+          "heuristic_task": "reasoning",
+          "input_tokens": 0,
+          "latency_ms": 1.0803749901242554,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "hybrid-0.3",
+          "task_type": "reasoning"
+        },
+        "expected_task": "reasoning",
+        "id": "fresh-reasoning-16",
+        "prompt": "A legal brief argues: 'All previous rulings favored the defendant, therefore this ruling should too.' Summarizing the brief is not the goal \u2014 assess whether the argument's logical structure is valid.",
+        "tags": [
+          "collision",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9999996666667778,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": 0.9999996666667778,
+          "heuristic_task": "reasoning",
+          "input_tokens": 0,
+          "latency_ms": 2.787500008707866,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "hybrid-0.3",
+          "task_type": "reasoning"
+        },
+        "expected_task": "reasoning",
+        "id": "fresh-reasoning-18",
+        "prompt": "Una empresa redujo su plantilla un 20% y las ganancias aumentaron ese a\u00f1o, pero cayeron dos a\u00f1os despu\u00e9s. \u00bfCu\u00e1les son las explicaciones m\u00e1s plausibles para ese patr\u00f3n y qu\u00e9 factores deber\u00edan haberse considerado antes del recorte?",
+        "tags": [
+          "multilingual",
+          "spanish"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9999996666667778,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": 0.9999996666667778,
+          "heuristic_task": "reasoning",
+          "input_tokens": 0,
+          "latency_ms": 1.6043749928940088,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "hybrid-0.3",
+          "task_type": "reasoning"
+        },
+        "expected_task": "reasoning",
+        "id": "fresh-reasoning-20",
+        "prompt": "Zwei L\u00e4nder haben \u00e4hnliche Impfquoten, aber sehr unterschiedliche COVID-Sterblichkeitsraten. Welche konkurrierenden Erkl\u00e4rungen sollten vor einer politischen Schlussfolgerung gepr\u00fcft werden?",
+        "tags": [
+          "german",
+          "multilingual"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9999996666667778,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": 0.9999996666667778,
+          "heuristic_task": "creative_writing",
+          "input_tokens": 0,
+          "latency_ms": 1.0085829999297857,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "hybrid-0.3",
+          "task_type": "creative_writing"
+        },
+        "expected_task": "creative_writing",
+        "id": "fresh-creative_writing-02",
+        "prompt": "Compose a lullaby sung by a lighthouse keeper to the sea itself, treating the ocean as a restless child who refuses to sleep.",
+        "tags": [
+          "clear",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9999996666667778,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": 0.9999996666667778,
+          "heuristic_task": "creative_writing",
+          "input_tokens": 0,
+          "latency_ms": 0.8272089762613177,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "hybrid-0.3",
+          "task_type": "creative_writing"
+        },
+        "expected_task": "creative_writing",
+        "id": "fresh-creative_writing-04",
+        "prompt": "Invent five brand names and matching one-line slogans for a fictional apothecary that sells bottled memories instead of medicine.",
+        "tags": [
+          "clear",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.99999960000016,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": 0.99999960000016,
+          "heuristic_task": "creative_writing",
+          "input_tokens": 0,
+          "latency_ms": 0.7987499993760139,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "hybrid-0.3",
+          "task_type": "creative_writing"
+        },
+        "expected_task": "creative_writing",
+        "id": "fresh-creative_writing-06",
+        "prompt": "The last bookshop on a flooded planet has one afternoon left before the water rises to the door. Show me that afternoon.",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9999998333333611,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": 0.9999998333333611,
+          "heuristic_task": "creative_writing",
+          "input_tokens": 0,
+          "latency_ms": 0.8122079889290035,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "hybrid-0.3",
+          "task_type": "creative_writing"
+        },
+        "expected_task": "creative_writing",
+        "id": "fresh-creative_writing-08",
+        "prompt": "Give a nineteenth-century naturalist's voice to a field note describing the first sighting of a smartphone in the wild.",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9,
+          "cost_usd": 4.17e-05,
+          "error": null,
+          "heuristic_confidence": 0.0,
+          "heuristic_task": "general",
+          "input_tokens": 222,
+          "latency_ms": 762.3125000100117,
+          "llm_calls": 1,
+          "model": "gpt-4o-mini",
+          "output_tokens": 14,
+          "strategy": "hybrid-0.3",
+          "task_type": "creative_writing"
+        },
+        "expected_task": "creative_writing",
+        "id": "fresh-creative_writing-10",
+        "prompt": "A ghost haunts the apartment but is more embarrassed than frightening. Show a single evening from the ghost's perspective.",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9999996666667778,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": 0.9999996666667778,
+          "heuristic_task": "creative_writing",
+          "input_tokens": 0,
+          "latency_ms": 0.7334999972954392,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "hybrid-0.3",
+          "task_type": "creative_writing"
+        },
+        "expected_task": "creative_writing",
+        "id": "fresh-creative_writing-12",
+        "prompt": "Give the moon a personals ad. It should sound sincere, a little desperate, and geologically accurate.",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.5454544462810098,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": 0.5454544462810098,
+          "heuristic_task": "creative_writing",
+          "input_tokens": 0,
+          "latency_ms": 1.1957920214626938,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "hybrid-0.3",
+          "task_type": "creative_writing"
+        },
+        "expected_task": "creative_writing",
+        "id": "fresh-creative_writing-14",
+        "prompt": "The dataset label says 'factual description' but ignore that: spin a myth explaining why the Sahara forgot how to grow things, told by a grandmother to grandchildren around a fire.",
+        "tags": [
+          "collision",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9047618185941125,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": 0.9047618185941125,
+          "heuristic_task": "creative_writing",
+          "input_tokens": 0,
+          "latency_ms": 0.769832986406982,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "hybrid-0.3",
+          "task_type": "creative_writing"
+        },
+        "expected_task": "creative_writing",
+        "id": "fresh-creative_writing-16",
+        "prompt": "This looks like a legal brief request: 'Party A: Autumn. Party B: Summer. Dispute: Custody of September.' Draft the actual court transcript as absurdist fiction, not a legal document.",
+        "tags": [
+          "collision",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9999996666667778,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": 0.9999996666667778,
+          "heuristic_task": "creative_writing",
+          "input_tokens": 0,
+          "latency_ms": 1.150708005297929,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "hybrid-0.3",
+          "task_type": "creative_writing"
+        },
+        "expected_task": "creative_writing",
+        "id": "fresh-creative_writing-18",
+        "prompt": "Escribe un microrrelato de no m\u00e1s de cien palabras sobre un relojero que descubre que todos los relojes del pueblo llevan a\u00f1os contando el tiempo al rev\u00e9s.",
+        "tags": [
+          "multilingual",
+          "spanish"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9999996666667778,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": 0.9999996666667778,
+          "heuristic_task": "creative_writing",
+          "input_tokens": 0,
+          "latency_ms": 1.0158749937545508,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "hybrid-0.3",
+          "task_type": "creative_writing"
+        },
+        "expected_task": "creative_writing",
+        "id": "fresh-creative_writing-20",
+        "prompt": "Schreib einen kurzen Dialog zwischen zwei Laternen auf einer leeren Br\u00fccke, die sich fragen, ob jemand sie noch braucht, wenn die Stadt schl\u00e4ft.",
+        "tags": [
+          "german",
+          "multilingual"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9999996666667778,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": 0.9999996666667778,
+          "heuristic_task": "summarization",
+          "input_tokens": 0,
+          "latency_ms": 1.0835000139195472,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "hybrid-0.3",
+          "task_type": "summarization"
+        },
+        "expected_task": "summarization",
+        "id": "fresh-summarization-02",
+        "prompt": "The following email thread covers a week of back-and-forth about the office relocation. Extract the key decisions and action items from it: 'Monday: HR confirmed lease signed. Wednesday: IT flagged cabling issues. Friday: Move date set for October 14, IT to resolve cabling by October 7.'",
+        "tags": [
+          "clear",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9999999130434859,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": 0.9999999130434859,
+          "heuristic_task": "summarization",
+          "input_tokens": 0,
+          "latency_ms": 0.818000000435859,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "hybrid-0.3",
+          "task_type": "summarization"
+        },
+        "expected_task": "summarization",
+        "id": "fresh-summarization-04",
+        "prompt": "Condense the following patient discharge notes into a brief overview suitable for a follow-up nurse: 'Patient admitted with acute bronchitis, treated with antibiotics and nebulizer therapy for three days, discharged with a five-day oral antibiotic course, advised to return if symptoms worsen.'",
+        "tags": [
+          "clear",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 1.0,
+          "cost_usd": 4.575e-05,
+          "error": null,
+          "heuristic_confidence": 0.0,
+          "heuristic_task": "general",
+          "input_tokens": 249,
+          "latency_ms": 578.7695829931181,
+          "llm_calls": 1,
+          "model": "gpt-4o-mini",
+          "output_tokens": 14,
+          "strategy": "hybrid-0.3",
+          "task_type": "summarization"
+        },
+        "expected_task": "summarization",
+        "id": "fresh-summarization-06",
+        "prompt": "Pull out what matters most from this legal memo passage: 'The arbitration clause is enforceable under state law, the 30-day notice requirement was not met by the claimant, and the panel recommends dismissal without prejudice pending proper notice.'",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9999996666667778,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": 0.9999996666667778,
+          "heuristic_task": "summarization",
+          "input_tokens": 0,
+          "latency_ms": 0.41491701267659664,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "hybrid-0.3",
+          "task_type": "summarization"
+        },
+        "expected_task": "summarization",
+        "id": "fresh-summarization-08",
+        "prompt": "Capture the gist of this research abstract in two sentences: 'This study examined sleep deprivation effects on 450 adults over six weeks. Results showed a 34% decline in reaction time, elevated cortisol levels, and impaired memory consolidation in participants sleeping fewer than six hours nightly.'",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9999998823529551,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": 0.9999998823529551,
+          "heuristic_task": "summarization",
+          "input_tokens": 0,
+          "latency_ms": 0.4117079952266067,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "hybrid-0.3",
+          "task_type": "summarization"
+        },
+        "expected_task": "summarization",
+        "id": "fresh-summarization-10",
+        "prompt": "Trim this customer complaint log entry to its core facts: 'Customer called on March 3 reporting a delayed shipment originally due February 28. Agent confirmed warehouse error, issued a $15 credit, and escalated to logistics for priority re-shipment within 48 hours.'",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9999996666667778,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": 0.9999996666667778,
+          "heuristic_task": "summarization",
+          "input_tokens": 0,
+          "latency_ms": 0.35179199767298996,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "hybrid-0.3",
+          "task_type": "summarization"
+        },
+        "expected_task": "summarization",
+        "id": "fresh-summarization-12",
+        "prompt": "What's the takeaway from this press release section: 'TechNova announced a partnership with CloudBridge to co-develop AI-driven analytics tools, targeting enterprise clients in healthcare and finance, with a planned product launch in Q2 next year and a joint investment of $50 million.'",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.7142855102041399,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": 0.7142855102041399,
+          "heuristic_task": "summarization",
+          "input_tokens": 0,
+          "latency_ms": 1.050458027748391,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "hybrid-0.3",
+          "task_type": "summarization"
+        },
+        "expected_task": "summarization",
+        "id": "fresh-summarization-14",
+        "prompt": "This looks like a math-heavy financial report but I just need the narrative highlights: 'Revenue grew 22% to $4.1B. Operating margin expanded 150 basis points. Debt-to-equity ratio improved to 0.6. Management cited strong consumer demand and cost discipline as primary drivers.'",
+        "tags": [
+          "collision",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.8461537159763514,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": 0.8461537159763514,
+          "heuristic_task": "summarization",
+          "input_tokens": 0,
+          "latency_ms": 0.7402499904856086,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "hybrid-0.3",
+          "task_type": "summarization"
+        },
+        "expected_task": "summarization",
+        "id": "fresh-summarization-16",
+        "prompt": "This is a coding project status update, but I need a plain-language digest of it, not a code review: 'Sprint 7 closed with 34 of 40 story points completed. Two critical bugs remain open. The API integration module passed QA. Deployment to staging is scheduled for Thursday.'",
+        "tags": [
+          "collision",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9999998333333611,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": 0.9999998333333611,
+          "heuristic_task": "summarization",
+          "input_tokens": 0,
+          "latency_ms": 0.5237919976934791,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "hybrid-0.3",
+          "task_type": "summarization"
+        },
+        "expected_task": "summarization",
+        "id": "fresh-summarization-18",
+        "prompt": "Por favor, resume este correo en dos o tres oraciones: 'Estimado equipo, les informamos que la reuni\u00f3n del martes ha sido pospuesta al jueves a las 10:00 a.m. El orden del d\u00eda incluye revisi\u00f3n de presupuesto, avances del proyecto y asignaci\u00f3n de nuevas responsabilidades. Confirmen asistencia antes del mi\u00e9rcoles.'",
+        "tags": [
+          "multilingual",
+          "spanish"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9999996666667778,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": 0.9999996666667778,
+          "heuristic_task": "summarization",
+          "input_tokens": 0,
+          "latency_ms": 0.5028750165365636,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "hybrid-0.3",
+          "task_type": "summarization"
+        },
+        "expected_task": "summarization",
+        "id": "fresh-summarization-20",
+        "prompt": "Fasse eine kurze Zusammenfassung dieser Besprechungsnotizen: 'Das Team einigte sich auf einen neuen Zeitplan f\u00fcr die Produkteinf\u00fchrung im M\u00e4rz. Das Marketingbudget wurde um 10 % gek\u00fcrzt. Die Qualit\u00e4tssicherung soll ab sofort w\u00f6chentlich berichten. Offene Punkte werden bis Freitag gekl\u00e4rt.'",
+        "tags": [
+          "german",
+          "multilingual"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.99999960000016,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": 0.99999960000016,
+          "heuristic_task": "math",
+          "input_tokens": 0,
+          "latency_ms": 0.820916990051046,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "hybrid-0.3",
+          "task_type": "math"
+        },
+        "expected_task": "math",
+        "id": "fresh-math-02",
+        "prompt": "A fair six-sided die is rolled four times. What is the probability that at least two rolls show the same number?",
+        "tags": [
+          "clear",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9999998181818512,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": 0.9999998181818512,
+          "heuristic_task": "math",
+          "input_tokens": 0,
+          "latency_ms": 1.7262079927604645,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "hybrid-0.3",
+          "task_type": "math"
+        },
+        "expected_task": "math",
+        "id": "fresh-math-04",
+        "prompt": "Compute the definite integral of f(x) = 3x^2 - 2x + 1 from x = 0 to x = 4 and interpret the numerical result.",
+        "tags": [
+          "clear",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 1.0,
+          "cost_usd": 4.1849999999999994e-05,
+          "error": null,
+          "heuristic_confidence": 0.0,
+          "heuristic_task": "general",
+          "input_tokens": 231,
+          "latency_ms": 605.2187080204021,
+          "llm_calls": 1,
+          "model": "gpt-4o-mini",
+          "output_tokens": 12,
+          "strategy": "hybrid-0.3",
+          "task_type": "math"
+        },
+        "expected_task": "math",
+        "id": "fresh-math-06",
+        "prompt": "If a triangle has sides of length 7, 10, and 13, figure out whether it is acute, right, or obtuse using side lengths alone.",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9999998333333611,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": 0.9999998333333611,
+          "heuristic_task": "math",
+          "input_tokens": 0,
+          "latency_ms": 1.1092920030932873,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "hybrid-0.3",
+          "task_type": "math"
+        },
+        "expected_task": "math",
+        "id": "fresh-math-08",
+        "prompt": "Given a dataset of values 4, 8, 15, 16, 23, 42, determine the sample variance and standard deviation.",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9999998181818512,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": 0.9999998181818512,
+          "heuristic_task": "math",
+          "input_tokens": 0,
+          "latency_ms": 0.7888749823905528,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "hybrid-0.3",
+          "task_type": "math"
+        },
+        "expected_task": "math",
+        "id": "fresh-math-10",
+        "prompt": "Show that the square root of 3 cannot be expressed as a ratio of two integers.",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9999998333333611,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": 0.9999998333333611,
+          "heuristic_task": "math",
+          "input_tokens": 0,
+          "latency_ms": 0.843332993099466,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "hybrid-0.3",
+          "task_type": "math"
+        },
+        "expected_task": "math",
+        "id": "fresh-math-12",
+        "prompt": "Determine the eigenvalues of the matrix [[2, 1], [5, 3]] and find a corresponding eigenvector for each.",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.799999840000032,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": 0.799999840000032,
+          "heuristic_task": "math",
+          "input_tokens": 0,
+          "latency_ms": 1.0412920091766864,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "hybrid-0.3",
+          "task_type": "math"
+        },
+        "expected_task": "math",
+        "id": "fresh-math-14",
+        "prompt": "Without writing any code or pseudocode, derive the closed-form formula for the sum of a geometric series with first term a, ratio r, and n terms.",
+        "tags": [
+          "collision",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9999998571428775,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": 0.9999998571428775,
+          "heuristic_task": "math",
+          "input_tokens": 0,
+          "latency_ms": 1.4097090170253068,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "hybrid-0.3",
+          "task_type": "math"
+        },
+        "expected_task": "math",
+        "id": "fresh-math-16",
+        "prompt": "In a clinical trial framing: 200 patients, 30% in the control group showed recovery. Of the treated group of 140, 85 recovered. Calculate and compare the two recovery proportions using a z-test for proportions.",
+        "tags": [
+          "collision",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 1.0,
+          "cost_usd": 4.2e-05,
+          "error": null,
+          "heuristic_confidence": 0.0,
+          "heuristic_task": "general",
+          "input_tokens": 232,
+          "latency_ms": 553.13237500377,
+          "llm_calls": 1,
+          "model": "gpt-4o-mini",
+          "output_tokens": 12,
+          "strategy": "hybrid-0.3",
+          "task_type": "math"
+        },
+        "expected_task": "math",
+        "id": "fresh-math-18",
+        "prompt": "Si lanzas dos dados justos de seis caras, \u00bfcu\u00e1l es la probabilidad de que la suma sea mayor que 8? Muestra todos los casos favorables.",
+        "tags": [
+          "multilingual",
+          "spanish"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9999996666667778,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": 0.9999996666667778,
+          "heuristic_task": "math",
+          "input_tokens": 0,
+          "latency_ms": 1.48079200880602,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "hybrid-0.3",
+          "task_type": "math"
+        },
+        "expected_task": "math",
+        "id": "fresh-math-20",
+        "prompt": "Beweise, dass die Summe zweier gerader ganzer Zahlen stets gerade ist, und zeige dasselbe f\u00fcr das Produkt einer geraden und einer ungeraden Zahl.",
+        "tags": [
+          "german",
+          "multilingual"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.0,
+          "cost_usd": 3.795e-05,
+          "error": null,
+          "heuristic_confidence": 0.0,
+          "heuristic_task": "general",
+          "input_tokens": 205,
+          "latency_ms": 584.9450839741621,
+          "llm_calls": 1,
+          "model": "gpt-4o-mini",
+          "output_tokens": 12,
+          "strategy": "hybrid-0.3",
+          "task_type": "general"
+        },
+        "expected_task": "general",
+        "id": "fresh-general-02",
+        "prompt": "List the official languages spoken in Switzerland.",
+        "tags": [
+          "clear",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.0,
+          "cost_usd": 3.8849999999999996e-05,
+          "error": null,
+          "heuristic_confidence": 0.0,
+          "heuristic_task": "general",
+          "input_tokens": 211,
+          "latency_ms": 619.126875011716,
+          "llm_calls": 1,
+          "model": "gpt-4o-mini",
+          "output_tokens": 12,
+          "strategy": "hybrid-0.3",
+          "task_type": "general"
+        },
+        "expected_task": "general",
+        "id": "fresh-general-04",
+        "prompt": "Translate the phrase 'Where is the nearest train station?' into Japanese.",
+        "tags": [
+          "clear",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.0,
+          "cost_usd": 4.034999999999999e-05,
+          "error": null,
+          "heuristic_confidence": 0.0,
+          "heuristic_task": "general",
+          "input_tokens": 221,
+          "latency_ms": 715.7400420110207,
+          "llm_calls": 1,
+          "model": "gpt-4o-mini",
+          "output_tokens": 12,
+          "strategy": "hybrid-0.3",
+          "task_type": "general"
+        },
+        "expected_task": "general",
+        "id": "fresh-general-06",
+        "prompt": "I have basil, mozzarella, and tomatoes in my fridge. Name a classic dish I can make with just those three ingredients.",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.0,
+          "cost_usd": 4.0799999999999996e-05,
+          "error": null,
+          "heuristic_confidence": 0.0,
+          "heuristic_task": "general",
+          "input_tokens": 220,
+          "latency_ms": 630.1399589865468,
+          "llm_calls": 1,
+          "model": "gpt-4o-mini",
+          "output_tokens": 13,
+          "strategy": "hybrid-0.3",
+          "task_type": "reasoning"
+        },
+        "expected_task": "general",
+        "id": "fresh-general-08",
+        "prompt": "My passport expires in four months and I want to visit the EU. Will most Schengen countries accept it?",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.0,
+          "cost_usd": 4.005e-05,
+          "error": null,
+          "heuristic_confidence": 0.0,
+          "heuristic_task": "general",
+          "input_tokens": 219,
+          "latency_ms": 995.7237079797778,
+          "llm_calls": 1,
+          "model": "gpt-4o-mini",
+          "output_tokens": 12,
+          "strategy": "hybrid-0.3",
+          "task_type": "general"
+        },
+        "expected_task": "general",
+        "id": "fresh-general-10",
+        "prompt": "I keep finding small black ants near my kitchen sink every morning. What household items can I use to deter them?",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.0,
+          "cost_usd": 3.975e-05,
+          "error": null,
+          "heuristic_confidence": 0.0,
+          "heuristic_task": "general",
+          "input_tokens": 217,
+          "latency_ms": 896.8233750201762,
+          "llm_calls": 1,
+          "model": "gpt-4o-mini",
+          "output_tokens": 12,
+          "strategy": "hybrid-0.3",
+          "task_type": "general"
+        },
+        "expected_task": "general",
+        "id": "fresh-general-12",
+        "prompt": "Give me a phonetic pronunciation guide for the Welsh town name Llanfairpwllgwyngyll.",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9,
+          "cost_usd": 4.1849999999999994e-05,
+          "error": null,
+          "heuristic_confidence": 0.0,
+          "heuristic_task": "general",
+          "input_tokens": 227,
+          "latency_ms": 594.197875005193,
+          "llm_calls": 1,
+          "model": "gpt-4o-mini",
+          "output_tokens": 13,
+          "strategy": "hybrid-0.3",
+          "task_type": "reasoning"
+        },
+        "expected_task": "general",
+        "id": "fresh-general-14",
+        "prompt": "This label says 'Agiter avant utilisation' \u2014 what does that mean in English, and on what kind of product would you typically see it?",
+        "tags": [
+          "collision",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.0,
+          "cost_usd": 4.1700000000000004e-05,
+          "error": null,
+          "heuristic_confidence": 0.0,
+          "heuristic_task": "general",
+          "input_tokens": 230,
+          "latency_ms": 658.9991659857333,
+          "llm_calls": 1,
+          "model": "gpt-4o-mini",
+          "output_tokens": 12,
+          "strategy": "hybrid-0.3",
+          "task_type": "general"
+        },
+        "expected_task": "general",
+        "id": "fresh-general-16",
+        "prompt": "My recipe calls for 'bicarbonate of soda' but I'm in the US. What is the American name for this ingredient and which aisle is it usually in?",
+        "tags": [
+          "collision",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.0,
+          "cost_usd": 3.9149999999999996e-05,
+          "error": null,
+          "heuristic_confidence": 0.0,
+          "heuristic_task": "general",
+          "input_tokens": 213,
+          "latency_ms": 1128.9932919899002,
+          "llm_calls": 1,
+          "model": "gpt-4o-mini",
+          "output_tokens": 12,
+          "strategy": "hybrid-0.3",
+          "task_type": "general"
+        },
+        "expected_task": "general",
+        "id": "fresh-general-18",
+        "prompt": "\u00bfCu\u00e1les son los documentos necesarios para renovar el pasaporte en M\u00e9xico?",
+        "tags": [
+          "multilingual",
+          "spanish"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.0,
+          "cost_usd": 3.9149999999999996e-05,
+          "error": null,
+          "heuristic_confidence": 0.0,
+          "heuristic_task": "general",
+          "input_tokens": 213,
+          "latency_ms": 599.7753749834374,
+          "llm_calls": 1,
+          "model": "gpt-4o-mini",
+          "output_tokens": 12,
+          "strategy": "hybrid-0.3",
+          "task_type": "general"
+        },
+        "expected_task": "general",
+        "id": "fresh-general-20",
+        "prompt": "Welche Impfungen werden f\u00fcr eine Reise nach S\u00fcdostasien generell empfohlen?",
+        "tags": [
+          "german",
+          "multilingual"
+        ]
+      }
+    ],
+    "llm-router": [
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9,
+          "cost_usd": 4.0950000000000006e-05,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 225,
+          "latency_ms": 953.8627919973806,
+          "llm_calls": 1,
+          "model": "gpt-4o-mini",
+          "output_tokens": 12,
+          "strategy": "llm-router",
+          "task_type": "coding"
+        },
+        "expected_task": "coding",
+        "id": "fresh-coding-02",
+        "prompt": "Build a REST endpoint in Express.js that accepts a JSON body, validates required fields, and stores the result in a PostgreSQL table.",
+        "tags": [
+          "clear",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9,
+          "cost_usd": 4.05e-05,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 222,
+          "latency_ms": 580.9718749951571,
+          "llm_calls": 1,
+          "model": "gpt-4o-mini",
+          "output_tokens": 12,
+          "strategy": "llm-router",
+          "task_type": "coding"
+        },
+        "expected_task": "coding",
+        "id": "fresh-coding-04",
+        "prompt": "Implement a binary search tree in TypeScript with insert, delete, and in-order traversal methods, including unit tests using Jest.",
+        "tags": [
+          "clear",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9,
+          "cost_usd": 4.155e-05,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 225,
+          "latency_ms": 830.3626670094673,
+          "llm_calls": 1,
+          "model": "gpt-4o-mini",
+          "output_tokens": 13,
+          "strategy": "llm-router",
+          "task_type": "reasoning"
+        },
+        "expected_task": "coding",
+        "id": "fresh-coding-06",
+        "prompt": "Every time our nightly job runs, the database connection pool exhausts and new requests hang indefinitely. What should we change to prevent this?",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9,
+          "cost_usd": 4.2e-05,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 232,
+          "latency_ms": 682.1477919875178,
+          "llm_calls": 1,
+          "model": "gpt-4o-mini",
+          "output_tokens": 12,
+          "strategy": "llm-router",
+          "task_type": "coding"
+        },
+        "expected_task": "coding",
+        "id": "fresh-coding-08",
+        "prompt": "The checkout page takes 12 seconds to load. Profiling shows most time is spent in a nested loop inside the pricing engine. Help me speed it up.",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9,
+          "cost_usd": 4.1700000000000004e-05,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 230,
+          "latency_ms": 570.8616249903571,
+          "llm_calls": 1,
+          "model": "gpt-4o-mini",
+          "output_tokens": 12,
+          "strategy": "llm-router",
+          "task_type": "coding"
+        },
+        "expected_task": "coding",
+        "id": "fresh-coding-10",
+        "prompt": "Our CI pipeline fails with 'ModuleNotFoundError: No module named pandas' even though it's listed in requirements.txt. What's going wrong and how do we fix it?",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9,
+          "cost_usd": 4.05e-05,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 222,
+          "latency_ms": 1060.1035830040928,
+          "llm_calls": 1,
+          "model": "gpt-4o-mini",
+          "output_tokens": 12,
+          "strategy": "llm-router",
+          "task_type": "coding"
+        },
+        "expected_task": "coding",
+        "id": "fresh-coding-12",
+        "prompt": "After migrating to a new schema, the search results come back in random order instead of sorted by relevance. Identify and patch the issue.",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9,
+          "cost_usd": 4.259999999999999e-05,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 236,
+          "latency_ms": 552.6247500092722,
+          "llm_calls": 1,
+          "model": "gpt-4o-mini",
+          "output_tokens": 12,
+          "strategy": "llm-router",
+          "task_type": "coding"
+        },
+        "expected_task": "coding",
+        "id": "fresh-coding-14",
+        "prompt": "This is purely a business question, not a technical one: our invoice totals are wrong when discounts stack. Show me the SQL query that reproduces the calculation so finance can verify the numbers.",
+        "tags": [
+          "collision",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9,
+          "cost_usd": 4.23e-05,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 234,
+          "latency_ms": 654.2646250163671,
+          "llm_calls": 1,
+          "model": "gpt-4o-mini",
+          "output_tokens": 12,
+          "strategy": "llm-router",
+          "task_type": "coding"
+        },
+        "expected_task": "coding",
+        "id": "fresh-coding-16",
+        "prompt": "Forget summarizing the paper\u2014what I actually need is a simulation in NumPy that reproduces Figure 3's Monte Carlo experiment so I can tweak the parameters myself.",
+        "tags": [
+          "collision",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 1.0,
+          "cost_usd": 4.3049999999999996e-05,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 239,
+          "latency_ms": 659.9981249892153,
+          "llm_calls": 1,
+          "model": "gpt-4o-mini",
+          "output_tokens": 12,
+          "strategy": "llm-router",
+          "task_type": "coding"
+        },
+        "expected_task": "coding",
+        "id": "fresh-coding-18",
+        "prompt": "Escribe una funci\u00f3n en JavaScript que reciba un arreglo de objetos con campos 'nombre' y 'precio', y devuelva los cinco productos m\u00e1s caros ordenados de mayor a menor.",
+        "tags": [
+          "multilingual",
+          "spanish"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9,
+          "cost_usd": 4.155e-05,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 229,
+          "latency_ms": 647.3999579902738,
+          "llm_calls": 1,
+          "model": "gpt-4o-mini",
+          "output_tokens": 12,
+          "strategy": "llm-router",
+          "task_type": "coding"
+        },
+        "expected_task": "coding",
+        "id": "fresh-coding-20",
+        "prompt": "Schreibe eine Terraform-Konfiguration, die eine AWS Lambda-Funktion mit einer API-Gateway-Ausl\u00f6sung und den n\u00f6tigen IAM-Rollen bereitstellt.",
+        "tags": [
+          "german",
+          "multilingual"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9,
+          "cost_usd": 4.17e-05,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 226,
+          "latency_ms": 762.8022920107469,
+          "llm_calls": 1,
+          "model": "gpt-4o-mini",
+          "output_tokens": 13,
+          "strategy": "llm-router",
+          "task_type": "reasoning"
+        },
+        "expected_task": "reasoning",
+        "id": "fresh-reasoning-02",
+        "prompt": "A city reduced speeding tickets by 40% after installing cameras, yet traffic fatalities rose. What are the most plausible explanations for this apparent contradiction?",
+        "tags": [
+          "clear",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9,
+          "cost_usd": 4.395e-05,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 241,
+          "latency_ms": 645.232249982655,
+          "llm_calls": 1,
+          "model": "gpt-4o-mini",
+          "output_tokens": 13,
+          "strategy": "llm-router",
+          "task_type": "reasoning"
+        },
+        "expected_task": "reasoning",
+        "id": "fresh-reasoning-04",
+        "prompt": "A patient takes a new medication and their symptoms improve. Their doctor attributes the improvement to the drug, but the patient had also changed their diet the same week. Evaluate the strength of the doctor's conclusion.",
+        "tags": [
+          "clear",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9,
+          "cost_usd": 4.23e-05,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 230,
+          "latency_ms": 631.6571249917615,
+          "llm_calls": 1,
+          "model": "gpt-4o-mini",
+          "output_tokens": 13,
+          "strategy": "llm-router",
+          "task_type": "reasoning"
+        },
+        "expected_task": "reasoning",
+        "id": "fresh-reasoning-06",
+        "prompt": "A nation's birth rate fell sharply in the decade following a major economic recession. Several commentators blame cultural shifts while economists point to housing costs. Which account better fits the evidence?",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9,
+          "cost_usd": 4.14e-05,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 224,
+          "latency_ms": 729.6363750065211,
+          "llm_calls": 1,
+          "model": "gpt-4o-mini",
+          "output_tokens": 13,
+          "strategy": "llm-router",
+          "task_type": "reasoning"
+        },
+        "expected_task": "reasoning",
+        "id": "fresh-reasoning-08",
+        "prompt": "A startup's user engagement doubled after a redesign, but revenue stayed flat. Walk through the competing interpretations before settling on the most credible one.",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9,
+          "cost_usd": 4.3799999999999994e-05,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 240,
+          "latency_ms": 657.6678749988787,
+          "llm_calls": 1,
+          "model": "gpt-4o-mini",
+          "output_tokens": 13,
+          "strategy": "llm-router",
+          "task_type": "reasoning"
+        },
+        "expected_task": "reasoning",
+        "id": "fresh-reasoning-10",
+        "prompt": "An elderly resident's health declined rapidly after moving to an assisted-living facility. Family members disagree about whether the environment, the loss of independence, or an underlying condition is responsible. How should one weigh these possibilities?",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9,
+          "cost_usd": 4.199999999999999e-05,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 228,
+          "latency_ms": 628.1332499929704,
+          "llm_calls": 1,
+          "model": "gpt-4o-mini",
+          "output_tokens": 13,
+          "strategy": "llm-router",
+          "task_type": "reasoning"
+        },
+        "expected_task": "reasoning",
+        "id": "fresh-reasoning-12",
+        "prompt": "Two witnesses to the same accident give incompatible accounts, yet both pass a lie-detector test. What principles should guide deciding whose testimony carries more weight?",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9,
+          "cost_usd": 4.365e-05,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 239,
+          "latency_ms": 746.3056249835063,
+          "llm_calls": 1,
+          "model": "gpt-4o-mini",
+          "output_tokens": 13,
+          "strategy": "llm-router",
+          "task_type": "reasoning"
+        },
+        "expected_task": "reasoning",
+        "id": "fresh-reasoning-14",
+        "prompt": "This is a statistics question about numbers, but don't calculate anything: a poll shows 60% of voters support a policy before a debate and 55% after. What non-numerical factors best explain the shift?",
+        "tags": [
+          "collision",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9,
+          "cost_usd": 4.3499999999999993e-05,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 238,
+          "latency_ms": 761.458083987236,
+          "llm_calls": 1,
+          "model": "gpt-4o-mini",
+          "output_tokens": 13,
+          "strategy": "llm-router",
+          "task_type": "reasoning"
+        },
+        "expected_task": "reasoning",
+        "id": "fresh-reasoning-16",
+        "prompt": "A legal brief argues: 'All previous rulings favored the defendant, therefore this ruling should too.' Summarizing the brief is not the goal \u2014 assess whether the argument's logical structure is valid.",
+        "tags": [
+          "collision",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9,
+          "cost_usd": 4.56e-05,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 252,
+          "latency_ms": 669.2542920063715,
+          "llm_calls": 1,
+          "model": "gpt-4o-mini",
+          "output_tokens": 13,
+          "strategy": "llm-router",
+          "task_type": "reasoning"
+        },
+        "expected_task": "reasoning",
+        "id": "fresh-reasoning-18",
+        "prompt": "Una empresa redujo su plantilla un 20% y las ganancias aumentaron ese a\u00f1o, pero cayeron dos a\u00f1os despu\u00e9s. \u00bfCu\u00e1les son las explicaciones m\u00e1s plausibles para ese patr\u00f3n y qu\u00e9 factores deber\u00edan haberse considerado antes del recorte?",
+        "tags": [
+          "multilingual",
+          "spanish"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9,
+          "cost_usd": 4.29e-05,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 234,
+          "latency_ms": 547.0063750108238,
+          "llm_calls": 1,
+          "model": "gpt-4o-mini",
+          "output_tokens": 13,
+          "strategy": "llm-router",
+          "task_type": "reasoning"
+        },
+        "expected_task": "reasoning",
+        "id": "fresh-reasoning-20",
+        "prompt": "Zwei L\u00e4nder haben \u00e4hnliche Impfquoten, aber sehr unterschiedliche COVID-Sterblichkeitsraten. Welche konkurrierenden Erkl\u00e4rungen sollten vor einer politischen Schlussfolgerung gepr\u00fcft werden?",
+        "tags": [
+          "german",
+          "multilingual"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9,
+          "cost_usd": 4.17e-05,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 222,
+          "latency_ms": 560.355374997016,
+          "llm_calls": 1,
+          "model": "gpt-4o-mini",
+          "output_tokens": 14,
+          "strategy": "llm-router",
+          "task_type": "creative_writing"
+        },
+        "expected_task": "creative_writing",
+        "id": "fresh-creative_writing-02",
+        "prompt": "Compose a lullaby sung by a lighthouse keeper to the sea itself, treating the ocean as a restless child who refuses to sleep.",
+        "tags": [
+          "clear",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9,
+          "cost_usd": 4.2e-05,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 224,
+          "latency_ms": 595.7749169901945,
+          "llm_calls": 1,
+          "model": "gpt-4o-mini",
+          "output_tokens": 14,
+          "strategy": "llm-router",
+          "task_type": "creative_writing"
+        },
+        "expected_task": "creative_writing",
+        "id": "fresh-creative_writing-04",
+        "prompt": "Invent five brand names and matching one-line slogans for a fictional apothecary that sells bottled memories instead of medicine.",
+        "tags": [
+          "clear",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9,
+          "cost_usd": 4.1849999999999994e-05,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 223,
+          "latency_ms": 538.3116249868181,
+          "llm_calls": 1,
+          "model": "gpt-4o-mini",
+          "output_tokens": 14,
+          "strategy": "llm-router",
+          "task_type": "creative_writing"
+        },
+        "expected_task": "creative_writing",
+        "id": "fresh-creative_writing-06",
+        "prompt": "The last bookshop on a flooded planet has one afternoon left before the water rises to the door. Show me that afternoon.",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9,
+          "cost_usd": 4.14e-05,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 220,
+          "latency_ms": 594.5340000034776,
+          "llm_calls": 1,
+          "model": "gpt-4o-mini",
+          "output_tokens": 14,
+          "strategy": "llm-router",
+          "task_type": "creative_writing"
+        },
+        "expected_task": "creative_writing",
+        "id": "fresh-creative_writing-08",
+        "prompt": "Give a nineteenth-century naturalist's voice to a field note describing the first sighting of a smartphone in the wild.",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9,
+          "cost_usd": 4.1849999999999994e-05,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 223,
+          "latency_ms": 824.8268750030547,
+          "llm_calls": 1,
+          "model": "gpt-4o-mini",
+          "output_tokens": 14,
+          "strategy": "llm-router",
+          "task_type": "creative_writing"
+        },
+        "expected_task": "creative_writing",
+        "id": "fresh-creative_writing-10",
+        "prompt": "A ghost haunts the apartment but is more embarrassed than frightening. Show a single evening from the ghost's perspective.",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9,
+          "cost_usd": 4.1099999999999996e-05,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 218,
+          "latency_ms": 700.4273330094293,
+          "llm_calls": 1,
+          "model": "gpt-4o-mini",
+          "output_tokens": 14,
+          "strategy": "llm-router",
+          "task_type": "creative_writing"
+        },
+        "expected_task": "creative_writing",
+        "id": "fresh-creative_writing-12",
+        "prompt": "Give the moon a personals ad. It should sound sincere, a little desperate, and geologically accurate.",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9,
+          "cost_usd": 4.35e-05,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 234,
+          "latency_ms": 735.3936249855906,
+          "llm_calls": 1,
+          "model": "gpt-4o-mini",
+          "output_tokens": 14,
+          "strategy": "llm-router",
+          "task_type": "creative_writing"
+        },
+        "expected_task": "creative_writing",
+        "id": "fresh-creative_writing-14",
+        "prompt": "The dataset label says 'factual description' but ignore that: spin a myth explaining why the Sahara forgot how to grow things, told by a grandmother to grandchildren around a fire.",
+        "tags": [
+          "collision",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9,
+          "cost_usd": 4.4099999999999995e-05,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 238,
+          "latency_ms": 622.9967919935007,
+          "llm_calls": 1,
+          "model": "gpt-4o-mini",
+          "output_tokens": 14,
+          "strategy": "llm-router",
+          "task_type": "creative_writing"
+        },
+        "expected_task": "creative_writing",
+        "id": "fresh-creative_writing-16",
+        "prompt": "This looks like a legal brief request: 'Party A: Autumn. Party B: Summer. Dispute: Custody of September.' Draft the actual court transcript as absurdist fiction, not a legal document.",
+        "tags": [
+          "collision",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 1.0,
+          "cost_usd": 4.35e-05,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 234,
+          "latency_ms": 577.7327500109095,
+          "llm_calls": 1,
+          "model": "gpt-4o-mini",
+          "output_tokens": 14,
+          "strategy": "llm-router",
+          "task_type": "creative_writing"
+        },
+        "expected_task": "creative_writing",
+        "id": "fresh-creative_writing-18",
+        "prompt": "Escribe un microrrelato de no m\u00e1s de cien palabras sobre un relojero que descubre que todos los relojes del pueblo llevan a\u00f1os contando el tiempo al rev\u00e9s.",
+        "tags": [
+          "multilingual",
+          "spanish"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9,
+          "cost_usd": 4.275e-05,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 229,
+          "latency_ms": 2967.4860830127727,
+          "llm_calls": 1,
+          "model": "gpt-4o-mini",
+          "output_tokens": 14,
+          "strategy": "llm-router",
+          "task_type": "creative_writing"
+        },
+        "expected_task": "creative_writing",
+        "id": "fresh-creative_writing-20",
+        "prompt": "Schreib einen kurzen Dialog zwischen zwei Laternen auf einer leeren Br\u00fccke, die sich fragen, ob jemand sie noch braucht, wenn die Stadt schl\u00e4ft.",
+        "tags": [
+          "german",
+          "multilingual"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9,
+          "cost_usd": 4.709999999999999e-05,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 258,
+          "latency_ms": 684.5284579903819,
+          "llm_calls": 1,
+          "model": "gpt-4o-mini",
+          "output_tokens": 14,
+          "strategy": "llm-router",
+          "task_type": "summarization"
+        },
+        "expected_task": "summarization",
+        "id": "fresh-summarization-02",
+        "prompt": "The following email thread covers a week of back-and-forth about the office relocation. Extract the key decisions and action items from it: 'Monday: HR confirmed lease signed. Wednesday: IT flagged cabling issues. Friday: Move date set for October 14, IT to resolve cabling by October 7.'",
+        "tags": [
+          "clear",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9,
+          "cost_usd": 4.62e-05,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 252,
+          "latency_ms": 557.2411250032019,
+          "llm_calls": 1,
+          "model": "gpt-4o-mini",
+          "output_tokens": 14,
+          "strategy": "llm-router",
+          "task_type": "summarization"
+        },
+        "expected_task": "summarization",
+        "id": "fresh-summarization-04",
+        "prompt": "Condense the following patient discharge notes into a brief overview suitable for a follow-up nurse: 'Patient admitted with acute bronchitis, treated with antibiotics and nebulizer therapy for three days, discharged with a five-day oral antibiotic course, advised to return if symptoms worsen.'",
+        "tags": [
+          "clear",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9,
+          "cost_usd": 4.5299999999999997e-05,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 246,
+          "latency_ms": 600.0010419811588,
+          "llm_calls": 1,
+          "model": "gpt-4o-mini",
+          "output_tokens": 14,
+          "strategy": "llm-router",
+          "task_type": "summarization"
+        },
+        "expected_task": "summarization",
+        "id": "fresh-summarization-06",
+        "prompt": "Pull out what matters most from this legal memo passage: 'The arbitration clause is enforceable under state law, the 30-day notice requirement was not met by the claimant, and the panel recommends dismissal without prejudice pending proper notice.'",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 1.0,
+          "cost_usd": 4.59e-05,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 250,
+          "latency_ms": 796.7523749975953,
+          "llm_calls": 1,
+          "model": "gpt-4o-mini",
+          "output_tokens": 14,
+          "strategy": "llm-router",
+          "task_type": "summarization"
+        },
+        "expected_task": "summarization",
+        "id": "fresh-summarization-08",
+        "prompt": "Capture the gist of this research abstract in two sentences: 'This study examined sleep deprivation effects on 450 adults over six weeks. Results showed a 34% decline in reaction time, elevated cortisol levels, and impaired memory consolidation in participants sleeping fewer than six hours nightly.'",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9,
+          "cost_usd": 4.6049999999999994e-05,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 251,
+          "latency_ms": 611.5348750026897,
+          "llm_calls": 1,
+          "model": "gpt-4o-mini",
+          "output_tokens": 14,
+          "strategy": "llm-router",
+          "task_type": "summarization"
+        },
+        "expected_task": "summarization",
+        "id": "fresh-summarization-10",
+        "prompt": "Trim this customer complaint log entry to its core facts: 'Customer called on March 3 reporting a delayed shipment originally due February 28. Agent confirmed warehouse error, issued a $15 credit, and escalated to logistics for priority re-shipment within 48 hours.'",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9,
+          "cost_usd": 4.6049999999999994e-05,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 251,
+          "latency_ms": 592.2326660074759,
+          "llm_calls": 1,
+          "model": "gpt-4o-mini",
+          "output_tokens": 14,
+          "strategy": "llm-router",
+          "task_type": "summarization"
+        },
+        "expected_task": "summarization",
+        "id": "fresh-summarization-12",
+        "prompt": "What's the takeaway from this press release section: 'TechNova announced a partnership with CloudBridge to co-develop AI-driven analytics tools, targeting enterprise clients in healthcare and finance, with a planned product launch in Q2 next year and a joint investment of $50 million.'",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9,
+          "cost_usd": 4.74e-05,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 260,
+          "latency_ms": 688.361457985593,
+          "llm_calls": 1,
+          "model": "gpt-4o-mini",
+          "output_tokens": 14,
+          "strategy": "llm-router",
+          "task_type": "summarization"
+        },
+        "expected_task": "summarization",
+        "id": "fresh-summarization-14",
+        "prompt": "This looks like a math-heavy financial report but I just need the narrative highlights: 'Revenue grew 22% to $4.1B. Operating margin expanded 150 basis points. Debt-to-equity ratio improved to 0.6. Management cited strong consumer demand and cost discipline as primary drivers.'",
+        "tags": [
+          "collision",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9,
+          "cost_usd": 4.6949999999999996e-05,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 257,
+          "latency_ms": 581.3467080006376,
+          "llm_calls": 1,
+          "model": "gpt-4o-mini",
+          "output_tokens": 14,
+          "strategy": "llm-router",
+          "task_type": "summarization"
+        },
+        "expected_task": "summarization",
+        "id": "fresh-summarization-16",
+        "prompt": "This is a coding project status update, but I need a plain-language digest of it, not a code review: 'Sprint 7 closed with 34 of 40 story points completed. Two critical bugs remain open. The API integration module passed QA. Deployment to staging is scheduled for Thursday.'",
+        "tags": [
+          "collision",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 1.0,
+          "cost_usd": 4.845e-05,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 267,
+          "latency_ms": 574.7793749906123,
+          "llm_calls": 1,
+          "model": "gpt-4o-mini",
+          "output_tokens": 14,
+          "strategy": "llm-router",
+          "task_type": "summarization"
+        },
+        "expected_task": "summarization",
+        "id": "fresh-summarization-18",
+        "prompt": "Por favor, resume este correo en dos o tres oraciones: 'Estimado equipo, les informamos que la reuni\u00f3n del martes ha sido pospuesta al jueves a las 10:00 a.m. El orden del d\u00eda incluye revisi\u00f3n de presupuesto, avances del proyecto y asignaci\u00f3n de nuevas responsabilidades. Confirmen asistencia antes del mi\u00e9rcoles.'",
+        "tags": [
+          "multilingual",
+          "spanish"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 1.0,
+          "cost_usd": 4.7699999999999994e-05,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 262,
+          "latency_ms": 663.5318330081645,
+          "llm_calls": 1,
+          "model": "gpt-4o-mini",
+          "output_tokens": 14,
+          "strategy": "llm-router",
+          "task_type": "summarization"
+        },
+        "expected_task": "summarization",
+        "id": "fresh-summarization-20",
+        "prompt": "Fasse eine kurze Zusammenfassung dieser Besprechungsnotizen: 'Das Team einigte sich auf einen neuen Zeitplan f\u00fcr die Produkteinf\u00fchrung im M\u00e4rz. Das Marketingbudget wurde um 10 % gek\u00fcrzt. Die Qualit\u00e4tssicherung soll ab sofort w\u00f6chentlich berichten. Offene Punkte werden bis Freitag gekl\u00e4rt.'",
+        "tags": [
+          "german",
+          "multilingual"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.0,
+          "cost_usd": 0.0001869,
+          "error": "LLM router returned malformed classification JSON",
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 222,
+          "latency_ms": 2295.081249991199,
+          "llm_calls": 1,
+          "model": "gpt-4o-mini",
+          "output_tokens": 256,
+          "strategy": "llm-router",
+          "task_type": "__error__"
+        },
+        "expected_task": "math",
+        "id": "fresh-math-02",
+        "prompt": "A fair six-sided die is rolled four times. What is the probability that at least two rolls show the same number?",
+        "tags": [
+          "clear",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 1.0,
+          "cost_usd": 4.245e-05,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 235,
+          "latency_ms": 594.8754169803578,
+          "llm_calls": 1,
+          "model": "gpt-4o-mini",
+          "output_tokens": 12,
+          "strategy": "llm-router",
+          "task_type": "math"
+        },
+        "expected_task": "math",
+        "id": "fresh-math-04",
+        "prompt": "Compute the definite integral of f(x) = 3x^2 - 2x + 1 from x = 0 to x = 4 and interpret the numerical result.",
+        "tags": [
+          "clear",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 1.0,
+          "cost_usd": 4.2149999999999995e-05,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 233,
+          "latency_ms": 514.0167500067037,
+          "llm_calls": 1,
+          "model": "gpt-4o-mini",
+          "output_tokens": 12,
+          "strategy": "llm-router",
+          "task_type": "math"
+        },
+        "expected_task": "math",
+        "id": "fresh-math-06",
+        "prompt": "If a triangle has sides of length 7, 10, and 13, figure out whether it is acute, right, or obtuse using side lengths alone.",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 1.0,
+          "cost_usd": 4.0950000000000006e-05,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 225,
+          "latency_ms": 797.7255409932695,
+          "llm_calls": 1,
+          "model": "gpt-4o-mini",
+          "output_tokens": 12,
+          "strategy": "llm-router",
+          "task_type": "math"
+        },
+        "expected_task": "math",
+        "id": "fresh-math-08",
+        "prompt": "Given a dataset of values 4, 8, 15, 16, 23, 42, determine the sample variance and standard deviation.",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 1.0,
+          "cost_usd": 3.975e-05,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 217,
+          "latency_ms": 715.544292004779,
+          "llm_calls": 1,
+          "model": "gpt-4o-mini",
+          "output_tokens": 12,
+          "strategy": "llm-router",
+          "task_type": "math"
+        },
+        "expected_task": "math",
+        "id": "fresh-math-10",
+        "prompt": "Show that the square root of 3 cannot be expressed as a ratio of two integers.",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9,
+          "cost_usd": 4.125e-05,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 227,
+          "latency_ms": 831.7893329949584,
+          "llm_calls": 1,
+          "model": "gpt-4o-mini",
+          "output_tokens": 12,
+          "strategy": "llm-router",
+          "task_type": "math"
+        },
+        "expected_task": "math",
+        "id": "fresh-math-12",
+        "prompt": "Determine the eigenvalues of the matrix [[2, 1], [5, 3]] and find a corresponding eigenvector for each.",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9,
+          "cost_usd": 4.2449999999999995e-05,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 231,
+          "latency_ms": 722.673041978851,
+          "llm_calls": 1,
+          "model": "gpt-4o-mini",
+          "output_tokens": 13,
+          "strategy": "llm-router",
+          "task_type": "reasoning"
+        },
+        "expected_task": "math",
+        "id": "fresh-math-14",
+        "prompt": "Without writing any code or pseudocode, derive the closed-form formula for the sum of a geometric series with first term a, ratio r, and n terms.",
+        "tags": [
+          "collision",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 1.0,
+          "cost_usd": 4.364999999999999e-05,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 243,
+          "latency_ms": 688.5620410030242,
+          "llm_calls": 1,
+          "model": "gpt-4o-mini",
+          "output_tokens": 12,
+          "strategy": "llm-router",
+          "task_type": "math"
+        },
+        "expected_task": "math",
+        "id": "fresh-math-16",
+        "prompt": "In a clinical trial framing: 200 patients, 30% in the control group showed recovery. Of the treated group of 140, 85 recovered. Calculate and compare the two recovery proportions using a z-test for proportions.",
+        "tags": [
+          "collision",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9,
+          "cost_usd": 4.275e-05,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 237,
+          "latency_ms": 597.2224999859463,
+          "llm_calls": 1,
+          "model": "gpt-4o-mini",
+          "output_tokens": 12,
+          "strategy": "llm-router",
+          "task_type": "math"
+        },
+        "expected_task": "math",
+        "id": "fresh-math-18",
+        "prompt": "Si lanzas dos dados justos de seis caras, \u00bfcu\u00e1l es la probabilidad de que la suma sea mayor que 8? Muestra todos los casos favorables.",
+        "tags": [
+          "multilingual",
+          "spanish"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 1.0,
+          "cost_usd": 4.275e-05,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 237,
+          "latency_ms": 677.5757090072148,
+          "llm_calls": 1,
+          "model": "gpt-4o-mini",
+          "output_tokens": 12,
+          "strategy": "llm-router",
+          "task_type": "math"
+        },
+        "expected_task": "math",
+        "id": "fresh-math-20",
+        "prompt": "Beweise, dass die Summe zweier gerader ganzer Zahlen stets gerade ist, und zeige dasselbe f\u00fcr das Produkt einer geraden und einer ungeraden Zahl.",
+        "tags": [
+          "german",
+          "multilingual"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.0,
+          "cost_usd": 3.8549999999999995e-05,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 209,
+          "latency_ms": 697.6201659999788,
+          "llm_calls": 1,
+          "model": "gpt-4o-mini",
+          "output_tokens": 12,
+          "strategy": "llm-router",
+          "task_type": "general"
+        },
+        "expected_task": "general",
+        "id": "fresh-general-02",
+        "prompt": "List the official languages spoken in Switzerland.",
+        "tags": [
+          "clear",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.0,
+          "cost_usd": 3.9149999999999996e-05,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 213,
+          "latency_ms": 589.0879170037806,
+          "llm_calls": 1,
+          "model": "gpt-4o-mini",
+          "output_tokens": 12,
+          "strategy": "llm-router",
+          "task_type": "general"
+        },
+        "expected_task": "general",
+        "id": "fresh-general-04",
+        "prompt": "Translate the phrase 'Where is the nearest train station?' into Japanese.",
+        "tags": [
+          "clear",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.0,
+          "cost_usd": 4.05e-05,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 222,
+          "latency_ms": 597.2659580002073,
+          "llm_calls": 1,
+          "model": "gpt-4o-mini",
+          "output_tokens": 12,
+          "strategy": "llm-router",
+          "task_type": "general"
+        },
+        "expected_task": "general",
+        "id": "fresh-general-06",
+        "prompt": "I have basil, mozzarella, and tomatoes in my fridge. Name a classic dish I can make with just those three ingredients.",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.0,
+          "cost_usd": 4.0799999999999996e-05,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 220,
+          "latency_ms": 633.783166995272,
+          "llm_calls": 1,
+          "model": "gpt-4o-mini",
+          "output_tokens": 13,
+          "strategy": "llm-router",
+          "task_type": "reasoning"
+        },
+        "expected_task": "general",
+        "id": "fresh-general-08",
+        "prompt": "My passport expires in four months and I want to visit the EU. Will most Schengen countries accept it?",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.0,
+          "cost_usd": 4.034999999999999e-05,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 221,
+          "latency_ms": 682.1725420013536,
+          "llm_calls": 1,
+          "model": "gpt-4o-mini",
+          "output_tokens": 12,
+          "strategy": "llm-router",
+          "task_type": "general"
+        },
+        "expected_task": "general",
+        "id": "fresh-general-10",
+        "prompt": "I keep finding small black ants near my kitchen sink every morning. What household items can I use to deter them?",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.0,
+          "cost_usd": 3.9599999999999994e-05,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 216,
+          "latency_ms": 555.6821660138667,
+          "llm_calls": 1,
+          "model": "gpt-4o-mini",
+          "output_tokens": 12,
+          "strategy": "llm-router",
+          "task_type": "general"
+        },
+        "expected_task": "general",
+        "id": "fresh-general-12",
+        "prompt": "Give me a phonetic pronunciation guide for the Welsh town name Llanfairpwllgwyngyll.",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.8,
+          "cost_usd": 4.199999999999999e-05,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 228,
+          "latency_ms": 748.6491249874234,
+          "llm_calls": 1,
+          "model": "gpt-4o-mini",
+          "output_tokens": 13,
+          "strategy": "llm-router",
+          "task_type": "reasoning"
+        },
+        "expected_task": "general",
+        "id": "fresh-general-14",
+        "prompt": "This label says 'Agiter avant utilisation' \u2014 what does that mean in English, and on what kind of product would you typically see it?",
+        "tags": [
+          "collision",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.0,
+          "cost_usd": 4.23e-05,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 234,
+          "latency_ms": 606.9690000149421,
+          "llm_calls": 1,
+          "model": "gpt-4o-mini",
+          "output_tokens": 12,
+          "strategy": "llm-router",
+          "task_type": "general"
+        },
+        "expected_task": "general",
+        "id": "fresh-general-16",
+        "prompt": "My recipe calls for 'bicarbonate of soda' but I'm in the US. What is the American name for this ingredient and which aisle is it usually in?",
+        "tags": [
+          "collision",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.0,
+          "cost_usd": 3.9450000000000003e-05,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 215,
+          "latency_ms": 776.5625000174623,
+          "llm_calls": 1,
+          "model": "gpt-4o-mini",
+          "output_tokens": 12,
+          "strategy": "llm-router",
+          "task_type": "general"
+        },
+        "expected_task": "general",
+        "id": "fresh-general-18",
+        "prompt": "\u00bfCu\u00e1les son los documentos necesarios para renovar el pasaporte en M\u00e9xico?",
+        "tags": [
+          "multilingual",
+          "spanish"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.0,
+          "cost_usd": 3.8849999999999996e-05,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 211,
+          "latency_ms": 727.4346249760129,
+          "llm_calls": 1,
+          "model": "gpt-4o-mini",
+          "output_tokens": 12,
+          "strategy": "llm-router",
+          "task_type": "general"
+        },
+        "expected_task": "general",
+        "id": "fresh-general-20",
+        "prompt": "Welche Impfungen werden f\u00fcr eine Reise nach S\u00fcdostasien generell empfohlen?",
+        "tags": [
+          "german",
+          "multilingual"
+        ]
+      }
+    ]
+  },
+  "schema": "axonllm.autorouting-benchmark/v1",
+  "strategies": [
+    {
+      "accuracy": 0.8666666666666667,
+      "by_tag": {
+        "clear": {
+          "accuracy": 1.0,
+          "requests": 12
+        },
+        "collision": {
+          "accuracy": 0.8333333333333334,
+          "requests": 12
+        },
+        "english": {
+          "accuracy": 0.875,
+          "requests": 48
+        },
+        "german": {
+          "accuracy": 0.8333333333333334,
+          "requests": 6
+        },
+        "implicit": {
+          "accuracy": 0.8333333333333334,
+          "requests": 24
+        },
+        "multilingual": {
+          "accuracy": 0.8333333333333334,
+          "requests": 12
+        },
+        "spanish": {
+          "accuracy": 0.8333333333333334,
+          "requests": 6
+        }
+      },
+      "cache_hits": 0,
+      "confusion_matrix": {
+        "coding": {
+          "coding": 7,
+          "general": 3
+        },
+        "creative_writing": {
+          "creative_writing": 9,
+          "general": 1
+        },
+        "general": {
+          "general": 10
+        },
+        "math": {
+          "general": 2,
+          "math": 8
+        },
+        "reasoning": {
+          "math": 1,
+          "reasoning": 9
+        },
+        "summarization": {
+          "general": 1,
+          "summarization": 9
+        }
+      },
+      "correct": 52,
+      "cost_coverage": 1.0,
+      "errors": 0,
+      "input_tokens": 0,
+      "known_router_cost_usd": 0.0,
+      "latency_ms": {
+        "mean": 0.3861215333333333,
+        "p50": 0.30725,
+        "p95": 0.8961729499999997,
+        "p99": 1.2354322199999983
+      },
+      "llm_call_rate": 0.0,
+      "llm_calls": 0,
+      "macro_f1": 0.8747467798035394,
+      "output_tokens": 0,
+      "requests": 60,
+      "router_cost_per_1k_requests_usd": 0.0,
+      "router_cost_usd": 0.0,
+      "strategy": "axon-heuristic",
+      "wrong_cases": [
+        {
+          "confidence": 0.0,
+          "error": null,
+          "expected": "coding",
+          "id": "fresh-coding-08",
+          "predicted": "general",
+          "tags": [
+            "english",
+            "implicit"
+          ]
+        },
+        {
+          "confidence": 0.0,
+          "error": null,
+          "expected": "coding",
+          "id": "fresh-coding-16",
+          "predicted": "general",
+          "tags": [
+            "collision",
+            "english"
+          ]
+        },
+        {
+          "confidence": 0.0,
+          "error": null,
+          "expected": "coding",
+          "id": "fresh-coding-20",
+          "predicted": "general",
+          "tags": [
+            "german",
+            "multilingual"
+          ]
+        },
+        {
+          "confidence": 0.6666664444445185,
+          "error": null,
+          "expected": "reasoning",
+          "id": "fresh-reasoning-14",
+          "predicted": "math",
+          "tags": [
+            "collision",
+            "english"
+          ]
+        },
+        {
+          "confidence": 0.0,
+          "error": null,
+          "expected": "creative_writing",
+          "id": "fresh-creative_writing-10",
+          "predicted": "general",
+          "tags": [
+            "english",
+            "implicit"
+          ]
+        },
+        {
+          "confidence": 0.0,
+          "error": null,
+          "expected": "summarization",
+          "id": "fresh-summarization-06",
+          "predicted": "general",
+          "tags": [
+            "english",
+            "implicit"
+          ]
+        },
+        {
+          "confidence": 0.0,
+          "error": null,
+          "expected": "math",
+          "id": "fresh-math-06",
+          "predicted": "general",
+          "tags": [
+            "english",
+            "implicit"
+          ]
+        },
+        {
+          "confidence": 0.0,
+          "error": null,
+          "expected": "math",
+          "id": "fresh-math-18",
+          "predicted": "general",
+          "tags": [
+            "multilingual",
+            "spanish"
+          ]
+        }
+      ]
+    },
+    {
+      "accuracy": 0.9166666666666666,
+      "by_tag": {
+        "clear": {
+          "accuracy": 0.9166666666666666,
+          "requests": 12
+        },
+        "collision": {
+          "accuracy": 0.8333333333333334,
+          "requests": 12
+        },
+        "english": {
+          "accuracy": 0.8958333333333334,
+          "requests": 48
+        },
+        "german": {
+          "accuracy": 1.0,
+          "requests": 6
+        },
+        "implicit": {
+          "accuracy": 0.9166666666666666,
+          "requests": 24
+        },
+        "multilingual": {
+          "accuracy": 1.0,
+          "requests": 12
+        },
+        "spanish": {
+          "accuracy": 1.0,
+          "requests": 6
+        }
+      },
+      "cache_hits": 0,
+      "confusion_matrix": {
+        "coding": {
+          "coding": 9,
+          "reasoning": 1
+        },
+        "creative_writing": {
+          "creative_writing": 10
+        },
+        "general": {
+          "general": 8,
+          "reasoning": 2
+        },
+        "math": {
+          "__error__": 1,
+          "math": 8,
+          "reasoning": 1
+        },
+        "reasoning": {
+          "reasoning": 10
+        },
+        "summarization": {
+          "summarization": 10
+        }
+      },
+      "correct": 55,
+      "cost_coverage": 1.0,
+      "errors": 1,
+      "input_tokens": 13961,
+      "known_router_cost_usd": 0.0027049499999999994,
+      "latency_ms": {
+        "mean": 708.3917358624789,
+        "p50": 657.6678749988787,
+        "p95": 843.9966788951999,
+        "p99": 1861.2042330077415
+      },
+      "llm_call_rate": 1.0,
+      "llm_calls": 60,
+      "macro_f1": 0.9264132553606238,
+      "output_tokens": 1018,
+      "requests": 60,
+      "router_cost_per_1k_requests_usd": 0.04508249999999999,
+      "router_cost_usd": 0.0027049499999999994,
+      "strategy": "llm-router",
+      "wrong_cases": [
+        {
+          "confidence": 0.9,
+          "error": null,
+          "expected": "coding",
+          "id": "fresh-coding-06",
+          "predicted": "reasoning",
+          "tags": [
+            "english",
+            "implicit"
+          ]
+        },
+        {
+          "confidence": 0.0,
+          "error": "LLM router returned malformed classification JSON",
+          "expected": "math",
+          "id": "fresh-math-02",
+          "predicted": "__error__",
+          "tags": [
+            "clear",
+            "english"
+          ]
+        },
+        {
+          "confidence": 0.9,
+          "error": null,
+          "expected": "math",
+          "id": "fresh-math-14",
+          "predicted": "reasoning",
+          "tags": [
+            "collision",
+            "english"
+          ]
+        },
+        {
+          "confidence": 0.0,
+          "error": null,
+          "expected": "general",
+          "id": "fresh-general-08",
+          "predicted": "reasoning",
+          "tags": [
+            "english",
+            "implicit"
+          ]
+        },
+        {
+          "confidence": 0.8,
+          "error": null,
+          "expected": "general",
+          "id": "fresh-general-14",
+          "predicted": "reasoning",
+          "tags": [
+            "collision",
+            "english"
+          ]
+        }
+      ]
+    },
+    {
+      "accuracy": 0.95,
+      "by_tag": {
+        "clear": {
+          "accuracy": 1.0,
+          "requests": 12
+        },
+        "collision": {
+          "accuracy": 0.8333333333333334,
+          "requests": 12
+        },
+        "english": {
+          "accuracy": 0.9375,
+          "requests": 48
+        },
+        "german": {
+          "accuracy": 1.0,
+          "requests": 6
+        },
+        "implicit": {
+          "accuracy": 0.9583333333333334,
+          "requests": 24
+        },
+        "multilingual": {
+          "accuracy": 1.0,
+          "requests": 12
+        },
+        "spanish": {
+          "accuracy": 1.0,
+          "requests": 6
+        }
+      },
+      "cache_hits": 0,
+      "confusion_matrix": {
+        "coding": {
+          "coding": 10
+        },
+        "creative_writing": {
+          "creative_writing": 10
+        },
+        "general": {
+          "general": 8,
+          "reasoning": 2
+        },
+        "math": {
+          "math": 10
+        },
+        "reasoning": {
+          "math": 1,
+          "reasoning": 9
+        },
+        "summarization": {
+          "summarization": 10
+        }
+      },
+      "correct": 57,
+      "cost_coverage": 1.0,
+      "errors": 0,
+      "input_tokens": 3796,
+      "known_router_cost_usd": 0.0006953999999999998,
+      "latency_ms": {
+        "mean": 202.8135576818992,
+        "p50": 1.4567290054401383,
+        "p95": 851.2653336452785,
+        "p99": 1050.3642374239275
+      },
+      "llm_call_rate": 0.2833333333333333,
+      "llm_calls": 17,
+      "macro_f1": 0.9497354497354498,
+      "output_tokens": 210,
+      "requests": 60,
+      "router_cost_per_1k_requests_usd": 0.011589999999999996,
+      "router_cost_usd": 0.0006953999999999998,
+      "strategy": "hybrid-0.3",
+      "wrong_cases": [
+        {
+          "confidence": 0.6666664444445185,
+          "error": null,
+          "expected": "reasoning",
+          "id": "fresh-reasoning-14",
+          "predicted": "math",
+          "tags": [
+            "collision",
+            "english"
+          ]
+        },
+        {
+          "confidence": 0.0,
+          "error": null,
+          "expected": "general",
+          "id": "fresh-general-08",
+          "predicted": "reasoning",
+          "tags": [
+            "english",
+            "implicit"
+          ]
+        },
+        {
+          "confidence": 0.9,
+          "error": null,
+          "expected": "general",
+          "id": "fresh-general-14",
+          "predicted": "reasoning",
+          "tags": [
+            "collision",
+            "english"
+          ]
+        }
+      ]
+    }
+  ]
+}

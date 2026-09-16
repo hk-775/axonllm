@@ -1,0 +1,347 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AxonLLM — Auto-routing Benchmark</title>
+    <meta name="description" content="A reproducible comparison of AxonLLM's local heuristic, an LLM router, and a confidence-gated hybrid across accuracy, latency, and direct routing cost.">
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%237c3aed'/%3E%3Cpath d='M8 22L16 10L24 22' stroke='white' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round' fill='none'/%3E%3Ccircle cx='16' cy='10' r='2.5' fill='white'/%3E%3C/svg%3E">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="benchmark.css">
+</head>
+<body>
+
+<nav>
+    <div class="container">
+        <a href="/" class="logo" aria-label="AxonLLM home">
+            <svg width="30" height="30" viewBox="0 0 32 32" fill="none" aria-hidden="true">
+                <rect width="32" height="32" rx="8" fill="url(#axon-grad)"/>
+                <path d="M8 22L16 10L24 22" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+                <circle cx="16" cy="10" r="2.5" fill="white"/>
+                <circle cx="8" cy="22" r="2" fill="white" opacity="0.7"/>
+                <circle cx="24" cy="22" r="2" fill="white" opacity="0.7"/>
+                <line x1="12" y1="16" x2="20" y2="16" stroke="white" stroke-width="1.5" opacity="0.5"/>
+                <defs><linearGradient id="axon-grad" x1="0" y1="0" x2="32" y2="32"><stop stop-color="#8b5cf6"/><stop offset="1" stop-color="#6d28d9"/></linearGradient></defs>
+            </svg>
+            <span class="logo-text">Axon<span>LLM</span></span>
+        </a>
+        <ul class="nav-links">
+            <li><a href="/#routing">Routing</a></li>
+            <li><a href="architecture.html">Architecture</a></li>
+            <li><a href="benchmark.html" class="active" aria-current="page">Benchmark</a></li>
+            <li><a href="#methodology">Methodology</a></li>
+        </ul>
+        <div class="nav-actions">
+            <a href="/admin/dashboard" class="nav-cta" aria-label="Open the dashboard">
+                <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/></svg>
+                <span class="cta-label">Dashboard</span>
+            </a>
+            <a href="https://github.com/hk-775/axonllm" class="nav-cta secondary" aria-label="View AxonLLM on GitHub">
+                <svg width="16" height="16" fill="currentColor" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+                <span class="cta-label">GitHub</span>
+            </a>
+        </div>
+    </div>
+</nav>
+
+<header class="hero">
+    <div class="container">
+        <div class="hero-grid">
+            <div>
+                <p class="eyebrow">Auto-routing benchmark · Frozen held-out snapshot</p>
+                <h1>How much should routing intelligence cost?</h1>
+                <p class="hero-copy">
+                    AxonLLM compares a local keyword-and-regex classifier, an LLM
+                    classifier, and a confidence-gated hybrid on a frozen held-out
+                    corpus. The benchmark isolates the routing decision so generation
+                    latency and downstream model spend cannot hide the router's own cost.
+                </p>
+                <div class="hero-actions">
+                    <a class="button" href="#results">See the results</a>
+                    <a class="button secondary" href="benchmark-results.json">Download aggregate JSON</a>
+                    <a class="button secondary" href="https://github.com/hk-775/axonllm/blob/main/docs/benchmarks/autorouting-held-out-2026-09-16.json">Inspect case-level JSON</a>
+                </div>
+            </div>
+            <aside class="snapshot" aria-label="Benchmark snapshot details">
+                <span class="snapshot-badge">Frozen held-out corpus</span>
+                <dl>
+                    <div class="snapshot-row"><dt>Run</dt><dd>2026-09-16 17:19 UTC</dd></div>
+                    <div class="snapshot-row"><dt>Corpus</dt><dd>60 held out · 6 labels</dd></div>
+                    <div class="snapshot-row"><dt>LLM</dt><dd>gpt-4o-mini</dd></div>
+                    <div class="snapshot-row"><dt>Hybrid threshold</dt><dd>0.3</dd></div>
+                    <div class="snapshot-row"><dt>Concurrency</dt><dd>1</dd></div>
+                    <div class="snapshot-row"><dt>Downstream generation</dt><dd>Excluded</dd></div>
+                </dl>
+            </aside>
+        </div>
+        <p class="trust-note">
+            <strong>Read this result correctly:</strong> the heuristic was improved
+            using only the 60-prompt development split, where it moved from 35.0%
+            to 100.0%. The rules were locked before final per-case inspection and
+            scored 86.7% on the separate 60-prompt test split.
+        </p>
+    </div>
+</header>
+
+<main>
+    <section id="results" class="alt">
+        <div class="container">
+            <div class="section-head">
+                <div>
+                    <p class="section-label">Held-out comparison</p>
+                    <h2>Hybrid wins the routing tradeoff</h2>
+                    <p class="section-desc">
+                        Local rules remained sub-millisecond and free. GPT-4o Mini
+                        improved accuracy, while the hybrid reached the highest score
+                        by escalating only the 28.3% of prompts the heuristic marked
+                        uncertain.
+                    </p>
+                </div>
+                <a class="button secondary" href="https://github.com/hk-775/axonllm/blob/main/docs/AUTOROUTING_BENCHMARK.md">Read methodology</a>
+            </div>
+
+            <div class="result-grid">
+                <article class="result-card" data-benchmark-result data-strategy="axon-heuristic" data-accuracy="0.8666666667">
+                    <div class="result-topline">
+                        <span class="result-name">Improved heuristic</span>
+                        <span class="result-tag">Local only</span>
+                    </div>
+                    <div class="result-number">86.7%</div>
+                    <div class="result-caption">Accuracy · 52 / 60</div>
+                    <div class="result-details">
+                        <div class="result-detail"><span>Macro F1</span><span>0.875</span></div>
+                        <div class="result-detail"><span>p50 / p95</span><span>0.307 / 0.896 ms</span></div>
+                        <div class="result-detail"><span>LLM call rate</span><span>0%</span></div>
+                        <div class="result-detail"><span>Router cost / 1K</span><span>$0</span></div>
+                    </div>
+                </article>
+
+                <article class="result-card" data-benchmark-result data-strategy="llm-router" data-accuracy="0.9166666667">
+                    <div class="result-topline">
+                        <span class="result-name">LLM router</span>
+                        <span class="result-tag">Full escalation</span>
+                    </div>
+                    <div class="result-number">91.7%</div>
+                    <div class="result-caption">Accuracy · 55 / 60 · 1 parse error</div>
+                    <div class="result-details">
+                        <div class="result-detail"><span>Macro F1</span><span>0.926</span></div>
+                        <div class="result-detail"><span>p50 / p95</span><span>657.7 / 844.0 ms</span></div>
+                        <div class="result-detail"><span>LLM call rate</span><span>100%</span></div>
+                        <div class="result-detail"><span>Router cost / 1K</span><span>$0.045082</span></div>
+                    </div>
+                </article>
+
+                <article class="result-card best" data-benchmark-result data-strategy="hybrid-0.3" data-accuracy="0.95">
+                    <div class="result-topline">
+                        <span class="result-name">Hybrid · 0.3</span>
+                        <span class="result-tag">Best held out</span>
+                    </div>
+                    <div class="result-number">95.0%</div>
+                    <div class="result-caption">Accuracy · 57 / 60 · 0 errors</div>
+                    <div class="result-details">
+                        <div class="result-detail"><span>Macro F1</span><span>0.950</span></div>
+                        <div class="result-detail"><span>p50 / p95</span><span>1.457 / 851.3 ms</span></div>
+                        <div class="result-detail"><span>LLM call rate</span><span>28.3%</span></div>
+                        <div class="result-detail"><span>Router cost / 1K</span><span>$0.011590</span></div>
+                    </div>
+                </article>
+            </div>
+
+            <div class="table-wrap" role="region" aria-label="Full routing benchmark comparison" tabindex="0">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Strategy</th>
+                            <th>Accuracy</th>
+                            <th>Macro F1</th>
+                            <th>p50 latency</th>
+                            <th>p95 latency</th>
+                            <th>LLM calls</th>
+                            <th>Cost / 1K</th>
+                            <th>Errors</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr><td>Improved heuristic</td><td>86.7%</td><td>0.875</td><td>0.307 ms</td><td>0.896 ms</td><td>0 / 60</td><td>$0</td><td>0</td></tr>
+                        <tr><td>LLM router</td><td>91.7%</td><td>0.926</td><td>657.7 ms</td><td>844.0 ms</td><td>60 / 60</td><td>$0.045082</td><td>1</td></tr>
+                        <tr><td>Hybrid · 0.3</td><td>95.0%</td><td>0.950</td><td>1.457 ms</td><td>851.3 ms</td><td>17 / 60</td><td>$0.011590</td><td>0</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </section>
+
+    <section id="improvement">
+        <div class="container">
+            <div class="section-head">
+                <div>
+                    <p class="section-label">Regex improvement</p>
+                    <h2>38.3% → 86.7% on the frozen test split</h2>
+                    <p class="section-desc">
+                        Only development-set misses informed the generalized intent
+                        families. After the rules reached 100% on development, they
+                        were locked before final per-case inspection.
+                    </p>
+                </div>
+            </div>
+            <div class="comparison-grid">
+                <div class="before-after">
+                    <div class="delta">+48.3 pp</div>
+                    <div class="delta-label">Improvement on the same frozen 60-prompt test split</div>
+                    <div class="baseline-pair">
+                        <div class="baseline-row">
+                            <span>Original · test</span>
+                            <div class="bar-track"><div class="bar muted" style="width:38.3%" data-accuracy-bar></div></div>
+                            <strong>38.3%</strong>
+                        </div>
+                        <div class="baseline-row">
+                            <span>Improved · dev</span>
+                            <div class="bar-track"><div class="bar" style="width:100%" data-accuracy-bar></div></div>
+                            <strong>100.0%</strong>
+                        </div>
+                        <div class="baseline-row">
+                            <span>Improved · test</span>
+                            <div class="bar-track"><div class="bar" style="width:86.7%" data-accuracy-bar></div></div>
+                            <strong>86.7%</strong>
+                        </div>
+                    </div>
+                </div>
+                <div class="tradeoff-list">
+                    <div class="tradeoff">
+                        <h3>Frozen before tuning</h3>
+                        <p>The 120 generated prompts were split deterministically into 60 development and 60 final cases. Corpus and split hashes are published for verification.</p>
+                    </div>
+                    <div class="tradeoff">
+                        <h3>Generalized rules, not prompt IDs</h3>
+                        <p>The classifier added reusable families for requested artifacts, evidence weighing, compact outputs, quantitative operations, and multilingual intent.</p>
+                    </div>
+                    <div class="tradeoff">
+                        <h3>Regression score kept separate</h3>
+                        <p>The earlier 98.6% result on the known 72-prompt corpus remains published, but it is labeled as a tuned regression result rather than held-out evidence.</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <section class="alt" id="scenarios">
+        <div class="container">
+            <div class="section-head">
+                <div>
+                    <p class="section-label">Scenario accuracy</p>
+                    <h2>Where the strategies differ</h2>
+                    <p class="section-desc">
+                        Small scenario counts are diagnostic, not statistically
+                        conclusive. The complete held-out case output is published
+                        with the repository.
+                    </p>
+                </div>
+            </div>
+            <div class="table-wrap" role="region" aria-label="Routing accuracy by scenario" tabindex="0">
+                <table>
+                    <thead>
+                        <tr><th>Scenario</th><th>Cases</th><th>Heuristic</th><th>LLM</th><th>Hybrid</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td>Clear</td><td>12</td><td>100.0%</td><td>91.7%</td><td>100.0%</td></tr>
+                        <tr><td>Implicit</td><td>24</td><td>83.3%</td><td>91.7%</td><td>95.8%</td></tr>
+                        <tr><td>Keyword collision</td><td>12</td><td>83.3%</td><td>83.3%</td><td>83.3%</td></tr>
+                        <tr><td>Multilingual</td><td>12</td><td>83.3%</td><td>100.0%</td><td>100.0%</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </section>
+
+    <section id="interpretation">
+        <div class="container">
+            <div class="section-head">
+                <div>
+                    <p class="section-label">Interpretation</p>
+                    <h2>What this experiment supports</h2>
+                </div>
+            </div>
+            <div class="insight-grid">
+                <article class="insight">
+                    <span class="insight-index">01</span>
+                    <h3>Keep the deterministic first pass</h3>
+                    <p>The local classifier delivered 86.7% held-out accuracy with sub-millisecond p95 latency and no direct router spend.</p>
+                </article>
+                <article class="insight">
+                    <span class="insight-index">02</span>
+                    <h3>Escalate uncertainty, not every prompt</h3>
+                    <p>The hybrid reached 95.0% accuracy while invoking the LLM on 17 of 60 prompts, about one quarter of the full-router cost.</p>
+                </article>
+                <article class="insight">
+                    <span class="insight-index">03</span>
+                    <h3>Count operational failures</h3>
+                    <p>The LLM-only run produced one malformed classification after consuming its completion budget. Errors are scored as wrong routes, not silently removed.</p>
+                </article>
+            </div>
+        </div>
+    </section>
+
+    <section class="alt" id="methodology">
+        <div class="container">
+            <div class="section-head">
+                <div>
+                    <p class="section-label">Methodology</p>
+                    <h2>Reproducible, with the caveats attached</h2>
+                    <p class="section-desc">
+                        Every prompt is evaluated against the same six-label taxonomy.
+                        Router cache reuse is disabled with a per-request nonce, and
+                        direct router token cost is calculated from recorded usage.
+                        The corpus, split, hashes, and case-level decisions are committed.
+                    </p>
+                </div>
+            </div>
+            <div class="method-grid">
+                <div class="method"><div class="method-label">Corpus</div><div class="method-value">60 dev + 60 test</div></div>
+                <div class="method"><div class="method-label">Test labels</div><div class="method-value">6 × 10 balanced</div></div>
+                <div class="method"><div class="method-label">Repetitions</div><div class="method-value">1 snapshot</div></div>
+                <div class="method"><div class="method-label">Concurrency</div><div class="method-value">1 sequential</div></div>
+                <div class="method"><div class="method-label">Corpus generator</div><div class="method-value">Claude Sonnet</div></div>
+                <div class="method"><div class="method-label">Label review</div><div class="method-value">Manual + GPT-4.1</div></div>
+                <div class="method"><div class="method-label">Router LLM</div><div class="method-value">GPT-4o Mini</div></div>
+                <div class="method"><div class="method-label">Generation</div><div class="method-value">Excluded</div></div>
+            </div>
+
+            <pre class="code-block"><span class="comment"># Reproduce the frozen held-out comparison</span>
+uv run --locked axon-benchmark-routing \
+  --corpus docs/benchmarks/autorouting-final-test-2026-09-16.jsonl \
+  --strategy heuristic \
+  --strategy llm \
+  --strategy hybrid \
+  --hybrid-threshold 0.3 \
+  --llm-base-url http://127.0.0.1:8001/v1 \
+  --llm-model gpt-4o-mini \
+  --llm-api-key-env AXON_BENCHMARK_API_KEY \
+  --llm-input-cost-per-million 0.15 \
+  --llm-output-cost-per-million 0.60</pre>
+
+            <ul class="caveats">
+                <li>The 60 final cases were excluded from rule tuning. No classifier changes were made after final per-case inspection.</li>
+                <li>The corpus is synthetic and human-reviewed, not a substitute for labeled customer traffic from the target deployment.</li>
+                <li>One repetition captures a reproducible snapshot, not a confidence interval. Provider latency and stochastic classification can vary.</li>
+                <li>The supplied token prices were benchmark inputs, not a promise of current provider pricing. Recheck prices before financial decisions.</li>
+                <li>The benchmark measures routing classification only. It does not claim that a correct label always selects the best downstream model.</li>
+            </ul>
+        </div>
+    </section>
+</main>
+
+<footer>
+    <div class="container">
+        <p>
+            AxonLLM is open source under the MIT-0 License &middot;
+            <a href="https://github.com/hk-775/axonllm">GitHub</a> &middot;
+            <a href="https://github.com/hk-775/axonllm/blob/main/docs/benchmarks/autorouting-held-out-2026-09-16.md">Markdown report</a> &middot;
+            <a href="benchmark-results.json">Aggregate JSON</a>
+        </p>
+    </div>
+</footer>
+
+</body>
+</html>

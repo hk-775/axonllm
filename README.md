@@ -6,6 +6,7 @@
 
 [Website](https://hk-775.github.io/axonllm/) ·
 [Interactive architecture](https://hk-775.github.io/axonllm/architecture.html) ·
+[Routing benchmark](https://hk-775.github.io/axonllm/benchmark.html) ·
 [Quick start](#quick-start)
 
 **An open-source multi-provider LLM gateway with a mandatory control plane.**
@@ -203,10 +204,12 @@ AXON_LOCAL_DEMO_MODEL=claude-haiku \
 - **Tool calling (function calling)** — send OpenAI-shaped `tools`/`tool_choice`; supported adapters translate into their provider dialect (Anthropic `input_schema`, Bedrock `toolSpec`, Gemini `functionDeclarations`, Cohere `parameter_definitions`) and normalize calls on return. Support is model- and provider-specific, and AxonLLM transports tool calls rather than executing them.
 - **5 routing strategies** — round-robin, weighted, least-latency, cost-optimized, smart (intent-aware)
 - **Reproducible auto-routing benchmark** — compare the zero-cost Axon heuristic
-  with a small LLM router and confidence-gated hybrid on one labeled corpus;
-  report accuracy, latency, token cost, and the downstream savings required to
-  break even. See the
-  [Auto-routing Benchmark](docs/AUTOROUTING_BENCHMARK.md).
+  with an LLM router and confidence-gated hybrid on a frozen held-out corpus;
+  publish the development/test split, case-level decisions, accuracy, latency,
+  token cost, and downstream savings required to break even. The held-out
+  snapshot scored 86.7% heuristic, 91.7% LLM-only, and 95.0% hybrid. See the
+  [published results](https://hk-775.github.io/axonllm/benchmark.html) and
+  [methodology](docs/AUTOROUTING_BENCHMARK.md).
 - **Ensemble routing** — scatter-gather-synthesize across a panel of models with configurable quorum
 - **Multi-region hub-and-spoke** — single-region, active-passive failover, or active-active with weighted distribution
 - **Data residency** — strict mode filters spokes by zone to keep data in-region

@@ -929,6 +929,35 @@
 
         .tier-cost strong { color: var(--text); }
 
+        .benchmark-callout {
+            align-items: center;
+            background: var(--accent-soft);
+            border: 1px solid rgba(124, 58, 237, 0.24);
+            border-radius: var(--radius);
+            display: flex;
+            gap: 28px;
+            justify-content: space-between;
+            margin-top: 28px;
+            padding: 24px 28px;
+        }
+
+        .benchmark-callout strong {
+            display: block;
+            font-size: 1rem;
+            margin-bottom: 4px;
+        }
+
+        .benchmark-callout p {
+            color: var(--text-mid);
+            font-size: 0.88rem;
+            margin: 0;
+            max-width: 760px;
+        }
+
+        .benchmark-callout .btn-secondary {
+            flex: 0 0 auto;
+        }
+
         .silent {
             padding: 80px 0;
         }
@@ -1049,11 +1078,11 @@
            so the gaps close at a fixed rate: measured, 37px at 1200 shrinking
            10px per 20px of viewport, reaching the container's own 24px padding
            rhythm just under 1180. Drop the two least-load-bearing links there —
-           both are anchors to sections a visitor scrolls past anyway — which
+           one section anchor and the separately linked benchmark — which
            buys 152px and keeps Demo, Docs, Dashboard and GitHub intact, since
            those are the only ways off this page. */
         @media (max-width: 1180px) {
-            .nav-links li:nth-child(5),   /* Silent Failures */
+            .nav-links li:nth-child(5),   /* Benchmark */
             .nav-links li:nth-child(1) {  /* How It Works */
                 display: none;
             }
@@ -1105,6 +1134,8 @@
             .architecture-demo { padding: 72px 0; }
             .architecture-demo-head { align-items: stretch; flex-direction: column; }
             .architecture-demo-link { width: fit-content; }
+            .benchmark-callout { align-items: stretch; flex-direction: column; }
+            .benchmark-callout .btn-secondary { align-self: flex-start; width: auto; }
             .tier-cards { grid-template-columns: 1fr; }
             .feature-grid { grid-template-columns: 1fr; }
             .stat-row { grid-template-columns: repeat(2, 1fr); gap: 32px 16px; }
@@ -1139,7 +1170,7 @@
             <li><a href="#features">Features</a></li>
             <li><a href="#routing">Routing</a></li>
             <li><a href="#providers">Providers</a></li>
-            <li><a href="#silent">Silent Failures</a></li>
+            <li><a href="benchmark.html">Benchmark</a></li>
             <li><a href="architecture.html">Architecture</a></li>
         </ul>
         <div class="nav-actions" style="display:flex;gap:8px;align-items:center;flex-shrink:0;">
@@ -1429,6 +1460,16 @@ resp = client.chat.completions.create(
                 <p class="tier-desc">A panel answers in parallel, a judge synthesizes. Quorum decides how many must survive; a cost ceiling caps the blast radius; <code>best-single</code> fallback returns the strongest answer rather than an error.</p>
                 <div class="tier-cost"><strong>N+1&times;</strong> — panel size plus the judge</div>
             </div>
+        </div>
+        <div class="benchmark-callout">
+            <div>
+                <strong>Measured, not assumed</strong>
+                <p>The published frozen 60-prompt test measures classification accuracy, p50/p95 latency, LLM escalation rate, token usage, and direct router cost. Hybrid routing reached 95.0% accuracy while escalating 28.3% of prompts.</p>
+            </div>
+            <a href="benchmark.html" class="btn-secondary">
+                View Benchmark
+                <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+            </a>
         </div>
     </div>
 </section>

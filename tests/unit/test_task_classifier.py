@@ -1,9 +1,12 @@
 """Unit tests for TaskClassifier."""
 
+import json
+from pathlib import Path
+
 import pytest
 
-from src.gateway.task_classifier import TaskClassifier
 from src.gateway.models import ClassificationResult
+from src.gateway.task_classifier import TaskClassifier
 
 
 @pytest.fixture
@@ -253,3 +256,131 @@ class TestMatchedKeywords:
         assert "function" in result.matched_keywords
         assert "debug" in result.matched_keywords
         assert "code" in result.matched_keywords
+
+
+class TestIntentRegexes:
+    @pytest.mark.parametrize(
+        ("prompt", "expected"),
+        [
+            (
+                "Fix the failing assertion that contains 'write a sonnet'.",
+                "coding",
+            ),
+            (
+                "Think step by step about which service most likely caused "
+                "the latency spike.",
+                "reasoning",
+            ),
+            (
+                'The memo says "debug immediately"; evaluate that '
+                "recommendation and its evidence.",
+                "reasoning",
+            ),
+            ("Compose a sonnet about the last train home.", "creative_writing"),
+            (
+                "Extract the main claims and evidence without critiquing them.",
+                "summarization",
+            ),
+            (
+                "Provide an executive overview of the Python examples, "
+                "not code changes.",
+                "summarization",
+            ),
+            ("Find the eigenvalues of this matrix.", "math"),
+            (
+                "Derive the expected value; don't write a story.",
+                "math",
+            ),
+            (
+                "Give me a Python script for the fictional detective's "
+                "log analysis.",
+                "coding",
+            ),
+            (
+                "Translate this mood into a three-stanza poem.",
+                "creative_writing",
+            ),
+            (
+                "I need a quick rundown of this vendor proposal.",
+                "summarization",
+            ),
+            (
+                "Don't critique it; shrink this committee transcript entry.",
+                "summarization",
+            ),
+        ],
+    )
+    def test_intent_outweighs_referenced_content(
+        self,
+        classifier,
+        prompt,
+        expected,
+    ):
+        assert classifier.classify(prompt).task_type == expected
+
+    @pytest.mark.parametrize(
+        "prompt",
+        [
+            "My cat is named Rust; suggest a matching name for the dog.",
+            "Recommend a creative writing workbook for a beginner.",
+            "The word SQL is printed on the cap; what shoes would match?",
+        ],
+    )
+    def test_single_topic_words_do_not_hijack_general_requests(
+        self,
+        classifier,
+        prompt,
+    ):
+        assert classifier.classify(prompt).task_type == "general"
+
+    def test_packaged_benchmark_accuracy_stays_above_95_percent(
+        self,
+        classifier,
+    ):
+        corpus_path = (
+            Path(__file__).parents[2]
+            / "src/gateway/resources/benchmarks/autorouting.jsonl"
+        )
+        cases = [
+            json.loads(line)
+            for line in corpus_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        correct = sum(
+            classifier.classify(case["prompt"]).task_type
+            == case["expected_task"]
+            for case in cases
+        )
+        assert correct / len(cases) >= 0.95
+
+    @pytest.mark.parametrize(
+        ("filename", "minimum_accuracy"),
+        [
+            ("autorouting-development-2026-09-16.jsonl", 0.98),
+            ("autorouting-final-test-2026-09-16.jsonl", 0.85),
+        ],
+    )
+    def test_generated_benchmark_accuracy_stays_above_published_floor(
+        self,
+        classifier,
+        filename,
+        minimum_accuracy,
+    ):
+        corpus_path = (
+            Path(__file__).parents[2]
+            / "docs"
+            / "benchmarks"
+            / filename
+        )
+        cases = [
+            json.loads(line)
+            for line in corpus_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        assert len(cases) == 60
+        correct = sum(
+            classifier.classify(case["prompt"]).task_type
+            == case["expected_task"]
+            for case in cases
+        )
+        assert correct / len(cases) >= minimum_accuracy

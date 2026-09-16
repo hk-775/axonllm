@@ -31,6 +31,7 @@ const topLevelExtensions = new Set([
   ".drawio",
   ".html",
   ".js",
+  ".json",
   ".mp4",
   ".png",
   ".svg",
