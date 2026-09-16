@@ -95,6 +95,18 @@ const api = {
   put: (url, body) => request('PUT', url, body),
   del: url => request('DELETE', url)
 };
+
+/* Platform-wide reads are useful enhancements on the dashboard, but they are
+   not part of a tenant administrator's authority. A 403 therefore means
+   "omit this platform-only panel", not "the tenant page failed to load". */
+async function optionalPlatformRead(url) {
+  try {
+    return await api.get(url);
+  } catch (error) {
+    if (error && error.status === 403) return null;
+    throw error;
+  }
+}
 const sleep = milliseconds => new Promise(resolve => {
   window.setTimeout(resolve, milliseconds);
 });
@@ -454,7 +466,7 @@ function OverviewPage() {
   const [health, setHealth] = useState(null);
   const [error, setError] = useState(null);
   useEffect(() => {
-    Promise.all([api.get('/admin/overview'), api.get('/admin/health')]).then(([o, h]) => {
+    Promise.all([api.get('/admin/overview'), optionalPlatformRead('/admin/health')]).then(([o, h]) => {
       setData(o);
       setHealth(h);
     }).catch(e => setError('Failed to load overview data: ' + (e && e.message ? e.message : 'unknown error')));
@@ -2413,12 +2425,29 @@ function TracesPage() {
 function HealthPage() {
   const [health, setHealth] = useState(null);
   const [error, setError] = useState(null);
+  const [restricted, setRestricted] = useState(false);
   useEffect(() => {
-    api.get('/admin/health').then(setHealth).catch(e => setError('Failed to load health: ' + (e && e.message ? e.message : 'unknown error')));
+    api.get('/admin/health').then(setHealth).catch(e => {
+      if (e && e.status === 403) {
+        setRestricted(true);
+        return;
+      }
+      setError('Failed to load health: ' + (e && e.message ? e.message : 'unknown error'));
+    });
   }, []);
   if (error) return /*#__PURE__*/React.createElement(Flash, {
     type: "error"
   }, error);
+  if (restricted) {
+    return /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+      className: "page-header"
+    }, /*#__PURE__*/React.createElement("h1", null, "System health"), /*#__PURE__*/React.createElement("p", null, "Provider connectivity and runtime status")), /*#__PURE__*/React.createElement("div", {
+      className: "container"
+    }, /*#__PURE__*/React.createElement(EmptyState, {
+      title: "Platform administrator access required",
+      subtitle: "Provider, persistence, and runtime health are platform-wide. Tenant administrators can continue using tenant-scoped dashboard pages."
+    })));
+  }
   if (!health) return /*#__PURE__*/React.createElement(Loading, {
     text: "Loading health..."
   });
@@ -5948,6 +5977,8 @@ function App() {
   });
   const [browserAuth, setBrowserAuth] = useState(null);
   const [sessionContext, setSessionContext] = useState(null);
+  const sessionRoles = new Set(sessionContext && sessionContext.roles || []);
+  const tenantScopedDashboard = !sessionRoles.has('admin') && !sessionRoles.has('platform_admin') && ['tenant_admin', 'tenant_member', 'tenant_auditor'].some(role => sessionRoles.has(role));
   useEffect(() => {
     let active = true;
     fetch('/auth/config', {
@@ -6155,7 +6186,8 @@ function App() {
     items: [{
       key: 'models',
       icon: '🤖',
-      label: 'Models'
+      label: 'Models',
+      platformOnly: true
     }, {
       key: 'projects',
       icon: '📁',
@@ -6192,7 +6224,8 @@ function App() {
     }, {
       key: 'regions',
       icon: '🌐',
-      label: 'Regions'
+      label: 'Regions',
+      platformOnly: true
     }, {
       key: 'webhooks',
       icon: '🔔',
@@ -6203,30 +6236,36 @@ function App() {
     items: [{
       key: 'health',
       icon: '💚',
-      label: 'Health'
+      label: 'Health',
+      platformOnly: true
     }, {
       key: 'configuration',
       icon: '⚙',
-      label: 'Configuration'
+      label: 'Configuration',
+      platformOnly: true
     },
     /* No href: these render in the main pane like every other item, so
        the sidebar survives the click and stays highlighted. */
     {
       key: 'architecture',
       icon: '🗺',
-      label: 'Architecture'
+      label: 'Architecture',
+      platformOnly: true
     }, {
       key: 'pricing-drift',
       icon: '💲',
-      label: 'Pricing'
+      label: 'Pricing',
+      platformOnly: true
     }, {
       key: 'catalog-drift',
       icon: '📇',
-      label: 'Catalogue'
+      label: 'Catalogue',
+      platformOnly: true
     }, {
       key: 'production-checklist',
       icon: '✅',
-      label: 'Readiness'
+      label: 'Readiness',
+      platformOnly: true
     }]
   }];
   const isActive = item => {
@@ -6302,18 +6341,22 @@ function App() {
       padding: '0.5rem 0.5rem',
       overflow: 'auto'
     }
-  }, navSections.map(section => /*#__PURE__*/React.createElement("div", {
-    key: section.label,
-    className: "sidebar-section"
-  }, /*#__PURE__*/React.createElement("div", {
-    className: "sidebar-section-label"
-  }, section.label), section.items.map(item => /*#__PURE__*/React.createElement("button", {
-    key: item.key,
-    className: `nav-item ${isActive(item) ? 'active' : ''}`,
-    onClick: () => navigate(item.key)
-  }, /*#__PURE__*/React.createElement("span", {
-    className: "nav-icon"
-  }, item.icon), item.label))))), /*#__PURE__*/React.createElement("div", {
+  }, navSections.map(section => {
+    const items = section.items.filter(item => !item.platformOnly || !tenantScopedDashboard);
+    if (items.length === 0) return null;
+    return /*#__PURE__*/React.createElement("div", {
+      key: section.label,
+      className: "sidebar-section"
+    }, /*#__PURE__*/React.createElement("div", {
+      className: "sidebar-section-label"
+    }, section.label), items.map(item => /*#__PURE__*/React.createElement("button", {
+      key: item.key,
+      className: `nav-item ${isActive(item) ? 'active' : ''}`,
+      onClick: () => navigate(item.key)
+    }, /*#__PURE__*/React.createElement("span", {
+      className: "nav-icon"
+    }, item.icon), item.label)));
+  })), /*#__PURE__*/React.createElement("div", {
     style: {
       borderTop: '1px solid #f5f5f4',
       padding: '0.75rem 1.25rem'

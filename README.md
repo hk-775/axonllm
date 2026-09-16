@@ -202,6 +202,11 @@ AXON_LOCAL_DEMO_MODEL=claude-haiku \
 - **Adaptive provider route pools** — balance multiple credentials and endpoints per provider using route-level health, token-adjusted latency, capacity, priority, and recovery probes; reuse TCP/TLS pools by transport identity
 - **Tool calling (function calling)** — send OpenAI-shaped `tools`/`tool_choice`; supported adapters translate into their provider dialect (Anthropic `input_schema`, Bedrock `toolSpec`, Gemini `functionDeclarations`, Cohere `parameter_definitions`) and normalize calls on return. Support is model- and provider-specific, and AxonLLM transports tool calls rather than executing them.
 - **5 routing strategies** — round-robin, weighted, least-latency, cost-optimized, smart (intent-aware)
+- **Reproducible auto-routing benchmark** — compare the zero-cost Axon heuristic
+  with a small LLM router and confidence-gated hybrid on one labeled corpus;
+  report accuracy, latency, token cost, and the downstream savings required to
+  break even. See the
+  [Auto-routing Benchmark](docs/AUTOROUTING_BENCHMARK.md).
 - **Ensemble routing** — scatter-gather-synthesize across a panel of models with configurable quorum
 - **Multi-region hub-and-spoke** — single-region, active-passive failover, or active-active with weighted distribution
 - **Data residency** — strict mode filters spokes by zone to keep data in-region

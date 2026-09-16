@@ -5,7 +5,22 @@ const {
   useRef,
   useCallback
 } = React;
+const AUTH_KEY = 'axon_admin_api_key';
 const CSRF_COOKIE = '__Host-axon-csrf';
+function authStorage() {
+  try {
+    if (window.parent && window.parent !== window && window.parent.location.origin === window.location.origin) {
+      return window.parent.sessionStorage;
+    }
+  } catch (_error) {
+    // Cross-origin parents are not expected, but standalone chat still works.
+  }
+  return window.sessionStorage;
+}
+const getApiKey = () => authStorage().getItem(AUTH_KEY) || '';
+const setApiKey = key => {
+  if (key) authStorage().setItem(AUTH_KEY, key);else authStorage().removeItem(AUTH_KEY);
+};
 function getCsrfToken() {
   for (const part of document.cookie.split(';')) {
     const cookie = part.trim();
@@ -15,17 +30,40 @@ function getCsrfToken() {
   }
   return '';
 }
-function appFetch(url, options) {
+async function appFetch(url, options, retried) {
   const requestOptions = Object.assign({}, options || {});
   const method = (requestOptions.method || 'GET').toUpperCase();
   const headers = Object.assign({}, requestOptions.headers || {});
+  const csrfToken = getCsrfToken();
   if (!['GET', 'HEAD', 'OPTIONS'].includes(method)) {
-    const csrfToken = getCsrfToken();
     if (csrfToken) headers['X-Axon-CSRF-Token'] = csrfToken;
   }
+  const apiKey = csrfToken ? '' : getApiKey();
+  if (apiKey) headers.Authorization = 'Bearer ' + apiKey;
   requestOptions.headers = headers;
   requestOptions.credentials = 'same-origin';
-  return fetch(url, requestOptions);
+  const response = await fetch(url, requestOptions);
+  if (response.status !== 401 || retried) return response;
+  let payload = null;
+  try {
+    payload = await response.clone().json();
+  } catch (_error) {/* non-JSON body */}
+  const loginUrl = payload && payload.error && payload.error.login_url;
+  if (typeof loginUrl === 'string' && loginUrl.startsWith('/auth/login')) {
+    setApiKey('');
+    window.location.assign(loginUrl);
+    return response;
+  }
+  const currentKey = getApiKey();
+  if (currentKey && currentKey !== apiKey) {
+    return appFetch(url, options, true);
+  }
+  const replacement = window.prompt('This AxonLLM Sandbox requires a tenant API key.\n' + 'Paste the key supplied for this demo:');
+  if (replacement && replacement.trim()) {
+    setApiKey(replacement.trim());
+    return appFetch(url, options, true);
+  }
+  return response;
 }
 
 /* ── ModelSelector Component ── */

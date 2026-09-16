@@ -119,6 +119,7 @@ security = [
 axon = "src.gateway.cli:main"
 axon-demo = "src.gateway.cli:demo"
 axon-agentcore-deploy = "src.gateway.deployment.agentcore_deploy:main"
+axon-benchmark-routing = "src.gateway.autorouting_benchmark:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -149,6 +150,7 @@ include = ["axonllm*", "src*"]
     "admin/static/*",
     "admin/static/tour/*",
     "admin/static/vendor/*",
+    "resources/benchmarks/*",
     "chat/static/*",
     "chat/static/vendor/*",
     "deployment/schemas/*.json",

@@ -139,6 +139,8 @@ def _client() -> tuple[TestClient, str, str]:
     app = Starlette(
         routes=[
             Route("/admin/session", api.session_context),
+            Route("/admin/overview", api.overview),
+            Route("/admin/health", api.health),
             Route("/admin/projects", api.list_projects),
             Route("/admin/projects/{id}", api.get_project),
         ]
@@ -201,6 +203,17 @@ def test_dashboard_credentials_switch_the_complete_tenant_view() -> None:
     assert acme_session.json()["roles"] == ["tenant_admin"]
     assert globex_session.json()["roles"] == ["tenant_admin"]
 
+    # Tenant overview data remains usable while platform-wide provider and
+    # persistence health stays behind the platform-administrator boundary.
+    assert client.get(
+        "/admin/overview",
+        headers=_authorization(acme_key),
+    ).status_code == 200
+    assert client.get(
+        "/admin/health",
+        headers=_authorization(acme_key),
+    ).status_code == 403
+
     acme_projects = client.get(
         "/admin/projects",
         headers=_authorization(acme_key),
@@ -246,4 +259,7 @@ def test_dashboard_switcher_uses_credentials_not_tenant_parameters() -> None:
     assert "Tenant: {sessionContext.tenant_id}" in source
     assert "Switch demo tenant with another tenant-admin API key" in source
     assert "if (hasNewSessionKey(headers))" in source
+    assert "optionalPlatformRead('/admin/health')" in source
+    assert "error && error.status === 403" in source
+    assert "item => !item.platformOnly || !tenantScopedDashboard" in source
     assert "tenant_id=" not in source
