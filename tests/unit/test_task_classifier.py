@@ -291,6 +291,23 @@ class TestIntentRegexes:
                 "Derive the expected value; don't write a story.",
                 "math",
             ),
+            (
+                "Give me a Python script for the fictional detective's "
+                "log analysis.",
+                "coding",
+            ),
+            (
+                "Translate this mood into a three-stanza poem.",
+                "creative_writing",
+            ),
+            (
+                "I need a quick rundown of this vendor proposal.",
+                "summarization",
+            ),
+            (
+                "Don't critique it; shrink this committee transcript entry.",
+                "summarization",
+            ),
         ],
     )
     def test_intent_outweighs_referenced_content(
@@ -335,3 +352,35 @@ class TestIntentRegexes:
             for case in cases
         )
         assert correct / len(cases) >= 0.95
+
+    @pytest.mark.parametrize(
+        ("filename", "minimum_accuracy"),
+        [
+            ("autorouting-development-2026-09-16.jsonl", 0.98),
+            ("autorouting-final-test-2026-09-16.jsonl", 0.85),
+        ],
+    )
+    def test_generated_benchmark_accuracy_stays_above_published_floor(
+        self,
+        classifier,
+        filename,
+        minimum_accuracy,
+    ):
+        corpus_path = (
+            Path(__file__).parents[2]
+            / "docs"
+            / "benchmarks"
+            / filename
+        )
+        cases = [
+            json.loads(line)
+            for line in corpus_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        assert len(cases) == 60
+        correct = sum(
+            classifier.classify(case["prompt"]).task_type
+            == case["expected_task"]
+            for case in cases
+        )
+        assert correct / len(cases) >= minimum_accuracy

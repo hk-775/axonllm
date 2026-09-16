@@ -463,13 +463,20 @@ try {
     benchmarkSummary.schema,
     "axonllm.autorouting-benchmark-summary/v1",
   );
-  assert.equal(benchmarkSummary.methodology.unique_cases, 72);
+  assert.equal(
+    benchmarkSummary.evaluation_status,
+    "frozen-held-out-test-corpus",
+  );
+  assert.equal(benchmarkSummary.methodology.unique_cases, 60);
+  assert.equal(benchmarkSummary.methodology.development_cases, 60);
   assert.equal(benchmarkSummary.strategies.length, 3);
   assert.equal(
     benchmarkSummary.strategies[0].strategy,
     "axon-heuristic",
   );
-  assert.ok(benchmarkSummary.strategies[0].accuracy > 0.98);
+  assert.ok(benchmarkSummary.strategies[0].accuracy > 0.86);
+  assert.equal(benchmarkSummary.strategies[2].strategy, "hybrid-0.3");
+  assert.equal(benchmarkSummary.strategies[2].accuracy, 0.95);
 
   const browserWebSocketUrl = await waitForDevToolsUrl(chrome, () => chromeOutput);
   const devToolsOrigin = `http://${new URL(browserWebSocketUrl).host}`;
@@ -792,16 +799,17 @@ try {
       links,
     };
   })()`);
-  assert.match(benchmark.copy, /Local rules win this snapshot/);
-  assert.match(benchmark.copy, /tuned\s+regression\s+result/i);
-  assert.match(benchmark.copy, /54\.2%\s*→\s*98\.6%/);
+  assert.match(benchmark.copy, /Hybrid wins the routing tradeoff/);
+  assert.match(benchmark.copy, /frozen\s+held-out/i);
+  assert.match(benchmark.copy, /38\.3%\s*→\s*86\.7%/);
   assert.equal(benchmark.cardCount, 3);
   assert.deepEqual(
     benchmark.strategies,
     ["axon-heuristic", "llm-router", "hybrid-0.3"],
   );
-  assert.ok(benchmark.accuracies[0] > benchmark.accuracies[1]);
-  assert.equal(benchmark.barCount, 2);
+  assert.ok(benchmark.accuracies[1] > benchmark.accuracies[0]);
+  assert.ok(benchmark.accuracies[2] > benchmark.accuracies[1]);
+  assert.equal(benchmark.barCount, 3);
   assert.equal(
     benchmark.links.some(({ href }) => (
       typeof href === "string" && href.startsWith("/")

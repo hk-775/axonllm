@@ -119,6 +119,69 @@ _INTENT_RULES: dict[str, tuple[tuple[re.Pattern[str], str, float], ...]] = {
             "coding_call_change",
             2.5,
         ),
+        (
+            re.compile(
+                r"(?=[\s\S]*\b(?:react\s+app|node(?:\.js)?\s+(?:app|service)|"
+                r"kubernetes\s+pods?|ci\s+pipeline|api\s+requests?|http\s+"
+                r"(?:request|response)|server|database\s+(?:connection|pool)|"
+                r"cache\s+invalidation|jwt\s+claims?|terraform|lambda|json\s+"
+                r"schema|css|sql\s+query|deployment\s+(?:configuration|config)|"
+                r"module(?:notfounderror|\s+not\s+found)|nested\s+loop)\b)"
+                r"(?=[\s\S]*\b(?:errors?|exceptions?|fail(?:s|ed|ing)?|"
+                r"crash(?:es|ed|ing)?|oomkilled|timeouts?|hang(?:s|ing)?|"
+                r"wrong|missing|slow|exhaust(?:s|ed)?|unsupported\s+media\s+"
+                r"type|blank\s+screen|random\s+order|not\s+validating|"
+                r"cannot\s+read)\b)"
+            ),
+            "coding_runtime_failure",
+            3.0,
+        ),
+        (
+            re.compile(
+                r"\b(?:fix|patch|resolve|troubleshoot|trace|optimi[sz]e|"
+                r"speed\s+up|prevent|integrate|configure|deploy|migrate)\b"
+                r"[\s\S]{0,120}\b(?:app(?:lication)?|service|server|database|"
+                r"api|endpoint|request|pipeline|deployment|pod|container|cache|"
+                r"schema|handler|module|library|loop|query|configuration)\b"
+                r"|\b(?:app(?:lication)?|service|server|database|api|endpoint|"
+                r"request|pipeline|deployment|pod|container|cache|schema|"
+                r"handler|module|library|loop|query|configuration)\b"
+                r"[\s\S]{0,120}\b(?:fix|patch|resolve|troubleshoot|trace|"
+                r"optimi[sz]e|speed\s+up|prevent|integrate|configure|deploy|"
+                r"migrate)\b"
+            ),
+            "coding_system_change",
+            2.5,
+        ),
+        (
+            re.compile(
+                r"\btranslate\b[\s\S]{0,60}\brequirements?\b"
+                r"[\s\S]{0,80}\b(?:handler|function|endpoint|code|"
+                r"implementation|service)\b"
+            ),
+            "coding_requirement_translation",
+            3.0,
+        ),
+        (
+            re.compile(
+                r"\b(?:give|show)\s+me\b[\s\S]{0,100}\b(?:python|typescript|"
+                r"javascript|java|rust|bash|shell|sql|go)\b[\s\S]{0,50}\b"
+                r"(?:script|function|query|handler|endpoint|implementation|"
+                r"code)\b"
+            ),
+            "coding_requested_artifact",
+            4.0,
+        ),
+        (
+            re.compile(
+                r"\b(?:[45]\d\d\s+(?:bad\s+gateway|not\s+found|unsupported\s+"
+                r"media\s+type|internal\s+server\s+error)|oomkilled|"
+                r"modulenotfounderror|cannot\s+read\s+propert(?:y|ies)|"
+                r"segmentation\s+fault)\b"
+            ),
+            "coding_failure_signature",
+            2.5,
+        ),
     ),
     "reasoning": (
         (
@@ -168,6 +231,65 @@ _INTENT_RULES: dict[str, tuple[tuple[re.Pattern[str], str, float], ...]] = {
             "reasoning_why",
             1.5,
         ),
+        (
+            re.compile(
+                r"\b(?:most|more)\s+(?:plausible|credible|defensible)\b|"
+                r"\b(?:better|best)\s+fits?\s+(?:the\s+)?evidence\b|"
+                r"\bwhat\s+(?:might|could)\s+account\s+for\b"
+            ),
+            "reasoning_explanation_selection",
+            3.0,
+        ),
+        (
+            re.compile(
+                r"\b(?:evaluate|assess|weigh|reconcile|scrutinize)\b"
+                r"[\s\S]{0,100}\b(?:evidence|claim|conclusion|argument|"
+                r"possibilit(?:y|ies)|explanations?|interpretations?|fairness|"
+                r"process|policy|label)\b"
+                r"|\b(?:evidence|claim|conclusion|argument|possibilit(?:y|ies)|"
+                r"explanations?|interpretations?|fairness|process|policy|label)"
+                r"\b[\s\S]{0,100}\b(?:evaluate|assess|weigh|reconcile|"
+                r"scrutinize)\b"
+            ),
+            "reasoning_evidence_weighing",
+            3.0,
+        ),
+        (
+            re.compile(
+                r"\b(?:where|how)\b[\s\S]{0,45}\blogic\b"
+                r"[\s\S]{0,30}\b(?:wrong|fail(?:s|ed)?|breaks?)\b|"
+                r"\bwhat\s+does\s+(?:this|that)\s+pattern\s+suggest\b|"
+                r"\bwhat\s+principles?\s+should\s+guide\b|"
+                r"\b(?:causal\s+argument|correlation\s+claim|competing\s+"
+                r"(?:interpretations?|explanations?)|sources?\s+of\s+"
+                r"(?:their\s+)?disagreement|logical(?:ly)?\s+(?:valid|"
+                r"justified)|argument(?:'s)?\s+logical\s+structure)\b"
+            ),
+            "reasoning_inference_structure",
+            3.0,
+        ),
+        (
+            re.compile(
+                r"\b(?:structural|contextual|underlying)\s+factors?\b"
+                r"[\s\S]{0,80}\b(?:scrutiny|explain|account|responsible)\b|"
+                r"\bwhether\b[\s\S]{0,80}\b(?:fair|justified|valid)\b"
+            ),
+            "reasoning_contextual_factors",
+            2.5,
+        ),
+        (
+            re.compile(
+                r"\b(?:explicaciones?\s+m[aá]s\s+plausibles|qu[eé]\s+"
+                r"factores|eval[uú]a(?:r)?\s+la\s+solidez|razonamiento|"
+                r"conclusi[oó]n)\b|"
+                r"\b(?:[ée]value[rz]?\s+la\s+solidit[eé]|raisonnement|"
+                r"explications?\s+concurrentes?)\b|"
+                r"\b(?:konkurrierenden?\s+erkl[aä]rungen|schlussfolgerung|"
+                r"begr[uü]ndung)\b"
+            ),
+            "reasoning_multilingual",
+            3.0,
+        ),
     ),
     "creative_writing": (
         (
@@ -187,6 +309,53 @@ _INTENT_RULES: dict[str, tuple[tuple[re.Pattern[str], str, float], ...]] = {
                 r"\b"
             ),
             "creative_output_spanish",
+            3.0,
+        ),
+        (
+            re.compile(
+                r"\b(?:write|compose|draft|invent|tell|continue|rewrite|turn|"
+                r"create|give|render|imagine|craft|spin|narrate|show)\b"
+                r"[\s\S]{0,100}\b(?:poems?|sonnets?|stories?|fiction|"
+                r"narratives?|dialogues?|monologues?|conversations?|scenes?|"
+                r"taglines?|slogans?|brand\s+names?|letters?|lullab(?:y|ies)|"
+                r"eulog(?:y|ies)|chapters?|myths?|voicemails?|personals?\s+ad|"
+                r"field\s+notes?|court\s+transcripts?|voice|character)\b"
+            ),
+            "creative_artifact_request",
+            3.0,
+        ),
+        (
+            re.compile(
+                r"\b(?:from\s+(?:the|a|his|her|their|its)\s+perspective|"
+                r"in\s+(?:his|her|their|its)\s+own\s+voice|interior\s+"
+                r"monologues?|as\s+absurdist\s+fiction|narrated\s+by|"
+                r"deliverable\s+is\s+(?:a\s+)?(?:poem|sonnet|story|dialogue)|"
+                r"show\s+me\s+(?:that|the|a)\s+(?:afternoon|evening|morning|"
+                r"night|moment|scene))\b"
+            ),
+            "creative_scenario_request",
+            2.5,
+        ),
+        (
+            re.compile(
+                r"\b(?:translate|turn|transform)\b[\s\S]{0,90}\binto\b"
+                r"[\s\S]{0,40}\b(?:poem|sonnet|story|dialogue|monologue|"
+                r"scene|fiction|narrative)\b"
+            ),
+            "creative_transformation",
+            3.0,
+        ),
+        (
+            re.compile(
+                r"\b(?:escribe|imagina|redacta|comp[oó]n)\b"
+                r"[\s\S]{0,70}\b(?:poema|cuento|historia|di[aá]logo|"
+                r"microrrelato)\b|"
+                r"\b(?:[ée]cris|[ée]crivez|imagine|compose)\b"
+                r"[\s\S]{0,70}\b(?:po[eè]me|dialogue|histoire|r[eé]cit)\b|"
+                r"\b(?:schreib|schreibe|verfasse|erfinde)\w*\b"
+                r"[\s\S]{0,70}\b(?:gedicht|geschichte|dialog|monolog)\w*\b"
+            ),
+            "creative_multilingual",
             3.0,
         ),
     ),
@@ -222,6 +391,58 @@ _INTENT_RULES: dict[str, tuple[tuple[re.Pattern[str], str, float], ...]] = {
             "summarization_spanish",
             3.0,
         ),
+        (
+            re.compile(
+                r"\b(?:give|provide|capture|extract|pull\s+out|boil|trim|"
+                r"distill|shrink)\b[\s\S]{0,70}\b(?:main\s+points?|"
+                r"essentials?|short\s+version|gist|rundown|core\s+facts?|"
+                r"takeaways?|highlights?|overview|digest|decisions?|"
+                r"action\s+items?)\b"
+            ),
+            "summarization_compact_output",
+            3.0,
+        ),
+        (
+            re.compile(
+                r"\bwhat(?:'s|\s+is)\s+the\s+takeaway\s+from\b|"
+                r"\bboil\s+(?:it|this|that)\s+down\b|"
+                r"\bplain-language\s+digest\b|"
+                r"\b(?:quick|brief|short)\s+rundown\s+of\b"
+            ),
+            "summarization_paraphrase",
+            3.0,
+        ),
+        (
+            re.compile(
+                r"\b(?:report|passage|excerpt|transcript|proposal|notes?|"
+                r"emails?|memo|abstract|press\s+release|contract\s+clause|"
+                r"log\s+entry|document|status\s+update)\b"
+                r"[\s\S]{0,100}\b(?:main\s+points?|essentials?|short\s+"
+                r"version|gist|rundown|core\s+facts?|takeaways?|highlights?|"
+                r"overview|digest|distill|condense|summary)\b"
+            ),
+            "summarization_source_compaction",
+            2.5,
+        ),
+        (
+            re.compile(
+                r"\b(?:shrink|trim|distill|condense)\b[\s\S]{0,70}\b(?:"
+                r"report|passage|excerpt|transcript|proposal|notes?|emails?|"
+                r"memo|abstract|release|clause|log\s+entry|document|update)\b"
+            ),
+            "summarization_requested_compaction",
+            3.0,
+        ),
+        (
+            re.compile(
+                r"\b(?:resume|resumir|puntos?\s+(?:clave|principales?))\b|"
+                r"\b(?:r[eé]sum(?:e|er|ez)|points?\s+essentiels?)\b|"
+                r"\b(?:fass(?:e|t)?\b[\s\S]{0,50}\bzusammen|"
+                r"zusammenfassung|kurzfassung)\b"
+            ),
+            "summarization_multilingual",
+            3.0,
+        ),
     ),
     "math": (
         (
@@ -247,6 +468,52 @@ _INTENT_RULES: dict[str, tuple[tuple[re.Pattern[str], str, float], ...]] = {
                 r"\b(?:cu[aá]nto\s+es\s+)?\d+\s+por\s+ciento\s+de\s+\d+\b"
             ),
             "percent_of_spanish",
+            3.0,
+        ),
+        (
+            re.compile(
+                r"\b(?:find|compute|calculate|solve|derive|prove|show|"
+                r"determine|work\s+out|evaluate)\b[\s\S]{0,100}\b(?:"
+                r"solutions?|equations?|integrals?|derivatives?|probability|"
+                r"variance|standard\s+deviation|eigenvalues?|eigenvectors?|"
+                r"matri(?:x|ces)|dimensions?|angles?|geometric\s+series|"
+                r"scaling\s+factor|fractions?|decimals?|ratio\s+of\s+two\s+"
+                r"integers|induction|critical\s+points?|z-test|proportions?|"
+                r"triangles?|rectangles?|polygons?|area|volume)\b"
+            ),
+            "math_requested_operation",
+            3.0,
+        ),
+        (
+            re.compile(
+                r"(?=[\s\S]*\d[\s\S]*\d)"
+                r"(?=[\s\S]*\b(?:miles?|mph|km/h|marbles?|dice|rolls?|"
+                r"years?|cm|soldiers?|groups?|patients?|percent|factor|"
+                r"degrees?|hours?|minutes?)\b)"
+                r"(?=[\s\S]*\b(?:how\s+many|how\s+long|when|where|chances?|"
+                r"calculate|work\s+out|determine|meet|split|drawn|rolled)\b)"
+            ),
+            "math_word_problem",
+            3.0,
+        ),
+        (
+            re.compile(
+                r"\b(?:compounded?\s+(?:monthly|quarterly|annually)|"
+                r"triples?\s+in\s+value|divisible\s+by|split\s+into\s+\d+\s+"
+                r"equal\s+groups?|rounded?\s+to\s+\w+\s+decimal|"
+                r"scaling\s+factor|sample\s+variance|standard\s+deviation|"
+                r"both\s+match\s+in\s+colou?r)\b"
+            ),
+            "math_quantitative_structure",
+            3.0,
+        ),
+        (
+            re.compile(
+                r"\b(?:calcula|calcule|d[eé]riv[eé]e|probabilit[eé]|"
+                r"demuestra|prueba)\b|"
+                r"\b(?:berechne|wahrscheinlichkeit|beweise)\b"
+            ),
+            "math_multilingual",
             3.0,
         ),
     ),

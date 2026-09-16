@@ -1,50 +1,98 @@
 {
   "schema": "axonllm.autorouting-benchmark-summary/v1",
   "source_schema": "axonllm.autorouting-benchmark/v1",
-  "generated_at": "2026-09-16T16:33:48.313007+00:00",
-  "evaluation_status": "tuned-development-regression-corpus",
+  "generated_at": "2026-09-16T17:19:17.167580+00:00",
+  "evaluation_status": "frozen-held-out-test-corpus",
   "scope": "Router classification only; downstream model generation is excluded.",
   "methodology": {
-    "corpus_source": "packaged",
-    "unique_cases": 72,
-    "requests_per_strategy": 72,
+    "generated_corpus_source": "docs/benchmarks/autorouting-generated-2026-09-16.jsonl",
+    "development_corpus_source": "docs/benchmarks/autorouting-development-2026-09-16.jsonl",
+    "test_corpus_source": "docs/benchmarks/autorouting-final-test-2026-09-16.jsonl",
+    "generated_cases": 120,
+    "development_cases": 60,
+    "unique_cases": 60,
+    "requests_per_strategy": 60,
     "repetitions": 1,
-    "label_distribution": {
-      "coding": 12,
-      "creative_writing": 12,
-      "general": 12,
-      "math": 12,
-      "reasoning": 12,
-      "summarization": 12
+    "split_policy": "Odd-numbered case IDs were assigned to development and even-numbered IDs to final test before per-case tuning.",
+    "sha256": {
+      "generated": "39ecb1b767d43854f0c023175b6bcc5e7ccf3b8a0090649f20b3b6292865f860",
+      "development": "c44aa8cd3b388309af395ca429daa6615ca86a00c9f9297dad9d05d2a7ef6e6d",
+      "final_test": "48d24b4f58aa3934e327a0af08ed5459323bef01ddc1926da59119021ae39565"
     },
-    "llm_model": "groq-gpt-oss-20b",
+    "label_distribution": {
+      "coding": 10,
+      "creative_writing": 10,
+      "general": 10,
+      "math": 10,
+      "reasoning": 10,
+      "summarization": 10
+    },
+    "tag_distribution": {
+      "clear": 12,
+      "collision": 12,
+      "english": 48,
+      "german": 6,
+      "implicit": 24,
+      "multilingual": 12,
+      "spanish": 6
+    },
+    "corpus_generator": "claude-sonnet",
+    "label_review": "Manual review plus GPT-4.1 review with zero flagged cases",
+    "llm_model": "gpt-4o-mini",
     "llm_endpoint": "AxonLLM local OpenAI-compatible gateway",
     "hybrid_confidence_threshold": 0.3,
     "concurrency": 1,
     "router_cache": "isolated with a per-request ignored nonce",
-    "input_cost_per_million_usd": 0.075,
-    "output_cost_per_million_usd": 0.3
+    "input_cost_per_million_usd": 0.15,
+    "output_cost_per_million_usd": 0.6
   },
-  "historical_baseline": {
-    "generated_at": "2026-09-16T16:03:36.192323+00:00",
-    "strategy": "axon-heuristic-before-regex-improvements",
-    "accuracy": 0.5416666666666666,
-    "macro_f1": 0.551671030731133,
-    "p95_latency_ms": 0.0146208,
-    "router_cost_per_1k_requests_usd": 0.0
+  "development_history": {
+    "initial_heuristic": {
+      "correct": 21,
+      "requests": 60,
+      "accuracy": 0.35,
+      "macro_f1": 0.33388929078584245
+    },
+    "locked_heuristic": {
+      "correct": 60,
+      "requests": 60,
+      "accuracy": 1.0,
+      "macro_f1": 1.0
+    },
+    "rule_change_boundary": "Only development-set misses informed classifier changes. No classifier changes were made after final test inspection."
+  },
+  "held_out_history": {
+    "heuristic_before_improvements": {
+      "correct": 23,
+      "requests": 60,
+      "accuracy": 0.38333333333333336
+    },
+    "heuristic_after_development_lock": {
+      "correct": 52,
+      "requests": 60,
+      "accuracy": 0.8666666666666667
+    },
+    "accuracy_delta_percentage_points": 48.333333333333336
+  },
+  "historical_regression_snapshot": {
+    "source": "docs/benchmarks/autorouting-2026-09-16.json",
+    "status": "tuned-development-regression-corpus",
+    "requests": 72,
+    "heuristic_accuracy": 0.9861111111111112,
+    "interpretation": "Retained as a regression score, not used as held-out production evidence."
   },
   "strategies": [
     {
       "strategy": "axon-heuristic",
-      "correct": 71,
-      "requests": 72,
-      "accuracy": 0.9861111111111112,
-      "macro_f1": 0.986086956521739,
+      "correct": 52,
+      "requests": 60,
+      "accuracy": 0.8666666666666667,
+      "macro_f1": 0.8747467798035394,
       "latency_ms": {
-        "mean": 0.09389747222222222,
-        "p50": 0.08122950000000001,
-        "p95": 0.11163490000000001,
-        "p99": 0.4503080000000072
+        "mean": 0.3861215333333333,
+        "p50": 0.30725,
+        "p95": 0.8961729499999997,
+        "p99": 1.2354322199999983
       },
       "llm_calls": 0,
       "llm_call_rate": 0.0,
@@ -56,100 +104,87 @@
     },
     {
       "strategy": "llm-router",
-      "correct": 68,
-      "requests": 72,
-      "accuracy": 0.9444444444444444,
-      "macro_f1": 0.9453734671125975,
+      "correct": 55,
+      "requests": 60,
+      "accuracy": 0.9166666666666666,
+      "macro_f1": 0.9264132553606238,
       "latency_ms": {
-        "mean": 1857.0296851689313,
-        "p50": 1345.748020496103,
-        "p95": 5132.983540240094,
-        "p99": 5872.735179822487
+        "mean": 708.3917358624789,
+        "p50": 657.6678749988787,
+        "p95": 843.9966788951999,
+        "p99": 1861.2042330077415
       },
-      "llm_calls": 72,
+      "llm_calls": 60,
       "llm_call_rate": 1.0,
-      "input_tokens": 19801,
-      "output_tokens": 5825,
-      "router_cost_usd": 0.0032325749999999997,
-      "router_cost_per_1k_requests_usd": 0.044896874999999996,
-      "errors": 0
+      "input_tokens": 13961,
+      "output_tokens": 1018,
+      "router_cost_usd": 0.0027049499999999994,
+      "router_cost_per_1k_requests_usd": 0.04508249999999999,
+      "errors": 1
     },
     {
       "strategy": "hybrid-0.3",
-      "correct": 70,
-      "requests": 72,
-      "accuracy": 0.9722222222222222,
-      "macro_f1": 0.9721739130434783,
+      "correct": 57,
+      "requests": 60,
+      "accuracy": 0.95,
+      "macro_f1": 0.9497354497354498,
       "latency_ms": {
-        "mean": 485.2060966954418,
-        "p50": 0.21227099932730198,
-        "p95": 2973.2731584634166,
-        "p99": 4040.3323938904314
+        "mean": 202.8135576818992,
+        "p50": 1.4567290054401383,
+        "p95": 851.2653336452785,
+        "p99": 1050.3642374239275
       },
-      "llm_calls": 12,
-      "llm_call_rate": 0.16666666666666666,
-      "input_tokens": 3275,
-      "output_tokens": 999,
-      "router_cost_usd": 0.000545325,
-      "router_cost_per_1k_requests_usd": 0.007573958333333334,
+      "llm_calls": 17,
+      "llm_call_rate": 0.2833333333333333,
+      "input_tokens": 3796,
+      "output_tokens": 210,
+      "router_cost_usd": 0.0006953999999999998,
+      "router_cost_per_1k_requests_usd": 0.011589999999999996,
       "errors": 0
     }
   ],
   "comparisons_to_current_heuristic": [
     {
       "candidate": "llm-router",
-      "accuracy_delta_percentage_points": -4.166666666666674,
-      "p95_latency_delta_ms": 5132.871905340094,
-      "incremental_router_cost_usd": 0.0032325749999999997
+      "accuracy_delta_percentage_points": 4.999999999999993,
+      "additional_correct_routes": 3,
+      "p95_latency_delta_ms": 843.1005059451999,
+      "incremental_router_cost_usd": 0.0027049499999999994,
+      "break_even_downstream_savings_per_request_usd": 0.00004508249999999999,
+      "router_cost_per_additional_correct_route_usd": 0.0009016499999999998
     },
     {
       "candidate": "hybrid-0.3",
-      "accuracy_delta_percentage_points": -1.388888888888895,
-      "p95_latency_delta_ms": 2973.1615235634167,
-      "incremental_router_cost_usd": 0.000545325
+      "accuracy_delta_percentage_points": 8.333333333333325,
+      "additional_correct_routes": 5,
+      "p95_latency_delta_ms": 850.3691606952784,
+      "incremental_router_cost_usd": 0.0006953999999999998,
+      "break_even_downstream_savings_per_request_usd": 0.000011589999999999996,
+      "router_cost_per_additional_correct_route_usd": 0.00013907999999999995
     }
   ],
   "known_misclassifications": {
     "axon-heuristic": [
-      {
-        "id": "math-08",
-        "expected": "math",
-        "predicted": "reasoning"
-      }
+      {"id": "fresh-coding-08", "expected": "coding", "predicted": "general"},
+      {"id": "fresh-coding-16", "expected": "coding", "predicted": "general"},
+      {"id": "fresh-coding-20", "expected": "coding", "predicted": "general"},
+      {"id": "fresh-reasoning-14", "expected": "reasoning", "predicted": "math"},
+      {"id": "fresh-creative_writing-10", "expected": "creative_writing", "predicted": "general"},
+      {"id": "fresh-summarization-06", "expected": "summarization", "predicted": "general"},
+      {"id": "fresh-math-06", "expected": "math", "predicted": "general"},
+      {"id": "fresh-math-18", "expected": "math", "predicted": "general"}
     ],
     "llm-router": [
-      {
-        "id": "coding-11",
-        "expected": "coding",
-        "predicted": "reasoning"
-      },
-      {
-        "id": "summary-11",
-        "expected": "summarization",
-        "predicted": "creative_writing"
-      },
-      {
-        "id": "math-08",
-        "expected": "math",
-        "predicted": "reasoning"
-      },
-      {
-        "id": "general-04",
-        "expected": "general",
-        "predicted": "creative_writing"
-      }
+      {"id": "fresh-coding-06", "expected": "coding", "predicted": "reasoning"},
+      {"id": "fresh-math-02", "expected": "math", "predicted": "__error__", "error": "malformed classification JSON"},
+      {"id": "fresh-math-14", "expected": "math", "predicted": "reasoning"},
+      {"id": "fresh-general-08", "expected": "general", "predicted": "reasoning"},
+      {"id": "fresh-general-14", "expected": "general", "predicted": "reasoning"}
     ],
     "hybrid-0.3": [
-      {
-        "id": "math-08",
-        "expected": "math",
-        "predicted": "reasoning"
-      },
-      {
-        "id": "general-04",
-        "expected": "general",
-        "predicted": "creative_writing"
-      }
+      {"id": "fresh-reasoning-14", "expected": "reasoning", "predicted": "math"},
+      {"id": "fresh-general-08", "expected": "general", "predicted": "reasoning"},
+      {"id": "fresh-general-14", "expected": "general", "predicted": "reasoning"}
     ]
   }
 }

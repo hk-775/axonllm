@@ -1,0 +1,1979 @@
+{
+  "comparisons": [],
+  "corpus": {
+    "label_distribution": {
+      "coding": 10,
+      "creative_writing": 10,
+      "general": 10,
+      "math": 10,
+      "reasoning": 10,
+      "summarization": 10
+    },
+    "repetitions": 1,
+    "requests_per_strategy": 60,
+    "source": "docs/benchmarks/autorouting-development-2026-09-16.jsonl",
+    "tag_distribution": {
+      "clear": 12,
+      "collision": 18,
+      "english": 54,
+      "french": 6,
+      "implicit": 24,
+      "multilingual": 6
+    },
+    "unique_cases": 60
+  },
+  "generated_at": "2026-09-16T17:02:13.879271+00:00",
+  "records": {
+    "axon-heuristic": [
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.8823528373702545,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 1.2385,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "coding"
+        },
+        "expected_task": "coding",
+        "id": "fresh-coding-01",
+        "prompt": "Write a Python function that takes a list of timestamps and returns the longest streak of consecutive days.",
+        "tags": [
+          "clear",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9999998666666844,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.147,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "coding"
+        },
+        "expected_task": "coding",
+        "id": "fresh-coding-03",
+        "prompt": "Create a Bash script that monitors disk usage every five minutes and sends an email alert when any partition exceeds 85 percent.",
+        "tags": [
+          "clear",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.0,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.101708,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "general"
+        },
+        "expected_task": "coding",
+        "id": "fresh-coding-05",
+        "prompt": "My React app shows a blank screen after deployment. The console says 'Cannot read properties of undefined (reading map)'. How do I fix this?",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.0,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.163625,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "general"
+        },
+        "expected_task": "coding",
+        "id": "fresh-coding-07",
+        "prompt": "Our Kubernetes pods keep crashing with OOMKilled. The app is a Node.js service processing large CSV files. What changes would stop this from happening?",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.0,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.151833,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "general"
+        },
+        "expected_task": "coding",
+        "id": "fresh-coding-09",
+        "prompt": "Users report that after changing their email address the old address still receives notifications for two days. Trace where the cache invalidation is missing.",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.0,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.142458,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "general"
+        },
+        "expected_task": "coding",
+        "id": "fresh-coding-11",
+        "prompt": "The mobile app sends a POST to /api/orders but the server always returns 415 Unsupported Media Type. Walk me through resolving this mismatch.",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.5294117024221527,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.201333,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "coding"
+        },
+        "expected_task": "coding",
+        "id": "fresh-coding-13",
+        "prompt": "I'm writing a mystery novel where a detective analyzes server logs. Give me a realistic Python script the character would use to parse Apache access logs and flag IPs with more than 100 requests per minute.",
+        "tags": [
+          "collision",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.99999950000025,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.1915,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "coding"
+        },
+        "expected_task": "coding",
+        "id": "fresh-coding-15",
+        "prompt": "I know you're not a lawyer, but our GDPR audit requires a data-deletion endpoint. Implement it in Django so that all personal data for a given user ID is purged within 30 days of request.",
+        "tags": [
+          "collision",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.0,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.168333,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "general"
+        },
+        "expected_task": "coding",
+        "id": "fresh-coding-17",
+        "prompt": "The marketing team wants a 'personalized greeting' feature. Translate that requirement into a Go handler that reads the user's locale from a JWT claim and returns a localized welcome message.",
+        "tags": [
+          "collision",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9999997777778271,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.141125,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "coding"
+        },
+        "expected_task": "coding",
+        "id": "fresh-coding-19",
+        "prompt": "Cr\u00e9e un script Python qui surveille un dossier et d\u00e9place automatiquement les fichiers PDF vers un sous-dossier horodat\u00e9 d\u00e8s qu'ils apparaissent.",
+        "tags": [
+          "french",
+          "multilingual"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.0,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.192375,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "general"
+        },
+        "expected_task": "reasoning",
+        "id": "fresh-reasoning-01",
+        "prompt": "A warehouse fire started near the electrical panel but investigators also found an accelerant near the loading dock. Which explanation is more defensible given that both areas showed burn origin markers?",
+        "tags": [
+          "clear",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.7142855102041399,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.20375,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "reasoning"
+        },
+        "expected_task": "reasoning",
+        "id": "fresh-reasoning-03",
+        "prompt": "Two employees with identical qualifications applied for the same promotion. One was rejected after a brief interview, the other after reviewing the portfolio. What factors should determine whether the process was fair?",
+        "tags": [
+          "clear",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.0,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.17275,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "general"
+        },
+        "expected_task": "reasoning",
+        "id": "fresh-reasoning-05",
+        "prompt": "After a town banned single-use plastics, beach litter surveys showed no improvement for two years, then a sudden drop in year three. What might account for the delayed effect?",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.0,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.195208,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "general"
+        },
+        "expected_task": "reasoning",
+        "id": "fresh-reasoning-07",
+        "prompt": "Two neighboring schools use the same curriculum yet one consistently outperforms the other on standardized tests. Without assuming the obvious, what structural or contextual factors deserve the closest scrutiny?",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.0,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.187041,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "general"
+        },
+        "expected_task": "reasoning",
+        "id": "fresh-reasoning-09",
+        "prompt": "A journalist reports that countries with higher chocolate consumption win more Nobel Prizes per capita. A reader argues this proves diet enhances cognition. Where does the reader's logic go wrong?",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.0,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.184208,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "general"
+        },
+        "expected_task": "reasoning",
+        "id": "fresh-reasoning-11",
+        "prompt": "A government mandates a four-day workweek and productivity rises in the first quarter, then returns to baseline. What does this pattern suggest about interpreting the policy's long-term value?",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.0,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.218208,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "general"
+        },
+        "expected_task": "reasoning",
+        "id": "fresh-reasoning-13",
+        "prompt": "I know you love writing stories, but instead tell me: a biography claims Lincoln's depression made him a better leader. Is that a causal argument, a correlation claim, or something else, and how strong is the evidence?",
+        "tags": [
+          "collision",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.0,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.19225,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "general"
+        },
+        "expected_task": "reasoning",
+        "id": "fresh-reasoning-15",
+        "prompt": "The recipe calls for local ingredients and the menu promises authenticity, yet food critics call the restaurant fusion. Evaluate whether the critics' label is logically justified given those two facts.",
+        "tags": [
+          "collision",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.0,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.1755,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "general"
+        },
+        "expected_task": "reasoning",
+        "id": "fresh-reasoning-17",
+        "prompt": "Climate scientists and economists both cite the same dataset but reach opposite policy conclusions. Without doing any math, identify the most likely sources of their disagreement.",
+        "tags": [
+          "collision",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.0,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.223208,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "general"
+        },
+        "expected_task": "reasoning",
+        "id": "fresh-reasoning-19",
+        "prompt": "Un rapport indique que les villes ayant plus de biblioth\u00e8ques publiques affichent des taux de criminalit\u00e9 plus bas. Un \u00e9lu conclut que construire des biblioth\u00e8ques r\u00e9duit la criminalit\u00e9. \u00c9valuez la solidit\u00e9 de ce raisonnement.",
+        "tags": [
+          "french",
+          "multilingual"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9999997500000625,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.132875,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "creative_writing"
+        },
+        "expected_task": "creative_writing",
+        "id": "fresh-creative_writing-01",
+        "prompt": "Write a villain's monologue delivered to an empty throne room, where the villain slowly realizes the throne was never worth taking.",
+        "tags": [
+          "clear",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.0,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.113667,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "general"
+        },
+        "expected_task": "creative_writing",
+        "id": "fresh-creative_writing-03",
+        "prompt": "Draft a breakup letter written by a cartographer to the concept of home, using map-making metaphors throughout.",
+        "tags": [
+          "clear",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.0,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.13925,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "general"
+        },
+        "expected_task": "creative_writing",
+        "id": "fresh-creative_writing-05",
+        "prompt": "A retired astronaut sits across from her estranged daughter at a diner. Give me their first sixty seconds of conversation, pauses included.",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.0,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.100292,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "general"
+        },
+        "expected_task": "creative_writing",
+        "id": "fresh-creative_writing-07",
+        "prompt": "Imagine the voicemail a migratory bird would leave if it could call the window it keeps flying into.",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.0,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.142458,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "general"
+        },
+        "expected_task": "creative_writing",
+        "id": "fresh-creative_writing-09",
+        "prompt": "Two rival chess grandmasters share a train compartment. Neither speaks, but both are thinking loudly. Render those interior monologues side by side.",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.0,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.129792,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "general"
+        },
+        "expected_task": "creative_writing",
+        "id": "fresh-creative_writing-11",
+        "prompt": "Translate the emotional arc of a sourdough starter being neglected for a month into a three-stanza poem without ever mentioning bread.",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.0,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.193708,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "general"
+        },
+        "expected_task": "creative_writing",
+        "id": "fresh-creative_writing-13",
+        "prompt": "I know you can analyze rhetorical structure, but instead put those skills aside and just give me the eulogy a retired con artist would deliver at his own funeral, written in his own slippery voice.",
+        "tags": [
+          "collision",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.0,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.165375,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "general"
+        },
+        "expected_task": "creative_writing",
+        "id": "fresh-creative_writing-15",
+        "prompt": "Without summarizing the plot of any existing fairy tale, craft an original opening chapter in which the forest itself applies for a restraining order against a woodcutter.",
+        "tags": [
+          "collision",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.0,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.168,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "general"
+        },
+        "expected_task": "creative_writing",
+        "id": "fresh-creative_writing-17",
+        "prompt": "Though the topic is machine learning, the deliverable is a sonnet narrated by a neural network experiencing its first moment of genuine confusion about what it means to dream.",
+        "tags": [
+          "collision",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.0,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.128417,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "general"
+        },
+        "expected_task": "creative_writing",
+        "id": "fresh-creative_writing-19",
+        "prompt": "Imagine un po\u00e8me en fran\u00e7ais o\u00f9 une vieille valise raconte les voyages qu'elle a faits et ceux qu'elle n'a jamais os\u00e9 r\u00eaver.",
+        "tags": [
+          "french",
+          "multilingual"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9999997500000625,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.112709,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "summarization"
+        },
+        "expected_task": "summarization",
+        "id": "fresh-summarization-01",
+        "prompt": "Here are my meeting notes from today's product review: 'Discussed Q3 roadmap delays, agreed to push mobile feature to November, budget concerns raised by finance, next sync scheduled for Friday.' Please condense these into two or three bullet points.",
+        "tags": [
+          "clear",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.0,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.108875,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "general"
+        },
+        "expected_task": "summarization",
+        "id": "fresh-summarization-03",
+        "prompt": "Read this paragraph from the annual sustainability report and give me the main points in one short paragraph: 'The company reduced carbon emissions by 18% year-over-year, expanded renewable energy sourcing to 60% of total consumption, and committed to net-zero operations by 2035.'",
+        "tags": [
+          "clear",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.0,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.097666,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "general"
+        },
+        "expected_task": "summarization",
+        "id": "fresh-summarization-05",
+        "prompt": "Here's a transcript excerpt from last week's town hall: 'CEO outlined three strategic pillars\u2014growth, efficiency, and talent. CFO noted a 12% revenue increase but flagged rising supply costs. HR head announced a new hybrid work policy effective January.' Boil it down to the essentials.",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.0,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.07625,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "general"
+        },
+        "expected_task": "summarization",
+        "id": "fresh-summarization-07",
+        "prompt": "I've pasted a long incident report below. Give me the short version: 'At 14:32 a power outage hit Building C, affecting 200 workstations. Backup generators activated within four minutes. Root cause identified as a faulty transformer. Full restoration completed by 17:00. No data loss reported.'",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.0,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.066041,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "general"
+        },
+        "expected_task": "summarization",
+        "id": "fresh-summarization-09",
+        "prompt": "My supervisor needs a quick rundown of this vendor proposal: 'Vendor offers cloud migration services over 90 days, guarantees 99.9% uptime SLA, prices at $120,000 flat fee, includes 12 months post-migration support, and requires a 20% deposit upfront.'",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.0,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.0945,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "general"
+        },
+        "expected_task": "summarization",
+        "id": "fresh-summarization-11",
+        "prompt": "Here's a chunk of a policy document on data retention: 'All financial records must be kept for seven years. HR files are retained for five years post-employment. Marketing data may be purged after two years unless litigation hold applies.' Distill this into plain language.",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.9999997142857959,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.14,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "summarization"
+        },
+        "expected_task": "summarization",
+        "id": "fresh-summarization-13",
+        "prompt": "I know you could rewrite this beautifully, but I just need the key points extracted\u2014not a rewrite. Passage: 'The merger integrates two supply chains, consolidates three regional offices into one hub, reduces headcount by 8%, and is expected to generate $200M in annual savings by year three.'",
+        "tags": [
+          "collision",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.0,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.097,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "general"
+        },
+        "expected_task": "summarization",
+        "id": "fresh-summarization-15",
+        "prompt": "Don't analyze or critique\u2014just shrink this ethics committee transcript entry: 'The committee reviewed three proposals. Proposal A was approved unanimously. Proposal B was tabled pending additional IRB documentation. Proposal C was rejected due to insufficient participant safeguards.'",
+        "tags": [
+          "collision",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.99999950000025,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.101375,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "summarization"
+        },
+        "expected_task": "summarization",
+        "id": "fresh-summarization-17",
+        "prompt": "Ignore the legal jargon and give me a brief overview of what this contract clause actually says: 'Either party may terminate this agreement with 60 days written notice. Termination for cause requires documented breach and a 15-day cure period. Fees paid prior to termination are non-refundable.'",
+        "tags": [
+          "collision",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.0,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.332584,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "general"
+        },
+        "expected_task": "summarization",
+        "id": "fresh-summarization-19",
+        "prompt": "Voici un extrait d'un rapport trimestriel. Donne-m'en les points essentiels en quelques lignes : 'Les ventes ont augment\u00e9 de 15 % par rapport au trimestre pr\u00e9c\u00e9dent. Les co\u00fbts op\u00e9rationnels ont diminu\u00e9 gr\u00e2ce \u00e0 l'automatisation. Un nouveau march\u00e9 en Asie du Sud-Est a \u00e9t\u00e9 identifi\u00e9 comme priorit\u00e9 strat\u00e9gique pour le prochain exercice.'",
+        "tags": [
+          "french",
+          "multilingual"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.99999960000016,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.117542,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "math"
+        },
+        "expected_task": "math",
+        "id": "fresh-math-01",
+        "prompt": "Find all real solutions to the equation x^4 - 5x^2 + 6 = 0 and verify each solution satisfies the original equation.",
+        "tags": [
+          "clear",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.0,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.088417,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "general"
+        },
+        "expected_task": "math",
+        "id": "fresh-math-03",
+        "prompt": "Prove by induction that the sum of the first n odd positive integers equals n squared.",
+        "tags": [
+          "clear",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.0,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.1185,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "general"
+        },
+        "expected_task": "math",
+        "id": "fresh-math-05",
+        "prompt": "A bag holds 5 red and 7 blue marbles. Two are drawn without replacement. What are the chances both match in color?",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.0,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.105833,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "general"
+        },
+        "expected_task": "math",
+        "id": "fresh-math-07",
+        "prompt": "A savings account grows at 4% compounded monthly. How many years until an initial deposit triples in value?",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.0,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.132667,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "general"
+        },
+        "expected_task": "math",
+        "id": "fresh-math-09",
+        "prompt": "Two trains leave stations 300 miles apart heading toward each other at 60 mph and 90 mph respectively. When and where do they meet?",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.0,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.105916,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "general"
+        },
+        "expected_task": "math",
+        "id": "fresh-math-11",
+        "prompt": "A rectangle's length exceeds its width by 5 cm and its area is 84 cm\u00b2. Work out both dimensions.",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.0,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.200042,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "general"
+        },
+        "expected_task": "math",
+        "id": "fresh-math-13",
+        "prompt": "I know this looks like a history question, but ignore the context: Napoleon's army of 600,000 lost 75% in the Russian campaign. If survivors split into 12 equal groups, how many soldiers per group?",
+        "tags": [
+          "collision",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.7142855102041399,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.104959,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "reasoning"
+        },
+        "expected_task": "math",
+        "id": "fresh-math-15",
+        "prompt": "The poem says 'seven times seventy shall be forgiven.' Treating that literally, compute the result and determine whether it is divisible by 11.",
+        "tags": [
+          "collision",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.0,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.211291,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "general"
+        },
+        "expected_task": "math",
+        "id": "fresh-math-17",
+        "prompt": "This seems like a cooking question, but calculate: a recipe scales ingredients by a factor of 1.5 three times consecutively. Express the total scaling factor as a fraction and as a decimal rounded to four places.",
+        "tags": [
+          "collision",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.0,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.121875,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "general"
+        },
+        "expected_task": "math",
+        "id": "fresh-math-19",
+        "prompt": "Calcule la d\u00e9riv\u00e9e de la fonction f(x) = ln(x\u00b2 + 3x) et trouvez les points critiques sur l'intervalle (0, 10).",
+        "tags": [
+          "french",
+          "multilingual"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.0,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.0455,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "general"
+        },
+        "expected_task": "general",
+        "id": "fresh-general-01",
+        "prompt": "What is the capital city of New Zealand?",
+        "tags": [
+          "clear",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.0,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.069542,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "general"
+        },
+        "expected_task": "general",
+        "id": "fresh-general-03",
+        "prompt": "What are the standard dimensions of a regulation NBA basketball court?",
+        "tags": [
+          "clear",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.0,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.108875,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "general"
+        },
+        "expected_task": "general",
+        "id": "fresh-general-05",
+        "prompt": "My flight lands at Heathrow Terminal 5 at 9 pm. What is the fastest way to reach central London from there?",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.0,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.088375,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "general"
+        },
+        "expected_task": "general",
+        "id": "fresh-general-07",
+        "prompt": "Put these countries in alphabetical order: Zimbabwe, Argentina, Finland, Brazil, Canada.",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.0,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.065042,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "general"
+        },
+        "expected_task": "general",
+        "id": "fresh-general-09",
+        "prompt": "Format this date so it follows ISO 8601: March 7th, 2024.",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.0,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.106375,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "general"
+        },
+        "expected_task": "general",
+        "id": "fresh-general-11",
+        "prompt": "My hotel in Tokyo is in Shinjuku. Which subway line should I take to reach Senso-ji Temple in Asakusa?",
+        "tags": [
+          "english",
+          "implicit"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.0,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.096375,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "general"
+        },
+        "expected_task": "general",
+        "id": "fresh-general-13",
+        "prompt": "I know you can write essays, but instead just tell me: what year did the Berlin Wall fall?",
+        "tags": [
+          "collision",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.0,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.108167,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "general"
+        },
+        "expected_task": "general",
+        "id": "fresh-general-15",
+        "prompt": "Forget any analysis \u2014 just name the three countries that share a land border with Portugal.",
+        "tags": [
+          "collision",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.0,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.107708,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "general"
+        },
+        "expected_task": "general",
+        "id": "fresh-general-17",
+        "prompt": "I don't need a comparison or recommendation, just tell me what blood type is considered the universal donor.",
+        "tags": [
+          "collision",
+          "english"
+        ]
+      },
+      {
+        "decision": {
+          "cache_hit": false,
+          "confidence": 0.0,
+          "cost_usd": 0.0,
+          "error": null,
+          "heuristic_confidence": null,
+          "heuristic_task": null,
+          "input_tokens": 0,
+          "latency_ms": 0.069208,
+          "llm_calls": 0,
+          "model": null,
+          "output_tokens": 0,
+          "strategy": "axon-heuristic",
+          "task_type": "general"
+        },
+        "expected_task": "general",
+        "id": "fresh-general-19",
+        "prompt": "Quels sont les jours f\u00e9ri\u00e9s nationaux en France au mois de mai?",
+        "tags": [
+          "french",
+          "multilingual"
+        ]
+      }
+    ]
+  },
+  "schema": "axonllm.autorouting-benchmark/v1",
+  "strategies": [
+    {
+      "accuracy": 0.35,
+      "by_tag": {
+        "clear": {
+          "accuracy": 0.6666666666666666,
+          "requests": 12
+        },
+        "collision": {
+          "accuracy": 0.3888888888888889,
+          "requests": 18
+        },
+        "english": {
+          "accuracy": 0.35185185185185186,
+          "requests": 54
+        },
+        "french": {
+          "accuracy": 0.3333333333333333,
+          "requests": 6
+        },
+        "implicit": {
+          "accuracy": 0.16666666666666666,
+          "requests": 24
+        },
+        "multilingual": {
+          "accuracy": 0.3333333333333333,
+          "requests": 6
+        }
+      },
+      "cache_hits": 0,
+      "confusion_matrix": {
+        "coding": {
+          "coding": 5,
+          "general": 5
+        },
+        "creative_writing": {
+          "creative_writing": 1,
+          "general": 9
+        },
+        "general": {
+          "general": 10
+        },
+        "math": {
+          "general": 8,
+          "math": 1,
+          "reasoning": 1
+        },
+        "reasoning": {
+          "general": 9,
+          "reasoning": 1
+        },
+        "summarization": {
+          "general": 7,
+          "summarization": 3
+        }
+      },
+      "correct": 21,
+      "cost_coverage": 1.0,
+      "errors": 0,
+      "input_tokens": 0,
+      "known_router_cost_usd": 0.0,
+      "latency_ms": {
+        "mean": 0.15674926666666666,
+        "p50": 0.1312295,
+        "p95": 0.218458,
+        "p99": 0.7040095599999968
+      },
+      "llm_call_rate": 0.0,
+      "llm_calls": 0,
+      "macro_f1": 0.33388929078584245,
+      "output_tokens": 0,
+      "requests": 60,
+      "router_cost_per_1k_requests_usd": 0.0,
+      "router_cost_usd": 0.0,
+      "strategy": "axon-heuristic",
+      "wrong_cases": [
+        {
+          "confidence": 0.0,
+          "error": null,
+          "expected": "coding",
+          "id": "fresh-coding-05",
+          "predicted": "general",
+          "tags": [
+            "english",
+            "implicit"
+          ]
+        },
+        {
+          "confidence": 0.0,
+          "error": null,
+          "expected": "coding",
+          "id": "fresh-coding-07",
+          "predicted": "general",
+          "tags": [
+            "english",
+            "implicit"
+          ]
+        },
+        {
+          "confidence": 0.0,
+          "error": null,
+          "expected": "coding",
+          "id": "fresh-coding-09",
+          "predicted": "general",
+          "tags": [
+            "english",
+            "implicit"
+          ]
+        },
+        {
+          "confidence": 0.0,
+          "error": null,
+          "expected": "coding",
+          "id": "fresh-coding-11",
+          "predicted": "general",
+          "tags": [
+            "english",
+            "implicit"
+          ]
+        },
+        {
+          "confidence": 0.0,
+          "error": null,
+          "expected": "coding",
+          "id": "fresh-coding-17",
+          "predicted": "general",
+          "tags": [
+            "collision",
+            "english"
+          ]
+        },
+        {
+          "confidence": 0.0,
+          "error": null,
+          "expected": "reasoning",
+          "id": "fresh-reasoning-01",
+          "predicted": "general",
+          "tags": [
+            "clear",
+            "english"
+          ]
+        },
+        {
+          "confidence": 0.0,
+          "error": null,
+          "expected": "reasoning",
+          "id": "fresh-reasoning-05",
+          "predicted": "general",
+          "tags": [
+            "english",
+            "implicit"
+          ]
+        },
+        {
+          "confidence": 0.0,
+          "error": null,
+          "expected": "reasoning",
+          "id": "fresh-reasoning-07",
+          "predicted": "general",
+          "tags": [
+            "english",
+            "implicit"
+          ]
+        },
+        {
+          "confidence": 0.0,
+          "error": null,
+          "expected": "reasoning",
+          "id": "fresh-reasoning-09",
+          "predicted": "general",
+          "tags": [
+            "english",
+            "implicit"
+          ]
+        },
+        {
+          "confidence": 0.0,
+          "error": null,
+          "expected": "reasoning",
+          "id": "fresh-reasoning-11",
+          "predicted": "general",
+          "tags": [
+            "english",
+            "implicit"
+          ]
+        },
+        {
+          "confidence": 0.0,
+          "error": null,
+          "expected": "reasoning",
+          "id": "fresh-reasoning-13",
+          "predicted": "general",
+          "tags": [
+            "collision",
+            "english"
+          ]
+        },
+        {
+          "confidence": 0.0,
+          "error": null,
+          "expected": "reasoning",
+          "id": "fresh-reasoning-15",
+          "predicted": "general",
+          "tags": [
+            "collision",
+            "english"
+          ]
+        },
+        {
+          "confidence": 0.0,
+          "error": null,
+          "expected": "reasoning",
+          "id": "fresh-reasoning-17",
+          "predicted": "general",
+          "tags": [
+            "collision",
+            "english"
+          ]
+        },
+        {
+          "confidence": 0.0,
+          "error": null,
+          "expected": "reasoning",
+          "id": "fresh-reasoning-19",
+          "predicted": "general",
+          "tags": [
+            "french",
+            "multilingual"
+          ]
+        },
+        {
+          "confidence": 0.0,
+          "error": null,
+          "expected": "creative_writing",
+          "id": "fresh-creative_writing-03",
+          "predicted": "general",
+          "tags": [
+            "clear",
+            "english"
+          ]
+        },
+        {
+          "confidence": 0.0,
+          "error": null,
+          "expected": "creative_writing",
+          "id": "fresh-creative_writing-05",
+          "predicted": "general",
+          "tags": [
+            "english",
+            "implicit"
+          ]
+        },
+        {
+          "confidence": 0.0,
+          "error": null,
+          "expected": "creative_writing",
+          "id": "fresh-creative_writing-07",
+          "predicted": "general",
+          "tags": [
+            "english",
+            "implicit"
+          ]
+        },
+        {
+          "confidence": 0.0,
+          "error": null,
+          "expected": "creative_writing",
+          "id": "fresh-creative_writing-09",
+          "predicted": "general",
+          "tags": [
+            "english",
+            "implicit"
+          ]
+        },
+        {
+          "confidence": 0.0,
+          "error": null,
+          "expected": "creative_writing",
+          "id": "fresh-creative_writing-11",
+          "predicted": "general",
+          "tags": [
+            "english",
+            "implicit"
+          ]
+        },
+        {
+          "confidence": 0.0,
+          "error": null,
+          "expected": "creative_writing",
+          "id": "fresh-creative_writing-13",
+          "predicted": "general",
+          "tags": [
+            "collision",
+            "english"
+          ]
+        },
+        {
+          "confidence": 0.0,
+          "error": null,
+          "expected": "creative_writing",
+          "id": "fresh-creative_writing-15",
+          "predicted": "general",
+          "tags": [
+            "collision",
+            "english"
+          ]
+        },
+        {
+          "confidence": 0.0,
+          "error": null,
+          "expected": "creative_writing",
+          "id": "fresh-creative_writing-17",
+          "predicted": "general",
+          "tags": [
+            "collision",
+            "english"
+          ]
+        },
+        {
+          "confidence": 0.0,
+          "error": null,
+          "expected": "creative_writing",
+          "id": "fresh-creative_writing-19",
+          "predicted": "general",
+          "tags": [
+            "french",
+            "multilingual"
+          ]
+        },
+        {
+          "confidence": 0.0,
+          "error": null,
+          "expected": "summarization",
+          "id": "fresh-summarization-03",
+          "predicted": "general",
+          "tags": [
+            "clear",
+            "english"
+          ]
+        },
+        {
+          "confidence": 0.0,
+          "error": null,
+          "expected": "summarization",
+          "id": "fresh-summarization-05",
+          "predicted": "general",
+          "tags": [
+            "english",
+            "implicit"
+          ]
+        },
+        {
+          "confidence": 0.0,
+          "error": null,
+          "expected": "summarization",
+          "id": "fresh-summarization-07",
+          "predicted": "general",
+          "tags": [
+            "english",
+            "implicit"
+          ]
+        },
+        {
+          "confidence": 0.0,
+          "error": null,
+          "expected": "summarization",
+          "id": "fresh-summarization-09",
+          "predicted": "general",
+          "tags": [
+            "english",
+            "implicit"
+          ]
+        },
+        {
+          "confidence": 0.0,
+          "error": null,
+          "expected": "summarization",
+          "id": "fresh-summarization-11",
+          "predicted": "general",
+          "tags": [
+            "english",
+            "implicit"
+          ]
+        },
+        {
+          "confidence": 0.0,
+          "error": null,
+          "expected": "summarization",
+          "id": "fresh-summarization-15",
+          "predicted": "general",
+          "tags": [
+            "collision",
+            "english"
+          ]
+        },
+        {
+          "confidence": 0.0,
+          "error": null,
+          "expected": "summarization",
+          "id": "fresh-summarization-19",
+          "predicted": "general",
+          "tags": [
+            "french",
+            "multilingual"
+          ]
+        },
+        {
+          "confidence": 0.0,
+          "error": null,
+          "expected": "math",
+          "id": "fresh-math-03",
+          "predicted": "general",
+          "tags": [
+            "clear",
+            "english"
+          ]
+        },
+        {
+          "confidence": 0.0,
+          "error": null,
+          "expected": "math",
+          "id": "fresh-math-05",
+          "predicted": "general",
+          "tags": [
+            "english",
+            "implicit"
+          ]
+        },
+        {
+          "confidence": 0.0,
+          "error": null,
+          "expected": "math",
+          "id": "fresh-math-07",
+          "predicted": "general",
+          "tags": [
+            "english",
+            "implicit"
+          ]
+        },
+        {
+          "confidence": 0.0,
+          "error": null,
+          "expected": "math",
+          "id": "fresh-math-09",
+          "predicted": "general",
+          "tags": [
+            "english",
+            "implicit"
+          ]
+        },
+        {
+          "confidence": 0.0,
+          "error": null,
+          "expected": "math",
+          "id": "fresh-math-11",
+          "predicted": "general",
+          "tags": [
+            "english",
+            "implicit"
+          ]
+        },
+        {
+          "confidence": 0.0,
+          "error": null,
+          "expected": "math",
+          "id": "fresh-math-13",
+          "predicted": "general",
+          "tags": [
+            "collision",
+            "english"
+          ]
+        },
+        {
+          "confidence": 0.7142855102041399,
+          "error": null,
+          "expected": "math",
+          "id": "fresh-math-15",
+          "predicted": "reasoning",
+          "tags": [
+            "collision",
+            "english"
+          ]
+        },
+        {
+          "confidence": 0.0,
+          "error": null,
+          "expected": "math",
+          "id": "fresh-math-17",
+          "predicted": "general",
+          "tags": [
+            "collision",
+            "english"
+          ]
+        },
+        {
+          "confidence": 0.0,
+          "error": null,
+          "expected": "math",
+          "id": "fresh-math-19",
+          "predicted": "general",
+          "tags": [
+            "french",
+            "multilingual"
+          ]
+        }
+      ]
+    }
+  ]
+}
