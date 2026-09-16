@@ -38,16 +38,42 @@ It is intentionally harder than ordinary traffic. Its purpose is to expose
 where a rule-based router fails, not to claim a universal production accuracy
 number.
 
+## Published snapshot — 2026-09-16
+
+The public report is available at
+[hk-775.github.io/axonllm/benchmark.html](https://hk-775.github.io/axonllm/benchmark.html).
+The exact case-level outputs are committed as
+[JSON](benchmarks/autorouting-2026-09-16.json) and
+[Markdown](benchmarks/autorouting-2026-09-16.md).
+
+| Strategy | Accuracy | Macro F1 | p50 latency | p95 latency | LLM call rate | Router cost / 1K |
+|---|---:|---:|---:|---:|---:|---:|
+| Improved Axon heuristic | 98.6% | 0.986 | 0.081 ms | 0.112 ms | 0.0% | $0 |
+| LLM router | 94.4% | 0.945 | 1,345.748 ms | 5,132.984 ms | 100.0% | $0.044897 |
+| Hybrid, threshold 0.3 | 97.2% | 0.972 | 0.212 ms | 2,973.273 ms | 16.7% | $0.007574 |
+
+The heuristic result is a **development regression score**, not held-out
+production evidence. The classifier was improved after reviewing failures in
+this 72-prompt corpus, raising its score from the original 54.2% baseline to
+98.6%. A deployment decision should use a separately frozen, human-reviewed
+sample from the target workload.
+
+The live comparison used `groq-gpt-oss-20b` through AxonLLM's local
+OpenAI-compatible endpoint, one sequential repetition, a hybrid confidence
+threshold of `0.3`, cache-isolating nonces, and explicit benchmark inputs of
+`$0.075` per million input tokens and `$0.30` per million output tokens.
+Downstream answer generation was excluded.
+
 ## Run the zero-cost baseline
 
 ```bash
-uv run axon-benchmark-routing \
+uv run --locked axon-benchmark-routing \
   --strategy heuristic \
   --output-json /tmp/axon-routing-heuristic.json \
   --output-markdown /tmp/axon-routing-heuristic.md
 ```
 
-The initial AxonLLM baseline on the committed corpus is:
+The initial pre-improvement AxonLLM baseline on the committed corpus was:
 
 | Metric | Result |
 |---|---:|
@@ -69,7 +95,7 @@ prints the key.
 ```bash
 export ROUTER_BENCHMARK_KEY="<proxy key>"
 
-uv run axon-benchmark-routing \
+uv run --locked axon-benchmark-routing \
   --strategy heuristic \
   --strategy llm \
   --strategy hybrid \
@@ -95,7 +121,7 @@ The same command can target AxonLLM itself:
 ./scripts/local_demo_backup.sh copy-key tenant-acme
 
 # Export the copied key as AXON_BENCHMARK_API_KEY, then:
-uv run axon-benchmark-routing \
+uv run --locked axon-benchmark-routing \
   --strategy heuristic \
   --strategy llm \
   --strategy hybrid \
@@ -124,13 +150,13 @@ the experiment.
 
 ```bash
 # Run only multilingual and collision cases.
-uv run axon-benchmark-routing \
+uv run --locked axon-benchmark-routing \
   --strategy heuristic \
   --include-tag multilingual \
   --include-tag collision
 
 # Deterministic smaller live sample, balanced across task labels.
-uv run axon-benchmark-routing \
+uv run --locked axon-benchmark-routing \
   --strategy heuristic \
   --strategy llm \
   --sample-size 12 \
@@ -138,7 +164,7 @@ uv run axon-benchmark-routing \
   ...LLM options...
 
 # Increase concurrency only after confirming provider rate limits.
-uv run axon-benchmark-routing \
+uv run --locked axon-benchmark-routing \
   --concurrency 4 \
   ...other options...
 ```

@@ -446,6 +446,9 @@ try {
     "narration/smart-chat-0.mp3",
     "axonllm-demo.mp4",
     "axonllm-demo.vtt",
+    "benchmark.html",
+    "benchmark.css",
+    "benchmark-results.json",
   ]) {
     assert.equal(
       await requestStatus(`${origin}${publicBase}${asset}`),
@@ -453,6 +456,20 @@ try {
       `Public asset did not resolve: ${asset || "index.html"}`,
     );
   }
+  const benchmarkSummary = await requestJson(
+    `${origin}${publicBase}benchmark-results.json`,
+  );
+  assert.equal(
+    benchmarkSummary.schema,
+    "axonllm.autorouting-benchmark-summary/v1",
+  );
+  assert.equal(benchmarkSummary.methodology.unique_cases, 72);
+  assert.equal(benchmarkSummary.strategies.length, 3);
+  assert.equal(
+    benchmarkSummary.strategies[0].strategy,
+    "axon-heuristic",
+  );
+  assert.ok(benchmarkSummary.strategies[0].accuracy > 0.98);
 
   const browserWebSocketUrl = await waitForDevToolsUrl(chrome, () => chromeOutput);
   const devToolsOrigin = `http://${new URL(browserWebSocketUrl).host}`;
@@ -526,6 +543,12 @@ try {
       text.includes("Architecture") && resolved.endsWith("/axonllm/architecture.html")
     )),
     "The landing page does not link to the published architecture page.",
+  );
+  assert.ok(
+    landing.links.some(({ text, resolved }) => (
+      text.includes("Benchmark") && resolved.endsWith("/axonllm/benchmark.html")
+    )),
+    "The landing page does not link to the published benchmark page.",
   );
   assert.ok(
     landing.links.some(({ text, resolved }) => (
@@ -748,6 +771,54 @@ try {
   assert.equal(hasSuccessfulResponse(responses, "/architecture-components.svg"), true);
   await captureScreenshot(cdp, "axonllm-architecture.png");
 
+  await navigate(cdp, `${origin}${publicBase}benchmark.html`);
+  assert.equal(
+    await evaluate(cdp, "document.title"),
+    "AxonLLM — Auto-routing Benchmark",
+  );
+  const benchmark = await evaluate(cdp, `(() => {
+    const cards = [...document.querySelectorAll("[data-benchmark-result]")];
+    const links = [...document.querySelectorAll("a")].map((anchor) => ({
+      href: anchor.getAttribute("href"),
+      resolved: anchor.href,
+      text: anchor.textContent.trim(),
+    }));
+    return {
+      copy: document.body.textContent,
+      cardCount: cards.length,
+      strategies: cards.map((card) => card.dataset.strategy),
+      accuracies: cards.map((card) => Number(card.dataset.accuracy)),
+      barCount: document.querySelectorAll("[data-accuracy-bar]").length,
+      links,
+    };
+  })()`);
+  assert.match(benchmark.copy, /Local rules win this snapshot/);
+  assert.match(benchmark.copy, /tuned\s+regression\s+result/i);
+  assert.match(benchmark.copy, /54\.2%\s*→\s*98\.6%/);
+  assert.equal(benchmark.cardCount, 3);
+  assert.deepEqual(
+    benchmark.strategies,
+    ["axon-heuristic", "llm-router", "hybrid-0.3"],
+  );
+  assert.ok(benchmark.accuracies[0] > benchmark.accuracies[1]);
+  assert.equal(benchmark.barCount, 2);
+  assert.equal(
+    benchmark.links.some(({ href }) => (
+      typeof href === "string" && href.startsWith("/")
+    )),
+    false,
+    "The public benchmark still contains a root-relative link.",
+  );
+  assert.ok(
+    benchmark.links.some(({ text, resolved }) => (
+      text.includes("aggregate JSON")
+      && resolved.endsWith("/axonllm/benchmark-results.json")
+    )),
+    "The benchmark does not link to its machine-readable aggregate.",
+  );
+  assert.equal(hasSuccessfulResponse(responses, "/benchmark.css"), true);
+  await captureScreenshot(cdp, "axonllm-benchmark.png");
+
   await cdp.send("Emulation.setDeviceMetricsOverride", {
     width: 390,
     height: 844,
@@ -761,7 +832,7 @@ try {
       "document.documentElement.scrollWidth <= document.documentElement.clientWidth + 1",
     ),
     true,
-    "The public architecture page overflows the mobile viewport.",
+    "The public benchmark page overflows the mobile viewport.",
   );
 
   const failedLocalRequests = serverRequests.filter(({ status }) => status >= 400);
@@ -770,7 +841,8 @@ try {
   assert.deepEqual(consoleErrors, []);
   console.log(
     "public site e2e OK: canonical landing, interactive animation, MP3 narration, "
-      + "product film, three SVG architecture views, highlighting, zoom, and mobile layout",
+      + "product film, three SVG architecture views, benchmark report, "
+      + "highlighting, zoom, and mobile layout",
   );
 } catch (error) {
   if (chromeOutput) {

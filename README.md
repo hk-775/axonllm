@@ -6,6 +6,7 @@
 
 [Website](https://hk-775.github.io/axonllm/) ·
 [Interactive architecture](https://hk-775.github.io/axonllm/architecture.html) ·
+[Routing benchmark](https://hk-775.github.io/axonllm/benchmark.html) ·
 [Quick start](#quick-start)
 
 **An open-source multi-provider LLM gateway with a mandatory control plane.**
@@ -206,7 +207,8 @@ AXON_LOCAL_DEMO_MODEL=claude-haiku \
   with a small LLM router and confidence-gated hybrid on one labeled corpus;
   report accuracy, latency, token cost, and the downstream savings required to
   break even. See the
-  [Auto-routing Benchmark](docs/AUTOROUTING_BENCHMARK.md).
+  [published results](https://hk-775.github.io/axonllm/benchmark.html) and
+  [methodology](docs/AUTOROUTING_BENCHMARK.md).
 - **Ensemble routing** — scatter-gather-synthesize across a panel of models with configurable quorum
 - **Multi-region hub-and-spoke** — single-region, active-passive failover, or active-active with weighted distribution
 - **Data residency** — strict mode filters spokes by zone to keep data in-region

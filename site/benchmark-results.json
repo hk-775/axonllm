@@ -1,0 +1,155 @@
+{
+  "schema": "axonllm.autorouting-benchmark-summary/v1",
+  "source_schema": "axonllm.autorouting-benchmark/v1",
+  "generated_at": "2026-09-16T16:33:48.313007+00:00",
+  "evaluation_status": "tuned-development-regression-corpus",
+  "scope": "Router classification only; downstream model generation is excluded.",
+  "methodology": {
+    "corpus_source": "packaged",
+    "unique_cases": 72,
+    "requests_per_strategy": 72,
+    "repetitions": 1,
+    "label_distribution": {
+      "coding": 12,
+      "creative_writing": 12,
+      "general": 12,
+      "math": 12,
+      "reasoning": 12,
+      "summarization": 12
+    },
+    "llm_model": "groq-gpt-oss-20b",
+    "llm_endpoint": "AxonLLM local OpenAI-compatible gateway",
+    "hybrid_confidence_threshold": 0.3,
+    "concurrency": 1,
+    "router_cache": "isolated with a per-request ignored nonce",
+    "input_cost_per_million_usd": 0.075,
+    "output_cost_per_million_usd": 0.3
+  },
+  "historical_baseline": {
+    "generated_at": "2026-09-16T16:03:36.192323+00:00",
+    "strategy": "axon-heuristic-before-regex-improvements",
+    "accuracy": 0.5416666666666666,
+    "macro_f1": 0.551671030731133,
+    "p95_latency_ms": 0.0146208,
+    "router_cost_per_1k_requests_usd": 0.0
+  },
+  "strategies": [
+    {
+      "strategy": "axon-heuristic",
+      "correct": 71,
+      "requests": 72,
+      "accuracy": 0.9861111111111112,
+      "macro_f1": 0.986086956521739,
+      "latency_ms": {
+        "mean": 0.09389747222222222,
+        "p50": 0.08122950000000001,
+        "p95": 0.11163490000000001,
+        "p99": 0.4503080000000072
+      },
+      "llm_calls": 0,
+      "llm_call_rate": 0.0,
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "router_cost_usd": 0.0,
+      "router_cost_per_1k_requests_usd": 0.0,
+      "errors": 0
+    },
+    {
+      "strategy": "llm-router",
+      "correct": 68,
+      "requests": 72,
+      "accuracy": 0.9444444444444444,
+      "macro_f1": 0.9453734671125975,
+      "latency_ms": {
+        "mean": 1857.0296851689313,
+        "p50": 1345.748020496103,
+        "p95": 5132.983540240094,
+        "p99": 5872.735179822487
+      },
+      "llm_calls": 72,
+      "llm_call_rate": 1.0,
+      "input_tokens": 19801,
+      "output_tokens": 5825,
+      "router_cost_usd": 0.0032325749999999997,
+      "router_cost_per_1k_requests_usd": 0.044896874999999996,
+      "errors": 0
+    },
+    {
+      "strategy": "hybrid-0.3",
+      "correct": 70,
+      "requests": 72,
+      "accuracy": 0.9722222222222222,
+      "macro_f1": 0.9721739130434783,
+      "latency_ms": {
+        "mean": 485.2060966954418,
+        "p50": 0.21227099932730198,
+        "p95": 2973.2731584634166,
+        "p99": 4040.3323938904314
+      },
+      "llm_calls": 12,
+      "llm_call_rate": 0.16666666666666666,
+      "input_tokens": 3275,
+      "output_tokens": 999,
+      "router_cost_usd": 0.000545325,
+      "router_cost_per_1k_requests_usd": 0.007573958333333334,
+      "errors": 0
+    }
+  ],
+  "comparisons_to_current_heuristic": [
+    {
+      "candidate": "llm-router",
+      "accuracy_delta_percentage_points": -4.166666666666674,
+      "p95_latency_delta_ms": 5132.871905340094,
+      "incremental_router_cost_usd": 0.0032325749999999997
+    },
+    {
+      "candidate": "hybrid-0.3",
+      "accuracy_delta_percentage_points": -1.388888888888895,
+      "p95_latency_delta_ms": 2973.1615235634167,
+      "incremental_router_cost_usd": 0.000545325
+    }
+  ],
+  "known_misclassifications": {
+    "axon-heuristic": [
+      {
+        "id": "math-08",
+        "expected": "math",
+        "predicted": "reasoning"
+      }
+    ],
+    "llm-router": [
+      {
+        "id": "coding-11",
+        "expected": "coding",
+        "predicted": "reasoning"
+      },
+      {
+        "id": "summary-11",
+        "expected": "summarization",
+        "predicted": "creative_writing"
+      },
+      {
+        "id": "math-08",
+        "expected": "math",
+        "predicted": "reasoning"
+      },
+      {
+        "id": "general-04",
+        "expected": "general",
+        "predicted": "creative_writing"
+      }
+    ],
+    "hybrid-0.3": [
+      {
+        "id": "math-08",
+        "expected": "math",
+        "predicted": "reasoning"
+      },
+      {
+        "id": "general-04",
+        "expected": "general",
+        "predicted": "creative_writing"
+      }
+    ]
+  }
+}
