@@ -1202,10 +1202,21 @@ configured and tested receivers before launch.
 
 Each deployed AWS stack enables DynamoDB PITR, daily AWS Backup, and
 governance-mode Vault Lock with a 30-day minimum and 365-day maximum
-retention. `.github/workflows/operations-security.yml` always validates the
-AgentCore target and enables the Fargate target only when the protected
-production environment sets `AXON_FARGATE_RECOVERY_ENABLED=true`. A disabled
-Fargate target does not request AWS credentials or construct a session policy.
+retention. `.github/workflows/operations-security.yml` controls each target
+through variables in the protected `production` environment:
+
+- `AXON_AGENTCORE_RECOVERY_ENABLED` defaults to `true` for existing deployments.
+  Set it to `false` when retiring the AgentCore deployment.
+- `AXON_FARGATE_RECOVERY_ENABLED` defaults to `false`. Set it to `true` for a
+  deployed Fargate target.
+
+Both variables accept only `true` or `false`; other nonempty values fail the
+workflow. A disabled target skips both the daily audit and monthly restore
+exercise, does not request AWS credentials, and records the skipped validation
+in the job summary. Set the relevant variable to `true` when restoring or
+launching that target, after provisioning its backup infrastructure. Disabling
+validation does not change the retained table's PITR or create backups.
+
 The workflow stores only protected-variable names and documented defaults in
 its matrix; it resolves their values in runner steps after the `production`
 environment is attached to the job.

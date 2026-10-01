@@ -53,6 +53,8 @@ jobs:
       matrix:
         include:
           - target: fargate
+            enabled_variable: AXON_FARGATE_RECOVERY_ENABLED
+            enabled_default: "false"
             stack_name: AxonLLMStack
             table_variable: AXON_FARGATE_STATE_TABLE_NAME
             table_default: axonllm-state
@@ -60,6 +62,8 @@ jobs:
             kms_variable: AXON_DATA_KMS_KEY_ARN
             validate_secret: true
           - target: agentcore
+            enabled_variable: AXON_AGENTCORE_RECOVERY_ENABLED
+            enabled_default: "true"
             stack_name: AxonLLMAgentCoreStack
             table_variable: AXON_AGENTCORE_STATE_TABLE_NAME
             table_default: axonllm-agentcore-state
@@ -71,20 +75,31 @@ jobs:
       id-token: write
 
     steps:
+      - name: Resolve recovery target state
+        id: target
+        env:
+          RECOVERY_ENABLED: ${{ vars[matrix.enabled_variable] || matrix.enabled_default }}
+          RECOVERY_VARIABLE: ${{ matrix.enabled_variable }}
+        run: |
+          case "${RECOVERY_ENABLED}" in
+            true|false) echo "enabled=${RECOVERY_ENABLED}" >> "${GITHUB_OUTPUT}" ;;
+            *) echo "::error::${RECOVERY_VARIABLE} must be true or false."; exit 1 ;;
+          esac
+
       - name: Check out operational checks
-        if: ${{ matrix.target == 'agentcore' || vars.AXON_FARGATE_RECOVERY_ENABLED == 'true' }}
+        if: ${{ steps.target.outputs.enabled == 'true' }}
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           persist-credentials: false
 
       - name: Set up Python
-        if: ${{ matrix.target == 'agentcore' || vars.AXON_FARGATE_RECOVERY_ENABLED == 'true' }}
+        if: ${{ steps.target.outputs.enabled == 'true' }}
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.12"
 
       - name: Validate recovery target configuration
-        if: ${{ matrix.target == 'agentcore' || vars.AXON_FARGATE_RECOVERY_ENABLED == 'true' }}
+        if: ${{ steps.target.outputs.enabled == 'true' }}
         env:
           AWS_ACCOUNT_ID: ${{ vars.AXON_AWS_ACCOUNT_ID }}
           KMS_KEY_ARN: ${{ vars[matrix.kms_variable] }}
@@ -95,7 +110,7 @@ jobs:
           fi
 
       - name: Configure read-only AWS credentials
-        if: ${{ matrix.target == 'agentcore' || vars.AXON_FARGATE_RECOVERY_ENABLED == 'true' }}
+        if: ${{ steps.target.outputs.enabled == 'true' }}
         uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
         with:
           aws-region: us-east-1
@@ -107,7 +122,7 @@ jobs:
             {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["backup:DescribeBackupVault","backup:ListRecoveryPointsByBackupVault"],"Resource":"arn:aws:backup:us-east-1:${{ vars.AXON_AWS_ACCOUNT_ID }}:backup-vault:${{ matrix.vault_prefix }}*"},{"Effect":"Allow","Action":["cloudformation:DescribeStacks","cloudformation:ListStackResources"],"Resource":"arn:aws:cloudformation:us-east-1:${{ vars.AXON_AWS_ACCOUNT_ID }}:stack/${{ matrix.stack_name }}/*"},{"Effect":"Allow","Action":["dynamodb:DescribeContinuousBackups","dynamodb:DescribeTable"],"Resource":"arn:aws:dynamodb:us-east-1:${{ vars.AXON_AWS_ACCOUNT_ID }}:table/${{ vars[matrix.table_variable] || matrix.table_default }}"},{"Effect":"Allow","Action":["secretsmanager:DescribeSecret","secretsmanager:ListSecretVersionIds"],"Resource":"arn:aws:secretsmanager:us-east-1:${{ vars.AXON_AWS_ACCOUNT_ID }}:secret:AxonLLMStack-*"},{"Effect":"Allow","Action":["kms:DescribeKey","kms:GetKeyRotationStatus"],"Resource":"${{ vars[matrix.kms_variable] }}"}]}
 
       - name: Validate state recovery controls
-        if: ${{ matrix.target == 'agentcore' || vars.AXON_FARGATE_RECOVERY_ENABLED == 'true' }}
+        if: ${{ steps.target.outputs.enabled == 'true' }}
         env:
           REQUIRE_VAULT_LOCK: ${{ github.event_name == 'schedule' || inputs.require_vault_lock }}
         run: |
@@ -121,7 +136,7 @@ jobs:
             "${arguments[@]}"
 
       - name: Validate provider-secret rotation
-        if: ${{ (matrix.target == 'agentcore' || vars.AXON_FARGATE_RECOVERY_ENABLED == 'true') && matrix.validate_secret && !cancelled() }}
+        if: ${{ (steps.target.outputs.enabled == 'true') && matrix.validate_secret && !cancelled() }}
         env:
           REQUIRE_AUTOMATIC_ROTATION: ${{ inputs.require_automatic_rotation || false }}
         run: |
@@ -135,8 +150,10 @@ jobs:
             "${arguments[@]}"
 
       - name: Report disabled recovery target
-        if: ${{ matrix.target == 'fargate' && vars.AXON_FARGATE_RECOVERY_ENABLED != 'true' }}
-        run: echo "${{ matrix.target }} recovery checks are disabled for this deployment."
+        if: ${{ steps.target.outputs.enabled == 'false' }}
+        run: |
+          echo "${{ matrix.target }} recovery validation skipped: ${{ matrix.enabled_variable }}=false." |
+            tee -a "${GITHUB_STEP_SUMMARY}"
 
   recovery:
     name: Exercise ${{ matrix.target }} point-in-time recovery
@@ -151,12 +168,16 @@ jobs:
       matrix:
         include:
           - target: fargate
+            enabled_variable: AXON_FARGATE_RECOVERY_ENABLED
+            enabled_default: "false"
             stack_name: AxonLLMStack
             table_variable: AXON_FARGATE_STATE_TABLE_NAME
             table_default: axonllm-state
             vault_prefix: axon-state-
             kms_variable: AXON_DATA_KMS_KEY_ARN
           - target: agentcore
+            enabled_variable: AXON_AGENTCORE_RECOVERY_ENABLED
+            enabled_default: "true"
             stack_name: AxonLLMAgentCoreStack
             table_variable: AXON_AGENTCORE_STATE_TABLE_NAME
             table_default: axonllm-agentcore-state
@@ -167,20 +188,31 @@ jobs:
       id-token: write
 
     steps:
+      - name: Resolve recovery target state
+        id: target
+        env:
+          RECOVERY_ENABLED: ${{ vars[matrix.enabled_variable] || matrix.enabled_default }}
+          RECOVERY_VARIABLE: ${{ matrix.enabled_variable }}
+        run: |
+          case "${RECOVERY_ENABLED}" in
+            true|false) echo "enabled=${RECOVERY_ENABLED}" >> "${GITHUB_OUTPUT}" ;;
+            *) echo "::error::${RECOVERY_VARIABLE} must be true or false."; exit 1 ;;
+          esac
+
       - name: Check out recovery tooling
-        if: ${{ matrix.target == 'agentcore' || vars.AXON_FARGATE_RECOVERY_ENABLED == 'true' }}
+        if: ${{ steps.target.outputs.enabled == 'true' }}
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           persist-credentials: false
 
       - name: Set up Python
-        if: ${{ matrix.target == 'agentcore' || vars.AXON_FARGATE_RECOVERY_ENABLED == 'true' }}
+        if: ${{ steps.target.outputs.enabled == 'true' }}
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.12"
 
       - name: Validate recovery target configuration
-        if: ${{ matrix.target == 'agentcore' || vars.AXON_FARGATE_RECOVERY_ENABLED == 'true' }}
+        if: ${{ steps.target.outputs.enabled == 'true' }}
         env:
           AWS_ACCOUNT_ID: ${{ vars.AXON_AWS_ACCOUNT_ID }}
           KMS_KEY_ARN: ${{ vars[matrix.kms_variable] }}
@@ -191,7 +223,7 @@ jobs:
           fi
 
       - name: Configure recovery AWS credentials
-        if: ${{ matrix.target == 'agentcore' || vars.AXON_FARGATE_RECOVERY_ENABLED == 'true' }}
+        if: ${{ steps.target.outputs.enabled == 'true' }}
         uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
         with:
           aws-region: us-east-1
@@ -205,7 +237,7 @@ jobs:
 
       - name: Restore and validate temporary table
         id: restore
-        if: ${{ matrix.target == 'agentcore' || vars.AXON_FARGATE_RECOVERY_ENABLED == 'true' }}
+        if: ${{ steps.target.outputs.enabled == 'true' }}
         env:
           REQUIRE_VAULT_LOCK: ${{ github.event_name == 'schedule' || inputs.require_vault_lock }}
           RETAIN_RESTORE: >-
@@ -248,7 +280,7 @@ jobs:
           PY
 
       - name: Preserve recovery evidence
-        if: ${{ (matrix.target == 'agentcore' || vars.AXON_FARGATE_RECOVERY_ENABLED == 'true') && !cancelled() && steps.restore.outcome == 'success' }}
+        if: ${{ (steps.target.outputs.enabled == 'true') && !cancelled() && steps.restore.outcome == 'success' }}
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: axonllm-recovery-${{ matrix.target }}-${{ github.run_id }}
@@ -257,5 +289,7 @@ jobs:
           retention-days: 90
 
       - name: Report disabled recovery target
-        if: ${{ matrix.target == 'fargate' && vars.AXON_FARGATE_RECOVERY_ENABLED != 'true' }}
-        run: echo "${{ matrix.target }} recovery exercise is disabled for this deployment."
+        if: ${{ steps.target.outputs.enabled == 'false' }}
+        run: |
+          echo "${{ matrix.target }} recovery exercise skipped: ${{ matrix.enabled_variable }}=false." |
+            tee -a "${GITHUB_STEP_SUMMARY}"

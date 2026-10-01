@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -18,14 +20,8 @@ import validate_workflows  # noqa: E402
 
 CHECKOUT_PIN = validate_workflows.APPROVED_ACTION_PINS["actions/checkout"]
 OPERATIONS_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "operations-security.yml"
-TARGET_ENABLED = (
-    "${{ matrix.target == 'agentcore' || "
-    "vars.AXON_FARGATE_RECOVERY_ENABLED == 'true' }}"
-)
-TARGET_DISABLED = (
-    "${{ matrix.target == 'fargate' && "
-    "vars.AXON_FARGATE_RECOVERY_ENABLED != 'true' }}"
-)
+TARGET_ENABLED = "${{ steps.target.outputs.enabled == 'true' }}"
+TARGET_DISABLED = "${{ steps.target.outputs.enabled == 'false' }}"
 TARGET_KMS_KEY = "${{ vars[matrix.kms_variable] }}"
 TARGET_TABLE = "${{ vars[matrix.table_variable] || matrix.table_default }}"
 
@@ -290,8 +286,7 @@ jobs:
         self.assertEqual(
             secret_step["if"],
             (
-                "${{ (matrix.target == 'agentcore' || "
-                "vars.AXON_FARGATE_RECOVERY_ENABLED == 'true') && "
+                "${{ (steps.target.outputs.enabled == 'true') && "
                 "matrix.validate_secret && !cancelled() }}"
             ),
         )
@@ -413,8 +408,7 @@ jobs:
         self.assertEqual(
             evidence["if"],
             (
-                "${{ (matrix.target == 'agentcore' || "
-                "vars.AXON_FARGATE_RECOVERY_ENABLED == 'true') && "
+                "${{ (steps.target.outputs.enabled == 'true') && "
                 "!cancelled() && steps.restore.outcome == 'success' }}"
             ),
         )
@@ -447,6 +441,73 @@ jobs:
         self.assertIn("--exercise-restore", recovery_commands)
         audit_commands = "\n".join(step.get("run", "") for step in audit["steps"])
         self.assertNotIn("--exercise-restore", audit_commands)
+
+    def test_operations_switches_gate_every_target_step(self) -> None:
+        workflow = _load_operations_workflow()
+        for job_name in ("audit", "recovery"):
+            job = workflow["jobs"][job_name]
+            with self.subTest(job=job_name):
+                self.assertEqual(job["environment"], "production")
+                self.assertEqual(
+                    {
+                        item["target"]: (
+                            item["enabled_variable"],
+                            item["enabled_default"],
+                        )
+                        for item in job["strategy"]["matrix"]["include"]
+                    },
+                    {
+                        "fargate": ("AXON_FARGATE_RECOVERY_ENABLED", "false"),
+                        "agentcore": ("AXON_AGENTCORE_RECOVERY_ENABLED", "true"),
+                    },
+                )
+                resolver = job["steps"][0]
+                self.assertEqual(resolver["id"], "target")
+                self.assertNotIn("if", resolver)
+                self.assertEqual(
+                    resolver["env"]["RECOVERY_ENABLED"],
+                    "${{ vars[matrix.enabled_variable] || matrix.enabled_default }}",
+                )
+                for step in job["steps"][1:]:
+                    if step["name"] == "Report disabled recovery target":
+                        self.assertEqual(step["if"], TARGET_DISABLED)
+                        self.assertIn("GITHUB_STEP_SUMMARY", step["run"])
+                    else:
+                        self.assertIn(
+                            "steps.target.outputs.enabled == 'true'",
+                            step["if"],
+                        )
+
+    def test_operations_switch_resolver_rejects_invalid_values(self) -> None:
+        workflow = _load_operations_workflow()
+        for job_name in ("audit", "recovery"):
+            resolver = workflow["jobs"][job_name]["steps"][0]
+            for value in ("true", "false", "tru", "0", ""):
+                with self.subTest(job=job_name, value=value):
+                    with tempfile.TemporaryDirectory() as directory:
+                        output = Path(directory) / "output"
+                        result = subprocess.run(
+                            ["bash", "-e", "-o", "pipefail", "-c", resolver["run"]],
+                            env={
+                                **os.environ,
+                                "RECOVERY_ENABLED": value,
+                                "RECOVERY_VARIABLE": "AXON_AGENTCORE_RECOVERY_ENABLED",
+                                "GITHUB_OUTPUT": str(output),
+                            },
+                            text=True,
+                            capture_output=True,
+                            check=False,
+                        )
+                        if value in ("true", "false"):
+                            self.assertEqual(result.returncode, 0, result.stderr)
+                            self.assertEqual(
+                                output.read_text(encoding="utf-8"),
+                                f"enabled={value}\n",
+                            )
+                        else:
+                            self.assertNotEqual(result.returncode, 0)
+                            self.assertIn("must be true or false", result.stdout)
+                            self.assertFalse(output.exists())
 
     def test_operations_recovery_policy_is_resource_scoped(self) -> None:
         workflow = _load_operations_workflow()
