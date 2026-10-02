@@ -22,6 +22,15 @@ answer. Per-task results make this distinction visible.
 
 ## Expanded benchmark — October 2, 2026
 
+Follow-up: [action-first regex revision](REGEX_REVISION.md) and
+[its results](../../docs/benchmarks/regex-revision-2026-10-02/README.md).
+The separate candidate improves 49.79% → 65.10% on the reused 960-prompt test
+(162 improvements, 15 regressions), and 45.83% → 61.67% on 120 reserved
+validation prompts. It was developed after the original results were public.
+It does not replace the original classifier or any result below.
+The [revision webpage](https://hk-775.github.io/axonllm/benchmark-regex.html)
+exposes every regression.
+
 [Interactive results and case browser](https://hk-775.github.io/axonllm/benchmark.html) ·
 [Evidence report](../../docs/benchmarks/smart-routing-v2-evidence-2026-10-02.md) ·
 [Protocol](PROTOCOL_V2.md) · [Data card](DATA_CARD_V2.md) · [Frozen data](data/v2)
