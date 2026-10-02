@@ -4,6 +4,9 @@ set -euo pipefail
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 cd "${repo_root}"
 
+# Validate optional model dependencies without installing Torch in gateway CI.
+uv lock --check --project benchmarks/routing/runtime
+
 work_dir=$(mktemp -d)
 trap 'rm -rf "${work_dir}"' EXIT
 

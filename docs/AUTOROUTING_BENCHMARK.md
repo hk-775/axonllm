@@ -1,5 +1,10 @@
 # Auto-routing Benchmark
 
+For the four-way **regex / Laya / Strands Decider / GPT-4o Mini** comparison,
+see the [smart-routing benchmark](../benchmarks/routing/README.md). It adds pinned
+local models, excluded warmup, and separate API versus hardware/electricity
+cost columns. The September snapshot below remains an unchanged historical run.
+
 AxonLLM includes a reproducible benchmark for the routing tradeoff behind
 `model: "auto"`:
 
