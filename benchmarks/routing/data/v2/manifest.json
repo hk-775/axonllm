@@ -1,0 +1,57 @@
+{
+  "schema": "axonllm.routing-corpus/v2",
+  "seed": 775,
+  "frozen_at": "2026-10-02T19:07:38.656960+00:00",
+  "kind": "synthetic; AI-authored and cross-provider model-reviewed; not human-labeled",
+  "generator": "gpt-4.1-2025-04-14",
+  "reviewer": "claude-sonnet-4-6",
+  "authoring_policy_sha256": "ec04efd976905d8f4c69e895906fe23d8d46f13e880e73502ca7b28d500a8039",
+  "review_policy_sha256": "1e2af6f5d3c5daee72eff05851e2687106d3a4433e38ce85922f0ccfd0358484",
+  "totals": {
+    "cases": 1200,
+    "families": 300,
+    "labels": {
+      "coding": 200,
+      "reasoning": 200,
+      "creative_writing": 200,
+      "summarization": 200,
+      "math": 200,
+      "general": 200
+    },
+    "domains": {
+      "software_and_data": 120,
+      "workplace_and_business": 120,
+      "home_and_travel": 120,
+      "science_and_environment": 120,
+      "education_and_history": 120,
+      "public_services": 120,
+      "arts_and_media": 120,
+      "retail_and_support": 120,
+      "sports_and_leisure": 120,
+      "health_and_wellbeing": 120
+    }
+  },
+  "development": {
+    "cases": 240,
+    "families": 60
+  },
+  "test": {
+    "cases": 960,
+    "families": 240
+  },
+  "pre_freeze_revisions": 574,
+  "files": {
+    ".gitignore": "035be897b00b2e4df85234618e91ae2c91213ba53b2bf492fc890efec505f2ae",
+    "authoring-usage.json": "bbe734be5ac5ae994a38fd641d17ac879099e6806279001305d9c3fd9e1ea2b1",
+    "development.jsonl": "bb511b4be1d9d3ce68d493b25256d75afad48f639594720dff96ceba557a0dc3",
+    "duplicate-audit.json": "e1a1a792db528856f7048523ec8ad33f835d4d8b4b7a8d701435d54f37a90259",
+    "label-review.json": "61d63113644001a3bdba335234c42c03f741f199e7e0aafd742a2a7c6ab85c92",
+    "pre-freeze-revisions.json": "366a2ea51dcafbac15eae934d0c8548b72f6bd969e74a128473f085f117fc0fb",
+    "test.jsonl": "9e75e6b4e0e64cdb990a94913d7acf7fece47f6b939bbdd4cf9435cd22c8e533"
+  },
+  "locked_router_implementation": {
+    "task_classifier.py": "22650eac0a4bef6faa5fa1526d588e8bf51c33152426b375d975e4d89c2dffdc",
+    "decision_model_routing.py": "e04f333a08abcc8ad3cffbfdceb83fa7c590c485bb215f98c6b4fcc0b238cd92"
+  },
+  "routing_system_prompt_sha256": "50e5fa4326fb3513305f934feff5cbcf6ac3f37ebd100a5d9b64d1563e577fc3"
+}

@@ -81,7 +81,7 @@ jobs:
       - name: Lint
         run: >-
           uv run --frozen --no-sync ruff check --no-cache
-          axonllm src tests agentcore_agent.py serve_dashboard.py
+          axonllm src tests benchmarks agentcore_agent.py serve_dashboard.py
 
       - name: Run v0.3 routing conformance
         run: >-

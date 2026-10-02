@@ -39,13 +39,13 @@
     <div class="section-heading"><p class="eyebrow">Measured results</p><h2>Accuracy comes with uncertainty.</h2>
       <p>One primary pass per router. Intervals resample whole scenario families,
         keeping correlated prompt variants together.</p></div>
-    <div class="cards"><article class="result-card" data-benchmark-result data-strategy="axon-heuristic" data-accuracy="0.4979166666666667"><h3>Regex / heuristic</h3><div class="score">49.79%</div><p class="interval">46.9%–52.7% · 95% family interval</p><div class="accuracy-track" data-accuracy-bar role="img" aria-label="Regex / heuristic accuracy 49.79%"><div class="accuracy-fill" style="width:49.792%"></div></div><p class="mini">Median latency: 0.34 ms</p><p class="mini">API cost / 1,000: $0</p></article><article class="result-card" data-benchmark-result data-strategy="laya" data-accuracy="0.6625"><h3>Laya</h3><div class="score">66.25%</div><p class="interval">63.3%–69.2% · 95% family interval</p><div class="accuracy-track" data-accuracy-bar role="img" aria-label="Laya accuracy 66.25%"><div class="accuracy-fill" style="width:66.250%"></div></div><p class="mini">Median latency: 37.63 ms</p><p class="mini">API cost / 1,000: $0</p></article><article class="result-card" data-benchmark-result data-strategy="strands" data-accuracy="0.9135416666666667"><h3>Strands Decider</h3><div class="score">91.35%</div><p class="interval">89.2%–93.3% · 95% family interval</p><div class="accuracy-track" data-accuracy-bar role="img" aria-label="Strands Decider accuracy 91.35%"><div class="accuracy-fill" style="width:91.354%"></div></div><p class="mini">Median latency: 164.18 ms</p><p class="mini">API cost / 1,000: $0</p></article><article class="result-card" data-benchmark-result data-strategy="llm-router" data-accuracy="0.9125"><h3>GPT-4o Mini</h3><div class="score">91.25%</div><p class="interval">88.9%–93.5% · 95% family interval</p><div class="accuracy-track" data-accuracy-bar role="img" aria-label="GPT-4o Mini accuracy 91.25%"><div class="accuracy-fill" style="width:91.250%"></div></div><p class="mini">Median latency: 736.22 ms</p><p class="mini">API cost / 1,000: $0.051203</p></article></div>
+    <div class="cards">@@CARDS@@</div>
     <div class="table-wrap" tabindex="0" role="region" aria-label="Full routing benchmark comparison">
       <table><thead><tr><th>Router</th><th>Accuracy / 95% interval</th><th>Macro F1</th>
         <th>Median / p95 latency</th><th>API cost / 1,000</th><th>Hardware / electricity</th><th>Errors</th></tr></thead>
-        <tbody><tr><td>Regex / heuristic</td><td>49.79% / 46.9%–52.7%</td><td>0.507</td><td>0.34 / 1.40 ms</td><td>$0</td><td>Unmeasured</td><td>0</td></tr><tr><td>Laya</td><td>66.25% / 63.3%–69.2%</td><td>0.662</td><td>37.63 / 46.53 ms</td><td>$0</td><td>Unmeasured</td><td>0</td></tr><tr><td>Strands Decider</td><td>91.35% / 89.2%–93.3%</td><td>0.914</td><td>164.18 / 207.52 ms</td><td>$0</td><td>Unmeasured</td><td>0</td></tr><tr><td>GPT-4o Mini</td><td>91.25% / 88.9%–93.5%</td><td>0.911</td><td>736.22 / 966.04 ms</td><td>$0.051203</td><td>Unmeasured</td><td>0</td></tr></tbody></table>
+        <tbody>@@RESULT_ROWS@@</tbody></table>
     </div>
-    <p class="caption">Measured host: Apple M4 Pro, 48 GiB RAM; MPS for local models. Laya: float32; Strands: bfloat16 with
+    <p class="caption">Measured host: @@HARDWARE@@. Laya: float32; Strands: bfloat16 with
       a reference causal-convolution kernel. GPT-4o Mini latency includes its network round trip.
       Hardware/electricity is unmeasured; provider infrastructure is included in API prices.</p>
   </section>
@@ -55,7 +55,7 @@
         An interval crossing zero does not distinguish that pair at this confidence level.</p></div>
     <div class="table-wrap" tabindex="0" role="region" aria-label="Paired accuracy comparisons">
       <table><thead><tr><th>Candidate vs baseline</th><th>Accuracy difference</th>
-        <th>Adjusted interval</th><th>Separated on this set?</th></tr></thead><tbody><tr><td>Laya vs Regex / heuristic</td><td>+16.46 pp</td><td>+11.35 to +21.67 pp</td><td>Yes</td></tr><tr><td>Strands Decider vs Regex / heuristic</td><td>+41.56 pp</td><td>+37.08 to +46.15 pp</td><td>Yes</td></tr><tr><td>GPT-4o Mini vs Regex / heuristic</td><td>+41.46 pp</td><td>+36.56 to +46.35 pp</td><td>Yes</td></tr><tr><td>Strands Decider vs Laya</td><td>+25.10 pp</td><td>+20.83 to +29.27 pp</td><td>Yes</td></tr><tr><td>GPT-4o Mini vs Laya</td><td>+25.00 pp</td><td>+20.52 to +29.48 pp</td><td>Yes</td></tr><tr><td>GPT-4o Mini vs Strands Decider</td><td>-0.10 pp</td><td>-4.06 to +3.65 pp</td><td>No</td></tr></tbody></table>
+        <th>Adjusted interval</th><th>Separated on this set?</th></tr></thead><tbody>@@PAIRS@@</tbody></table>
     </div>
     <p class="caption">10,000 class-stratified, paired family bootstrap samples. Bonferroni family-wise
       95% intervals. These describe the synthetic sampling scheme, not real-world representativeness.</p>
@@ -66,11 +66,11 @@
         request; it does not score the quality of an eventual reasoning answer.</p></div>
     <div class="table-wrap" tabindex="0" role="region" aria-label="Accuracy by task">
       <table><thead><tr><th>Task</th><th>Regex / heuristic</th><th>Laya</th><th>Strands</th><th>GPT-4o Mini</th></tr></thead>
-        <tbody><tr><td>coding</td><td>63.7%</td><td>81.9%</td><td>98.8%</td><td>91.9%</td></tr><tr><td>reasoning</td><td>21.9%</td><td>48.1%</td><td>79.4%</td><td>96.9%</td></tr><tr><td>creative writing</td><td>36.2%</td><td>90.0%</td><td>95.0%</td><td>98.1%</td></tr><tr><td>summarization</td><td>63.1%</td><td>53.1%</td><td>95.6%</td><td>98.1%</td></tr><tr><td>math</td><td>17.5%</td><td>46.2%</td><td>95.6%</td><td>93.8%</td></tr><tr><td>general</td><td>96.2%</td><td>78.1%</td><td>83.8%</td><td>68.8%</td></tr></tbody></table>
+        <tbody>@@TASKS@@</tbody></table>
     </div>
     <details><summary>Repeatability: 120 test prompts, three repetitions each</summary>
       <p>The panel reuses 30 deterministically selected test families. It is reported separately
-        and adds nothing to the primary accuracy sample size.</p><ul><li>Regex / heuristic: 0/120 prompts changed predicted label.</li><li>Laya: 0/120 prompts changed predicted label.</li><li>Strands Decider: 0/120 prompts changed predicted label.</li><li>GPT-4o Mini: 0/120 prompts changed predicted label.</li></ul>
+        and adds nothing to the primary accuracy sample size.</p><ul>@@REPEATABILITY@@</ul>
     </details>
   </section>
   <section class="container" id="cases">
@@ -79,7 +79,7 @@
         loads from a public static file; this page makes no inference calls.</p></div>
     <div class="filters">
       <label>Search prompts<input id="case-search" type="search" placeholder="Search for a topic or phrase"></label>
-      <label>Expected category<select id="case-task"><option value="">All categories</option><option value="coding">coding</option><option value="reasoning">reasoning</option><option value="creative_writing">creative writing</option><option value="summarization">summarization</option><option value="math">math</option><option value="general">general</option></select></label>
+      <label>Expected category<select id="case-task"><option value="">All categories</option>@@TASK_OPTIONS@@</select></label>
       <label>Variant<select id="case-variant"><option value="">All variants</option>
         <option value="explicit">Explicit request</option><option value="implicit">Implicit intent</option>
         <option value="keyword_collision">Keyword collision</option><option value="quoted_distraction">Quoted distraction</option>

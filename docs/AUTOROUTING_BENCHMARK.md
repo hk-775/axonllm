@@ -1,5 +1,12 @@
 # Auto-routing Benchmark
 
+For the four-way **regex / Laya / Strands Decider / GPT-4o Mini** comparison,
+see the [smart-routing benchmark](../benchmarks/routing/README.md). Its expanded
+model-reviewed synthetic corpus has 960 test prompts and 240 development prompts,
+with scenario-family uncertainty intervals, pinned local models, excluded warmup,
+and separate API versus hardware/electricity costs. The September snapshot below
+remains an unchanged historical run.
+
 AxonLLM includes a reproducible benchmark for the routing tradeoff behind
 `model: "auto"`:
 
@@ -29,7 +36,7 @@ larger completion.
 ## Published held-out snapshot — 2026-09-16
 
 The public report is available at
-[hk-775.github.io/axonllm/benchmark.html](https://hk-775.github.io/axonllm/benchmark.html).
+[archived September benchmark](https://hk-775.github.io/axonllm/benchmark-2026-09-16.html).
 The exact case-level outputs are committed as
 [JSON](benchmarks/autorouting-held-out-2026-09-16.json) and
 [Markdown](benchmarks/autorouting-held-out-2026-09-16.md).

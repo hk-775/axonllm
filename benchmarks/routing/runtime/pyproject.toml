@@ -1,0 +1,13 @@
+[project]
+name = "axon-routing-benchmark-runtime"
+version = "0.1.0"
+requires-python = ">=3.11,<3.14"
+dependencies = ["axon-llm", "laya", "strands-decider"]
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+axon-llm = { path = "../../..", editable = true }
+laya = { git = "https://github.com/NandhaKishorM/laya.git", rev = "fa9a2a7070b1789912a49ae24603bbfb1a78b001" }
+strands-decider = { git = "https://github.com/strands-labs/strands-decider.git", rev = "ddd11994bc451ffc78fa30f43037c291fd4d44b6" }
