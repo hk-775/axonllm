@@ -15,15 +15,112 @@ model's answer. The six labels are `coding`, `reasoning`, `creative_writing`,
 prompt and label descriptions. They never receive case IDs, tags, or expected
 answers. The production regex classifier is unchanged.
 
-Ten final-test prompts require **reasoning**: causal explanations, competing
-hypotheses, weighing evidence, and evaluating arguments. For example:
-“A startup's user engagement doubled after a redesign, but revenue stayed flat.
-Walk through the competing interpretations before settling on the most credible
-one.” Other reasoning cases deliberately include numbers or summarization terms
-to test whether a router follows intent rather than a keyword. The report
-includes a per-task table so reasoning performance is visible separately.
+The expanded test set includes **160 reasoning prompts** covering causal
+inference, competing hypotheses, evidence, and qualitative tradeoffs. Recognizing
+such a request does not mean that a decision model can generate or verify its
+answer. Per-task results make this distinction visible.
 
-## Recorded run — October 2, 2026
+## Expanded benchmark — October 2, 2026
+
+[Interactive results and case browser](https://hk-775.github.io/axonllm/benchmark.html) ·
+[Evidence report](../../docs/benchmarks/smart-routing-v2-evidence-2026-10-02.md) ·
+[Protocol](PROTOCOL_V2.md) · [Data card](DATA_CARD_V2.md) · [Frozen data](data/v2)
+
+**Model-reviewed synthetic benchmark:** 1,200 newly authored English prompts,
+with 240 development prompts and 960 test prompts. Six task labels and ten
+domains are balanced across the splits. Each substantive scenario has explicit,
+implicit, keyword-collision, and quoted-distraction variants; all four stay in
+the same split. GPT-4.1 authored the corpus and Claude Sonnet 4.6 audited labels
+without seeing intended answers. Revision history remains public. This is model
+review, not human ground truth.
+
+| Router | Accuracy (95% family interval) | Median / p95 | API cost / 1,000 | Hardware / electricity |
+|---|---:|---:|---:|---|
+| Regex / heuristic | 49.79% (46.9%–52.7%) | 0.34 / 1.40 ms | $0 | Unmeasured |
+| Laya | 66.25% (63.3%–69.2%) | 37.63 / 46.53 ms | $0 | Unmeasured |
+| Strands Decider | 91.35% (89.2%–93.3%) | 164.18 / 207.52 ms | $0 | Unmeasured |
+| GPT-4o Mini | 91.25% (88.9%–93.5%) | 736.22 / 966.04 ms | $0.051203 | Unmeasured |
+
+Strands and GPT-4o Mini differ by one correct route. The adjusted interval for
+GPT-4o Mini minus Strands is **−4.06 to +3.65 percentage points**: this set does
+not establish an overall accuracy winner or prove equivalence. Task slices
+matter: reasoning-route accuracy is **96.9% for GPT-4o Mini versus 79.4% for
+Strands**, 48.1% for Laya, and 21.9% for the heuristic.
+
+All 5,280 measured decisions completed without request errors. Every candidate
+kept the same predicted label across the three repetitions of each of the 120
+repeatability prompts. Usage-priced GPT-4o Mini cost was **$0.06787725** for both
+expanded panels and their warmups. Corpus authoring and label-audit usage are
+separate and excluded from that amount.
+
+The data and protocol were committed at `2ed42d1` before candidate inference.
+Router implementations, taxonomy, checkpoint pins, and inference settings were
+held fixed. The primary result uses one pass over 960 prompts. A separate
+120-prompt panel measures repeatability across three repetitions; it does not
+inflate the primary sample size.
+
+Uncertainty uses 10,000 class-stratified, paired bootstrap resamples of the
+**240 scenario families**. The evidence report includes descriptive 95%
+intervals and adjusted intervals covering all six pairwise accuracy comparisons.
+Related variants are not treated as independent examples. These intervals
+describe this synthetic sampling scheme, not real-world representativeness.
+
+Raw measured files:
+
+- [Primary predictions and usage](../../docs/benchmarks/smart-routing-v2-primary-2026-10-02.json)
+- [Repeatability predictions and usage](../../docs/benchmarks/smart-routing-v2-repeatability-2026-10-02.json)
+- [Aggregate evidence and intervals](../../docs/benchmarks/smart-routing-v2-evidence-2026-10-02.json)
+
+### Reproduce the expanded comparison
+
+From a fresh repository checkout:
+
+```bash
+uv sync --locked --project benchmarks/routing/runtime --python 3.13
+
+# Offline data verification: no API key or model inference needed.
+uv run --locked --project benchmarks/routing/runtime \
+  python -m benchmarks.routing.corpus validate
+
+# Set OPENAI_API_KEY through your shell or secret manager.
+# Initial pinned model downloads happen during excluded initialization.
+uv run --locked --project benchmarks/routing/runtime \
+  python -m benchmarks.routing.run_expanded --panel primary --device mps --allow-downloads
+uv run --locked --project benchmarks/routing/runtime \
+  python -m benchmarks.routing.run_expanded --panel repeatability --device mps --allow-downloads
+
+uv run --locked --project benchmarks/routing/runtime \
+  python -m benchmarks.routing.analyze \
+  --repeatability docs/benchmarks/smart-routing-v2-repeatability-2026-10-02.json
+```
+
+Use `--device cpu` or `--device cuda` for other hardware. Omit `--allow-downloads`
+when all pinned files are already cached; the recorded run used cached files.
+Expect hardware and network conditions to change latency. Pass
+`--hardware-description "your actual host and RAM"` to the analysis command to
+record the measured machine; the default leaves hardware details unspecified.
+
+Interrupted runs resume from ignored `data/v2/.work/runs/` checkpoints, without
+repeating completed billable calls. Configuration changes are rejected within
+the same checkpoint directory. To measure a fresh run, preserve the previous
+results and move that ignored directory aside first. Output files replace the
+local recorded reports; use git to inspect the difference before publishing.
+API keys are never written to reports.
+
+To rebuild the static viewer after completing both panels and the analysis:
+
+```bash
+uv run --locked --project benchmarks/routing/runtime python -m benchmarks.routing.publish_page
+node scripts/build_public_site.mjs /tmp/axonllm-public-site
+node scripts/test_public_site.mjs /tmp/axonllm-public-site
+```
+
+The normal CI verifies frozen files and analysis contracts without invoking
+models or requiring API credentials. Dataset authoring is a separate operation:
+`corpus build` requires OpenAI and Anthropic credentials only for a new,
+unfrozen version. It refuses to overwrite the frozen v2 corpus.
+
+## Original 60-prompt pilot — October 2, 2026
 
 [Full report](../../docs/benchmarks/smart-routing-2026-10-02.md) ·
 [Case-level JSON](../../docs/benchmarks/smart-routing-2026-10-02.json)
@@ -58,7 +155,7 @@ warmup: **$0.0093021 total** for the recorded run. This excludes the earlier
 development smoke check. API usage and costs are recorded per request; API
 credentials are absent from both artifacts.
 
-## Run all four
+## Run the pilot or a custom corpus
 
 Run these commands from the AxonLLM repository root. Local model dependencies
 are isolated from the ordinary gateway installation. Python 3.11–3.13 is
@@ -161,7 +258,7 @@ implementation and runtime-lock hashes, and per-case predictions. Model weights
 are not bundled. Laya and Strands have
 their own upstream Apache-2.0 licenses; AxonLLM code remains MIT-0.
 
-The existing final-test set contains **60 public synthetic prompts**, ten per
+The original pilot test set contains **60 public synthetic prompts**, ten per
 label. It was originally held out from the September heuristic improvements,
 but is now public. Treat this comparison as a reproducible demonstration, not
 an unseen production benchmark. Three repetitions produce 180 observations,
@@ -169,8 +266,8 @@ not 180 independent prompts. Inspect scenario slices and confusion matrices;
 there is no universal winning router.
 
 The Laya candidate is specifically the English checkpoint. Multilingual cases
-remain in the common test set and are tagged, so this scope limitation remains
-visible. Prompt length, language, label ambiguity, machine load, model precision,
+remain in the pilot and are tagged; the expanded v2 corpus is English-only.
+Prompt length, language, label ambiguity, machine load, model precision,
 network location, and API load can all change the outcome. No local-model
 calibration or heuristic tuning should use the final-test labels. Use the
 separate development file for adapter checks and any future tuning.

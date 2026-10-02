@@ -5,6 +5,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer, request as httpRequest } from "node:http";
+import { request as httpsRequest } from "node:https";
 import { tmpdir } from "node:os";
 import { dirname, extname, join, resolve, sep } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -16,6 +17,15 @@ const publicRoot = resolve(
 );
 const publicBase = "/axonllm/";
 const screenshotDirectory = process.env.AXONLLM_E2E_SCREENSHOT_DIR;
+const requestedOrigin = process.env.AXONLLM_E2E_PUBLIC_ORIGIN;
+let publicOrigin;
+if (requestedOrigin) {
+  const url = new URL(requestedOrigin);
+  assert.equal(url.protocol, "https:", "Live-origin verification requires HTTPS.");
+  assert.equal(url.username + url.password + url.search + url.hash, "");
+  assert.equal(url.pathname, "/", "Supply an origin; the /axonllm/ path is fixed.");
+  publicOrigin = url.origin;
+}
 
 if (typeof WebSocket !== "function") {
   throw new Error("The public-site browser test requires Node.js 22 or newer.");
@@ -165,7 +175,7 @@ async function startStaticServer() {
 
 function requestJson(url, method = "GET") {
   return new Promise((resolveRequest, reject) => {
-    const request = httpRequest(url, { method }, (response) => {
+    const request = (url.startsWith("https:") ? httpsRequest : httpRequest)(url, { method }, (response) => {
       let body = "";
       response.setEncoding("utf8");
       response.on("data", (chunk) => {
@@ -183,7 +193,7 @@ function requestJson(url, method = "GET") {
         }
       });
     });
-    request.setTimeout(2_000, () => {
+    request.setTimeout(url.startsWith("https:") ? 15_000 : 2_000, () => {
       request.destroy(new Error(`Timed out requesting ${url}`));
     });
     request.once("error", reject);
@@ -193,11 +203,11 @@ function requestJson(url, method = "GET") {
 
 function requestStatus(url, method = "HEAD") {
   return new Promise((resolveRequest, reject) => {
-    const request = httpRequest(url, { method }, (response) => {
+    const request = (url.startsWith("https:") ? httpsRequest : httpRequest)(url, { method }, (response) => {
       response.resume();
       response.on("end", () => resolveRequest(response.statusCode || 0));
     });
-    request.setTimeout(4_000, () => {
+    request.setTimeout(url.startsWith("https:") ? 15_000 : 4_000, () => {
       request.destroy(new Error(`Timed out requesting ${url}`));
     });
     request.once("error", reject);
@@ -392,7 +402,8 @@ function hasSuccessfulResponse(responses, suffix) {
   ));
 }
 
-const { server, origin, requests: serverRequests } = await startStaticServer();
+const { server, origin: localOrigin, requests: serverRequests } = await startStaticServer();
+const origin = publicOrigin || localOrigin;
 const profileDirectory = await mkdtemp(join(tmpdir(), "axonllm-pages-chrome-"));
 const chromePath = findChrome();
 let chromeOutput = "";
@@ -449,6 +460,9 @@ try {
     "benchmark.html",
     "benchmark.css",
     "benchmark-results.json",
+    "benchmark-cases.json",
+    "benchmark.js",
+    "benchmark-2026-09-16.html",
   ]) {
     assert.equal(
       await requestStatus(`${origin}${publicBase}${asset}`),
@@ -461,22 +475,28 @@ try {
   );
   assert.equal(
     benchmarkSummary.schema,
-    "axonllm.autorouting-benchmark-summary/v1",
+    "axonllm.routing-evidence/v2",
   );
   assert.equal(
     benchmarkSummary.evaluation_status,
-    "frozen-held-out-test-corpus",
+    "model-reviewed synthetic benchmark",
   );
-  assert.equal(benchmarkSummary.methodology.unique_cases, 60);
-  assert.equal(benchmarkSummary.methodology.development_cases, 60);
-  assert.equal(benchmarkSummary.strategies.length, 3);
-  assert.equal(
-    benchmarkSummary.strategies[0].strategy,
-    "axon-heuristic",
-  );
-  assert.ok(benchmarkSummary.strategies[0].accuracy > 0.86);
-  assert.equal(benchmarkSummary.strategies[2].strategy, "hybrid-0.3");
-  assert.equal(benchmarkSummary.strategies[2].accuracy, 0.95);
+  assert.equal(benchmarkSummary.methodology.unique_cases, 960);
+  assert.equal(benchmarkSummary.methodology.development_cases, 240);
+  assert.equal(benchmarkSummary.methodology.families, 240);
+  assert.equal(benchmarkSummary.strategies.length, 4);
+  assert.equal(benchmarkSummary.paired_comparisons.length, 6);
+  for (const result of benchmarkSummary.strategies) {
+    assert.equal(result.requests, 960);
+    assert.ok(result.accuracy >= 0 && result.accuracy <= 1);
+    assert.equal(result.accuracy_ci95.length, 2);
+    assert.ok(result.accuracy_ci95[0] <= result.accuracy_ci95[1]);
+    assert.equal(result.hardware_electricity_cost_status, "unmeasured");
+    if (result.strategy !== "llm-router") assert.equal(result.router_cost_usd, 0);
+  }
+  const benchmarkCases = await requestJson(`${origin}${publicBase}benchmark-cases.json`);
+  assert.equal(benchmarkCases.cases.length, 960);
+  assert.equal(benchmarkCases.corpus_manifest_sha256, benchmarkSummary.corpus_manifest_sha256);
 
   const browserWebSocketUrl = await waitForDevToolsUrl(chrome, () => chromeOutput);
   const devToolsOrigin = `http://${new URL(browserWebSocketUrl).host}`;
@@ -799,17 +819,17 @@ try {
       links,
     };
   })()`);
-  assert.match(benchmark.copy, /Hybrid wins the routing tradeoff/);
-  assert.match(benchmark.copy, /frozen\s+held-out/i);
-  assert.match(benchmark.copy, /38\.3%\s*→\s*86\.7%/);
-  assert.equal(benchmark.cardCount, 3);
+  assert.match(benchmark.copy, /Model-reviewed synthetic benchmark/);
+  assert.match(benchmark.copy, /scenario families/i);
+  assert.match(benchmark.copy, /Unmeasured/);
+  assert.match(benchmark.copy, /Bonferroni/);
+  assert.equal(benchmark.cardCount, 4);
   assert.deepEqual(
     benchmark.strategies,
-    ["axon-heuristic", "llm-router", "hybrid-0.3"],
+    ["axon-heuristic", "laya", "strands", "llm-router"],
   );
-  assert.ok(benchmark.accuracies[1] > benchmark.accuracies[0]);
-  assert.ok(benchmark.accuracies[2] > benchmark.accuracies[1]);
-  assert.equal(benchmark.barCount, 3);
+  assert.deepEqual(benchmark.accuracies, benchmarkSummary.strategies.map((s) => s.accuracy));
+  assert.equal(benchmark.barCount, 4);
   assert.equal(
     benchmark.links.some(({ href }) => (
       typeof href === "string" && href.startsWith("/")
@@ -825,7 +845,46 @@ try {
     "The benchmark does not link to its machine-readable aggregate.",
   );
   assert.equal(hasSuccessfulResponse(responses, "/benchmark.css"), true);
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    if (await evaluate(cdp, 'document.querySelectorAll(".case").length > 0')) break;
+    await delay(100);
+  }
+  assert.equal(await evaluate(cdp, 'document.querySelectorAll(".case").length'), 12);
+  assert.match(await evaluate(cdp, 'document.querySelector("#case-status").textContent'), /960 matching/);
+  await evaluate(cdp, `(() => {
+    const select = document.querySelector("#case-task");
+    select.value = "reasoning";
+    select.dispatchEvent(new Event("input", { bubbles: true }));
+  })()`);
+  assert.match(await evaluate(cdp, 'document.querySelector("#case-status").textContent'), /160 matching/);
+  assert.equal(await evaluate(cdp, `Array.from(document.querySelectorAll(".case-meta"))
+    .every((node) => node.textContent.includes("Expected: reasoning"))`), true);
+  await evaluate(cdp, `(() => {
+    document.querySelector("#case-errors").checked = true;
+    document.querySelector("#case-errors").dispatchEvent(new Event("input", { bubbles: true }));
+  })()`);
+  const expectedReasoningErrors = benchmarkCases.cases.filter((item) =>
+    item.expected_task === "reasoning"
+    && Object.values(item.predictions).some((prediction) => prediction !== item.expected_task)
+  ).length;
+  assert.match(
+    await evaluate(cdp, 'document.querySelector("#case-status").textContent'),
+    new RegExp(`^${expectedReasoningErrors} matching`),
+  );
+  await evaluate(cdp, `(() => {
+    document.querySelector("#case-errors").checked = false;
+    document.querySelector("#case-task").value = "";
+    document.querySelector("#case-task").dispatchEvent(new Event("input", { bubbles: true }));
+  })()`);
+  await evaluate(cdp, 'document.querySelector("#case-more").click()');
+  assert.equal(await evaluate(cdp, 'document.querySelectorAll(".case").length'), 24);
   await captureScreenshot(cdp, "axonllm-benchmark.png");
+  await evaluate(cdp, `(() => {
+    document.documentElement.style.scrollBehavior = "auto";
+    document.querySelector("#results").scrollIntoView();
+  })()`);
+  await captureScreenshot(cdp, "axonllm-benchmark-results.png");
+  await evaluate(cdp, "window.scrollTo(0, 0)");
 
   await cdp.send("Emulation.setDeviceMetricsOverride", {
     width: 390,
@@ -842,9 +901,15 @@ try {
     true,
     "The public benchmark page overflows the mobile viewport.",
   );
+  await captureScreenshot(cdp, "axonllm-benchmark-mobile.png");
+  await evaluate(cdp, 'document.querySelector("#results").scrollIntoView()');
+  await captureScreenshot(cdp, "axonllm-benchmark-results-mobile.png");
 
   const failedLocalRequests = serverRequests.filter(({ status }) => status >= 400);
   assert.deepEqual(failedLocalRequests, []);
+  assert.deepEqual(responses.filter(({ status, url }) => (
+    new URL(url).origin === origin && status >= 400
+  )), []);
   assert.deepEqual(browserExceptions, []);
   assert.deepEqual(consoleErrors, []);
   console.log(

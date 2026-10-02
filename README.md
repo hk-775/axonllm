@@ -203,16 +203,15 @@ AXON_LOCAL_DEMO_MODEL=claude-haiku \
 - **Adaptive provider route pools** — balance multiple credentials and endpoints per provider using route-level health, token-adjusted latency, capacity, priority, and recovery probes; reuse TCP/TLS pools by transport identity
 - **Tool calling (function calling)** — send OpenAI-shaped `tools`/`tool_choice`; supported adapters translate into their provider dialect (Anthropic `input_schema`, Bedrock `toolSpec`, Gemini `functionDeclarations`, Cohere `parameter_definitions`) and normalize calls on return. Support is model- and provider-specific, and AxonLLM transports tool calls rather than executing them.
 - **5 routing strategies** — round-robin, weighted, least-latency, cost-optimized, smart (intent-aware)
-- **Reproducible auto-routing benchmark** — compare the zero-cost Axon heuristic
-  with an LLM router and confidence-gated hybrid on a frozen held-out corpus;
-  publish the development/test split, case-level decisions, accuracy, latency,
-  token cost, and downstream savings required to break even. The held-out
-  snapshot scored 86.7% heuristic, 91.7% LLM-only, and 95.0% hybrid. See the
-  [published results](https://hk-775.github.io/axonllm/benchmark.html) and
-  [methodology](docs/AUTOROUTING_BENCHMARK.md). The optional
-  [four-way smart-routing benchmark](benchmarks/routing/README.md) compares
-  regex, local Laya, local Strands Decider, and GPT-4o Mini with separate API
-  and hardware/electricity cost columns.
+- **Reproducible smart-routing benchmark** — compare regex, local Laya, local
+  Strands Decider, and GPT-4o Mini on 960 frozen test prompts, with 240 separate
+  development prompts. Publish raw decisions, scenario-family confidence
+  intervals, label audits, latency, and separate API versus hardware/electricity
+  costs. The corpus is synthetic and model-reviewed; it measures task routing,
+  not downstream answer quality. [Explore results and cases](https://hk-775.github.io/axonllm/benchmark.html)
+  or [reproduce the comparison](benchmarks/routing/README.md). The earlier
+  heuristic / LLM / hybrid experiment remains in the
+  [September report](docs/AUTOROUTING_BENCHMARK.md).
 - **Ensemble routing** — scatter-gather-synthesize across a panel of models with configurable quorum
 - **Multi-region hub-and-spoke** — single-region, active-passive failover, or active-active with weighted distribution
 - **Data residency** — strict mode filters spokes by zone to keep data in-region

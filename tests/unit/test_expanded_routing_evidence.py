@@ -8,8 +8,10 @@ import json
 import pytest
 
 from benchmarks.routing import corpus
-from benchmarks.routing.analyze import family_bootstrap, verify_primary
-from src.gateway.autorouting_benchmark import TASK_TYPES
+from benchmarks.routing.analyze import family_bootstrap, verify_primary, verify_summaries
+from src.gateway.autorouting_benchmark import (
+    BenchmarkCase, CaseResult, RouteDecision, TASK_TYPES, build_report, summarize_results,
+)
 
 
 def cases(families_per_label=5, domains=None):
@@ -163,3 +165,23 @@ def test_primary_analysis_rejects_repetitions_and_modified_labels():
     records[0]["expected_task"] = "wrong"
     with pytest.raises(ValueError, match="differs from frozen"):
         verify_primary(report, rows, manifest)
+
+
+def test_summary_cannot_claim_better_scores_or_lower_cost_than_raw_predictions():
+    case = BenchmarkCase("one", "Explain this code snippet.", "coding", ())
+    decision = RouteDecision(strategy="example", task_type="general", confidence=0.8,
+                             latency_ms=123.0, cost_usd=0.01)
+    result = CaseResult(case.case_id, case.prompt, case.expected_task, case.tags, decision)
+    summary = summarize_results([result])
+    report = build_report(cases=[case], summaries=[summary],
+                          results_by_strategy={"example": [result]}, source="fixture", repetitions=1)
+    verify_summaries(report)
+    summary["router_cost_usd"] += 1e-16
+    verify_summaries(report)  # harmless cross-version floating-point rounding
+    summary["accuracy"] = 1.0
+    with pytest.raises(ValueError, match="differs from raw"):
+        verify_summaries(report)
+    summary["accuracy"] = 0.0
+    summary["router_cost_per_1k_requests_usd"] = 0.0
+    with pytest.raises(ValueError, match="differs from raw"):
+        verify_summaries(report)

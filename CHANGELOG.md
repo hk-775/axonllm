@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Add optional pinned Laya and Strands Decider adapters to the smart-routing
+  benchmark alongside the Axon heuristic and GPT-4o Mini, with separate API and
+  hardware/electricity cost reporting.
+- Publish a frozen, model-reviewed synthetic corpus of 1,200 prompts: 960 test
+  and 240 development examples, split by scenario family. Include blind label
+  audits, revision history, resumable measurement panels, paired family
+  bootstrap analysis, and a searchable static results page.
+
 ## [0.4.1] - 2026-08-26
 
 ### Security

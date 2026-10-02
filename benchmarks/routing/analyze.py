@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from collections import Counter, defaultdict
 from itertools import combinations
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -12,7 +13,9 @@ import random
 
 from benchmarks.routing.corpus import DATA, ROOT, SEED, digest, read_json, verify_frozen, write_json
 from benchmarks.routing.run_expanded import panel_cases
-from src.gateway.autorouting_benchmark import TASK_TYPES, _percentile
+from src.gateway.autorouting_benchmark import (
+    CaseResult, RouteDecision, TASK_TYPES, _percentile, summarize_results,
+)
 
 
 def family_bootstrap(
@@ -124,10 +127,45 @@ def verify_primary(report: dict, rows: list[dict], manifest: dict) -> dict[str, 
     return predictions
 
 
-def analyze(primary_path: Path, repeat_path: Path | None = None) -> dict:
+def verify_summaries(report: dict) -> None:
+    """Recompute published scores, latencies, errors, and cost from raw decisions."""
+    def equivalent(left, right) -> bool:
+        # Python versions can differ in floating-point summation. Permit only
+        # rounding noise, far below one case or a billed token.
+        if isinstance(left, float) and isinstance(right, (int, float)):
+            return math.isfinite(left) and math.isfinite(right) and math.isclose(
+                left, right, rel_tol=1e-12, abs_tol=1e-12,
+            )
+        if isinstance(left, dict) and isinstance(right, dict):
+            return left.keys() == right.keys() and all(equivalent(value, right[key])
+                                                       for key, value in left.items())
+        if isinstance(left, list) and isinstance(right, list):
+            return len(left) == len(right) and all(equivalent(a, b) for a, b in zip(left, right))
+        return left == right
+
+    summaries = {summary["strategy"]: summary for summary in report["strategies"]}
+    if len(summaries) != len(report["strategies"]) or set(summaries) != set(report["records"]):
+        raise ValueError("summary candidates do not match raw records")
+    for strategy, records in report["records"].items():
+        if any(record["decision"]["strategy"] != strategy for record in records):
+            raise ValueError("raw record strategy differs from its group")
+        results = [
+            CaseResult(record["id"], record["prompt"], record["expected_task"],
+                       tuple(record["tags"]), RouteDecision(**record["decision"]))
+            for record in records
+        ]
+        if not equivalent(summarize_results(results), summaries[strategy]):
+            raise ValueError("published summary differs from raw decisions")
+
+
+def analyze(
+    primary_path: Path, repeat_path: Path | None = None, *,
+    hardware_description: str = "Hardware details not recorded; see runtime device and environment.",
+) -> dict:
     manifest = verify_frozen()
     rows = [json.loads(line) for line in (DATA / "test.jsonl").read_text().splitlines()]
     report = read_json(primary_path)
+    verify_summaries(report)
     predictions = verify_primary(report, rows, manifest)
     if set(predictions) != {"axon-heuristic", "laya", "strands", "llm-router"}:
         raise ValueError("publication analysis requires all four candidates")
@@ -141,6 +179,11 @@ def analyze(primary_path: Path, repeat_path: Path | None = None) -> dict:
         "evaluation_status": "model-reviewed synthetic benchmark",
         "generated_at": report["generated_at"],
         "corpus_manifest_sha256": digest(manifest),
+        "artifact_sha256": {
+            "primary_report": hashlib.sha256(primary_path.read_bytes()).hexdigest(),
+            "analysis_code": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+            "protocol": hashlib.sha256((ROOT / "benchmarks/routing/PROTOCOL_V2.md").read_bytes()).hexdigest(),
+        },
         "methodology": {
             "unique_cases": len(rows), "development_cases": manifest["development"]["cases"],
             "families": uncertainty["families"], "domains": 10, "variants_per_family": 4,
@@ -148,7 +191,8 @@ def analyze(primary_path: Path, repeat_path: Path | None = None) -> dict:
             "generator": manifest["generator"], "reviewer": manifest["reviewer"],
             "bootstrap": {k: v for k, v in uncertainty.items() if k not in {"estimates", "comparisons"}},
             "scope": "short-prompt task routing; downstream answer quality excluded",
-            "hardware": "Apple M4 Pro, 48 GiB RAM; MPS for local models",
+            "hardware": hardware_description,
+            "hardware_description_source": "operator-supplied description; not inferred from model scores",
             "limitations": [
                 "Synthetic, model-reviewed labels; no human annotation claim.",
                 "Variants are correlated; intervals resample whole scenario families.",
@@ -164,7 +208,9 @@ def analyze(primary_path: Path, repeat_path: Path | None = None) -> dict:
         "repeatability": None,
     }
     if repeat_path:
+        result["artifact_sha256"]["repeatability_report"] = hashlib.sha256(repeat_path.read_bytes()).hexdigest()
         repeat = read_json(repeat_path)
+        verify_summaries(repeat)
         if repeat["corpus_manifest_sha256"] != digest(manifest):
             raise ValueError("repeatability panel uses a different corpus")
         selected, repetitions = panel_cases("repeatability")
@@ -210,7 +256,7 @@ def markdown(result: dict) -> str:
         cost = summary["router_cost_per_1k_requests_usd"]
         price = "Unknown" if cost is None else "$0" if cost == 0 else f"${cost:.6f}"
         lines.append(
-            f"| {summary['strategy']} | {summary['accuracy']:.1%} ({low:.1%}–{high:.1%}) | "
+            f"| {summary['strategy']} | {summary['accuracy']:.2%} ({low:.1%}–{high:.1%}) | "
             f"{summary['macro_f1']:.3f} | {summary['latency_ms']['p50']:.2f} ms | "
             f"{summary['latency_ms']['p95']:.2f} ms | {price} | Unmeasured | {summary['errors']} |"
         )
@@ -248,8 +294,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--primary", type=Path, default=ROOT / "docs/benchmarks/smart-routing-v2-primary-2026-10-02.json")
     parser.add_argument("--repeatability", type=Path)
+    parser.add_argument("--hardware-description", default=(
+        "Hardware details not recorded; see runtime device and environment."
+    ), help="describe the actual measured host; do not copy another run's hardware")
     args = parser.parse_args()
-    result = analyze(args.primary, args.repeatability)
+    result = analyze(args.primary, args.repeatability, hardware_description=args.hardware_description)
     destination = ROOT / "docs/benchmarks/smart-routing-v2-evidence-2026-10-02"
     write_json(destination.with_suffix(".json"), result)
     destination.with_suffix(".md").write_text(markdown(result))
