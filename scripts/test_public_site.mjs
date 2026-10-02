@@ -905,6 +905,19 @@ try {
   await evaluate(cdp, 'document.querySelector("#results").scrollIntoView()');
   await captureScreenshot(cdp, "axonllm-benchmark-results-mobile.png");
 
+  await navigate(cdp, `${origin}${publicBase}benchmark-regex.html`);
+  const regexRevision = await requestJson(`${origin}${publicBase}benchmark-regex-results.json`);
+  const regexTest = regexRevision.panels["reused-test"];
+  assert.equal(regexTest.strategies["original-regex"].correct, 478);
+  assert.equal(regexTest.strategies["action-first-regex"].correct, 625);
+  assert.equal(regexTest.regressed.length, 15);
+  assert.equal(await evaluate(cdp, 'document.querySelectorAll("[data-regression]").length'), 15);
+  assert.match(await evaluate(cdp, "document.body.innerText"), /not a fresh/);
+  assert.equal(await evaluate(cdp, "document.documentElement.scrollWidth <= innerWidth + 1"), true);
+  await evaluate(cdp, 'document.querySelector("[data-regression]").open = true');
+  assert.match(await evaluate(cdp, 'document.querySelector("[data-regression]").innerText'), /Matched rules/);
+  await captureScreenshot(cdp, "axonllm-regex-revision-mobile.png");
+
   const failedLocalRequests = serverRequests.filter(({ status }) => status >= 400);
   assert.deepEqual(failedLocalRequests, []);
   assert.deepEqual(responses.filter(({ status, url }) => (
