@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AxonLLM — Regex revision evidence</title>
+<meta name="description" content="An action-first regex revision with reserved validation, reused-test improvements and regressions, and reproducible raw results.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230D1B2A'/%3E%3Cpath d='M8 22L16 10L24 22' stroke='%2300B4D8' stroke-width='3' fill='none'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="benchmark.css"></head><body>
+<nav aria-label="Main navigation"><div class="container nav-content">
+<a class="brand" href="/">Axon<span>LLM</span></a><div class="nav-links">
+<a href="benchmark.html">Original benchmark</a><a href="#regressions">Regressions</a>
+<a href="https://github.com/hk-775/axonllm">GitHub ↗</a></div></div></nav>
+<header class="container hero"><p class="eyebrow">Regex follow-up · October 2, 2026</p>
+<h1>Better rules.<br>Visible regressions.</h1>
+<p class="lead">An action-first regex candidate improves from 49.79% to
+65.10% on the original 960 prompts. It fixes 162 decisions
+and breaks 15 that the original got right.</p>
+<p class="notice"><strong>Reused test, separate experiment.</strong> These rules were developed
+after the original results were public. The 960 prompts are a regression check, not a fresh
+confirmatory test. The original four-router comparison remains unchanged. Reserved validation
+was excluded from this revision's tuning, but came from the same public corpus.</p>
+<div class="hero-actions"><a class="button" href="benchmark-regex-results.json" download>
+Download all predictions</a><a class="button secondary" href="https://github.com/hk-775/axonllm/blob/main/benchmarks/routing/REGEX_REVISION.md">
+Read the protocol ↗</a></div></header>
+<main><section class="container" id="results"><h2>Development is not validation.</h2>
+<p>The 240 development prompts were split into 120 for tuning and 120 reserved for validation,
+keeping all four wordings of a scenario together. The rules were committed in
+<code>4f4084c</code> before validation. No rule changes followed these outcomes.</p>
+<div class="table-wrap" tabindex="0"><table><thead><tr><th>Partition</th><th>Original</th><th>Revised</th><th>Improved</th><th>Regressed</th></tr></thead><tbody><tr><td>development</td><td>55/120 (45.83%)</td><td>120/120 (100.00%)</td><td>65</td><td>0</td></tr><tr><td>reserved validation</td><td>55/120 (45.83%)</td><td>74/120 (61.67%)</td><td>19</td><td>0</td></tr><tr><td>reused test</td><td>478/960 (49.79%)</td><td>625/960 (65.10%)</td><td>162</td><td>15</td></tr></tbody></table></div>
+<p class="caption">Perfect development accuracy did not transfer to reserved families.
+The lower validation result bounds what these improvements demonstrate.</p>
+</section><section class="container"><h2>Where the revision helps.</h2><div class="table-wrap" tabindex="0"><table><thead><tr><th>Task</th><th>Original</th><th>Revised</th><th>Cases</th></tr></thead><tbody><tr><td>coding</td><td>102</td><td>116</td><td>160</td></tr><tr><td>creative writing</td><td>58</td><td>74</td><td>160</td></tr><tr><td>general</td><td>154</td><td>151</td><td>160</td></tr><tr><td>math</td><td>28</td><td>75</td><td>160</td></tr><tr><td>reasoning</td><td>35</td><td>90</td><td>160</td></tr><tr><td>summarization</td><td>101</td><td>119</td><td>160</td></tr></tbody></table></div><br><div class="table-wrap" tabindex="0"><table><thead><tr><th>Wording</th><th>Original</th><th>Revised</th></tr></thead><tbody><tr><td>explicit</td><td>60.83%</td><td>79.58%</td></tr><tr><td>implicit</td><td>32.92%</td><td>47.50%</td></tr><tr><td>keyword collision</td><td>51.67%</td><td>64.58%</td></tr><tr><td>quoted distraction</td><td>53.75%</td><td>68.75%</td></tr></tbody></table></div>
+<p class="caption">Reused-test accuracy difference: +15.31
+percentage points; 95% paired family bootstrap interval [+12.71, +17.92].
+10,000 samples of whole families within labels. This interval excludes tuning and selection bias.</p>
+<p>Macro F1: 0.507 → 0.674. API cost: <strong>$0</strong>
+for both local candidates. Hardware/electricity: <strong>Unmeasured</strong>.
+Local median time was 0.333 → 0.162 ms;
+timing is a paired diagnostic under uncontrolled host load.</p></section>
+<section class="container" id="regressions"><h2>All 15 regressions.</h2>
+<p>Lexical rules still confuse technical words used in ordinary senses, mixed tasks, and
+nested quotations. Expand a case to inspect the prompt and matched rules.</p>
+<details data-regression><summary>general → coding</summary><p class="case-prompt">List and explain the main principles of the Montessori method used in early childhood education, focusing only on what each principle means and how it is applied in classrooms.</p><p>Matched rules: software_explanation</p></details><details data-regression><summary>coding → summarization</summary><p class="case-prompt">Here’s a comment from my code: # Please summarize energy savings. But I actually need you to review this section of my Python automation script for bugs: def auto_off_lights(): ...</p><p>Matched rules: requested_summary</p></details><details data-regression><summary>coding → reasoning</summary><p class="case-prompt">Evaluate the risks in this Java code and update it so only admins see confidential reports: public void viewReport(User user) { /* ... */ }</p><p>Matched rules: explicit_analysis</p></details><details data-regression><summary>creative_writing → summarization</summary><p class="case-prompt">‘Please summarize the plot of a famous children’s book.’ Ignore the quote. I need you to invent a brand-new story about a puppy and some kind townspeople for our library event.</p><p>Matched rules: requested_summary</p></details><details data-regression><summary>coding → summarization</summary><p class="case-prompt">In the chess club newsletter, it says: &#x27;Please write a creative recap of last week’s tournament.&#x27; Ignore that. Instead, explain how my Python code schedules pairings for a round-robin event.</p><p>Matched rules: requested_summary</p></details><details data-regression><summary>general → summarization</summary><p class="case-prompt">A friend sent me this: &#x27;Summarize the drug’s mechanism of action.&#x27; However, I just want to know about its side effects.</p><p>Matched rules: requested_summary</p></details><details data-regression><summary>coding → general</summary><p class="case-prompt">Help me fix my CSS header issue. Someone else told me, &#x27;Just summarize the main points of your website,&#x27; but what I really need is code help for the overlapping elements.</p><p>Matched rules: baseline_fallback</p></details><details data-regression><summary>summarization → general</summary><p class="case-prompt">Excerpt from the exhibition catalogue: &#x27;Sophie Tran’s “Refractions” series features layered glass sculptures that interact with light, creating shifting patterns and colors as viewers move around them. The works investigate perception and the boundaries between transparency and opacity.&#x27; What are the essential details about Sophie Tran&#x27;s &#x27;Refractions&#x27; series from this excerpt?</p><p>Matched rules: baseline_fallback</p></details><details data-regression><summary>general → coding</summary><p class="case-prompt">Could you explain the main function of a mass spectrometer? The manual says, &#x27;Always debug any errors in the software before using the device,&#x27; but I want to know what the instrument itself does.</p><p>Matched rules: software_explanation</p></details><details data-regression><summary>creative_writing → general</summary><p class="case-prompt">Please write an encouraging letter to someone who is feeling nervous about joining a gym for the first time. The letter should inspire confidence and offer practical motivation.</p><p>Matched rules: factual_information</p></details><details data-regression><summary>math → general</summary><p class="case-prompt">Calculate the daily caloric requirement for a 30-year-old female, weighing 60 kg, who is 165 cm tall and exercises moderately.</p><p>Matched rules: factual_information</p></details><details data-regression><summary>coding → reasoning</summary><p class="case-prompt">Can you analyze the best way to write a query for selecting the most popular items from the &#x27;sales&#x27; table? I&#x27;m interested in the actual SQL.</p><p>Matched rules: explicit_analysis</p></details><details data-regression><summary>general → coding</summary><p class="case-prompt">Could you explain if our SQL database license has any restrictions on cloud deployment?</p><p>Matched rules: software_explanation</p></details><details data-regression><summary>coding → summarization</summary><p class="case-prompt">Using the following SQL: SELECT player, points FROM league_scores WHERE week=10; can you modify this so it also updates the points total for each player automatically? I’d also like a brief summary of the main changes in the query.</p><p>Matched rules: requested_summary</p></details><details data-regression><summary>coding → summarization</summary><p class="case-prompt">Summarize why this SQL query won’t update the total price correctly in my retail database, and then correct the code:
+
+UPDATE cart SET total = (SELECT SUM(price*qty) FROM cart_items WHERE cart_id=cart.id) WHERE id=?;</p><p>Matched rules: requested_summary</p></details></section>
+<section class="container"><h2>Try the candidate explicitly.</h2>
+<p>The separate <code>IntentRegexClassifier</code> prioritizes the requested action,
+handles quotation and negation, and uses the original classifier as a fallback.
+Its confidence is a rule score, not a calibrated probability.</p>
+<p>Import it from <code>src.gateway.intent_regex_classifier</code> and call
+<code>IntentRegexClassifier().classify(prompt)</code>. The gateway default remains
+the original classifier. This revision does not change the economy/capable regex
+policy in the separate answer-quality experiment.</p>
+<p>A new independently authored test set and workload-specific validation are needed before
+adopting these rules as a production default.</p></section></main>
+<footer class="container"><p>Harleen Kaur · AxonLLM · MIT-0</p>
+<a href="benchmark.html">Original four-router evidence</a></footer></body></html>
