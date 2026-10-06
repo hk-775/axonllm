@@ -31,6 +31,10 @@ It does not replace the original classifier or any result below.
 The [revision webpage](https://hk-775.github.io/axonllm/benchmark-regex.html)
 exposes every regression.
 
+The [dependency maintenance note](REGEX_DEPENDENCY_MAINTENANCE.md) explains
+the October 6 security update, the preserved historical lock, and how to
+reproduce the frozen revision after production dependency updates.
+
 [Interactive results and case browser](https://hk-775.github.io/axonllm/benchmark.html) ·
 [Evidence report](../../docs/benchmarks/smart-routing-v2-evidence-2026-10-02.md) ·
 [Protocol](PROTOCOL_V2.md) · [Data card](DATA_CARD_V2.md) · [Frozen data](data/v2)
