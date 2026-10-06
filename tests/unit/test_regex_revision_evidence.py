@@ -21,7 +21,7 @@ def test_revision_retains_frozen_sources_and_disjoint_families():
     # Production dependencies can receive security updates; retain and verify
     # the exact historical lock separately, without installing it in CI.
     for name, expected in snapshot["files"].items():
-        path = EVIDENCE / "uv.lock" if name == "uv.lock" else ROOT / name
+        path = EVIDENCE / "uv.lock.snapshot" if name == "uv.lock" else ROOT / name
         assert digest(path) == expected, f"frozen file changed: {name}"
     verify_frozen()
     splits = partitions()
