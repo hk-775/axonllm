@@ -9,10 +9,11 @@ already used 6.9.1 and required no change.
 
 The October 2 regex experiment included the then-current root `uv.lock`
 in its immutable freeze. Its exact bytes are preserved as
-[`docs/benchmarks/regex-revision-2026-10-02/uv.lock`](../../docs/benchmarks/regex-revision-2026-10-02/uv.lock),
+[`docs/benchmarks/regex-revision-2026-10-02/uv.lock.snapshot`](../../docs/benchmarks/regex-revision-2026-10-02/uv.lock.snapshot),
 with SHA-256
 `8caaaa525d9ee67e68be05a79ad4004f8e6916ca86231d7ab8bc82b4368149cf`.
-This file is historical evidence, not an installation target. The classifier,
+The `.snapshot` suffix distinguishes historical evidence from active dependency
+manifests in GitHub's dependency inventory. It is not an installation target. The classifier,
 runner, protocol, freeze manifest, corpus, and published predictions remain
 unchanged.
 
